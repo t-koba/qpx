@@ -617,6 +617,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
+      - name: build qpxd release binary
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
       - name: external http2 comparison bench
         id: external_http2_comparison_bench
         continue-on-error: true
