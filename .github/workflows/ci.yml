@@ -416,7 +416,7 @@ jobs:
       - name: install qpx-only perf packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y valgrind jq
+          sudo apt-get install -y valgrind jq nginx nghttp2-client openssl
       - name: criterion streaming throughput bench
         id: criterion_streaming_throughput_bench
         continue-on-error: true
