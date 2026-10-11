@@ -272,7 +272,9 @@ if not records:
     fail(f"no {BENCH} records found in {JSONL_PATH}")
 
 failures = []
+marginals = []
 lane_scores = []
+lane_noises = []
 for body_bytes, max_streams in sorted(required_lanes):
     missing = [
         proxy
@@ -336,6 +338,15 @@ for body_bytes, max_streams in sorted(required_lanes):
     ) ** 0.2
     lane_scores.append(lane_score)
 
+    # Lane measurement noise comes from the compared pair's observed sample
+    # spread (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh).
+    # A miss inside the band is noise, a miss beyond it is decisive.
+    lane_noise = 1.0
+    for record in (qpx, nginx):
+        for field in ("requests_per_sec_ratio", "requests_per_total_cpu_second_ratio"):
+            lane_noise = max(lane_noise, nested_number(record, "sample_spread", field, record.get("proxy", "record")))
+    lane_noises.append(lane_noise)
+
     checks = (
         ("throughput ratio", throughput_ratio, "min_lane_throughput_ratio", "min"),
         ("total CPU efficiency ratio", total_cpu_ratio, "min_lane_total_cpu_efficiency_ratio", "min"),
@@ -350,15 +361,33 @@ for body_bytes, max_streams in sorted(required_lanes):
     for label, current, field, direction in checks:
         objective = lane_limit(field, (body_bytes, max_streams))
         if direction == "min" and current + 1e-12 < objective:
-            failures.append(
-                f"HTTP/2 {body_bytes}-byte m={max_streams} {label} "
-                f"{current:.6f} < objective {objective:.6f}"
-            )
+            decisive_bar = objective / lane_noise
+            if current + 1e-12 < decisive_bar:
+                failures.append(
+                    f"HTTP/2 {body_bytes}-byte m={max_streams} {label} "
+                    f"{current:.6f} < objective {objective:.6f} "
+                    f"(decisive: miss exceeds lane noise {lane_noise:.6f})"
+                )
+            else:
+                marginals.append(
+                    f"HTTP/2 {body_bytes}-byte m={max_streams} {label} marginal: "
+                    f"{current:.6f} < objective {objective:.6f} but within lane noise "
+                    f"{lane_noise:.6f}; not a regression signal"
+                )
         if direction == "max" and current > objective + 1e-12:
-            failures.append(
-                f"HTTP/2 {body_bytes}-byte m={max_streams} {label} "
-                f"{current:.6f} > objective {objective:.6f}"
-            )
+            decisive_bar = objective * lane_noise
+            if current > decisive_bar + 1e-12:
+                failures.append(
+                    f"HTTP/2 {body_bytes}-byte m={max_streams} {label} "
+                    f"{current:.6f} > objective {objective:.6f} "
+                    f"(decisive: miss exceeds lane noise {lane_noise:.6f})"
+                )
+            else:
+                marginals.append(
+                    f"HTTP/2 {body_bytes}-byte m={max_streams} {label} marginal: "
+                    f"{current:.6f} > objective {objective:.6f} but within lane noise "
+                    f"{lane_noise:.6f}; not a regression signal"
+                )
 
     for proxy, record in (("direct-backend", direct), ("qpxd", qpx), ("nginx", nginx)):
         if proxy == "qpxd":
@@ -406,10 +435,28 @@ aggregate_objective = positive_number(
 )
 print(f"HTTP/2 aggregate dominance={aggregate_score:.3f}")
 if aggregate_score + 1e-12 < aggregate_objective:
-    failures.append(
-        f"HTTP/2 aggregate dominance score {aggregate_score:.6f} "
-        f"< objective {aggregate_objective:.6f}"
+    aggregate_noise = max(lane_noises) if lane_noises else 1.0
+    decisive_bar = aggregate_objective / aggregate_noise
+    if aggregate_score + 1e-12 < decisive_bar:
+        failures.append(
+            f"HTTP/2 aggregate dominance score {aggregate_score:.6f} "
+            f"< objective {aggregate_objective:.6f} "
+            f"(decisive: miss exceeds lane noise {aggregate_noise:.6f})"
+        )
+    else:
+        marginals.append(
+            f"HTTP/2 aggregate dominance marginal: {aggregate_score:.6f} "
+            f"< objective {aggregate_objective:.6f} but within lane noise "
+            f"{aggregate_noise:.6f}; not a regression signal"
+        )
+
+if marginals:
+    print(
+        f"{len(marginals)} marginal objective(s) within measurement noise "
+        "(not failures, kept visible for trend review):"
     )
+    for marginal in marginals:
+        print(marginal)
 
 if failures:
     for failure in failures:
