@@ -114,11 +114,18 @@ pub async fn maybe_store(
     let storage_primary = storage_key.primary_hash_arc();
     let initial_age_secs =
         initial_age_secs(response.headers(), now, context.timing.response_delay_secs);
-    let vary_values = cache_vary_values(
+    let Some(vary_values) = cache_vary_values(
         request_headers,
         &vary,
         storage_key.content_digest.as_deref(),
-    );
+    ) else {
+        // Fail-closed: a Vary selector that cannot be represented losslessly
+        // (e.g. obs-text) must neither be stored nor served to others.
+        response
+            .headers_mut()
+            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+        return Ok(response);
+    };
     let variant_key = variant_storage_key(storage_primary.as_ref(), &vary_values);
     let namespace = cache_namespace(policy, "default");
     let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
@@ -527,12 +534,12 @@ fn cache_vary_values(
     request_headers: &http::HeaderMap,
     vary_headers: &[String],
     content_digest: Option<&str>,
-) -> Vec<(String, String)> {
-    let mut values = vary_values_from_request_headers(request_headers, vary_headers);
+) -> Option<Vec<(String, String)>> {
+    let mut values = vary_values_from_request_headers(request_headers, vary_headers)?;
     if let Some(digest) = content_digest {
         values.push(("@query-content".to_string(), digest.to_string()));
     }
-    values
+    Some(values)
 }
 
 fn refreshed_vary_values(
@@ -544,7 +551,10 @@ fn refreshed_vary_values(
         .iter()
         .find(|(name, _)| name == "@query-content")
         .map(|(_, value)| value.as_str());
+    // Keep the previous variant on unrepresentable selectors rather than
+    // poisoning the entry with a collapsed value.
     cache_vary_values(request_headers, vary_headers, content_digest)
+        .unwrap_or_else(|| previous.to_vec())
 }
 
 fn content_location_matches_target(

@@ -35,13 +35,15 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
     let policy = policy();
     let namespace = super::util::cache_namespace(&policy, "default");
     let primary = key.primary_hash();
+    // Vary selector values use the byte-faithful encoding from vary.rs
+    // (absence `\x00` vs present `\x01` + joined values).
     let en_variant = variant_storage_key(
         primary.as_str(),
-        &[("accept-language".to_string(), "en".to_string())],
+        &[("accept-language".to_string(), "\u{1}en".to_string())],
     );
     let ja_variant = variant_storage_key(
         primary.as_str(),
-        &[("accept-language".to_string(), "ja".to_string())],
+        &[("accept-language".to_string(), "\u{1}ja".to_string())],
     );
     let backend = Arc::new(MockBackend::new());
     let index = VariantIndex {
@@ -76,7 +78,7 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
             response_delay_secs: 0,
             freshness_lifetime_secs: 60,
             vary_headers: vec!["accept-language".to_string()],
-            vary_values: vec![("accept-language".to_string(), lang.to_string())],
+            vary_values: vec![("accept-language".to_string(), format!("\u{1}{lang}"))],
             header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),

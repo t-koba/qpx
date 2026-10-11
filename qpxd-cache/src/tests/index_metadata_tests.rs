@@ -230,7 +230,11 @@ fn vary_matching_works() {
         response_delay_secs: 0,
         freshness_lifetime_secs: 30,
         vary_headers: vec!["accept-language".to_string()],
-        vary_values: vec![("accept-language".to_string(), "ja".to_string())],
+        vary_values: super::vary::vary_values_from_request_headers(
+            &req_headers,
+            &["accept-language".to_string()],
+        )
+        .expect("encodable vary selector"),
         header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
