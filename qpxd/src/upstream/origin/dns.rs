@@ -198,10 +198,21 @@ async fn resolve_host_records(
 ) -> Result<(Vec<DnsARecord>, Duration)> {
     let mut records = Vec::new();
     let mut ttl = None::<Duration>;
-    let (a_records, aaaa_records) = tokio::try_join!(
+    // RFC 8305 section 3: a failed family must not discard a usable answer
+    // from the other family, so retain a nonempty successful family.
+    let (a_result, aaaa_result) = tokio::join!(
         query_dns_records(host, DNS_TYPE_A, nameservers),
         query_dns_records(host, DNS_TYPE_AAAA, nameservers)
-    )?;
+    );
+    let (a_records, aaaa_records): (Vec<DnsARecord>, Vec<DnsARecord>) =
+        match (a_result, aaaa_result) {
+            (Ok(a), Ok(aaaa)) => (a, aaaa),
+            (Ok(a), Err(_)) if !a.is_empty() => (a, Vec::new()),
+            (Err(_), Ok(aaaa)) if !aaaa.is_empty() => (Vec::new(), aaaa),
+            (Ok(_), Err(err)) => return Err(err),
+            (Err(err), Ok(_)) => return Err(err),
+            (Err(a_err), Err(_)) => return Err(a_err),
+        };
     for resolved in [a_records, aaaa_records] {
         for record in resolved {
             ttl = Some(match ttl {

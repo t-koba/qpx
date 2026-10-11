@@ -76,6 +76,40 @@ async fn spawn_fake_dns_rcode_server(rcode: u8) -> Result<(SocketAddr, JoinHandl
     Ok((addr, task))
 }
 
+async fn spawn_fake_dns_server_with_failing_qtypes(
+    answers: HashMap<(String, u16), Vec<TestDnsRecord>>,
+    failing_qtypes: Vec<u16>,
+    rcode: u8,
+) -> Result<(SocketAddr, JoinHandle<Result<()>>)> {
+    let socket = UdpSocket::bind((Ipv4Addr::LOCALHOST, 0)).await?;
+    let addr = socket.local_addr()?;
+    let task = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (n, peer) = socket.recv_from(&mut buf).await?;
+            let request = &buf[..n];
+            let qtype = dns_qtype_of_request(request).unwrap_or(0);
+            let response = if failing_qtypes.contains(&qtype) {
+                let mut response = build_test_dns_response(request, &HashMap::new())?;
+                response[3] = (response[3] & 0xf0) | (rcode & 0x0f);
+                response
+            } else {
+                build_test_dns_response(request, &answers)?
+            };
+            socket.send_to(response.as_slice(), peer).await?;
+        }
+    });
+    Ok((addr, task))
+}
+
+fn dns_qtype_of_request(request: &[u8]) -> Result<u16> {
+    let (_, next) = parse_dns_name(request, 12)?;
+    if next + 4 > request.len() {
+        return Err(anyhow!("dns question truncated"));
+    }
+    Ok(u16::from_be_bytes([request[next], request[next + 1]]))
+}
+
 async fn spawn_fake_dns_server_with_tcp_fallback(
     answers: HashMap<(String, u16), Vec<TestDnsRecord>>,
 ) -> Result<(SocketAddr, JoinHandle<Result<()>>, JoinHandle<Result<()>>)> {

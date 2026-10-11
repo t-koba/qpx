@@ -103,3 +103,88 @@ async fn dns_discovery_falls_back_after_resolver_error_rcode() -> Result<()> {
     assert_eq!(endpoints[0].connect_authority(443)?, "127.0.0.10:9443");
     Ok(())
 }
+
+#[tokio::test]
+async fn dns_discovery_retains_usable_a_when_aaaa_fails() -> Result<()> {
+    let mut answers = HashMap::new();
+    answers.insert(
+        ("service.example".to_string(), DNS_TYPE_A),
+        vec![TestDnsRecord::A {
+            addr: Ipv4Addr::new(127, 0, 0, 10),
+            ttl_secs: 12,
+        }],
+    );
+    let (nameserver, server) =
+        spawn_fake_dns_server_with_failing_qtypes(answers, vec![DNS_TYPE_AAAA], 2).await?;
+
+    let config = discovery_config(UpstreamDiscoveryKind::Dns);
+    let result = discover_origin_endpoints_with_nameservers(
+        "https://service.example",
+        &config,
+        &[nameserver],
+    )
+    .await;
+
+    server.abort();
+    let _ = server.await;
+
+    let (endpoints, delay) = result?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].connect_authority(443)?, "127.0.0.10:443");
+    assert_eq!(delay, Duration::from_secs(12));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dns_discovery_retains_usable_aaaa_when_a_fails() -> Result<()> {
+    let mut answers = HashMap::new();
+    answers.insert(
+        ("service.example".to_string(), DNS_TYPE_AAAA),
+        vec![TestDnsRecord::Aaaa {
+            addr: Ipv6Addr::LOCALHOST,
+            ttl_secs: 9,
+        }],
+    );
+    let (nameserver, server) =
+        spawn_fake_dns_server_with_failing_qtypes(answers, vec![DNS_TYPE_A], 2).await?;
+
+    let config = discovery_config(UpstreamDiscoveryKind::Dns);
+    let result = discover_origin_endpoints_with_nameservers(
+        "https://service.example",
+        &config,
+        &[nameserver],
+    )
+    .await;
+
+    server.abort();
+    let _ = server.await;
+
+    let (endpoints, delay) = result?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(delay, Duration::from_secs(9));
+    Ok(())
+}
+
+#[tokio::test]
+async fn dns_discovery_errors_when_both_families_fail() -> Result<()> {
+    let (nameserver, server) = spawn_fake_dns_server_with_failing_qtypes(
+        HashMap::new(),
+        vec![DNS_TYPE_A, DNS_TYPE_AAAA],
+        2,
+    )
+    .await?;
+
+    let config = discovery_config(UpstreamDiscoveryKind::Dns);
+    let result = discover_origin_endpoints_with_nameservers(
+        "https://service.example",
+        &config,
+        &[nameserver],
+    )
+    .await;
+
+    server.abort();
+    let _ = server.await;
+
+    assert!(result.is_err());
+    Ok(())
+}
