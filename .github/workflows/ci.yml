@@ -393,8 +393,15 @@ jobs:
           path: target/perf/*.jsonl
           if-no-files-found: ignore
 
-  perf_audit:
-    name: perf audit
+  # Perf audit split: three parallel jobs so wall time tracks the longest group
+  # (~30 min) instead of the serial sum (~89 min). Same-VM rule: every bench
+  # whose rows are compared with each other runs together with its enforcing
+  # checks on one VM (proxy matrix + its two enforcements + baseline; http2
+  # bench + its enforcement; streaming bench + its enforcement; netem bench;
+  # allocation profile + its budget). Independent qpx-only measurements form
+  # the third job.
+  perf_audit_qpx:
+    name: perf audit (qpx-only)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
@@ -406,10 +413,10 @@ jobs:
         run: |
           mkdir -p target/perf
           scripts/check-perf-runner.sh
-      - name: install proxy comparison packages
+      - name: install qpx-only perf packages
         run: |
           sudo apt-get update
-          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
+          sudo apt-get install -y valgrind jq
       - name: criterion streaming throughput bench
         id: criterion_streaming_throughput_bench
         continue-on-error: true
@@ -443,40 +450,6 @@ jobs:
           QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-audit-advanced-transport-perf.jsonl
         run: |
           cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture --test-threads=1
-      - name: external proxy comparison bench
-        id: external_proxy_comparison_bench
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-D warnings"
-          QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
-          QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV: "MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728"
-        run: |
-          cargo build -p qpxd --release --locked --features http3-backend-qpx
-          scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
-      - name: enforce cache origin and feature-rich performance objectives
-        id: enforce_cache_origin_feature_rich_performance_objectives
-        continue-on-error: true
-        run: scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json
-      - name: external http2 comparison bench
-        id: external_http2_comparison_bench
-        continue-on-error: true
-        env:
-          QPX_HTTP2_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-http2-compare.jsonl
-        run: scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
-      - name: enforce http2 performance objectives
-        id: enforce_http2_performance_objectives
-        continue-on-error: true
-        run: scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl perf/http2-performance-objectives.json
-      - name: external long streaming comparison bench
-        id: external_long_streaming_comparison_bench
-        continue-on-error: true
-        env:
-          QPX_STREAMING_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-streaming-compare.jsonl
-        run: scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
-      - name: enforce streaming performance objectives
-        id: enforce_streaming_performance_objectives
-        continue-on-error: true
-        run: scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json
       - name: allocation profile
         id: allocation_profile
         continue-on-error: true
@@ -490,17 +463,6 @@ jobs:
         id: enforce_allocation_budget
         continue-on-error: true
         run: scripts/check-allocation-budget.sh target/perf/perf-audit-allocation-profile.jsonl perf/allocation-budget.json
-      - name: compare proxy baseline
-        id: compare_proxy_baseline
-        continue-on-error: true
-        run: scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json
-      - name: netem proxy comparison bench
-        id: netem_proxy_comparison_bench
-        continue-on-error: true
-        env:
-          QPX_NETEM_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-netem-proxy-compare.jsonl
-          QPX_NETEM_META_JSON: ${{ github.workspace }}/target/perf/perf-audit-netem-profile.jsonl
-        run: scripts/perf-audit-netem-compare.sh "$QPX_NETEM_COMPARE_JSON"
       - name: http3 interop matrix
         id: http3_interop_matrix
         continue-on-error: true
@@ -522,16 +484,8 @@ jobs:
           H3_CRATE_PROTOCOL_PERF_BENCHMARKS: ${{ steps.h3_crate_protocol_perf_benchmarks.outcome }}
           QPX_HTTP3_PROTOCOL_PERF_BENCHMARKS: ${{ steps.qpx_http3_protocol_perf_benchmarks.outcome }}
           ADVANCED_TRANSPORT_PERF_BENCHMARKS: ${{ steps.advanced_transport_perf_benchmarks.outcome }}
-          EXTERNAL_PROXY_COMPARISON_BENCH: ${{ steps.external_proxy_comparison_bench.outcome }}
-          ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_cache_origin_feature_rich_performance_objectives.outcome }}
-          EXTERNAL_HTTP2_COMPARISON_BENCH: ${{ steps.external_http2_comparison_bench.outcome }}
-          ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_http2_performance_objectives.outcome }}
-          EXTERNAL_LONG_STREAMING_COMPARISON_BENCH: ${{ steps.external_long_streaming_comparison_bench.outcome }}
-          ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_streaming_performance_objectives.outcome }}
           ALLOCATION_PROFILE: ${{ steps.allocation_profile.outcome }}
           ENFORCE_ALLOCATION_BUDGET: ${{ steps.enforce_allocation_budget.outcome }}
-          COMPARE_PROXY_BASELINE: ${{ steps.compare_proxy_baseline.outcome }}
-          NETEM_PROXY_COMPARISON_BENCH: ${{ steps.netem_proxy_comparison_bench.outcome }}
           HTTP3_INTEROP_MATRIX: ${{ steps.http3_interop_matrix.outcome }}
           CALLGRIND_HOT_PATH_PROFILE: ${{ steps.callgrind_hot_path_profile.outcome }}
         run: |
@@ -548,16 +502,8 @@ jobs:
           check_step "h3 crate protocol perf benchmarks" "$H3_CRATE_PROTOCOL_PERF_BENCHMARKS"
           check_step "qpx http3 protocol perf benchmarks" "$QPX_HTTP3_PROTOCOL_PERF_BENCHMARKS"
           check_step "advanced transport perf benchmarks" "$ADVANCED_TRANSPORT_PERF_BENCHMARKS"
-          check_step "external proxy comparison bench" "$EXTERNAL_PROXY_COMPARISON_BENCH"
-          check_step "cache origin and feature-rich performance objectives" "$ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES"
-          check_step "external http2 comparison bench" "$EXTERNAL_HTTP2_COMPARISON_BENCH"
-          check_step "http2 performance objectives" "$ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES"
-          check_step "external long streaming comparison bench" "$EXTERNAL_LONG_STREAMING_COMPARISON_BENCH"
-          check_step "streaming performance objectives" "$ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES"
           check_step "allocation profile" "$ALLOCATION_PROFILE"
           check_step "allocation budget" "$ENFORCE_ALLOCATION_BUDGET"
-          check_step "compare proxy baseline" "$COMPARE_PROXY_BASELINE"
-          check_step "netem proxy comparison bench" "$NETEM_PROXY_COMPARISON_BENCH"
           check_step "http3 interop matrix" "$HTTP3_INTEROP_MATRIX"
           check_step "callgrind hot path profile" "$CALLGRIND_HOT_PATH_PROFILE"
           exit "$failed"
@@ -565,16 +511,159 @@ jobs:
         uses: actions/upload-artifact@v7
         if: always()
         with:
-          name: qpx-perf-audit-jsonl
+          name: qpx-perf-audit-jsonl-qpx
           path: |
             target/perf/*.jsonl
             target/perf/*.json
             target/perf/allocations/**
-            target/perf/http2-compare-logs/**
-            target/perf/netem-proxy-compare-logs/**
+            target/perf/profiles/**
+          if-no-files-found: ignore
+
+  perf_audit_proxy:
+    name: perf audit (proxy comparison)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: verify perf runner capacity
+        env:
+          QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
+        run: |
+          mkdir -p target/perf
+          scripts/check-perf-runner.sh
+      - name: install proxy comparison packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
+      - name: external proxy comparison bench
+        id: external_proxy_comparison_bench
+        continue-on-error: true
+        env:
+          RUSTFLAGS: "-D warnings"
+          QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
+          QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV: "MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728"
+        run: |
+          cargo build -p qpxd --release --locked --features http3-backend-qpx
+          scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
+      - name: enforce cache origin and feature-rich performance objectives
+        id: enforce_cache_origin_feature_rich_performance_objectives
+        continue-on-error: true
+        run: scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json
+      - name: external long streaming comparison bench
+        id: external_long_streaming_comparison_bench
+        continue-on-error: true
+        env:
+          QPX_STREAMING_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-streaming-compare.jsonl
+        run: scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
+      - name: enforce streaming performance objectives
+        id: enforce_streaming_performance_objectives
+        continue-on-error: true
+        run: scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json
+      - name: compare proxy baseline
+        id: compare_proxy_baseline
+        continue-on-error: true
+        run: scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json
+      - name: fail if any perf audit evaluation failed
+        if: always()
+        env:
+          EXTERNAL_PROXY_COMPARISON_BENCH: ${{ steps.external_proxy_comparison_bench.outcome }}
+          ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_cache_origin_feature_rich_performance_objectives.outcome }}
+          EXTERNAL_LONG_STREAMING_COMPARISON_BENCH: ${{ steps.external_long_streaming_comparison_bench.outcome }}
+          ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_streaming_performance_objectives.outcome }}
+          COMPARE_PROXY_BASELINE: ${{ steps.compare_proxy_baseline.outcome }}
+        run: |
+          failed=0
+          check_step() {
+            label="$1"
+            outcome="$2"
+            if [ "$outcome" != "success" ]; then
+              echo "$label failed: $outcome" >&2
+              failed=1
+            fi
+          }
+          check_step "external proxy comparison bench" "$EXTERNAL_PROXY_COMPARISON_BENCH"
+          check_step "cache origin and feature-rich performance objectives" "$ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES"
+          check_step "external long streaming comparison bench" "$EXTERNAL_LONG_STREAMING_COMPARISON_BENCH"
+          check_step "streaming performance objectives" "$ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES"
+          check_step "compare proxy baseline" "$COMPARE_PROXY_BASELINE"
+          exit "$failed"
+      - name: upload perf audit artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: qpx-perf-audit-jsonl-proxy
+          path: |
+            target/perf/*.jsonl
+            target/perf/*.json
             target/perf/proxy-compare-logs/**
             target/perf/streaming-compare-logs/**
-            target/perf/profiles/**
+          if-no-files-found: ignore
+
+  perf_audit_protocol:
+    name: perf audit (protocol comparison)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: verify perf runner capacity
+        env:
+          QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/runner.jsonl
+        run: |
+          mkdir -p target/perf
+          scripts/check-perf-runner.sh
+      - name: install proxy comparison packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
+      - name: external http2 comparison bench
+        id: external_http2_comparison_bench
+        continue-on-error: true
+        env:
+          QPX_HTTP2_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-http2-compare.jsonl
+        run: scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
+      - name: enforce http2 performance objectives
+        id: enforce_http2_performance_objectives
+        continue-on-error: true
+        run: scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl perf/http2-performance-objectives.json
+      - name: netem proxy comparison bench
+        id: netem_proxy_comparison_bench
+        continue-on-error: true
+        env:
+          QPX_NETEM_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-netem-proxy-compare.jsonl
+          QPX_NETEM_META_JSON: ${{ github.workspace }}/target/perf/perf-audit-netem-profile.jsonl
+        run: scripts/perf-audit-netem-compare.sh "$QPX_NETEM_COMPARE_JSON"
+      - name: fail if any perf audit evaluation failed
+        if: always()
+        env:
+          EXTERNAL_HTTP2_COMPARISON_BENCH: ${{ steps.external_http2_comparison_bench.outcome }}
+          ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_http2_performance_objectives.outcome }}
+          NETEM_PROXY_COMPARISON_BENCH: ${{ steps.netem_proxy_comparison_bench.outcome }}
+        run: |
+          failed=0
+          check_step() {
+            label="$1"
+            outcome="$2"
+            if [ "$outcome" != "success" ]; then
+              echo "$label failed: $outcome" >&2
+              failed=1
+            fi
+          }
+          check_step "external http2 comparison bench" "$EXTERNAL_HTTP2_COMPARISON_BENCH"
+          check_step "http2 performance objectives" "$ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES"
+          check_step "netem proxy comparison bench" "$NETEM_PROXY_COMPARISON_BENCH"
+          exit "$failed"
+      - name: upload perf audit artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: qpx-perf-audit-jsonl-protocol
+          path: |
+            target/perf/*.jsonl
+            target/perf/*.json
+            target/perf/http2-compare-logs/**
+            target/perf/netem-proxy-compare-logs/**
           if-no-files-found: ignore
 
   config_samples:
@@ -819,7 +908,9 @@ jobs:
       - http_rfc_all_features
       - external_h3_interop
       - perf_smoke
-      - perf_audit
+      - perf_audit_qpx
+      - perf_audit_proxy
+      - perf_audit_protocol
       - config_samples
       - build_test
       - release_target_preflight
