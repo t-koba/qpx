@@ -1942,8 +1942,14 @@ jq -cs \
         | .latency_p999_ms = ([$valid[].latency_p999_ms] | upper_median)
         | .transfer_kbytes_per_sec = ([$valid[].transfer_kbytes_per_sec] | lower_median)
         | .cpu_ms = ([$valid[].cpu_ms] | upper_median)
-        | .scheduler_run_delay_ns = ([$valid[].scheduler_run_delay_ns] | maximum)
-        | .scheduler_queue_delay_us_per_request = ([$valid[].scheduler_queue_delay_us_per_request] | maximum)
+        # Scheduler run-delay is a sampled diagnostic, not a workload result:
+        # a single preempted sample on a shared runner would otherwise decide
+        # the whole lane (worst-of-qpxd vs best-of-externals). Every primary
+        # metric above aggregates with a median, so the delay pair uses the
+        # conservative upper median too: a systematic regression still fails
+        # on a majority of bad samples, but one noisy sample cannot.
+        | .scheduler_run_delay_ns = ([$valid[].scheduler_run_delay_ns] | upper_median)
+        | .scheduler_queue_delay_us_per_request = ([$valid[].scheduler_queue_delay_us_per_request] | upper_median)
         | .kernel_resource_metrics = ([$valid[].kernel_resource_metrics] | all)
         | .requests_per_cpu_second = ([$valid[].requests_per_cpu_second] | lower_median)
         | .sample_spread = {
