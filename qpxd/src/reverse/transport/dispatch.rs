@@ -726,7 +726,7 @@ async fn complete_reverse_after_modules(
     })
     .await?;
     if override_upstream.is_none() && route.ipc.is_some() {
-        return dispatch_reverse_ipc_route(ReverseIpcDispatchInput {
+        return Box::pin(dispatch_reverse_ipc_route(ReverseIpcDispatchInput {
             base,
             state,
             conn,
@@ -755,10 +755,13 @@ async fn complete_reverse_after_modules(
             request_limits,
             request_limit_ctx,
             audit_ctx,
-        })
+        }))
         .await;
     }
-    dispatch_reverse_http_route(ReverseHttpDispatchInput {
+    // Keep upstream-only futures out of the enclosing cache-hit state machine.
+    // Otherwise boxing generic dispatch copies their large inline storage even
+    // when prepare_reverse_cache has already returned a response.
+    Box::pin(dispatch_reverse_http_route(ReverseHttpDispatchInput {
         base,
         state,
         conn,
@@ -792,6 +795,30 @@ async fn complete_reverse_after_modules(
         request_limit_ctx,
         audit_ctx,
         connection_pool,
-    })
+    }))
     .await
+}
+
+#[cfg(test)]
+mod future_layout_tests {
+    use super::*;
+    use std::future::Future;
+
+    fn future_size<A, F: Future>(_: impl FnOnce(A) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+
+    #[test]
+    fn cache_hit_state_does_not_embed_upstream_dispatch() {
+        // These futures are never polled: compare their compiler-generated
+        // layouts without creating a runtime or performing network I/O.
+        let cache_path = future_size(complete_reverse_after_modules);
+        let http_miss = future_size(dispatch_reverse_http_route);
+        let ipc_miss = future_size(dispatch_reverse_ipc_route);
+        assert!(
+            cache_path < http_miss && cache_path < ipc_miss,
+            "cache-hit state ({cache_path}) must exclude upstream-only futures \
+             (HTTP {http_miss}, IPC {ipc_miss})"
+        );
+    }
 }
