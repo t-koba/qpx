@@ -366,7 +366,7 @@ async fn execute_reverse_request(
                 request_destination_cache,
                 max_observed_request_body_bytes,
             },
-        observation,
+        observation: crate::http::pipeline::types::RequestObservation { request_rpc, .. },
     } = prepared;
     let router = &compiled.router;
     let proxy_name = state.plan.identity.proxy_name.as_ref();
@@ -375,7 +375,6 @@ async fn execute_reverse_request(
     let request_version = req.version();
     let path = base.path();
     let request_uri = base.request_uri();
-    let request_rpc = observation.request_rpc;
     let route = Some(route_idx)
         .and_then(|idx| router.route_at(idx))
         .ok_or_else(|| anyhow!("no route matched"))?;
