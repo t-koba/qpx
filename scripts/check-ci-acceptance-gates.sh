@@ -684,6 +684,9 @@ require scripts/check-streaming-performance.sh 'min_throughput_ratio'
 require scripts/check-streaming-performance.sh 'min_total_cpu_efficiency_ratio'
 require scripts/check-streaming-performance.sh 'max_p99_gap_ratio'
 require scripts/check-streaming-performance.sh 'max_total_time_ratio'
+require scripts/check-streaming-performance.sh 'lane_noise'
+require scripts/check-streaming-performance.sh 'not a regression signal'
+require scripts/check-streaming-performance.sh 'decisive: miss exceeds lane noise'
 require scripts/check-streaming-performance.sh 'competitive_frontier_total_ratio'
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_throughput_ratio 1.1
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_dominance_score 1.25

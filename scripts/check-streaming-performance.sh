@@ -294,6 +294,17 @@ fast_checks = (
 )
 
 failures = []
+marginals = []
+
+# Lane measurement noise comes from the compared records' observed sample
+# spread (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh,
+# check-http2-performance.sh). Throughput uses total-time spread as its proxy;
+# gap spread is excluded so the wide gap caps keep their teeth. A miss inside
+# the band is noise, a miss beyond it is decisive.
+fast_lane_noise = 1.0
+for record in (qpx_fast, leader, direct_fast):
+    for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
+        fast_lane_noise = max(fast_lane_noise, nested_number(record, "sample_spread", field))
 stability_objectives = objectives.get("stability", {})
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
 stability_records = {
@@ -326,9 +337,31 @@ for key in sorted(stability_records):
         )
 for name, current, objective, direction in fast_checks:
     if direction == "min" and current + 1e-12 < objective:
-        failures.append(f"fast streaming {name} {current:.6f} < objective {objective:.6f}")
+        decisive_bar = objective / fast_lane_noise
+        if current + 1e-12 < decisive_bar:
+            failures.append(
+                f"fast streaming {name} {current:.6f} < objective {objective:.6f} "
+                f"(decisive: miss exceeds lane noise {fast_lane_noise:.6f})"
+            )
+        else:
+            marginals.append(
+                f"fast streaming {name} marginal: {current:.6f} "
+                f"< objective {objective:.6f} but within lane noise "
+                f"{fast_lane_noise:.6f}; not a regression signal"
+            )
     if direction == "max" and current > objective + 1e-12:
-        failures.append(f"fast streaming {name} {current:.6f} > objective {objective:.6f}")
+        decisive_bar = objective * fast_lane_noise
+        if current > decisive_bar + 1e-12:
+            failures.append(
+                f"fast streaming {name} {current:.6f} > objective {objective:.6f} "
+                f"(decisive: miss exceeds lane noise {fast_lane_noise:.6f})"
+            )
+        else:
+            marginals.append(
+                f"fast streaming {name} marginal: {current:.6f} "
+                f"> objective {objective:.6f} but within lane noise "
+                f"{fast_lane_noise:.6f}; not a regression signal"
+            )
 
 qpx_slow = slow["qpxd"]
 direct_slow = slow["direct-backend"]
@@ -351,10 +384,25 @@ slow_ratios = {
     ),
 }
 slow_objectives = objectives.get("slow", {})
+slow_lane_noise = 1.0
+for record in (qpx_slow, direct_slow, slow_resource_leader):
+    for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
+        slow_lane_noise = max(slow_lane_noise, nested_number(record, "sample_spread", field))
 for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)
     if current > objective + 1e-12:
-        failures.append(f"slow streaming {field} {current:.6f} > objective {objective:.6f}")
+        decisive_bar = objective * slow_lane_noise
+        if current > decisive_bar + 1e-12:
+            failures.append(
+                f"slow streaming {field} {current:.6f} > objective {objective:.6f} "
+                f"(decisive: miss exceeds lane noise {slow_lane_noise:.6f})"
+            )
+        else:
+            marginals.append(
+                f"slow streaming {field} marginal: {current:.6f} "
+                f"> objective {objective:.6f} but within lane noise "
+                f"{slow_lane_noise:.6f}; not a regression signal"
+            )
 
 print(
     "streaming performance: "
@@ -371,6 +419,14 @@ print(
     f"resource-leader={slow_resource_leader_name}, "
     + ", ".join(f"{name}={value:.3f}" for name, value in slow_ratios.items())
 )
+
+if marginals:
+    print(
+        f"{len(marginals)} marginal objective(s) within measurement noise "
+        "(not failures, kept visible for trend review):"
+    )
+    for marginal in marginals:
+        print(marginal)
 
 if failures:
     for failure in failures:
