@@ -352,27 +352,29 @@ async fn execute_reverse_request(
     conn: &ReverseConnInfo,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, Response<Body>)> {
+    // Bind nested fields directly so partially moved containers do not remain
+    // in the async state across the dispatch awaits.
     let PreparedReverseRequest {
         mut req,
-        context,
-        route: prepared_route,
+        context: ReversePreparedContext { compiled, state },
+        route:
+            ReversePreparedRoute {
+                route_idx,
+                selected_policy,
+                identity,
+                sanitized_headers,
+                request_destination_cache,
+                max_observed_request_body_bytes,
+            },
         observation,
     } = prepared;
-    let compiled = context.compiled;
     let router = &compiled.router;
-    let state = context.state;
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let host = base.host().unwrap_or_default();
     let request_method = &base.method;
     let request_version = req.version();
     let path = base.path();
     let request_uri = base.request_uri();
-    let route_idx = prepared_route.route_idx;
-    let selected_policy = prepared_route.selected_policy;
-    let identity = prepared_route.identity;
-    let sanitized_headers = prepared_route.sanitized_headers;
-    let request_destination_cache = prepared_route.request_destination_cache;
-    let max_observed_request_body_bytes = prepared_route.max_observed_request_body_bytes;
     let request_rpc = observation.request_rpc;
     let route = Some(route_idx)
         .and_then(|idx| router.route_at(idx))
