@@ -43,6 +43,8 @@ pub(in crate::reverse) fn build_tls_acceptor(
             .with_no_client_auth()
             .with_cert_resolver(resolver)
     };
+    // Explicit fail-closed: RFC 8470 early data stays disabled on reverse listeners.
+    config.max_early_data_size = 0;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     #[cfg(feature = "acme")]
     config.alpn_protocols.push(b"acme-tls/1".to_vec());

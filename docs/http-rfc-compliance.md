@@ -90,7 +90,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | 6585 | native | 428 policy, 429, 431, CAPPORT-only 511 | qpxd protocol/config tests and RFC contract suite |
 | 7725 | native | policy-generated 451 with legal-information `Link` | API metadata and local-response contract tests |
 | 8297 | native | generation and relay of 103 across supported HTTP paths | informational-response RFC scenarios |
-| 8470 | native | 425 handling and replay-safety classification; early data disabled by default | method-registry and HTTP/3 tests |
+| 8470 | native | replay-safety classification; early data disabled by default (TCP explicit, QUIC explicit); 425/Early-Data gateway relay not yet enabled | method-registry and TLS early-data-disabled tests |
 | 6265 | native | strict Cookie and Set-Cookie codec/policy; no cookie jar or session authority | `cookie_policy::tests` |
 | 6266 | native | strict Content-Disposition parser/serializer and extended filename handling | `content_disposition::tests` |
 | 7239 | native | strict Forwarded codec and configured trusted-chain handling | `forwarded::tests`, qpxd forwarded tests |

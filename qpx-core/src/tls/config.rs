@@ -106,6 +106,10 @@ pub fn build_server_config(
     let mut config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(cert_chain, key)?;
+    // Explicit fail-closed: RFC 8470 early data stays disabled on TCP listeners.
+    // rustls defaults to 0 today; pin it so an upstream default change cannot
+    // silently enable 0-RTT without the Early-Data/425 gateway relay.
+    config.max_early_data_size = 0;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
     Ok(Arc::new(config))
 }

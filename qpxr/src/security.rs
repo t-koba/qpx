@@ -159,6 +159,8 @@ pub(crate) fn build_tls_acceptor(cli: &Cli) -> Result<Option<TlsAcceptor>> {
             .with_no_client_auth()
             .with_single_cert(cert_chain, key)?
     };
+    // Explicit fail-closed: RFC 8470 early data stays disabled.
+    config.max_early_data_size = 0;
     config.alpn_protocols = Vec::new();
     Ok(Some(tokio_rustls::TlsAcceptor::from(Arc::new(config))))
 }

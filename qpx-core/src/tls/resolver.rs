@@ -31,6 +31,8 @@ impl CaStore {
         let mut config = ServerConfig::builder()
             .with_no_client_auth()
             .with_cert_resolver(resolver.clone());
+        // Explicit fail-closed: RFC 8470 early data stays disabled on MITM listeners.
+        config.max_early_data_size = 0;
         config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
         Ok(MitmConfig {
             ca: self.clone(),
