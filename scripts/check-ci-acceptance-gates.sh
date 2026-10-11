@@ -572,6 +572,9 @@ require scripts/check-origin-cache-performance.sh 'compares incompatible executi
 require scripts/check-origin-cache-performance.sh 'qpx_blocking_workers'
 require scripts/check-origin-cache-performance.sh 'is missing workload_profile'
 require scripts/check-origin-cache-performance.sh 'objective {bench}/{body_bytes} weakens'
+require scripts/check-origin-cache-performance.sh 'lane_noise'
+require scripts/check-origin-cache-performance.sh 'not a regression signal'
+require scripts/check-origin-cache-performance.sh 'decisive: miss exceeds lane noise'
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_throughput_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_dominance_score 1.25

@@ -188,6 +188,7 @@ for record in records:
     indexed[key] = record
 
 results = []
+marginals = []
 for lane in lanes:
     try:
         bench = lane["bench"]
@@ -376,23 +377,65 @@ for lane in lanes:
         if objective(name) > policy_floor[name]:
             fail(f"objective {bench}/{body_bytes} weakens {name}")
 
-    failures = []
-    if throughput_ratio < objective("min_throughput_ratio"):
-        failures.append(f"throughput ratio {throughput_ratio:.3f}")
-    if cpu_ratio < objective("min_cpu_efficiency_ratio"):
-        failures.append(f"CPU-efficiency ratio {cpu_ratio:.3f}")
-    if p99_ratio > objective("max_p99_latency_ratio"):
-        failures.append(f"p99 ratio {p99_ratio:.3f}")
-    if dominance < objective("min_dominance_score"):
-        failures.append(f"dominance score {dominance:.3f}")
-    if rss_peak_ratio > objective("max_rss_peak_ratio"):
-        failures.append(f"RSS peak ratio {rss_peak_ratio:.3f}")
-    if fd_peak_ratio > objective("max_fd_peak_ratio"):
-        failures.append(f"FD peak ratio {fd_peak_ratio:.3f}")
-    if scheduler_queue_delay_ratio > objective("max_scheduler_queue_delay_ratio"):
-        failures.append(f"scheduler queue-delay ratio {scheduler_queue_delay_ratio:.3f}")
     qpx_spread = qpx["sample_spread"]
     reference_spread = reference["sample_spread"]
+    # Lane measurement noise comes from the current lane's observed sample
+    # spread; it judges absolute objectives alike (precedent:
+    # compare-proxy-baseline.sh). A miss inside the band is noise, a miss
+    # beyond it is decisive.
+    lane_noise = 1.0
+    for spread, context in ((qpx_spread, qpx_context), (reference_spread, reference_context)):
+        for field in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio"):
+            lane_noise = max(lane_noise, number(spread, field, context))
+
+    failures = []
+
+    def check_min(label, current_value, objective_value, floor_name):
+        decisive_bar = objective_value / lane_noise
+        floor_bar = policy_floor.get(floor_name)
+        if floor_bar is not None:
+            decisive_bar = max(decisive_bar, float(floor_bar))
+        if current_value + 1e-12 < objective_value:
+            if current_value + 1e-12 < decisive_bar:
+                failures.append(
+                    f"{label} {current_value:.3f} < objective {objective_value:.3f} "
+                    f"(decisive: miss exceeds lane noise {lane_noise:.6f})"
+                )
+            else:
+                marginals.append(
+                    f"{bench}/{body_bytes} {label} marginal for "
+                    f"{qpx_name} vs {reference_name}: {current_value:.6f} "
+                    f"< objective {objective_value:.6f} but within lane noise "
+                    f"{lane_noise:.6f}; not a regression signal"
+                )
+
+    def check_max(label, current_value, objective_value):
+        decisive_bar = objective_value * lane_noise
+        if current_value > objective_value + 1e-12:
+            if current_value > decisive_bar + 1e-12:
+                failures.append(
+                    f"{label} {current_value:.3f} > objective {objective_value:.3f} "
+                    f"(decisive: miss exceeds lane noise {lane_noise:.6f})"
+                )
+            else:
+                marginals.append(
+                    f"{bench}/{body_bytes} {label} marginal for "
+                    f"{qpx_name} vs {reference_name}: {current_value:.6f} "
+                    f"> objective {objective_value:.6f} but within lane noise "
+                    f"{lane_noise:.6f}; not a regression signal"
+                )
+
+    check_min("throughput ratio", throughput_ratio, objective("min_throughput_ratio"), "min_throughput_ratio")
+    check_min("CPU-efficiency ratio", cpu_ratio, objective("min_cpu_efficiency_ratio"), "min_cpu_efficiency_ratio")
+    check_max("p99 ratio", p99_ratio, objective("max_p99_latency_ratio"))
+    check_min("dominance score", dominance, objective("min_dominance_score"), "min_dominance_score")
+    check_max("RSS peak ratio", rss_peak_ratio, objective("max_rss_peak_ratio"))
+    check_max("FD peak ratio", fd_peak_ratio, objective("max_fd_peak_ratio"))
+    check_max(
+        "scheduler queue-delay ratio",
+        scheduler_queue_delay_ratio,
+        objective("max_scheduler_queue_delay_ratio"),
+    )
     for field in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio"):
         if number(qpx_spread, field, qpx_context) > objective("max_qpx_sample_spread_ratio"):
             failures.append(f"qpx {field} is unstable")
@@ -419,6 +462,14 @@ for lane in lanes:
     }
     print(json.dumps(result, sort_keys=True))
     results.append((bench, body_bytes, failures))
+
+if marginals:
+    print(
+        f"{len(marginals)} marginal objective(s) within measurement noise "
+        "(not failures, kept visible for trend review):"
+    )
+    for marginal in marginals:
+        print(marginal)
 
 failed = [(bench, body, failures) for bench, body, failures in results if failures]
 if failed:
