@@ -464,6 +464,9 @@ max_throughput_sample_spread_ratio = number(
 max_cpu_sample_spread_ratio = number(
     objective_defaults, "max_cpu_sample_spread_ratio"
 )
+max_p99_sample_spread_ratio = number(
+    objective_defaults, "max_p99_sample_spread_ratio"
+)
 max_rss_peak_ratio = number(objective_defaults, "max_rss_peak_ratio")
 max_fd_peak_ratio = number(objective_defaults, "max_fd_peak_ratio")
 max_scheduler_queue_delay_ratio = number(
@@ -558,7 +561,11 @@ for entry in baseline_entries:
     # 5% degradation band precedent. Objectives files are unchanged; only
     # the measurement-noise interpretation gains this floor.
     effective_noise = max(lane_noise, 1.05)
-    effective_noise_p99 = max(lane_noise_p99, 1.05)
+    # p99 tail varies more than throughput/CPU (green 1.176 on mizu 168076a,
+    # noisy 1.499 on mizu aebb6cc), but an unbounded spread lets a large tail
+    # regression pass as marginal (3.0 spread lets 3x through). The documented
+    # cap bounds the widening; spreads above it fail below as invalid.
+    effective_noise_p99 = min(max(lane_noise_p99, 1.05), max_p99_sample_spread_ratio)
 
     def check_min_baseline(label, current_value, baseline_value, required):
         decisive_bar = required / effective_noise
@@ -635,7 +642,7 @@ for entry in baseline_entries:
         current_p99_ratio,
         baseline_p99_ratio,
         allowed_p99_ratio,
-        lane_noise_p99,
+        effective_noise_p99,
         effective_noise_p99,
     )
     baseline_dominance_score = number(entry, "dominance_score")
@@ -719,7 +726,7 @@ for entry in baseline_entries:
         "proxy p99 latency dominance objective failed",
         current_p99_ratio,
         lane_max_p99_ratio,
-        lane_noise_p99,
+        effective_noise_p99,
         effective_noise_p99,
     )
     check_min_objective(
@@ -751,6 +758,7 @@ for entry in baseline_entries:
     for proxy, spread in current_entry["sample_spread"].items():
         throughput_spread = number(spread, "requests_per_sec_ratio")
         cpu_spread = number(spread, "requests_per_cpu_second_ratio")
+        p99_sample_spread = number(spread, "latency_p99_ratio")
         if throughput_spread > max_throughput_sample_spread_ratio + 1e-12:
             failures.append(
                 "proxy benchmark throughput sample spread objective failed for "
@@ -762,6 +770,12 @@ for entry in baseline_entries:
                 "proxy benchmark CPU sample spread objective failed for "
                 f"{key} and {proxy}: current ratio {cpu_spread:.6f} "
                 f"> objective {max_cpu_sample_spread_ratio:.6f}"
+            )
+        if p99_sample_spread > max_p99_sample_spread_ratio + 1e-12:
+            failures.append(
+                "proxy benchmark p99 sample spread objective failed for "
+                f"{key} and {proxy}: current ratio {p99_sample_spread:.6f} "
+                f"> objective {max_p99_sample_spread_ratio:.6f}"
             )
 
 if marginals:

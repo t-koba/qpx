@@ -3,6 +3,7 @@
     "max_cpu_sample_spread_ratio": 1.1,
     "max_fd_peak_ratio": 1.0,
     "max_p99_latency_ratio": 0.8,
+    "max_p99_sample_spread_ratio": 1.25,
     "max_rss_peak_ratio": 1.0,
     "max_scheduler_queue_delay_ratio": 1.0,
     "max_throughput_sample_spread_ratio": 1.1,

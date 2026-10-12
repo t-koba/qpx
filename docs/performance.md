@@ -55,13 +55,16 @@ reach a geometric multi-axis dominance score of at least 1.1
 truth). This is stricter
 than comparing qpx with a single chosen competitor because the reference may
 come from a different implementation on each axis. It rejects throughput or CPU
-sample spread above 10%. Direct-backend efficiency, headroom, and p99 spread
+sample spread above 10% and p99 sample spread above 25% (green 1.176 on mizu
+168076a, noisy 1.499 on mizu aebb6cc). Direct-backend efficiency and headroom
 remain in the artifact so backend saturation and runner noise remain visible,
 but headroom is recorded, not gated.
 
 All objective checkers judge misses against lane measurement noise: each lane
 derives a noise band from the observed throughput and CPU sample spread of the
-compared records, floored by a global 5% run-to-run tolerance. Shared CI
+compared records, floored by a global 5% run-to-run tolerance; p99 baseline
+and objective misses use the p99 spread instead, capped at the documented p99
+spread cap so an unstable tail is invalid rather than a wider pass. Shared CI
 runners vary run to run more than any single interleaved lane spread shows
 (observed decisive misses at 0.7-1.2% with lane spreads near 1.005, each on a
 different objective with no causal product change), so a miss inside
