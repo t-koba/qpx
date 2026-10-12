@@ -297,6 +297,37 @@ fn grpc_web_text_observer_accepts_padded_prefix_split() {
 }
 
 #[test]
+fn grpc_web_text_observer_accepts_empty_final_message() {
+    let encoded = BASE64.encode([0, 0, 0, 0, 0]);
+    let mut observer = GrpcFrameObserver::grpc_web(true, None, None);
+    observer.feed(encoded.as_bytes()).expect("feed");
+    let summary = observer.finish().expect("summary");
+    assert_eq!(summary.message_count, 1);
+    assert_eq!(summary.message_bytes, 0);
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_streaming_observer_accepts_empty_final_message() {
+    let mut observer = ConnectFrameObserver::new(None, None);
+    observer.feed(&[0, 0, 0, 0, 0]).expect("empty message");
+    let summary = observer.finish().expect("summary");
+    assert_eq!(summary.message_count, 1);
+    assert_eq!(summary.message_bytes, 0);
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_streaming_observer_rejects_empty_end_envelope() {
+    // A zero-length end envelope carries no EndStreamResponse JSON; it must
+    // fail at feed time rather than stick the machine mid-frame.
+    let mut observer = ConnectFrameObserver::new(None, None);
+    observer
+        .feed(&[0x02, 0, 0, 0, 0])
+        .expect_err("empty end envelope must fail");
+}
+
+#[test]
 fn grpc_web_text_observer_rejects_oversized_message_before_finish() {
     let encoded = BASE64.encode(frame_grpc_message(Bytes::from_static(b"hello")));
     let mut observer = GrpcFrameObserver::grpc_web(true, Some(4), None);

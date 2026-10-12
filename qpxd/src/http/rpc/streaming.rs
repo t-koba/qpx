@@ -33,7 +33,12 @@ impl ConnectFrameObserver {
     }
 
     pub(crate) fn feed(&mut self, mut chunk: &[u8]) -> Result<(), GrpcFrameError> {
-        while !chunk.is_empty() {
+        // Same zero-length completion rule as GrpcFrameObserver::feed_binary:
+        // a header that consumes its chunk with len 0 still completes its
+        // (possibly empty) payload immediately.
+        while !chunk.is_empty()
+            || matches!(self.state, FrameParseState::Payload { remaining: 0, .. })
+        {
             match &mut self.state {
                 FrameParseState::Header { buf, pos } => {
                     let take = (5 - *pos).min(chunk.len());

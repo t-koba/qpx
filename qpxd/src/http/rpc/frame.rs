@@ -206,7 +206,13 @@ impl GrpcFrameObserver {
     }
 
     fn feed_binary(&mut self, mut chunk: &[u8]) -> Result<(), GrpcFrameError> {
-        while !chunk.is_empty() {
+        // A zero-length payload completes the moment its header does, even
+        // when the header consumed the whole chunk: without the second
+        // disjunct the machine would stick in Payload { remaining: 0 } and a
+        // legal empty final message would fail finish as mid-frame EOF.
+        while !chunk.is_empty()
+            || matches!(self.state, FrameParseState::Payload { remaining: 0, .. })
+        {
             match &mut self.state {
                 FrameParseState::Header { buf, pos } => {
                     let take = (5 - *pos).min(chunk.len());
@@ -351,6 +357,27 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("0")
         );
+    }
+
+    #[test]
+    fn grpc_frame_observer_accepts_empty_final_message() {
+        // A zero-length message (e.g. protobuf Empty) completes when its
+        // header does, even if the header consumed the whole chunk.
+        let mut observer = GrpcFrameObserver::new(None);
+        observer.feed(&[0, 0, 0, 0, 0]).expect("empty message");
+        let summary = observer.finish().expect("summary");
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.message_bytes, 0);
+    }
+
+    #[test]
+    fn grpc_frame_observer_accepts_empty_message_split_header() {
+        let mut observer = GrpcFrameObserver::new(None);
+        observer.feed(&[0, 0]).expect("partial header");
+        observer.feed(&[0, 0, 0]).expect("header end");
+        let summary = observer.finish().expect("summary");
+        assert_eq!(summary.message_count, 1);
+        assert_eq!(summary.message_bytes, 0);
     }
 
     #[test]
