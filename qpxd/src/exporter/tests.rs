@@ -307,3 +307,28 @@ fn scoped_session_respects_zero_percent_sampling() {
 
     assert!(!session.capture_plaintext);
 }
+
+#[test]
+fn redacts_standalone_json_with_blank_lines() {
+    for sample in [
+        "{\n\n  \"password\": \"synthetic-marker\"\n}",
+        "{\r\n\r\n  \"password\": \"synthetic-marker\"\r\n}",
+    ] {
+        // The sample must be valid JSON for this regression to be meaningful.
+        let parsed: serde_json::Value =
+            serde_json::from_str(sample).expect("regression sample is valid JSON");
+        assert!(parsed.get("password").is_some());
+        let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+            headers: Vec::new(),
+            query_keys: Vec::new(),
+            json_paths: vec!["$.password".to_string()],
+        });
+        let out = redaction.redact_plaintext(sample.as_bytes());
+        let text = String::from_utf8(out.into_owned()).expect("utf8");
+        assert!(
+            text.contains("\"password\":\"<redacted>\""),
+            "blank-line sample was not redacted: {text:?}"
+        );
+        assert!(!text.contains("synthetic-marker"));
+    }
+}

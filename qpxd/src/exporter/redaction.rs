@@ -123,6 +123,12 @@ impl CaptureRedaction {
             }
             return self.redact_json_text(text);
         };
+        // A blank line inside a standalone JSON body is not an HTTP head/body
+        // boundary: only honor the split for an actual HTTP head, otherwise a
+        // pretty-printed sample would be returned unredacted below.
+        if !looks_like_http_message_prefix(text.as_str()) {
+            return self.redact_json_text(text);
+        }
         if !head.lines().any(is_json_content_type_header) {
             return text;
         }
