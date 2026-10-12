@@ -235,7 +235,10 @@ impl CombinedRequestTemplate {
             let redacted = redact_uri_query_keys(&request.uri().to_string(), redact_query_keys);
             append_escaped(&mut request_suffix, redacted.as_bytes());
         } else if request.uri().scheme().is_none() && request.uri().authority().is_none() {
-            request_suffix.extend_from_slice(
+            // Query-free origin form: no redaction applies, but delimiters must
+            // still be escaped to preserve combined-field boundaries.
+            append_escaped(
+                &mut request_suffix,
                 request
                     .uri()
                     .path_and_query()
@@ -244,7 +247,8 @@ impl CombinedRequestTemplate {
                     .as_bytes(),
             );
         } else {
-            request_suffix.extend_from_slice(request.uri().to_string().as_bytes());
+            // Query-free absolute form: same escaping contract as above.
+            append_escaped(&mut request_suffix, request.uri().to_string().as_bytes());
         }
         request_suffix.push(b' ');
         request_suffix.extend_from_slice(http_version_label(request.version()).as_bytes());
@@ -495,6 +499,53 @@ fn emit_direct_combined_access_log(
     })
 }
 
+/// Records HTTP result attributes on the request span.
+///
+/// Shared by the direct-combined fast path and the common completion path so
+/// enabling combined access logs never changes tracing semantics: handler
+/// polls run under the HTTP server span and status/identity/error attributes
+/// are recorded on both paths.
+fn record_http_result_on_span<B, E>(span: Option<&tracing::Span>, result: &Result<Response<B>, E>) {
+    let Some(span) = span else {
+        return;
+    };
+    use opentelemetry::trace::Status;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    match result {
+        Ok(resp) => {
+            let status = resp.status().as_u16();
+            span.record("http.response.status_code", status);
+            if let Some(ctx) = resp.extensions().get::<RequestLogContext>() {
+                if let Some(subject) = ctx.subject.as_deref() {
+                    span.record("enduser.id", subject);
+                }
+                if let Some(device_id) = ctx.device_id.as_deref() {
+                    span.record("qpx.device_id", device_id);
+                }
+                if let Some(rule) = ctx.matched_rule.as_deref() {
+                    span.record("qpx.matched_rule", rule);
+                }
+                if let Some(route) = ctx.matched_route.as_deref() {
+                    span.record("qpx.matched_route", route);
+                }
+                if let Some(policy_id) = ctx.decision_service_policy_id.as_deref() {
+                    span.record("qpx.decision_service_policy_id", policy_id);
+                }
+                if !ctx.policy_tags.is_empty() {
+                    let policy_tags = joined_or_empty(&ctx.policy_tags);
+                    span.record("qpx.policy_tags", policy_tags.as_ref());
+                }
+            }
+            if status >= 500 {
+                span.set_status(Status::error(format!("HTTP {status}")));
+            }
+        }
+        Err(_) => {
+            span.set_status(Status::error("request failed"));
+        }
+    }
+}
+
 impl<F, B, E> Future for AccessLogFuture<F>
 where
     F: Future<Output = Result<Response<B>, E>>,
@@ -508,14 +559,26 @@ where
         }
         let direct_combined = self.as_ref().get_ref().direct_combined;
         if direct_combined {
+            let span = {
+                // SAFETY: `AccessLogFuture` is pinned, and accessing the non-pinned span
+                // field does not move the pinned `inner` future.
+                let this = unsafe { self.as_mut().get_unchecked_mut() };
+                this.span.clone()
+            };
             // SAFETY: `AccessLogFuture` is pinned and `inner` is never moved.
             let inner = unsafe { self.as_mut().map_unchecked_mut(|state| &mut state.inner) };
+            // Enter the HTTP server span so async handler polls keep their trace
+            // context and downstream propagation, as on the common path.
+            let entered = span.as_ref().map(|span| span.enter());
             let polled = inner.poll(cx);
-            if let Poll::Ready(Ok(response)) = &polled {
-                // SAFETY: polling is complete, and bookkeeping fields are not structurally pinned.
+            drop(entered);
+            if let Poll::Ready(result) = &polled {
+                record_http_result_on_span(span.as_ref(), result);
+                // SAFETY: polling is complete, and bookkeeping fields are not
+                // structurally pinned.
                 let this = unsafe { self.as_mut().get_unchecked_mut() };
-                if let (Some(start), Some(snapshot)) =
-                    (this.start.take(), this.direct_snapshot.take())
+                if let (Some(start), Some(snapshot), Ok(response)) =
+                    (this.start.take(), this.direct_snapshot.take(), result)
                 {
                     let completed = Instant::now();
                     let bytes_out = response
@@ -552,43 +615,7 @@ where
                 // SAFETY: polling is complete, and mutating bookkeeping fields does not move
                 // the pinned `inner` future.
                 let this = unsafe { self.as_mut().get_unchecked_mut() };
-                if let Some(span) = span.as_ref() {
-                    use opentelemetry::trace::Status;
-                    use tracing_opentelemetry::OpenTelemetrySpanExt;
-                    match &result {
-                        Ok(resp) => {
-                            let status = resp.status().as_u16();
-                            span.record("http.response.status_code", status);
-                            if let Some(ctx) = resp.extensions().get::<RequestLogContext>() {
-                                if let Some(subject) = ctx.subject.as_deref() {
-                                    span.record("enduser.id", subject);
-                                }
-                                if let Some(device_id) = ctx.device_id.as_deref() {
-                                    span.record("qpx.device_id", device_id);
-                                }
-                                if let Some(rule) = ctx.matched_rule.as_deref() {
-                                    span.record("qpx.matched_rule", rule);
-                                }
-                                if let Some(route) = ctx.matched_route.as_deref() {
-                                    span.record("qpx.matched_route", route);
-                                }
-                                if let Some(policy_id) = ctx.decision_service_policy_id.as_deref() {
-                                    span.record("qpx.decision_service_policy_id", policy_id);
-                                }
-                                if !ctx.policy_tags.is_empty() {
-                                    let policy_tags = joined_or_empty(&ctx.policy_tags);
-                                    span.record("qpx.policy_tags", policy_tags.as_ref());
-                                }
-                            }
-                            if status >= 500 {
-                                span.set_status(Status::error(format!("HTTP {status}")));
-                            }
-                        }
-                        Err(_) => {
-                            span.set_status(Status::error("request failed"));
-                        }
-                    }
-                }
+                record_http_result_on_span(span.as_ref(), &result);
                 if let (Some(start), Some(snapshot), Ok(resp)) =
                     (this.start.take(), this.snapshot.take(), &result)
                 {
@@ -1025,5 +1052,104 @@ mod tests {
             request.headers().get(http::header::REFERER),
             request.headers().get(http::header::USER_AGENT)
         ));
+    }
+}
+
+#[cfg(test)]
+mod access_log_regression_tests {
+    use super::*;
+    use std::sync::Mutex;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[test]
+    fn combined_template_escapes_query_free_uri_delimiters() {
+        // Query-free origin form must escape delimiters exactly like the query
+        // branch, preserving combined-field boundaries.
+        let request = Request::builder()
+            .method("GET")
+            .uri("/a\"b\\c")
+            .body(())
+            .expect("request");
+        assert!(request.uri().query().is_none());
+        let template = CombinedRequestTemplate::build(
+            &request,
+            None,
+            None,
+            Arc::from(&b"127.0.0.1:8080 - - ["[..]),
+            &[],
+        );
+        assert_eq!(
+            String::from_utf8(template.request_suffix.to_vec()).expect("ASCII request suffix"),
+            "] \"GET /a\\\"b\\\\c HTTP/1.1\" "
+        );
+
+        // Query-free absolute form carries the same escaping contract.
+        let absolute = Request::builder()
+            .method("GET")
+            .uri("http://example.test/a\"b\\c")
+            .body(())
+            .expect("request");
+        assert!(absolute.uri().query().is_none());
+        let absolute_template = CombinedRequestTemplate::build(
+            &absolute,
+            None,
+            None,
+            Arc::from(&b"127.0.0.1:8080 - - ["[..]),
+            &[],
+        );
+        assert_eq!(
+            String::from_utf8(absolute_template.request_suffix.to_vec())
+                .expect("ASCII request suffix"),
+            "] \"GET http://example.test/a\\\"b\\\\c HTTP/1.1\" "
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn access_log_future_polls_inner_inside_request_span() {
+        let _guard = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(Level::INFO)
+            .set_default();
+        // The direct-combined fast path must preserve the HTTP server span
+        // across async handler polls, exactly like the common path.
+        for direct_combined in [false, true] {
+            let probe = tracing::info_span!("http_probe");
+            let expected = probe.clone();
+            let seen: Arc<Mutex<Option<bool>>> = Arc::new(Mutex::new(None));
+            let seen_inner = seen.clone();
+            let inner = async move {
+                // Force a second poll so both polls must run under the span.
+                tokio::task::yield_now().await;
+                let under_span =
+                    tracing::Span::current().id() == expected.id() && expected.id().is_some();
+                *seen_inner.lock().expect("lock") = Some(under_span);
+                let mut response = Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(())
+                    .expect("response");
+                response.extensions_mut().insert(RequestLogContext {
+                    subject: Some("user-1".to_string()),
+                    ..RequestLogContext::default()
+                });
+                Ok::<_, ()>(response)
+            };
+            let future = AccessLogFuture {
+                inner,
+                active: true,
+                start: Some(Instant::now()),
+                snapshot: None,
+                direct_snapshot: None,
+                span: Some(probe),
+                combined: true,
+                direct_combined,
+            };
+            let response = future.await.expect("response");
+            assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+            assert_eq!(
+                seen.lock().expect("lock").take(),
+                Some(true),
+                "handler poll ran outside the request span (direct_combined={direct_combined})"
+            );
+        }
     }
 }
