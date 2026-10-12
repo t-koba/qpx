@@ -772,7 +772,10 @@ mod rotation_safety_tests {
             std::fs::remove_dir_all(&dir).expect("clear probe dir");
         }
         std::fs::create_dir_all(&dir).expect("create probe dir");
-        dir
+        // Canonicalize so the probe never sits under a symlinked ancestor
+        // (e.g. macOS $TMPDIR via /var, or /tmp via /private/tmp), which the
+        // product's private-dir enforcement correctly rejects.
+        std::fs::canonicalize(&dir).expect("canonicalize probe dir")
     }
 
     fn write_file(dir: &std::path::Path, name: &str, contents: &str) {
