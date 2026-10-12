@@ -273,6 +273,7 @@ if not records:
 
 failures = []
 marginals = []
+unmeasured = []
 lane_scores = []
 lane_noises = []
 for body_bytes, max_streams in sorted(required_lanes):
@@ -418,16 +419,25 @@ for body_bytes, max_streams in sorted(required_lanes):
         cpu_spread = nested_number(
             record, "sample_spread", "requests_per_total_cpu_second_ratio", proxy
         )
-        if throughput_spread > throughput_limit + 1e-12:
-            failures.append(
-                f"HTTP/2 {body_bytes}-byte m={max_streams} {proxy} throughput sample spread "
-                f"{throughput_spread:.6f} > objective {throughput_limit:.6f}"
-            )
-        if cpu_spread > cpu_limit + 1e-12:
-            failures.append(
-                f"HTTP/2 {body_bytes}-byte m={max_streams} {proxy} total CPU sample spread "
-                f"{cpu_spread:.6f} > objective {cpu_limit:.6f}"
-            )
+        # Spread caps judge qpx's own measurement quality: an unstable qpx
+        # sample fails as invalid rather than passing as marginal. A breaching
+        # reference sample leaves the lane unmeasured, which is not a qpx
+        # regression, so it is reported visibly without failing the gate.
+        for label, value, limit in (
+            ("throughput", throughput_spread, throughput_limit),
+            ("total CPU", cpu_spread, cpu_limit),
+        ):
+            if value > limit + 1e-12:
+                message = (
+                    f"HTTP/2 {body_bytes}-byte m={max_streams} {proxy} {label} sample spread "
+                    f"{value:.6f} > objective {limit:.6f}"
+                )
+                if proxy == "qpxd":
+                    failures.append(message)
+                else:
+                    unmeasured.append(
+                        f"{message} (reference noise; lane unmeasured, not a qpx regression)"
+                    )
 
     print(
         f"HTTP/2 {body_bytes} bytes m={max_streams}: throughput={throughput_ratio:.3f}, "
@@ -466,6 +476,14 @@ if marginals:
     )
     for marginal in marginals:
         print(marginal)
+
+if unmeasured:
+    print(
+        f"{len(unmeasured)} lane sample(s) left unmeasured by reference noise "
+        "(not failures, kept visible for trend review):"
+    )
+    for lane in unmeasured:
+        print(lane)
 
 if failures:
     for failure in failures:

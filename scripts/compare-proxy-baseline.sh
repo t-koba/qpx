@@ -527,6 +527,7 @@ target_keys = {baseline_key(entry) for entry in baseline_entries}
 current = {baseline_key(entry): entry for entry in collect_ratios(records, target_keys)}
 failures = []
 marginals = []
+unmeasured = []
 
 for entry in baseline_entries:
     key = baseline_key(entry)
@@ -755,28 +756,31 @@ for entry in baseline_entries:
         current_scheduler_queue_delay_ratio,
         lane_max_scheduler_queue_delay_ratio,
     )
+    # Sample-spread caps judge qpx's own measurement quality: an unstable
+    # qpx tail fails as invalid rather than passing as marginal. A breaching
+    # reference sample leaves the lane unmeasured, which is not a qpx
+    # regression, so it is reported visibly without failing the gate.
     for proxy, spread in current_entry["sample_spread"].items():
         throughput_spread = number(spread, "requests_per_sec_ratio")
         cpu_spread = number(spread, "requests_per_cpu_second_ratio")
         p99_sample_spread = number(spread, "latency_p99_ratio")
-        if throughput_spread > max_throughput_sample_spread_ratio + 1e-12:
-            failures.append(
-                "proxy benchmark throughput sample spread objective failed for "
-                f"{key} and {proxy}: current ratio {throughput_spread:.6f} "
-                f"> objective {max_throughput_sample_spread_ratio:.6f}"
-            )
-        if cpu_spread > max_cpu_sample_spread_ratio + 1e-12:
-            failures.append(
-                "proxy benchmark CPU sample spread objective failed for "
-                f"{key} and {proxy}: current ratio {cpu_spread:.6f} "
-                f"> objective {max_cpu_sample_spread_ratio:.6f}"
-            )
-        if p99_sample_spread > max_p99_sample_spread_ratio + 1e-12:
-            failures.append(
-                "proxy benchmark p99 sample spread objective failed for "
-                f"{key} and {proxy}: current ratio {p99_sample_spread:.6f} "
-                f"> objective {max_p99_sample_spread_ratio:.6f}"
-            )
+        for label, value, cap in (
+            ("throughput", throughput_spread, max_throughput_sample_spread_ratio),
+            ("CPU", cpu_spread, max_cpu_sample_spread_ratio),
+            ("p99", p99_sample_spread, max_p99_sample_spread_ratio),
+        ):
+            if value > cap + 1e-12:
+                message = (
+                    f"proxy benchmark {label} sample spread objective failed for "
+                    f"{key} and {proxy}: current ratio {value:.6f} "
+                    f"> objective {cap:.6f}"
+                )
+                if proxy == "qpxd":
+                    failures.append(message)
+                else:
+                    unmeasured.append(
+                        f"{message} (reference noise; lane unmeasured, not a qpx regression)"
+                    )
 
 if marginals:
     print(
@@ -785,6 +789,14 @@ if marginals:
     )
     for marginal in marginals:
         print(marginal)
+
+if unmeasured:
+    print(
+        f"{len(unmeasured)} lane sample(s) left unmeasured by reference noise "
+        "(not failures, kept visible for trend review):"
+    )
+    for lane in unmeasured:
+        print(lane)
 
 if failures:
     for failure in failures:

@@ -54,9 +54,11 @@ reach a geometric multi-axis dominance score of at least 1.1
 (`perf/proxy-performance-objectives.json` lanes; the file is the source of
 truth). This is stricter
 than comparing qpx with a single chosen competitor because the reference may
-come from a different implementation on each axis. It rejects throughput or CPU
-sample spread above 10% and p99 sample spread above 25% (green 1.176 on mizu
-168076a, noisy 1.499 on mizu aebb6cc). Direct-backend efficiency and headroom
+come from a different implementation on each axis. It rejects qpx throughput or
+CPU sample spread above 10% and qpx p99 sample spread above 25% (green 1.176 on
+mizu 168076a, noisy 1.499 on mizu aebb6cc). A breaching reference sample leaves
+the lane unmeasured — reported visibly, not failed — since competitor noise is
+not a qpx regression. Direct-backend efficiency and headroom
 remain in the artifact so backend saturation and runner noise remain visible,
 but headroom is recorded, not gated.
 
@@ -248,7 +250,8 @@ supports. The geometric dominance score across the
 complete four-lane matrix must reach 1.5. qpx sample spread is capped at 10% by
 default (3.0x on the fully multiplexed 1 MiB lane);
 reference spread is recorded and capped separately so runner noise cannot
-silently excuse a qpx regression. The qpx HTTP/2 server runs streams
+silently excuse a qpx regression; a breaching reference sample is reported as
+unmeasured rather than failing the gate. The qpx HTTP/2 server runs streams
 concurrently in the owning connection task. The single active stream reuses its
 boxed future allocation; a second stream promotes both streams into the
 connection-local concurrent scheduler. The scheduler drains ready completions
