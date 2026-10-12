@@ -135,7 +135,6 @@ pub(crate) struct GrpcFrameObserver {
     max_trailer_bytes: Option<u64>,
     grpc_web: bool,
     grpc_web_text: bool,
-    grpc_web_text_done: bool,
     text_quantum: [u8; 4],
     text_quantum_len: usize,
 }
@@ -169,7 +168,6 @@ impl GrpcFrameObserver {
             max_trailer_bytes,
             grpc_web,
             grpc_web_text,
-            grpc_web_text_done: false,
             text_quantum: [0; 4],
             text_quantum_len: 0,
         }
@@ -183,26 +181,25 @@ impl GrpcFrameObserver {
     }
 
     fn feed_grpc_web_text(&mut self, chunk: &[u8]) -> Result<(), GrpcFrameError> {
+        // gRPC-Web text is base64 of the binary frame stream, but encoders
+        // may emit independently padded chunks mid-stream: padding ends the
+        // current base64 quantum, not the response. Each quartet therefore
+        // decodes on its own; only invalid symbols, misplaced padding
+        // (rejected by strict quartet decoding), and a partial trailing
+        // quantum at finish are errors.
         for byte in chunk
             .iter()
             .copied()
             .filter(|byte| !byte.is_ascii_whitespace())
         {
-            if self.grpc_web_text_done {
-                return Err(anyhow!("grpc-web-text data found after base64 padding").into());
-            }
             self.text_quantum[self.text_quantum_len] = byte;
             self.text_quantum_len += 1;
             if self.text_quantum_len == self.text_quantum.len() {
                 let quantum = self.text_quantum;
-                let padded = quantum.contains(&b'=');
                 let decoded = BASE64.decode(quantum).map_err(|err| anyhow!(err))?;
                 self.feed_binary(&decoded)?;
                 self.text_quantum = [0; 4];
                 self.text_quantum_len = 0;
-                if padded {
-                    self.grpc_web_text_done = true;
-                }
             }
         }
         Ok(())

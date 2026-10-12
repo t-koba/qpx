@@ -259,6 +259,44 @@ fn grpc_web_text_observer_parses_base64_quantum_split_one_byte_at_a_time() {
 }
 
 #[test]
+fn grpc_web_text_observer_accepts_independently_padded_frames() {
+    // Encoders may emit each frame as an independently padded base64 chunk:
+    // padding ends the chunk, not the response.
+    let first = BASE64.encode(frame_grpc_message(Bytes::from_static(b"ab")));
+    let second = BASE64.encode(frame_grpc_message(Bytes::from_static(b"c")));
+    assert!(
+        first.ends_with('='),
+        "frame encoding must carry padding, got {first}"
+    );
+    let mut encoded = first;
+    encoded.push_str(&second);
+    let mut observer = GrpcFrameObserver::grpc_web(true, None, None);
+    for chunk in encoded.as_bytes().chunks(3) {
+        observer.feed(chunk).expect("feed");
+    }
+    let summary = observer.finish().expect("summary");
+    assert_eq!(summary.message_count, 2);
+    assert_eq!(summary.message_bytes, 3);
+}
+
+#[test]
+fn grpc_web_text_observer_accepts_padded_prefix_split() {
+    // A one-byte prefix encoded alone carries padding mid-stream.
+    let body = [
+        frame_grpc_message(Bytes::from_static(b"ab")),
+        frame_grpc_message(Bytes::from_static(b"c")),
+    ]
+    .concat();
+    let mut encoded = BASE64.encode(&body[..1]);
+    encoded.push_str(&BASE64.encode(&body[1..]));
+    let mut observer = GrpcFrameObserver::grpc_web(true, None, None);
+    observer.feed(encoded.as_bytes()).expect("feed");
+    let summary = observer.finish().expect("summary");
+    assert_eq!(summary.message_count, 2);
+    assert_eq!(summary.message_bytes, 3);
+}
+
+#[test]
 fn grpc_web_text_observer_rejects_oversized_message_before_finish() {
     let encoded = BASE64.encode(frame_grpc_message(Bytes::from_static(b"hello")));
     let mut observer = GrpcFrameObserver::grpc_web(true, Some(4), None);
