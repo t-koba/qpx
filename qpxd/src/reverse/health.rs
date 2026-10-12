@@ -207,6 +207,19 @@ impl UpstreamEndpoint {
         }
     }
 
+    /// Hold one in-flight attempt count, released exactly once: explicitly
+    /// at the normal completion point via [`InflightAttemptGuard::release`],
+    /// or on drop for early returns, `?`, loop breaks, and task
+    /// cancellation. Mirrors the acquire/release pairing of
+    /// `EndpointConcurrencyPermit`, but the release point stays explicit so
+    /// normal-path limit accounting is unchanged.
+    pub(super) fn hold_inflight(self: &Arc<Self>) -> InflightAttemptGuard {
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+        InflightAttemptGuard {
+            endpoint: Some(Arc::clone(self)),
+        }
+    }
+
     pub(super) fn is_healthy(&self, now_ms: u64) -> bool {
         self.unhealthy_until_ms.load(Ordering::Relaxed) <= now_ms
     }
@@ -495,6 +508,28 @@ impl UpstreamEndpoint {
     }
 }
 
+/// Owns one in-flight attempt count on an endpoint; see
+/// [`UpstreamEndpoint::hold_inflight`].
+pub(super) struct InflightAttemptGuard {
+    endpoint: Option<Arc<UpstreamEndpoint>>,
+}
+
+impl InflightAttemptGuard {
+    pub(super) fn release(mut self) {
+        if let Some(endpoint) = self.endpoint.take() {
+            endpoint.inflight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+impl Drop for InflightAttemptGuard {
+    fn drop(&mut self) {
+        if let Some(endpoint) = self.endpoint.take() {
+            endpoint.inflight.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
 fn passive_failure_reason(kind: PassiveFailureKind) -> EjectionReason {
     match kind {
         PassiveFailureKind::Http5xx => EjectionReason::Http5xx,
@@ -571,5 +606,48 @@ mod tests {
 
         assert!(endpoint.is_healthy(now_millis()));
         assert_eq!(endpoint.failures.load(Ordering::Relaxed), 0);
+    }
+}
+
+#[cfg(test)]
+mod inflight_guard_tests {
+    use super::*;
+
+    #[test]
+    fn inflight_guard_releases_on_explicit_release() {
+        let endpoint = Arc::new(UpstreamEndpoint::new("http://example".to_string()));
+        let guard = endpoint.hold_inflight();
+        assert_eq!(endpoint.inflight.load(Ordering::Relaxed), 1);
+        guard.release();
+        assert_eq!(endpoint.inflight.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn inflight_guard_releases_on_drop() {
+        let endpoint = Arc::new(UpstreamEndpoint::new("http://example".to_string()));
+        {
+            let _guard = endpoint.hold_inflight();
+            assert_eq!(endpoint.inflight.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(endpoint.inflight.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn inflight_guard_releases_on_task_abort() {
+        let endpoint = Arc::new(UpstreamEndpoint::new("http://example".to_string()));
+        let (held_tx, held_rx) = tokio::sync::oneshot::channel::<()>();
+        let task = tokio::spawn({
+            let endpoint = endpoint.clone();
+            async move {
+                let _guard = endpoint.hold_inflight();
+                let _ = held_tx.send(());
+                std::future::pending::<()>().await;
+            }
+        });
+        held_rx.await.expect("guard held");
+        assert_eq!(endpoint.inflight.load(Ordering::Relaxed), 1);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(endpoint.inflight.load(Ordering::Relaxed), 0);
     }
 }

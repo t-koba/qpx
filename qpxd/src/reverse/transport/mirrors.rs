@@ -12,7 +12,6 @@ use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, LazyLock, Mutex};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::{Duration, Instant, timeout};
@@ -173,9 +172,8 @@ pub(super) fn dispatch_mirrors(
                 continue;
             }
         };
-        upstream.inflight.fetch_add(1, Ordering::Relaxed);
+        let inflight_guard = upstream.hold_inflight();
         let Some(_mirror_permit) = try_acquire_mirror_permit(upstream.as_ref()) else {
-            upstream.inflight.fetch_sub(1, Ordering::Relaxed);
             continue;
         };
         let upstream_for_task = upstream.clone();
@@ -198,7 +196,7 @@ pub(super) fn dispatch_mirrors(
                 ),
             )
             .await;
-            upstream_for_task.inflight.fetch_sub(1, Ordering::Relaxed);
+            inflight_guard.release();
             match response {
                 Ok(Ok(_)) => upstream_for_task.mark_response_success(&lifecycle),
                 Ok(Err(_)) | Err(_) => upstream_for_task.mark_failure(&health_policy),
@@ -232,9 +230,8 @@ pub(super) fn dispatch_streaming_mirrors(input: StreamingMirrorDispatch<'_>) {
             }
         };
         let upstream = mirror.upstream;
-        upstream.inflight.fetch_add(1, Ordering::Relaxed);
+        let inflight_guard = upstream.hold_inflight();
         let Some(_mirror_permit) = try_acquire_mirror_permit(upstream.as_ref()) else {
-            upstream.inflight.fetch_sub(1, Ordering::Relaxed);
             continue;
         };
         let upstream_for_task = upstream.clone();
@@ -257,7 +254,7 @@ pub(super) fn dispatch_streaming_mirrors(input: StreamingMirrorDispatch<'_>) {
                 ),
             )
             .await;
-            upstream_for_task.inflight.fetch_sub(1, Ordering::Relaxed);
+            inflight_guard.release();
             match response {
                 Ok(Ok(_)) => upstream_for_task.mark_response_success(&lifecycle),
                 Ok(Err(_)) | Err(_) => upstream_for_task.mark_failure(&health_policy),

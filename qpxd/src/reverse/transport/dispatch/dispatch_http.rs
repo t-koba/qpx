@@ -23,7 +23,6 @@ use crate::upstream::origin::OriginEndpoint;
 use anyhow::{Result, anyhow};
 use hyper::Response;
 use qpx_http::body::Body;
-use std::sync::atomic::Ordering;
 use tokio::time::{Duration, Instant};
 
 pub(super) async fn dispatch_reverse_http_route(
@@ -100,9 +99,9 @@ pub(super) async fn dispatch_reverse_http_route(
             );
             return Ok(empty_interim_response(response));
         };
-        if let Some(upstream) = selected_upstream.as_ref() {
-            upstream.inflight.fetch_add(1, Ordering::Relaxed);
-        }
+        let inflight_guard = selected_upstream
+            .as_ref()
+            .map(|upstream| upstream.hold_inflight());
         let started = (qpx_observability::metrics_enabled()
             || cache_policy.is_some()
             || route
@@ -148,8 +147,8 @@ pub(super) async fn dispatch_reverse_http_route(
             },
         )
         .await;
-        if let Some(upstream) = selected_upstream.as_ref() {
-            upstream.inflight.fetch_sub(1, Ordering::Relaxed);
+        if let Some(guard) = inflight_guard {
+            guard.release();
         }
         match response {
             Ok(Ok((interim, resp, upstream_cert))) => {

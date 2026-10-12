@@ -24,7 +24,6 @@ use crate::upstream::origin::{OriginEndpoint, proxy_websocket};
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_http::body::Body;
-use std::sync::atomic::Ordering;
 use tokio::time::{Duration, Instant, timeout};
 
 pub(super) async fn dispatch_reverse_ipc_route(
@@ -476,9 +475,9 @@ pub(super) async fn handle_reverse_websocket_upgrade(
         }
         Some(permits) => permits,
     };
-    if let Some(upstream) = selected_upstream.as_ref() {
-        upstream.inflight.fetch_add(1, Ordering::Relaxed);
-    }
+    let inflight_guard = selected_upstream
+        .as_ref()
+        .map(|upstream| upstream.hold_inflight());
     let started = Instant::now();
     if let Some(session) = export_session.as_ref() {
         let preview = crate::exporter::serialize_request_preview_async(&req).await;
@@ -497,8 +496,8 @@ pub(super) async fn handle_reverse_websocket_upgrade(
         ),
     )
     .await;
-    if let Some(upstream) = selected_upstream.as_ref() {
-        upstream.inflight.fetch_sub(1, Ordering::Relaxed);
+    if let Some(guard) = inflight_guard {
+        guard.release();
     }
     match response {
         Ok(Ok(mut resp)) => {
