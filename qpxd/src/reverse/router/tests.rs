@@ -809,3 +809,35 @@ fn selection_never_returns_rejected_endpoint_when_peer_flaps() {
         hammer.join().expect("hammer thread");
     }
 }
+
+#[test]
+fn removed_dynamic_endpoint_retires_after_drain_timeout() {
+    // A removed endpoint drains once and then retires: repeated discovery
+    // refreshes must not renew its drain deadline.
+    let lifecycle = EndpointLifecycleRuntime {
+        slow_start: None,
+        warmup: None,
+        drain_timeout: Some(Duration::from_millis(100)),
+    };
+    let first = Arc::new(UpstreamEndpoint::new("http://a".to_string()));
+    let pool = UpstreamEndpointSet::new(vec![], vec![first.clone()], vec![], lifecycle.clone());
+
+    let combined =
+        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    assert!(
+        combined
+            .iter()
+            .any(|endpoint| endpoint.target == "http://a")
+    );
+    pool.endpoints.store(Arc::new(combined));
+
+    std::thread::sleep(Duration::from_millis(150));
+    let combined =
+        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    assert!(
+        !combined
+            .iter()
+            .any(|endpoint| endpoint.target == "http://a"),
+        "removed endpoint must retire after its drain timeout"
+    );
+}

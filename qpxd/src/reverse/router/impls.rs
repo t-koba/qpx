@@ -287,7 +287,16 @@ impl UpstreamEndpointSet {
             }
         }
         for endpoint in reusable.into_values() {
-            if endpoint.mark_draining(&self.lifecycle) && endpoint.should_retain_draining(now_ms) {
+            // Mark only the transition into draining: mark_draining renews
+            // the deadline, so re-marking every refresh would keep removed
+            // endpoints past their drain timeout whenever refreshes outpace
+            // it. Later refreshes only evaluate the existing deadline.
+            let draining = if endpoint.is_draining() {
+                true
+            } else {
+                endpoint.mark_draining(&self.lifecycle)
+            };
+            if draining && endpoint.should_retain_draining(now_ms) {
                 combined.push(endpoint);
             }
         }
