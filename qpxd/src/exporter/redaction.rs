@@ -37,6 +37,10 @@ impl CaptureRedaction {
         let Ok(text) = std::str::from_utf8(payload) else {
             return Cow::Borrowed(b"<redacted>");
         };
+        // Redact the JSON body before transforming headers: body redaction
+        // keys off the original Content-Type, so redacting that header first
+        // would silently disable configured JSON redaction.
+        let text = self.redact_json_body(text.to_string());
         let mut out = String::with_capacity(text.len());
         for (idx, line) in text.split_inclusive('\n').enumerate() {
             if idx == 0 {
@@ -56,7 +60,7 @@ impl CaptureRedaction {
             }
             out.push_str(line);
         }
-        Cow::Owned(self.redact_json_body(out).into_bytes())
+        Cow::Owned(out.into_bytes())
     }
 
     pub(super) fn redact_plaintext_for_export<'a>(

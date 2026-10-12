@@ -332,3 +332,28 @@ fn redacts_standalone_json_with_blank_lines() {
         assert!(!text.contains("synthetic-marker"));
     }
 }
+
+#[test]
+fn redacting_content_type_preserves_json_body_redaction() {
+    for content_type in ["application/json", "application/problem+json"] {
+        let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+            headers: vec!["content-type".to_string()],
+            query_keys: Vec::new(),
+            json_paths: vec!["$.password".to_string()],
+        });
+        let raw = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: {content_type}\r\n\r\n{{\"password\":\"synthetic-marker\",\"ok\":true}}"
+        );
+        let out = redaction.redact_plaintext(raw.as_bytes());
+        let text = String::from_utf8(out.into_owned()).expect("utf8");
+        assert!(
+            text.contains("content-type: <redacted>"),
+            "content-type header was not redacted for {content_type}: {text:?}"
+        );
+        assert!(
+            text.contains("\"password\":\"<redacted>\""),
+            "JSON body redaction was disabled by content-type redaction for {content_type}: {text:?}"
+        );
+        assert!(!text.contains("synthetic-marker"));
+    }
+}
