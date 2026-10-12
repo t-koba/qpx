@@ -178,10 +178,12 @@ fn if_range_matches(condition: &IfRangeCondition, envelope: &CachedResponseEnvel
         IfRangeCondition::Etag(expected) => envelope
             .header_str(&ETAG)
             .is_some_and(|etag| strong_etag_eq(expected, etag)),
+        // RFC 9110 §13.1.5: an If-Range date matches only on exact equality
+        // (unlike If-Unmodified-Since's <= test); otherwise Range is ignored.
         IfRangeCondition::Date(expected) => envelope
             .header_str(&LAST_MODIFIED)
             .and_then(parse_http_date_secs)
-            .is_some_and(|last_modified| last_modified <= *expected),
+            .is_some_and(|last_modified| last_modified == *expected),
     }
 }
 
