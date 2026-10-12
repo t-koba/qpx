@@ -756,8 +756,12 @@ mod tests {
 
 #[cfg(test)]
 mod rotation_safety_tests {
-    use super::LogOutputConfig;
-    use super::{RotationCleanup, build_log_sink, cleanup_old_logs, is_rotation_suffix};
+    // `LogOutputConfig` and `build_log_sink` serve only the `#[cfg(unix)]`
+    // symlink tests below; gating the imports identically keeps `-D warnings`
+    // green on Windows where those tests compile out.
+    #[cfg(unix)]
+    use super::{LogOutputConfig, build_log_sink};
+    use super::{RotationCleanup, cleanup_old_logs, is_rotation_suffix};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
