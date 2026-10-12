@@ -6,7 +6,7 @@ use http::header::CONTENT_LENGTH;
 use std::time::Duration;
 use tokio::time::timeout;
 
-pub(super) async fn read_body_data(
+pub(crate) async fn read_body_data(
     body: &mut Body,
     read_timeout: Duration,
 ) -> Result<Option<Result<Bytes, qpx_http::body::BodyError>>> {
@@ -15,7 +15,7 @@ pub(super) async fn read_body_data(
         .map_err(|_| anyhow!("observed body read timed out"))
 }
 
-pub(super) async fn read_body_trailers(
+pub(crate) async fn read_body_trailers(
     body: &mut Body,
     read_timeout: Duration,
 ) -> Result<Option<HeaderMap>> {

@@ -262,6 +262,7 @@ pub(super) async fn prepare_forward_cache_keys(
     action: &qpx_core::config::ActionConfig,
     cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
     max_request_body_bytes: usize,
+    body_read_timeout: Duration,
 ) -> Result<(
     Request<Body>,
     Option<http::HeaderMap>,
@@ -284,6 +285,7 @@ pub(super) async fn prepare_forward_cache_keys(
         cache_policy,
         scheme.as_str(),
         max_request_body_bytes,
+        body_read_timeout,
     )
     .await?;
     let snapshot = lookup.as_ref().map(|_| req.headers().clone());
@@ -315,9 +317,10 @@ mod forward_query_cache_tests {
             .header(http::header::CONTENT_TYPE, content_type)
             .body(Body::from(body))
             .unwrap();
-        let (_, _, lookup, _) = prepare_forward_cache_keys(req, &action, Some(&policy), 1024)
-            .await
-            .unwrap();
+        let (_, _, lookup, _) =
+            prepare_forward_cache_keys(req, &action, Some(&policy), 1024, Duration::from_secs(1))
+                .await
+                .unwrap();
         lookup
     }
 

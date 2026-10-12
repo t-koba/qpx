@@ -91,6 +91,7 @@ pub(super) async fn prepare_forward_dispatch(
             action,
             cache_policy,
             selected_plan.streaming.max_request_body_bytes,
+            Duration::from_millis(selected_plan.streaming.body_read_timeout_ms),
         )
         .await?;
     req = req_out;

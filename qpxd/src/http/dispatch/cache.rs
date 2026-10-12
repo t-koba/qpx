@@ -1,3 +1,4 @@
+use super::super::body::size::io::{read_body_data, read_body_trailers};
 use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::http::capture::cache_flow::{
     CacheWritebackContext, process_upstream_response_for_cache,
@@ -10,6 +11,7 @@ use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
 use sha2::{Digest, Sha256};
+use std::time::Duration;
 
 pub(crate) enum DispatchCacheLookupOutcome {
     // Both payloads are large (`Response<Body>` and a `RevalidationState` embedding a
@@ -46,14 +48,17 @@ pub(crate) fn dispatch_cache_collapse_response(
 /// Buffers a QUERY request body and derives its RFC 10008 Sec 2.7 cache key
 /// content digest over the body plus representation metadata. Shared by the
 /// forward and reverse dispatch paths so both bind QUERY cache entries to
-/// request content instead of the URI alone.
+/// request content instead of the URI alone. Each body and trailer read is
+/// bounded by the selected route streaming `body_read_timeout`, matching the
+/// observation pipeline; an over-limit body or a stalled read fails closed.
 pub(crate) async fn buffer_query_for_cache_key(
     req: Request<Body>,
     max_body_bytes: usize,
+    body_read_timeout: Duration,
 ) -> Result<(Request<Body>, String)> {
     let (parts, mut body) = req.into_parts();
     let mut content = Vec::new();
-    while let Some(chunk) = body.data().await {
+    while let Some(chunk) = read_body_data(&mut body, body_read_timeout).await? {
         let chunk = chunk?;
         let next = content
             .len()
@@ -70,7 +75,7 @@ pub(crate) async fn buffer_query_for_cache_key(
     // Draining `data()` stashes a trailer frame inside the body; replay it so
     // upstream still receives trailers (e.g. Content-Digest) alongside the
     // buffered content.
-    let trailers = body.trailers().await?;
+    let trailers = read_body_trailers(&mut body, body_read_timeout).await?;
     let mut hasher = Sha256::new();
     hasher.update(b"qpx-query-cache-key-v1\0");
     for name in [CONTENT_TYPE, CONTENT_ENCODING, CONTENT_LANGUAGE] {
@@ -100,6 +105,7 @@ pub(crate) async fn prepare_query_aware_cache_key_pair(
     cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
     cache_default_scheme: &str,
     max_body_bytes: usize,
+    body_read_timeout: Duration,
 ) -> Result<(
     Request<Body>,
     Option<CacheRequestKey>,
@@ -109,7 +115,8 @@ pub(crate) async fn prepare_query_aware_cache_key_pair(
         return Ok((req, None, None));
     }
     if *req.method() == Method::QUERY {
-        let (req, digest) = buffer_query_for_cache_key(req, max_body_bytes).await?;
+        let (req, digest) =
+            buffer_query_for_cache_key(req, max_body_bytes, body_read_timeout).await?;
         let (lookup, target) =
             prepare_dispatch_cache_key_pair(&req, cache_policy, cache_default_scheme)?;
         let lookup = lookup.map(|key| key.with_content_digest(digest.clone()));

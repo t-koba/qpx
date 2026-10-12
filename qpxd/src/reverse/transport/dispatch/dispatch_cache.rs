@@ -56,11 +56,13 @@ pub(super) async fn prepare_reverse_cache(
     }
     let cache_default_scheme = if conn.tls_terminated { "https" } else { "http" };
     let max_body_bytes = route.plan.streaming.max_request_body_bytes;
+    let body_read_timeout = Duration::from_millis(route.plan.streaming.body_read_timeout_ms);
     let (buffered, cache_lookup_key, cache_target_key) = prepare_query_aware_cache_key_pair(
         req,
         request_cache_policy,
         cache_default_scheme,
         max_body_bytes,
+        body_read_timeout,
     )
     .await?;
     req = buffered;
@@ -512,7 +514,10 @@ mod query_cache_tests {
             .header(CONTENT_TYPE, content_type)
             .body(Body::from(body))
             .unwrap();
-        buffer_query_for_cache_key(request, 1024).await.unwrap().1
+        buffer_query_for_cache_key(request, 1024, std::time::Duration::from_secs(1))
+            .await
+            .unwrap()
+            .1
     }
 
     #[tokio::test]
@@ -534,7 +539,10 @@ mod query_cache_tests {
                 Some(trailer_map),
             ))
             .unwrap();
-        let (replayed, _) = buffer_query_for_cache_key(request, 1024).await.unwrap();
+        let (replayed, _) =
+            buffer_query_for_cache_key(request, 1024, std::time::Duration::from_secs(1))
+                .await
+                .unwrap();
         let mut replayed = replayed.into_body();
         let mut content = Vec::new();
         while let Some(chunk) = replayed.data().await {
@@ -547,6 +555,26 @@ mod query_cache_tests {
                 .get("content-digest")
                 .expect("content-digest trailer"),
             "sha-512=:probe:"
+        );
+    }
+
+    #[tokio::test]
+    async fn query_cache_key_buffering_applies_body_read_timeout() {
+        // A stalled QUERY body must fail closed on the selected read timeout
+        // instead of waiting for the ingress-layer bound.
+        let (_sender, body) = Body::channel();
+        let request = Request::builder()
+            .method(Method::QUERY)
+            .uri("https://example.com/search")
+            .header(CONTENT_TYPE, "application/sql")
+            .body(body)
+            .unwrap();
+        let err = buffer_query_for_cache_key(request, 1024, std::time::Duration::from_millis(50))
+            .await
+            .expect_err("stalled body must time out");
+        assert!(
+            err.to_string().contains("timed out"),
+            "unexpected error: {err}"
         );
     }
 

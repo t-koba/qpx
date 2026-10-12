@@ -14,7 +14,7 @@ use std::time::Duration;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncWriteExt;
 
-mod io;
+pub(crate) mod io;
 mod storage;
 
 use self::io::{parse_content_length, read_body_data, read_body_trailers};
