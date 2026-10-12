@@ -550,8 +550,16 @@ impl ResponseDirectives {
     /// a shared cache MUST NOT reuse a stale s-maxage response until it has
     /// been successfully validated with the origin — exactly like explicit
     /// must-revalidate and proxy-revalidate.
+    ///
+    /// RFC 9111 §5.2.2.4: an unqualified response no-cache MUST NOT satisfy
+    /// another request without forwarding for validation and receiving a
+    /// successful response, even for caches configured to send stale. This
+    /// covers the stale-while-revalidate and stale-if-error gates, which
+    /// otherwise serve stale while the fresh and max-stale gates refuse.
+    /// `no_cache` is set only for bare (or fail-closed empty) no-cache;
+    /// qualified field lists live in `no_cache_fields` and stay reusable.
     pub fn forbids_stale_reuse(&self) -> bool {
-        self.must_revalidate || self.proxy_revalidate || self.s_maxage.is_some()
+        self.must_revalidate || self.proxy_revalidate || self.s_maxage.is_some() || self.no_cache
     }
 }
 
