@@ -808,6 +808,8 @@ require .github/workflows/release.yml 'cargo build --workspace --release --locke
 require .github/workflows/release.yml 'cargo about generate --fail --config about.toml --workspace --locked licenses/about.hbs > THIRDPARTY.md'
 require .github/workflows/release.yml 'merge-base --is-ancestor'
 require .github/workflows/release.yml 'main receives releases only'
+require .github/workflows/release.yml 'fetch-depth: 0'
+require .github/workflows/release.yml 'refs/remotes/origin/main'
 require .github/workflows/release.yml 'Require RFC release gate success for this commit'
 require .github/workflows/release.yml 'HTTP RFC compliance release gate'
 require .github/workflows/release.yml 'checks: read'
