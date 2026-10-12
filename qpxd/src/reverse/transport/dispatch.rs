@@ -227,14 +227,17 @@ async fn execute_reverse_dispatch(
                     .clone();
                 let request_resource =
                     prepare_direct_webdav_resource(&mut req, route, service.as_ref())?;
-                let mut response = execute_webdav_service(
+                // Keep the WebDAV-only future out of the enclosing fast-path state
+                // machine; it is cold for plain-HTTP traffic (precedent:
+                // isolate upstream futures from cache-hit dispatch).
+                let mut response = Box::pin(execute_webdav_service(
                     req,
                     service,
                     &identity,
                     route.plan.streaming.max_request_body_bytes,
                     request_version == http::Version::HTTP_11 && !conn.tls_terminated,
                     Some(request_resource),
-                )
+                ))
                 .await?;
                 crate::http::protocol::l7::finalize_response_with_headers_in_place(
                     &base.method,
@@ -251,13 +254,25 @@ async fn execute_reverse_dispatch(
             Err(response) => return Ok(response),
         }
     }
-    let prepared =
-        match prepare_reverse_request(req, &base, conn, state, compiled, cors_request.as_ref())
-            .await?
-        {
-            Ok(prepared) => prepared,
-            Err(response) => return Ok(response),
-        };
+    // Keep slow-path-only futures out of the enclosing single-route fast-path
+    // state machine. Otherwise the plain-HTTP fast path (the hot path for
+    // the HTTP/2 1MB multiplexed benchmark) carries their large inline
+    // storage on every request even though it returns before them, inflating
+    // per-request stack/instructions and amplifying run-to-run CPU spread.
+    // (Precedent: isolate upstream futures from cache-hit dispatch.)
+    let prepared = match Box::pin(prepare_reverse_request(
+        req,
+        &base,
+        conn,
+        state,
+        compiled,
+        cors_request.as_ref(),
+    ))
+    .await?
+    {
+        Ok(prepared) => prepared,
+        Err(response) => return Ok(response),
+    };
     let route = prepared
         .context
         .compiled
@@ -273,14 +288,14 @@ async fn execute_reverse_dispatch(
     let reverse_error = prepared.context.state.messages.reverse_error.clone();
     let request_method = base.method.clone();
     let secure_transport = conn.tls_terminated;
-    let (interim, mut response) = match execute_reverse_request(
+    let (interim, mut response) = match Box::pin(execute_reverse_request(
         prepared,
         base,
         reverse,
         runtime,
         conn,
         connection_pool,
-    )
+    ))
     .await
     {
         Ok(response) => response,
