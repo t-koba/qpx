@@ -178,12 +178,28 @@ fn if_range_matches(condition: &IfRangeCondition, envelope: &CachedResponseEnvel
         IfRangeCondition::Etag(expected) => envelope
             .header_str(&ETAG)
             .is_some_and(|etag| strong_etag_eq(expected, etag)),
-        // RFC 9110 §13.1.5: an If-Range date matches only on exact equality
-        // (unlike If-Unmodified-Since's <= test); otherwise Range is ignored.
-        IfRangeCondition::Date(expected) => envelope
-            .header_str(&LAST_MODIFIED)
-            .and_then(parse_http_date_secs)
-            .is_some_and(|last_modified| last_modified == *expected),
+        // RFC 9110 §§13.1.5, 8.8.2.2: an If-Range date matches only on
+        // exact equality (unlike If-Unmodified-Since's <= test), and only
+        // when the stored date is a strong validator. Last-Modified is
+        // implicitly weak, so the cache additionally requires a Date header
+        // from the same stored response strictly after Last-Modified:
+        // second resolution makes this at least one second of separation,
+        // and both stamps come from one origin message, so no cross-clock
+        // comparison or invented threshold is involved. Without that
+        // evidence the date branch is false and Range is ignored, so a
+        // same-second rewrite can never yield a stitched 206.
+        IfRangeCondition::Date(expected) => {
+            let last_modified = envelope
+                .header_str(&LAST_MODIFIED)
+                .and_then(parse_http_date_secs);
+            let date = envelope.header_str(&DATE).and_then(parse_http_date_secs);
+            match (last_modified, date) {
+                (Some(last_modified), Some(date)) => {
+                    last_modified == *expected && date > last_modified
+                }
+                _ => false,
+            }
+        }
     }
 }
 

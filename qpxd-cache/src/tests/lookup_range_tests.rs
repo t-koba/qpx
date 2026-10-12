@@ -342,15 +342,22 @@ async fn if_range_later_date_falls_back_to_full_response() {
 
 #[tokio::test]
 async fn if_range_equal_date_serves_partial_response() {
-    // Positive control: an exact date match preserves the requested range.
+    // Positive control: an exact date match preserves the requested range,
+    // but only with strong-validator evidence: Date strictly after
+    // Last-Modified (RFC 9110 §§13.1.5, 8.8.2.2). The lifetime covers the
+    // fixed 2024 validator dates so apparent age keeps the entry fresh.
     let req = make_get_request("/if-range-equal-date");
     let key = CacheRequestKey::for_lookup(&req, "http")
         .expect("key")
         .expect("some key");
-    let mut response = make_response(StatusCode::OK, "public, max-age=60", "hello");
+    let mut response = make_response(StatusCode::OK, "public, max-age=1000000000", "hello");
     response.headers_mut().insert(
         LAST_MODIFIED,
         http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    response.headers_mut().insert(
+        DATE,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:01 GMT"),
     );
     let backends = backend_map();
     let _ = store_and_drain(
@@ -396,4 +403,189 @@ async fn if_range_equal_date_serves_partial_response() {
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"he");
+}
+
+#[tokio::test]
+async fn if_range_equal_date_without_date_falls_back_to_full_response() {
+    // No Date header means no strong-validator evidence: an equal
+    // Last-Modified alone must not yield a 206.
+    let req = make_get_request("/if-range-no-date");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "public, max-age=1000000000", "hello");
+    response.headers_mut().insert(
+        LAST_MODIFIED,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req.method(),
+        req.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let mut ranged = make_get_request("/if-range-no-date");
+    ranged
+        .headers_mut()
+        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+    ranged.headers_mut().insert(
+        IF_RANGE,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    let out = lookup(
+        ranged.method(),
+        ranged.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    let response = match out {
+        LookupOutcome::Hit(response) => response,
+        _ => panic!("expected cache hit"),
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = qpx_http::body::to_bytes(response.into_body())
+        .await
+        .expect("body");
+    assert_eq!(body.as_ref(), b"hello");
+}
+
+#[tokio::test]
+async fn if_range_equal_date_with_same_date_falls_back_to_full_response() {
+    // Date equal to Last-Modified carries no separation evidence: the
+    // stored date stays weak and the range must be ignored.
+    let req = make_get_request("/if-range-same-date");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "public, max-age=1000000000", "hello");
+    response.headers_mut().insert(
+        LAST_MODIFIED,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    response.headers_mut().insert(
+        DATE,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req.method(),
+        req.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let mut ranged = make_get_request("/if-range-same-date");
+    ranged
+        .headers_mut()
+        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+    ranged.headers_mut().insert(
+        IF_RANGE,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    let out = lookup(
+        ranged.method(),
+        ranged.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    let response = match out {
+        LookupOutcome::Hit(response) => response,
+        _ => panic!("expected cache hit"),
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = qpx_http::body::to_bytes(response.into_body())
+        .await
+        .expect("body");
+    assert_eq!(body.as_ref(), b"hello");
+}
+
+#[tokio::test]
+async fn if_range_equal_date_with_earlier_date_falls_back_to_full_response() {
+    // Date earlier than Last-Modified contradicts strength (and a sane
+    // origin clock): the range must be ignored.
+    let req = make_get_request("/if-range-earlier-date");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "public, max-age=1000000000", "hello");
+    response.headers_mut().insert(
+        LAST_MODIFIED,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    response.headers_mut().insert(
+        DATE,
+        http::HeaderValue::from_static("Mon, 01 Jan 2024 00:00:00 GMT"),
+    );
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req.method(),
+        req.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let mut ranged = make_get_request("/if-range-earlier-date");
+    ranged
+        .headers_mut()
+        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+    ranged.headers_mut().insert(
+        IF_RANGE,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    let out = lookup(
+        ranged.method(),
+        ranged.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    let response = match out {
+        LookupOutcome::Hit(response) => response,
+        _ => panic!("expected cache hit"),
+    };
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = qpx_http::body::to_bytes(response.into_body())
+        .await
+        .expect("body");
+    assert_eq!(body.as_ref(), b"hello");
 }
