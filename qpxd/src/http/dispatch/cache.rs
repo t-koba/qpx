@@ -67,6 +67,10 @@ pub(crate) async fn buffer_query_for_cache_key(
         }
         content.extend_from_slice(&chunk);
     }
+    // Draining `data()` stashes a trailer frame inside the body; replay it so
+    // upstream still receives trailers (e.g. Content-Digest) alongside the
+    // buffered content.
+    let trailers = body.trailers().await?;
     let mut hasher = Sha256::new();
     hasher.update(b"qpx-query-cache-key-v1\0");
     for name in [CONTENT_TYPE, CONTENT_ENCODING, CONTENT_LANGUAGE] {
@@ -81,7 +85,10 @@ pub(crate) async fn buffer_query_for_cache_key(
     hasher.update((content.len() as u64).to_be_bytes());
     hasher.update(&content);
     let digest = format!("sha-256:{:x}", hasher.finalize());
-    Ok((Request::from_parts(parts, Body::from(content)), digest))
+    Ok((
+        Request::from_parts(parts, Body::replay(content.into(), trailers)),
+        digest,
+    ))
 }
 
 /// Derives cache keys for GET-like and QUERY requests. QUERY bodies are

@@ -516,6 +516,41 @@ mod query_cache_tests {
     }
 
     #[tokio::test]
+    async fn query_cache_key_buffering_preserves_trailers() {
+        // A QUERY body carrying trailers (e.g. Content-Digest as a trailer)
+        // must reach upstream intact after cache-key buffering.
+        let mut trailer_map = http::HeaderMap::new();
+        trailer_map.insert(
+            "content-digest",
+            "sha-512=:probe:".parse().expect("trailer value"),
+        );
+        let request = Request::builder()
+            .method(Method::QUERY)
+            .uri("https://example.com/search")
+            .header(CONTENT_TYPE, "application/sql")
+            .header("trailer", "content-digest")
+            .body(Body::replay(
+                bytes::Bytes::from_static(b"select 1"),
+                Some(trailer_map),
+            ))
+            .unwrap();
+        let (replayed, _) = buffer_query_for_cache_key(request, 1024).await.unwrap();
+        let mut replayed = replayed.into_body();
+        let mut content = Vec::new();
+        while let Some(chunk) = replayed.data().await {
+            content.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(content, b"select 1");
+        let trailers = replayed.trailers().await.unwrap().expect("trailers");
+        assert_eq!(
+            trailers
+                .get("content-digest")
+                .expect("content-digest trailer"),
+            "sha-512=:probe:"
+        );
+    }
+
+    #[tokio::test]
     async fn query_cache_digest_includes_content_and_representation_metadata() {
         let first = digest("application/sql", "select 1").await;
         assert_ne!(first, digest("application/sql", "select 2").await);
