@@ -125,6 +125,7 @@ pub struct AccessLogService<S> {
     combined: bool,
     exclude: Arc<[Arc<str>]>,
     redact_query_keys: Arc<[String]>,
+    redact_headers: Arc<[String]>,
 }
 
 impl<S> AccessLogService<S> {
@@ -151,7 +152,37 @@ impl<S> AccessLogService<S> {
             combined: config.output.format.eq_ignore_ascii_case("combined"),
             exclude,
             redact_query_keys: Arc::from(config.redact.query_keys.clone()),
+            redact_headers: Arc::from(
+                config
+                    .redact
+                    .headers
+                    .iter()
+                    .map(|name| name.to_ascii_lowercase())
+                    .collect::<Vec<_>>(),
+            ),
         }
+    }
+
+    fn header_is_redacted(&self, name: &str) -> bool {
+        self.redact_headers.iter().any(|header| header == name)
+    }
+
+    /// Applies configured whole-header redaction at capture time, so every
+    /// emission path (combined template, structured log, span) honors
+    /// `redact.headers`. The `<redacted>` marker matches the capture
+    /// pipeline's header-redaction marker.
+    fn capture_header_value(
+        &self,
+        name: &str,
+        value: Option<&http::HeaderValue>,
+    ) -> Option<http::HeaderValue> {
+        value.map(|raw| {
+            if self.header_is_redacted(name) {
+                http::HeaderValue::from_static("<redacted>")
+            } else {
+                raw.clone()
+            }
+        })
     }
 
     fn is_excluded(&self, path: &str) -> bool {
@@ -162,17 +193,21 @@ impl<S> AccessLogService<S> {
         &self,
         request: &Request<ReqBody>,
     ) -> Arc<CombinedRequestTemplate> {
-        let referer = request.headers().get(http::header::REFERER);
-        let user_agent = request.headers().get(http::header::USER_AGENT);
+        let referer =
+            self.capture_header_value("referer", request.headers().get(http::header::REFERER));
+        let user_agent = self.capture_header_value(
+            "user-agent",
+            request.headers().get(http::header::USER_AGENT),
+        );
         if let Some(template) = self.direct_template.load_full()
-            && template.matches(request, referer, user_agent)
+            && template.matches(request, referer.as_ref(), user_agent.as_ref())
         {
             return template;
         }
         let template = Arc::new(CombinedRequestTemplate::build(
             request,
-            referer,
-            user_agent,
+            referer.as_ref(),
+            user_agent.as_ref(),
             self.direct_remote_prefix.clone(),
             &self.redact_query_keys,
         ));
@@ -819,10 +854,11 @@ where
         let mut host = None;
         let mut user_agent = None;
         if should_trace || (should_log && !self.combined) {
-            host = req.headers().get(http::header::HOST).cloned();
+            host = self.capture_header_value("host", req.headers().get(http::header::HOST));
         }
         if should_trace || (should_log && !direct_combined) {
-            user_agent = req.headers().get(http::header::USER_AGENT).cloned();
+            user_agent = self
+                .capture_header_value("user-agent", req.headers().get(http::header::USER_AGENT));
         }
 
         let redacted_uri =
@@ -877,7 +913,13 @@ where
                 .headers()
                 .get(http::header::REFERER)
                 .and_then(|v| v.to_str().ok())
-                .map(|s| redact_uri_query_keys(s, &self.redact_query_keys));
+                .map(|s| {
+                    if self.header_is_redacted("referer") {
+                        "<redacted>".to_string()
+                    } else {
+                        redact_uri_query_keys(s, &self.redact_query_keys)
+                    }
+                });
             Some(AccessLogSnapshot {
                 remote_addr: self.remote_addr,
                 kind: self.context.kind,
@@ -1151,5 +1193,94 @@ mod access_log_regression_tests {
                 "handler poll ran outside the request span (direct_combined={direct_combined})"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod access_log_header_redaction_tests {
+    use super::*;
+
+    fn redacting_service(headers: &[&str]) -> AccessLogService<()> {
+        let mut config = AccessLogConfig::default();
+        config.redact.headers = headers.iter().map(|name| name.to_string()).collect();
+        config.redact.query_keys = vec!["token".to_string()];
+        AccessLogService::new(
+            (),
+            "127.0.0.1:8080".parse().expect("socket addr"),
+            AccessLogContext {
+                kind: "test",
+                name: Arc::from("test"),
+            },
+            &config,
+        )
+    }
+
+    fn probe_request() -> Request<()> {
+        Request::builder()
+            .method("GET")
+            .uri("/items?token=secret&ok=1")
+            .header(http::header::REFERER, "https://example.test/?token=secret")
+            .header(http::header::USER_AGENT, "AGENT_PROBE")
+            .body(())
+            .expect("request")
+    }
+
+    #[test]
+    fn combined_template_redacts_configured_headers() {
+        // Mixed-case names prove case-insensitive matching; whole-header
+        // redaction replaces the value before query-key redaction runs.
+        let service = redacting_service(&["Referer", "USER-AGENT"]);
+        let request = probe_request();
+        let template = service.combined_request_template(&request);
+        assert_eq!(
+            String::from_utf8(template.metadata_suffix.to_vec()).expect("ASCII metadata suffix"),
+            " \"<redacted>\" \"<redacted>\" latency_ms="
+        );
+        // The redacted template must cache-hit on repeat: matches() compares
+        // the same redacted values it stores.
+        let repeated = service.combined_request_template(&request);
+        assert!(Arc::ptr_eq(&template, &repeated));
+    }
+
+    #[test]
+    fn combined_template_keeps_unconfigured_headers() {
+        // Control: headers outside redact.headers keep existing behavior —
+        // raw User-Agent, query-key-redacted Referer.
+        let service = redacting_service(&["cookie"]);
+        let request = probe_request();
+        let template = service.combined_request_template(&request);
+        assert_eq!(
+            String::from_utf8(template.metadata_suffix.to_vec()).expect("ASCII metadata suffix"),
+            " \"https://example.test/?token=<redacted>\" \"AGENT_PROBE\" latency_ms="
+        );
+    }
+
+    #[test]
+    fn capture_helpers_match_names_case_insensitively() {
+        let service = redacting_service(&["X-Custom-Secret"]);
+        assert!(service.header_is_redacted("x-custom-secret"));
+        assert!(!service.header_is_redacted("referer"));
+        assert_eq!(
+            service
+                .capture_header_value(
+                    "x-custom-secret",
+                    Some(&http::HeaderValue::from_static("s3"))
+                )
+                .as_ref()
+                .and_then(|v| v.to_str().ok()),
+            Some("<redacted>")
+        );
+        assert_eq!(
+            service
+                .capture_header_value("referer", Some(&http::HeaderValue::from_static("r")))
+                .as_ref()
+                .and_then(|v| v.to_str().ok()),
+            Some("r")
+        );
+        assert!(
+            service
+                .capture_header_value("x-custom-secret", None)
+                .is_none()
+        );
     }
 }
