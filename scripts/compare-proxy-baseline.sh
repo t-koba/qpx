@@ -760,10 +760,11 @@ for entry in baseline_entries:
         current_scheduler_queue_delay_ratio,
         lane_max_scheduler_queue_delay_ratio,
     )
-    # Sample-spread caps judge qpx's own measurement quality: an unstable
-    # qpx tail fails as invalid rather than passing as marginal. A breaching
-    # reference sample leaves the lane unmeasured, which is not a qpx
-    # regression, so it is reported visibly without failing the gate.
+    # Sample-spread caps judge qpx's own measurement quality and the rig's
+    # load stability: an unstable qpx tail or an unstable backend load fails
+    # as invalid rather than passing as marginal. A breaching competitor
+    # sample leaves the lane unmeasured, which is not a qpx regression, so
+    # it is reported visibly without failing the gate.
     for proxy, spread in current_entry["sample_spread"].items():
         throughput_spread = number(spread, "requests_per_sec_ratio")
         cpu_spread = number(spread, "requests_per_cpu_second_ratio")
@@ -779,7 +780,7 @@ for entry in baseline_entries:
                     f"{key} and {proxy}: current ratio {value:.6f} "
                     f"> objective {cap:.6f}"
                 )
-                if proxy == "qpxd":
+                if proxy in ("qpxd", "direct-backend"):
                     failures.append(message)
                 else:
                     unmeasured.append(

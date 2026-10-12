@@ -420,9 +420,10 @@ for body_bytes, max_streams in sorted(required_lanes):
         cpu_spread = nested_number(
             record, "sample_spread", "requests_per_total_cpu_second_ratio", proxy
         )
-        # Spread caps judge qpx's own measurement quality: an unstable qpx
-        # sample fails as invalid rather than passing as marginal. A breaching
-        # reference sample leaves the lane unmeasured, which is not a qpx
+        # Spread caps judge qpx's own measurement quality and the rig's
+        # load stability: an unstable qpx sample or an unstable backend load
+        # fails as invalid rather than passing as marginal. A breaching
+        # competitor sample leaves the lane unmeasured, which is not a qpx
         # regression, so it is reported visibly without failing the gate.
         for label, value, limit in (
             ("throughput", throughput_spread, throughput_limit),
@@ -433,7 +434,7 @@ for body_bytes, max_streams in sorted(required_lanes):
                     f"HTTP/2 {body_bytes}-byte m={max_streams} {proxy} {label} sample spread "
                     f"{value:.6f} > objective {limit:.6f}"
                 )
-                if proxy == "qpxd":
+                if proxy in ("qpxd", "direct-backend"):
                     failures.append(message)
                 else:
                     unmeasured.append(
