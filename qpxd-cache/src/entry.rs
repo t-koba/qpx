@@ -167,15 +167,14 @@ pub fn merge_headers_after_304(
     cached_headers: &[(String, String)],
     not_modified_headers: &http::HeaderMap,
 ) -> Vec<(String, String)> {
-    // RFC 9111: only update the stored headers with a constrained set of fields from the 304.
-    // This avoids persisting representation-specific fields that should not change on a 304.
+    // RFC 9111 §3.2: update the stored headers with each field provided in the
+    // 304, replacing existing values, except fields that must not be persisted
+    // for the stored representation (unchanged body bytes).
+    let connection_nominated = connection_nominated_headers(not_modified_headers);
     let mut nm = std::collections::HashMap::<String, Vec<String>>::new();
     for (name, value) in not_modified_headers {
         let lower = name.as_str().to_ascii_lowercase();
-        if qpx_http::protocol::semantics::is_hop_by_hop_header_name(lower.as_str()) {
-            continue;
-        }
-        if !is_304_mergeable_header(lower.as_str()) {
+        if is_304_excluded_header(lower.as_str(), &connection_nominated) {
             continue;
         }
         let Ok(value) = value.to_str() else {
@@ -195,9 +194,9 @@ pub fn merge_headers_after_304(
         }
         saw.insert(lower.clone());
 
-        if is_304_mergeable_header(lower.as_str())
-            && let Some(values) = nm.get(lower.as_str())
-        {
+        // Excluded 304 fields never reach `nm`, so stored framing labels and
+        // other kept fields always survive here unchanged.
+        if let Some(values) = nm.get(lower.as_str()) {
             if replaced.insert(lower.clone()) {
                 for v in values {
                     out.push((name.clone(), v.clone()));
@@ -220,17 +219,46 @@ pub fn merge_headers_after_304(
     out
 }
 
-fn is_304_mergeable_header(lower_name: &str) -> bool {
+/// Header fields that a 304 response must not merge into the stored entry.
+///
+/// RFC 9111 §3.2 requires updating stored fields except narrowly justified
+/// exclusions: hop-by-hop fields (including `Connection`-nominated ones, which
+/// describe only the 304 transport), and the framing labels of the unchanged
+/// stored body (`content-length`, `content-encoding`, `content-range`).
+/// Everything else — freshness metadata, validators, `Content-Type`, security
+/// policy and extension fields — is replaced or added. Policy gates such as
+/// `no-store`/`private` or cookie storage remain enforced afterwards by the
+/// revalidation-time storability check, not by this merge.
+fn is_304_excluded_header(lower_name: &str, connection_nominated: &HashSet<String>) -> bool {
+    if connection_nominated.contains(lower_name) {
+        return true;
+    }
+    if qpx_http::protocol::semantics::is_hop_by_hop_header_name(lower_name) {
+        return true;
+    }
     matches!(
         lower_name,
-        "cache-control"
-            | "expires"
-            | "etag"
-            | "last-modified"
-            | "date"
-            | "vary"
-            | "content-location"
+        "content-length" | "content-encoding" | "content-range"
     )
+}
+
+fn connection_nominated_headers(not_modified_headers: &http::HeaderMap) -> HashSet<String> {
+    let mut out = HashSet::new();
+    for value in not_modified_headers
+        .get_all(http::header::CONNECTION)
+        .iter()
+    {
+        let Ok(value) = value.to_str() else {
+            continue;
+        };
+        for token in value.split(',') {
+            let token = token.trim().to_ascii_lowercase();
+            if !token.is_empty() {
+                out.insert(token);
+            }
+        }
+    }
+    out
 }
 
 struct BuildResponseParams<'a> {
