@@ -417,6 +417,7 @@ fn expand_tilde_path(input: &str) -> PathBuf {
     PathBuf::from(input)
 }
 
+#[derive(Debug)]
 struct RotationCleanup {
     dir: PathBuf,
     base_name: String,
@@ -448,6 +449,15 @@ fn build_log_sink(
         .and_then(|name| name.to_str())
         .ok_or_else(|| anyhow::anyhow!("{label}: log path must include a valid file name"))?
         .to_string();
+    // The rolling appender opens a suffixed sibling of the configured path, so
+    // the base-path check above is not the file that is actually written.
+    // Fail closed on any pre-existing rotation target, including names for
+    // future rollovers: the log directory is owner-only, so only pre-existing
+    // links can redirect writes outside the configured boundary.
+    if rotation == "hourly" || rotation == "daily" {
+        reject_symlinked_rotation_targets(&dir, file_name.as_str(), rotation.as_str())
+            .with_context(|| format!("{label}: invalid rotated log target in {}", dir.display()))?;
+    }
     let appender = match rotation.as_str() {
         "hourly" => rolling::hourly(&dir, file_name.as_str()),
         "daily" => rolling::daily(&dir, file_name.as_str()),
@@ -507,6 +517,78 @@ fn spawn_rotation_cleanup(cleanup: RotationCleanup) {
     }
 }
 
+/// Returns true when `suffix` (the part after `base_name.`) is exactly the
+/// rotation filename the configured mode emits (`tracing_appender` uses
+/// `prefix.yyyy-MM-dd` for daily and `prefix.yyyy-MM-dd-HH` for hourly).
+/// Unknown modes fail closed: nothing counts as a rotation output.
+fn is_rotation_suffix(rotation: &str, suffix: &str) -> bool {
+    match rotation {
+        "hourly" => is_hourly_suffix(suffix),
+        "daily" => is_daily_suffix(suffix),
+        _ => false,
+    }
+}
+
+fn all_digits(bytes: &[u8]) -> bool {
+    !bytes.is_empty() && bytes.iter().all(|b| b.is_ascii_digit())
+}
+
+fn two_digit_number(bytes: &[u8]) -> Option<u32> {
+    if bytes.len() == 2 && all_digits(bytes) {
+        Some((u32::from(bytes[0] - b'0')) * 10 + u32::from(bytes[1] - b'0'))
+    } else {
+        None
+    }
+}
+
+fn is_daily_suffix(suffix: &str) -> bool {
+    // yyyy-MM-dd
+    let b = suffix.as_bytes();
+    if b.len() != 10 || b[4] != b'-' || b[7] != b'-' {
+        return false;
+    }
+    if !all_digits(&b[0..4]) || !all_digits(&b[5..7]) || !all_digits(&b[8..10]) {
+        return false;
+    }
+    let month = two_digit_number(&b[5..7]).unwrap_or(0);
+    let day = two_digit_number(&b[8..10]).unwrap_or(0);
+    (1..=12).contains(&month) && (1..=31).contains(&day)
+}
+
+fn is_hourly_suffix(suffix: &str) -> bool {
+    // yyyy-MM-dd-HH
+    let b = suffix.as_bytes();
+    if b.len() != 13 || b[4] != b'-' || b[7] != b'-' || b[10] != b'-' {
+        return false;
+    }
+    if !is_daily_suffix(&suffix[..10]) {
+        return false;
+    }
+    matches!(two_digit_number(&b[11..13]), Some(hour) if hour <= 23)
+}
+
+/// Fails closed when any existing rotation output for this base name is a
+/// symlink: the rolling appender would otherwise write through it outside the
+/// configured log directory.
+fn reject_symlinked_rotation_targets(dir: &Path, base_name: &str, rotation: &str) -> Result<()> {
+    let prefix = format!("{base_name}.");
+    let entries = std::fs::read_dir(dir)?;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            continue;
+        };
+        let Some(suffix) = name.strip_prefix(prefix.as_str()) else {
+            continue;
+        };
+        if !is_rotation_suffix(rotation, suffix) {
+            continue;
+        }
+        reject_symlink_path(&dir.join(name))?;
+    }
+    Ok(())
+}
+
 fn cleanup_old_logs(cleanup: &RotationCleanup) {
     if cleanup.keep == 0 {
         return;
@@ -515,8 +597,37 @@ fn cleanup_old_logs(cleanup: &RotationCleanup) {
     let mut entries = match std::fs::read_dir(&cleanup.dir) {
         Ok(entries) => entries
             .filter_map(|e| e.ok())
-            .filter_map(|e| e.file_name().to_str().map(|s| s.to_string()))
-            .filter(|name| name.starts_with(prefix.as_str()))
+            .filter_map(|e| {
+                let name = e.file_name().to_str()?.to_string();
+                let suffix = name.strip_prefix(prefix.as_str())?;
+                // Retention only owns the exact filenames the configured
+                // rotation mode emits; unrelated same-prefix files neither
+                // count toward keep nor are ever deleted.
+                if !is_rotation_suffix(cleanup.rotation.as_str(), suffix) {
+                    return None;
+                }
+                let path = cleanup.dir.join(&name);
+                match std::fs::symlink_metadata(&path) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        // Never delete through a link, and never let a planted
+                        // link displace real logs from the keep window.
+                        tracing::warn!(
+                            file = %path.display(),
+                            "skipping symlinked log file during rotation cleanup"
+                        );
+                        None
+                    }
+                    Ok(_) => Some(name),
+                    Err(err) => {
+                        tracing::warn!(
+                            error = ?err,
+                            file = %path.display(),
+                            "failed to inspect log file during rotation cleanup"
+                        );
+                        None
+                    }
+                }
+            })
             .collect::<Vec<_>>(),
         Err(err) => {
             tracing::warn!(
@@ -640,5 +751,164 @@ mod tests {
         }
 
         drop(guard);
+    }
+}
+
+#[cfg(test)]
+mod rotation_safety_tests {
+    use super::LogOutputConfig;
+    use super::{RotationCleanup, build_log_sink, cleanup_old_logs, is_rotation_suffix};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    fn probe_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "qpx-rotation-{name}-{}-{}",
+            std::process::id(),
+            PROBE_COUNTER.fetch_add(1, Ordering::Relaxed)
+        ));
+        if dir.exists() {
+            std::fs::remove_dir_all(&dir).expect("clear probe dir");
+        }
+        std::fs::create_dir_all(&dir).expect("create probe dir");
+        dir
+    }
+
+    fn write_file(dir: &std::path::Path, name: &str, contents: &str) {
+        std::fs::write(dir.join(name), contents).expect("write probe file");
+    }
+
+    fn cleanup_for(dir: &std::path::Path, rotation: &str, keep: usize) -> RotationCleanup {
+        RotationCleanup {
+            dir: dir.to_path_buf(),
+            base_name: "access.log".to_string(),
+            rotation: rotation.to_string(),
+            keep,
+        }
+    }
+
+    #[test]
+    fn rotation_suffix_validation_matches_emitted_formats() {
+        assert!(is_rotation_suffix("daily", "2026-10-12"));
+        assert!(is_rotation_suffix("hourly", "2026-10-12-09"));
+        assert!(!is_rotation_suffix("daily", "0-unrelated"));
+        assert!(!is_rotation_suffix("daily", "2026-10-12-09"));
+        assert!(!is_rotation_suffix("hourly", "2026-10-12"));
+        assert!(!is_rotation_suffix("daily", "2026-13-40"));
+        assert!(!is_rotation_suffix("hourly", "2026-10-12-24"));
+        assert!(!is_rotation_suffix("minutely", "2026-10-12"));
+        assert!(!is_rotation_suffix("bogus", "2026-10-12"));
+    }
+
+    #[test]
+    fn rotation_cleanup_spares_unrelated_prefix_files() {
+        let dir = probe_dir("cleanup");
+        write_file(&dir, "access.log.0-unrelated", "operator notes");
+        write_file(&dir, "access.log.2026-10-11", "old");
+        write_file(&dir, "access.log.2026-10-12", "new");
+        cleanup_old_logs(&cleanup_for(&dir, "daily", 1));
+        assert!(
+            dir.join("access.log.0-unrelated").exists(),
+            "unrelated same-prefix file must survive retention"
+        );
+        assert!(
+            dir.join("access.log.2026-10-12").exists(),
+            "newest valid rotation output must survive"
+        );
+        assert!(
+            !dir.join("access.log.2026-10-11").exists(),
+            "oldest valid rotation output beyond keep must be evicted"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rotation_cleanup_fails_closed_on_unknown_modes() {
+        let dir = probe_dir("cleanup-unknown");
+        write_file(&dir, "access.log.2026-10-11", "old");
+        write_file(&dir, "access.log.2026-10-12", "new");
+        cleanup_old_logs(&cleanup_for(&dir, "bogus", 1));
+        assert!(dir.join("access.log.2026-10-11").exists());
+        assert!(dir.join("access.log.2026-10-12").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rotation_cleanup_leaves_symlinks_untouched() {
+        let dir = probe_dir("cleanup-links");
+        let outside = probe_dir("cleanup-links-outside");
+        let target = outside.join("victim.txt");
+        std::fs::write(&target, "original").expect("write outside target");
+        write_file(&dir, "access.log.2026-10-11", "old");
+        write_file(&dir, "access.log.2026-10-12", "new");
+        std::os::unix::fs::symlink(&target, dir.join("access.log.2026-10-10"))
+            .expect("plant probe symlink");
+        cleanup_old_logs(&cleanup_for(&dir, "daily", 1));
+        // The planted link is neither deleted nor allowed to displace real logs.
+        assert!(
+            std::fs::symlink_metadata(dir.join("access.log.2026-10-10"))
+                .expect("metadata")
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(std::fs::read_to_string(&target).expect("read"), "original");
+        assert!(dir.join("access.log.2026-10-12").exists());
+        assert!(!dir.join("access.log.2026-10-11").exists());
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&outside).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_sink_rejects_symlinked_rotation_targets() {
+        use std::io::Write as _;
+
+        for rotation in ["daily", "hourly"] {
+            let dir = probe_dir(rotation);
+            let outside = probe_dir(&format!("{rotation}-outside"));
+            let target = outside.join("victim.txt");
+            std::fs::write(&target, "original").expect("write outside target");
+            // Create the real current rotation file through the library's own
+            // appender, so the probe tracks the exact emitted filename.
+            let mut appender = match rotation {
+                "hourly" => tracing_appender::rolling::hourly(&dir, "access.log"),
+                _ => tracing_appender::rolling::daily(&dir, "access.log"),
+            };
+            writeln!(appender, "probe").expect("write current rotation file");
+            let current = std::fs::read_dir(&dir)
+                .expect("read dir")
+                .filter_map(|e| e.ok())
+                .map(|e| e.file_name().to_str().expect("utf8").to_string())
+                .find(|name| {
+                    name.starts_with("access.log.")
+                        && is_rotation_suffix(rotation, &name["access.log.".len()..])
+                })
+                .expect("current rotation file exists");
+            // Sanity: without a symlink, init succeeds.
+            let config = LogOutputConfig {
+                enabled: true,
+                path: Some(dir.join("access.log").to_string_lossy().into_owned()),
+                format: "combined".to_string(),
+                rotation: rotation.to_string(),
+                rotation_count: 7,
+            };
+            assert!(build_log_sink(&config, "test").is_ok());
+            // Replace the actual rotation target with a symlink escape.
+            std::fs::remove_file(dir.join(&current)).expect("remove current file");
+            std::os::unix::fs::symlink(&target, dir.join(&current)).expect("plant symlink");
+            let err = match build_log_sink(&config, "test") {
+                Ok(_) => panic!("symlinked rotation target must fail init"),
+                Err(err) => err,
+            };
+            assert!(
+                format!("{err:#}").contains("symlink"),
+                "unexpected error for {rotation}: {err:#}"
+            );
+            assert_eq!(std::fs::read_to_string(&target).expect("read"), "original");
+            std::fs::remove_dir_all(&dir).ok();
+            std::fs::remove_dir_all(&outside).ok();
+        }
     }
 }
