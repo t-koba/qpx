@@ -379,14 +379,15 @@ for lane in lanes:
 
     qpx_spread = qpx["sample_spread"]
     reference_spread = reference["sample_spread"]
-    # Lane measurement noise comes from the current lane's observed sample
-    # spread; it judges absolute objectives alike (precedent:
-    # compare-proxy-baseline.sh). A miss inside the band is noise, a miss
-    # beyond it is decisive.
+    # Lane measurement noise comes from qpx's own observed sample spread; it
+    # judges absolute objectives alike (precedent: compare-proxy-baseline.sh,
+    # check-http2-performance.sh). A miss inside the band is noise, a miss
+    # beyond it is decisive. Reference spreads never widen the band:
+    # competitor instability must not excuse a qpx miss; spread-cap breaches
+    # (qpx or reference) still fail as invalid below.
     lane_noise = 1.0
-    for spread, context in ((qpx_spread, qpx_context), (reference_spread, reference_context)):
-        for field in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio"):
-            lane_noise = max(lane_noise, number(spread, field, context))
+    for field in ("requests_per_sec_ratio", "requests_per_cpu_second_ratio"):
+        lane_noise = max(lane_noise, number(qpx_spread, field, qpx_context))
 # Shared ubuntu-latest runners vary run-to-run more than any single
 # interleaved lane spread shows (observed decisive misses at 0.7-1.2%
 # with lane spreads near 1.005, each on a different objective with no

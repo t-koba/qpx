@@ -296,15 +296,16 @@ fast_checks = (
 failures = []
 marginals = []
 
-# Lane measurement noise comes from the compared records' observed sample
-# spread (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh,
+# Lane measurement noise comes from qpx's own observed sample spread
+# (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh,
 # check-http2-performance.sh). Throughput uses total-time spread as its proxy;
 # gap spread is excluded so the wide gap caps keep their teeth. A miss inside
-# the band is noise, a miss beyond it is decisive.
+# the band is noise, a miss beyond it is decisive. Reference spreads never
+# widen the band: competitor instability must not excuse a qpx miss;
+# spread-cap breaches still fail as invalid below.
 fast_lane_noise = 1.0
-for record in (qpx_fast, leader, direct_fast):
-    for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
-        fast_lane_noise = max(fast_lane_noise, nested_number(record, "sample_spread", field))
+for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
+    fast_lane_noise = max(fast_lane_noise, nested_number(qpx_fast, "sample_spread", field))
 fast_effective = max(fast_lane_noise, 1.05)
 stability_objectives = objectives.get("stability", {})
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
@@ -386,9 +387,8 @@ slow_ratios = {
 }
 slow_objectives = objectives.get("slow", {})
 slow_lane_noise = 1.0
-for record in (qpx_slow, direct_slow, slow_resource_leader):
-    for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
-        slow_lane_noise = max(slow_lane_noise, nested_number(record, "sample_spread", field))
+for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
+    slow_lane_noise = max(slow_lane_noise, nested_number(qpx_slow, "sample_spread", field))
 slow_effective = max(slow_lane_noise, 1.05)
 for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)
