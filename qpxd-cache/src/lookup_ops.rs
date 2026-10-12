@@ -413,7 +413,7 @@ pub async fn maybe_build_stale_if_error_response(
     state: &RevalidationState,
 ) -> Option<Response<Body>> {
     let directives = state.envelope.response_directives();
-    if directives.must_revalidate || directives.proxy_revalidate {
+    if directives.forbids_stale_reuse() {
         return None;
     }
     let limit = state.stale_if_error_secs?;
@@ -478,8 +478,7 @@ pub fn classify_for_request(
         let staleness = age.saturating_sub(freshness);
         let can_serve_stale = !req.no_cache
             && !resp.no_cache
-            && !resp.must_revalidate
-            && !resp.proxy_revalidate
+            && !resp.forbids_stale_reuse()
             && match req.max_stale {
                 Some(None) => true,
                 Some(Some(limit)) => staleness <= limit,
@@ -492,8 +491,7 @@ pub fn classify_for_request(
         if staleness > 0
             && let Some(swr) = resp.stale_while_revalidate
             && !req.no_cache
-            && !resp.must_revalidate
-            && !resp.proxy_revalidate
+            && !resp.forbids_stale_reuse()
             && staleness <= swr
         {
             // RFC 5861: allow serving stale for SWR window. For only-if-cached, do not

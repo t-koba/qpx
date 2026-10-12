@@ -213,3 +213,101 @@ async fn must_revalidate_blocks_stale_if_error_fallback() {
     };
     assert!(maybe_build_stale_if_error_response(&state).await.is_none());
 }
+
+fn s_maxage_envelope(cache_control: &str, freshness_lifetime_secs: u64) -> CachedResponseEnvelope {
+    CachedResponseEnvelope {
+        status: 200,
+        headers: vec![("cache-control".to_string(), cache_control.to_string())],
+        body: CachedBody::default(),
+        body_len: 0,
+        stored_at_ms: 0,
+        initial_age_secs: 0,
+        response_delay_secs: 0,
+        freshness_lifetime_secs,
+        vary_headers: Vec::new(),
+        vary_values: Vec::new(),
+        header_map: Default::default(),
+        response_directives: Default::default(),
+        response_header_values: Default::default(),
+    }
+}
+
+#[test]
+fn s_maxage_blocks_stale_with_max_stale() {
+    // RFC 9111 §5.2.2.10: s-maxage incorporates proxy-revalidate, so an
+    // expired s-maxage entry must revalidate even when the request allows
+    // stale (age 40s, freshness 10s, max-stale 60s).
+    let req = RequestDirectives {
+        max_stale: Some(Some(60)),
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("public, max-age=60, s-maxage=10", 10);
+    let disposition = classify_for_request(&req, &envelope, 40_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn s_maxage_blocks_stale_while_revalidate() {
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("public, s-maxage=10, stale-while-revalidate=60", 10);
+    let disposition = classify_for_request(&req, &envelope, 40_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn fresh_s_maxage_response_is_served() {
+    // Positive control: the prohibition applies only to stale entries.
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("public, max-age=60, s-maxage=10", 10);
+    let disposition = classify_for_request(&req, &envelope, 5_000);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeFresh));
+}
+
+#[tokio::test]
+async fn s_maxage_blocks_stale_if_error_fallback() {
+    let now = super::util::now_millis();
+    let backend = Arc::new(MockBackend::new());
+    backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:smaxage:y").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    let state = RevalidationState {
+        backend,
+        namespace: "ns".to_string(),
+        variant_key: "obj:smaxage:y".to_string(),
+        request_method: Method::GET,
+        request_directives: RequestDirectives::default(),
+        stale_if_error_secs: Some(60),
+        envelope: CachedResponseEnvelope {
+            status: 200,
+            headers: vec![(
+                "cache-control".to_string(),
+                "public, s-maxage=10, stale-if-error=60".to_string(),
+            )],
+            body: CachedBody::from_bytes(bytes::Bytes::from_static(b"hello")),
+            body_len: 5,
+            stored_at_ms: now.saturating_sub(40_000),
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 10,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            header_map: Default::default(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        },
+        revalidations: test_revalidations(),
+    };
+    assert!(maybe_build_stale_if_error_response(&state).await.is_none());
+}

@@ -543,6 +543,18 @@ pub struct ResponseDirectives {
     pub stale_if_error: Option<u64>,
 }
 
+impl ResponseDirectives {
+    /// Whether a stale response must not be reused without origin revalidation.
+    ///
+    /// RFC 9111 §5.2.2.10: s-maxage incorporates proxy-revalidate semantics, so
+    /// a shared cache MUST NOT reuse a stale s-maxage response until it has
+    /// been successfully validated with the origin — exactly like explicit
+    /// must-revalidate and proxy-revalidate.
+    pub fn forbids_stale_reuse(&self) -> bool {
+        self.must_revalidate || self.proxy_revalidate || self.s_maxage.is_some()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum CacheEntryDisposition {
     ServeFresh,
