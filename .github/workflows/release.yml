@@ -38,6 +38,14 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Verify release provenance on main
+        run: |
+          git fetch origin main --no-tags
+          if ! git merge-base --is-ancestor HEAD origin/main; then
+            echo "release tag $GITHUB_REF is not on main; main receives releases only" >&2
+            exit 1
+          fi
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@1.96
         with:
