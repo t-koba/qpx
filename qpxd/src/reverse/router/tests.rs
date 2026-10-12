@@ -740,3 +740,72 @@ edges:
 
     assert!(router.single_direct_webdav_route().is_none());
 }
+
+#[test]
+fn selection_never_returns_rejected_endpoint_when_peer_flaps() {
+    use std::sync::atomic::AtomicBool;
+
+    // Endpoint[0] is draining for the whole test, so it is rejected in every
+    // scan. Endpoint[1] flaps admission via its inflight counter while
+    // selections run: whenever it is eligible at the count scan but gone at
+    // the selection scan, the old upstreams[0] fallback returned the draining
+    // endpoint. Every strategy must yield [1] or None, never [0].
+    fn policy_for(lb: LoadBalanceStrategy) -> RoutePolicy {
+        RoutePolicy {
+            retry_attempts: 1,
+            retry_backoff: Duration::ZERO,
+            retry_body_replay: false,
+            retry_body_threshold_bytes: 64 * 1024,
+            retry_budget: RetryBudgetRuntime::new(1),
+            timeout: Duration::from_secs(30),
+            health: HealthCheckRuntime::from_config(None),
+            passive_health: None,
+            lifecycle: EndpointLifecycleRuntime {
+                slow_start: None,
+                warmup: None,
+                drain_timeout: Some(Duration::from_secs(30)),
+            },
+            max_upstream_concurrency: Some(1),
+            lb,
+        }
+    }
+
+    for lb in [
+        LoadBalanceStrategy::RoundRobin,
+        LoadBalanceStrategy::Random,
+        LoadBalanceStrategy::LeastConnections,
+        LoadBalanceStrategy::ConsistentHash,
+        LoadBalanceStrategy::Sticky,
+    ] {
+        let policy = policy_for(lb);
+        let rejected = Arc::new(UpstreamEndpoint::new("http://rejected".to_string()));
+        assert!(rejected.mark_draining(&policy.lifecycle));
+        let flapping = Arc::new(UpstreamEndpoint::new("http://flapping".to_string()));
+        let upstreams = vec![rejected.clone(), flapping.clone()];
+        let stop = Arc::new(AtomicBool::new(false));
+        let hammer = std::thread::spawn({
+            let flapping = flapping.clone();
+            let stop = stop.clone();
+            move || {
+                let mut n = 0u64;
+                while !stop.load(Ordering::Relaxed) {
+                    flapping.inflight.store((n % 2) as usize, Ordering::Relaxed);
+                    n = n.wrapping_add(1);
+                }
+            }
+        });
+        let rr_counter = AtomicUsize::new(0);
+        for seed in 0..4_000u64 {
+            if let Some(selected) =
+                select_upstream_inner(&upstreams, &policy, &rr_counter, seed, seed)
+            {
+                assert_ne!(
+                    selected.target, rejected.target,
+                    "strategy {lb:?} returned the draining endpoint"
+                );
+            }
+        }
+        stop.store(true, Ordering::Relaxed);
+        hammer.join().expect("hammer thread");
+    }
+}

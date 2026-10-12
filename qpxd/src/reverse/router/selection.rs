@@ -42,7 +42,7 @@ pub(super) fn select_upstream_inner(
 
     const FNV_OFFSET: u64 = 14695981039346656037;
     const FNV_PRIME: u64 = 1099511628211;
-    let rendezvous = |seed: u64| -> Arc<UpstreamEndpoint> {
+    let rendezvous = |seed: u64| -> Option<Arc<UpstreamEndpoint>> {
         let mut best = None;
         for endpoint in upstreams {
             let Some(class) = classify_endpoint(endpoint, policy, now_ms, gate_seed) else {
@@ -63,19 +63,22 @@ pub(super) fn select_upstream_inner(
                 }
             }
         }
-        best.map(|(u, _)| u).unwrap_or_else(|| upstreams[0].clone())
+        best.map(|(u, _)| u)
     };
 
-    let selected = match policy.lb {
+    // A missing candidate means admission changed between the count scan
+    // and the selection scan (health, drain, and inflight are read live, so
+    // concurrent requests and probes can flip them in between). Return None
+    // so the caller takes the no-upstream path: falling back to upstreams[0]
+    // here could send traffic to an endpoint rejected in both scans.
+    match policy.lb {
         LoadBalanceStrategy::RoundRobin => {
             let idx = rr_counter.fetch_add(1, Ordering::Relaxed) % effective_len;
             nth_candidate(upstreams, policy, now_ms, gate_seed, scope, counts, idx)
-                .unwrap_or_else(|| upstreams[0].clone())
         }
         LoadBalanceStrategy::Random => {
             let idx = (request_seed as usize) % effective_len;
             nth_candidate(upstreams, policy, now_ms, gate_seed, scope, counts, idx)
-                .unwrap_or_else(|| upstreams[0].clone())
         }
         LoadBalanceStrategy::LeastConnections => upstreams
             .iter()
@@ -85,12 +88,10 @@ pub(super) fn select_upstream_inner(
                     .map(|_| endpoint)
             })
             .min_by_key(|endpoint| endpoint.inflight.load(Ordering::Relaxed))
-            .cloned()
-            .unwrap_or_else(|| upstreams[0].clone()),
+            .cloned(),
         LoadBalanceStrategy::ConsistentHash => rendezvous(request_seed),
         LoadBalanceStrategy::Sticky => rendezvous(sticky_seed),
-    };
-    Some(selected)
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
