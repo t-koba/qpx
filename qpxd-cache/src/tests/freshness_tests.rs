@@ -403,3 +403,91 @@ async fn no_cache_blocks_head_stale_if_error_fallback() {
     state.envelope.stored_at_ms = now.saturating_sub(40_000);
     assert!(maybe_build_stale_if_error_response(&state).await.is_none());
 }
+
+#[test]
+fn zero_lifetime_is_never_fresh() {
+    // RFC 9111 §4.2: response_is_fresh = (freshness_lifetime > current_age).
+    // A max-age=0 entry is stale even at age zero and must revalidate.
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("max-age=0", 0);
+    let disposition = classify_for_request(&req, &envelope, 0);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn exact_expiry_requires_revalidation() {
+    // At age == freshness the entry is stale, not fresh; the seconds on
+    // either side keep their outcomes.
+    let req = RequestDirectives::default();
+    let before = classify_for_request(&req, &s_maxage_envelope("max-age=60", 60), 59_000);
+    assert!(matches!(before, CacheEntryDisposition::ServeFresh));
+    let at = classify_for_request(&req, &s_maxage_envelope("max-age=60", 60), 60_000);
+    assert!(matches!(at, CacheEntryDisposition::RequiresRevalidation));
+    let after = classify_for_request(&req, &s_maxage_envelope("max-age=60", 60), 61_000);
+    assert!(matches!(after, CacheEntryDisposition::RequiresRevalidation));
+}
+
+#[test]
+fn exact_expiry_must_revalidate_requires_revalidation() {
+    // Title case: an expired must-revalidate entry at its exact boundary
+    // must not be served fresh.
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("must-revalidate, max-age=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn exact_expiry_proxy_revalidate_requires_revalidation() {
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("proxy-revalidate, max-age=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn s_maxage_zero_requires_revalidation() {
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("public, s-maxage=0", 0);
+    let disposition = classify_for_request(&req, &envelope, 0);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn exact_expiry_allows_explicit_max_stale() {
+    // An explicit client stale allowance still applies at the boundary:
+    // staleness 0 is within the max-stale window.
+    let req = RequestDirectives {
+        max_stale: Some(Some(60)),
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("max-age=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
+}
+
+#[test]
+fn request_max_age_zero_still_permits_fresh_response() {
+    // Control: request max-age keeps its own "age no greater than" semantics;
+    // a fresh age-0 response stays permitted. Only the response-lifetime
+    // boundary changes.
+    let req = RequestDirectives {
+        max_age: Some(0),
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("max-age=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 0);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeFresh));
+}

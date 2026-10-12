@@ -459,7 +459,11 @@ pub fn classify_for_request(
     let resp = envelope.response_directives();
     let age = current_age_secs(envelope, now_ms);
     let freshness = envelope.freshness_lifetime_secs;
-    let fresh_by_age = age <= freshness;
+    // RFC 9111 §4.2: response_is_fresh = (freshness_lifetime > current_age).
+    // At age == freshness the entry is stale, so max-age=0 and exactly
+    // expired must-revalidate entries revalidate instead of serving fresh.
+    // Request max-age/min-fresh keep their own comparison semantics below.
+    let fresh_by_age = age < freshness;
     let fresh_by_req = match req.max_age {
         Some(max_age) => age <= max_age,
         None => true,

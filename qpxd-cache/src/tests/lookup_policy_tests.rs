@@ -306,6 +306,46 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
 }
 
 #[tokio::test]
+async fn zero_max_age_entry_revalidates_on_immediate_lookup() {
+    // RFC 9111 §4.2: a stored max-age=0 entry is stale at age zero, so even
+    // an immediate lookup must revalidate rather than hit.
+    let req = make_get_request("/zero");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let response = make_response(StatusCode::OK, "max-age=0", "body-a");
+
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req.method(),
+        req.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let outcome = lookup(
+        req.method(),
+        req.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(matches!(outcome, LookupOutcome::Revalidate(_)));
+}
+
+#[tokio::test]
 async fn authorization_public_without_vary_is_not_shared_across_credentials() {
     let mut req_a = make_get_request("/auth-no-vary");
     req_a.headers_mut().insert(
