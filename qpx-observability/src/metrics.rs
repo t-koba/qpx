@@ -299,8 +299,44 @@ fn parse_request_path(raw_headers: &[u8]) -> Result<Option<String>> {
     if method != "GET" {
         return Err(anyhow::anyhow!("unsupported method"));
     }
-    if !version.starts_with("HTTP/1.") {
+    // Exact version match: this is a minimal HTTP/1 endpoint, so a prefix
+    // match would accept malformed versions such as HTTP/1.bogus.
+    if version != "HTTP/1.0" && version != "HTTP/1.1" {
         return Err(anyhow::anyhow!("unsupported http version"));
     }
+    // Surplus request-line fields must not be silently ignored.
+    if parts.next().is_some() {
+        return Err(anyhow::anyhow!("malformed request line"));
+    }
     Ok(Some(path.to_string()))
+}
+
+#[cfg(test)]
+mod request_line_tests {
+    use super::parse_request_path;
+
+    fn path_of(request_line: &str) -> Result<Option<String>, String> {
+        parse_request_path(request_line.as_bytes()).map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn valid_http1_request_lines_are_accepted() {
+        assert_eq!(
+            path_of("GET /metrics HTTP/1.1\r\nHost: x\r\n"),
+            Ok(Some("/metrics".to_string()))
+        );
+        assert_eq!(
+            path_of("GET /metrics HTTP/1.0\r\nHost: x\r\n"),
+            Ok(Some("/metrics".to_string()))
+        );
+    }
+
+    #[test]
+    fn malformed_versions_and_surplus_fields_are_rejected() {
+        assert!(path_of("GET /metrics HTTP/1.bogus\r\nHost: x\r\n").is_err());
+        assert!(path_of("GET /metrics HTTP/1.1 unexpected\r\nHost: x\r\n").is_err());
+        assert!(path_of("GET /metrics HTTP/2\r\nHost: x\r\n").is_err());
+        assert!(path_of("POST /metrics HTTP/1.1\r\nHost: x\r\n").is_err());
+        assert!(path_of("\r\n").is_err());
+    }
 }
