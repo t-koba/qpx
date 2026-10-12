@@ -535,16 +535,20 @@ for entry in baseline_entries:
     if current_entry is None:
         failures.append(f"missing current proxy comparison lane {key}")
         continue
-    # Lane measurement noise comes from the current lane's observed sample
-    # spread; it judges baseline bands and absolute objectives alike. A miss
-    # inside the band is noise, a miss beyond it is decisive. Throughput and
-    # CPU use their own spreads; tail latency uses the p99 spread, which
-    # varies independently and far more (observed 1.50 p99 spread with 1.01
-    # throughput spread on the same 1MB lane of mizu aebb6cc). Judging a p99
-    # miss against throughput stability turns runner tail variance red.
+    # Lane measurement noise comes from qpx's own observed sample spread;
+    # it judges baseline bands and absolute objectives alike. A miss inside
+    # the band is noise, a miss beyond it is decisive. Reference spreads never
+    # widen the band: competitor instability must neither fail qpx nor excuse
+    # a qpx miss. Throughput and CPU use their own spreads; tail latency uses
+    # the p99 spread, which varies independently and far more (observed 1.50
+    # p99 spread with 1.01 throughput spread on the same 1MB lane of mizu
+    # aebb6cc). Judging a p99 miss against throughput stability turns runner
+    # tail variance red.
     lane_noise = 1.0
     lane_noise_p99 = 1.0
-    for lane_spread in current_entry["sample_spread"].values():
+    for proxy, lane_spread in current_entry["sample_spread"].items():
+        if proxy != "qpxd":
+            continue
         lane_noise = max(
             lane_noise,
             number(lane_spread, "requests_per_sec_ratio"),
@@ -779,7 +783,8 @@ for entry in baseline_entries:
                     failures.append(message)
                 else:
                     unmeasured.append(
-                        f"{message} (reference noise; lane unmeasured, not a qpx regression)"
+                        f"{message} (reference noise; reference side unmeasured, "
+                        "ratios still gated on qpx-side noise)"
                     )
 
 if marginals:

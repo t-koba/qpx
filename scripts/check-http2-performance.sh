@@ -339,13 +339,14 @@ for body_bytes, max_streams in sorted(required_lanes):
     ) ** 0.2
     lane_scores.append(lane_score)
 
-    # Lane measurement noise comes from the compared pair's observed sample
-    # spread (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh).
-    # A miss inside the band is noise, a miss beyond it is decisive.
+    # Lane measurement noise comes from qpx's own observed sample spread
+    # (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh).
+    # A miss inside the band is noise, a miss beyond it is decisive. The
+    # reference spread never widens the band: competitor instability must
+    # neither fail qpx nor excuse a qpx miss.
     lane_noise = 1.0
-    for record in (qpx, nginx):
-        for field in ("requests_per_sec_ratio", "requests_per_total_cpu_second_ratio"):
-            lane_noise = max(lane_noise, nested_number(record, "sample_spread", field, record.get("proxy", "record")))
+    for field in ("requests_per_sec_ratio", "requests_per_total_cpu_second_ratio"):
+        lane_noise = max(lane_noise, nested_number(qpx, "sample_spread", field, "qpxd"))
     # Shared ubuntu-latest runners vary run-to-run more than any single
     # interleaved lane spread shows (observed decisive misses at 0.7-1.2%
     # with lane spreads near 1.005, each on a different objective with no
@@ -436,7 +437,8 @@ for body_bytes, max_streams in sorted(required_lanes):
                     failures.append(message)
                 else:
                     unmeasured.append(
-                        f"{message} (reference noise; lane unmeasured, not a qpx regression)"
+                        f"{message} (reference noise; reference side unmeasured, "
+                        "ratios still gated on qpx-side noise)"
                     )
 
     print(

@@ -63,8 +63,9 @@ remain in the artifact so backend saturation and runner noise remain visible,
 but headroom is recorded, not gated.
 
 All objective checkers judge misses against lane measurement noise: each lane
-derives a noise band from the observed throughput and CPU sample spread of the
-compared records, floored by a global 5% run-to-run tolerance; p99 baseline
+derives a noise band from qpx's own observed throughput and CPU sample spread,
+floored by a global 5% run-to-run tolerance; reference spreads never widen the
+band, so competitor instability can neither fail qpx nor excuse a qpx miss; p99 baseline
 and objective misses use the p99 spread instead, capped at the documented p99
 spread cap so an unstable tail is invalid rather than a wider pass. Shared CI
 runners vary run to run more than any single interleaved lane spread shows
