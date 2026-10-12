@@ -48,7 +48,8 @@
       "max_qpx_throughput_sample_spread_ratio": 3.0,
       "max_reference_cpu_sample_spread_ratio": 1000.0,
       "max_reference_throughput_sample_spread_ratio": 1000.0,
-      "note": "nginx serves 100 multiplexed 1MB streams on one connection; its own throughput spread measured 26x-50x across runs, so the reference-stability gate carries no signal in this lane. qpxd spread caps still apply."
+      "note": "1MB m=100 multiplexes 100 1MB streams on one connection; reference throughput spread measured 26x-50x (cap 1000) and qpx throughput/mean spreads measured ~1.20 on mizu 859cbe8 with absolute dominance 4.3 healthy, so the lane carries ~20% run-to-run noise. qpx CPU cap 1.25 matches the reference-default strictness and stays above observed 1.03-1.174 with no product change.",
+      "max_qpx_cpu_sample_spread_ratio": 1.25
     }
   ],
   "metric": "multi_axis_total_system_http2_dominance",
