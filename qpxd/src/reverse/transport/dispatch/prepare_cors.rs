@@ -42,6 +42,8 @@ pub(super) async fn prepare_cors_preflight(
         observation_plan: RequestObservationPlan::default(),
         max_observed_request_body_bytes: state.plan.limits.body.max_observed_request_body_bytes,
         collect_observation_from_remaining: false,
+        first_match_idx: None,
+        preflight_owner_ambiguous: false,
     };
     scan_reverse_routes(
         router,
@@ -62,6 +64,12 @@ pub(super) async fn prepare_cors_preflight(
     let Some(route_idx) = selection.route_idx else {
         return Ok(None);
     };
+    // Ordinary route precedence: fall back to application handling when the
+    // actual request belongs to an earlier route or ownership is unresolved,
+    // instead of granting this later route's CORS permission for it.
+    if selection.first_match_idx != Some(route_idx) || selection.preflight_owner_ambiguous {
+        return Ok(None);
+    }
     let route = router
         .route_at(route_idx)
         .ok_or_else(|| anyhow!("selected CORS route is unavailable"))?;

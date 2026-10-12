@@ -33,6 +33,15 @@ pub(super) struct ReverseRouteSelection {
     pub(super) observation_plan: RequestObservationPlan,
     pub(super) max_observed_request_body_bytes: usize,
     pub(super) collect_observation_from_remaining: bool,
+    /// First route matching on preflight-known facts in `cors_only` scans,
+    /// whether or not it carries an edge CORS policy. Ordinary route
+    /// precedence: the edge preflight must authorize this route's request,
+    /// not a later CORS-enabled route's.
+    pub(super) first_match_idx: Option<usize>,
+    /// Whether a route before any CORS match depends on facts the preflight
+    /// cannot know (identity, request body). Ownership is unresolved, so the
+    /// edge preflight must fall back instead of granting a later permission.
+    pub(super) preflight_owner_ambiguous: bool,
 }
 
 #[expect(
@@ -87,9 +96,7 @@ pub(super) async fn scan_reverse_routes(
         }
     }
     router.try_for_each_candidate_route(prefilter_ctx.clone(), |idx, route| {
-        if cors_only && route.plan.cors.is_none() {
-            return Ok::<bool, anyhow::Error>(false);
-        }
+        let has_cors = route.plan.cors.is_some();
         let resolution_override = route.plan.destination_resolution.as_ref();
         let effective_policy = &route.plan.policy_context;
         let policy_key = policy_context_cache_key(effective_policy);
@@ -133,7 +140,22 @@ pub(super) async fn scan_reverse_routes(
             },
         );
         if cors_only {
-            if route.matches(&ctx) {
+            let matched = route.matches(&ctx);
+            // Ordinary route precedence: the edge preflight must authorize the
+            // route the actual request would select. Record the first route
+            // matching on preflight-known facts; an earlier identity- or
+            // body-dependent route leaves ownership unresolved.
+            if selection.first_match_idx.is_none() && !selection.preflight_owner_ambiguous {
+                if matched {
+                    selection.first_match_idx = Some(idx);
+                } else if !effective_policy.identity_sources.is_empty()
+                    || route.requires_request_body_observation()
+                    || route.requires_request_size()
+                {
+                    selection.preflight_owner_ambiguous = true;
+                }
+            }
+            if has_cors && matched {
                 selection.route_idx = Some(idx);
                 selection.selected_policy = effective_policy.clone();
                 selection.selected_identity = Some(identity);

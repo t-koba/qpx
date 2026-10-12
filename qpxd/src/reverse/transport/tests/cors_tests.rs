@@ -272,3 +272,87 @@ async fn cors_is_applied_to_generated_upstream_failure_response() {
         "true"
     );
 }
+
+#[tokio::test]
+async fn cors_preflight_does_not_grant_later_route_permission_for_earlier_owner() {
+    // Ordinary route precedence: the preflight authorizes the route the
+    // actual request would select. The earlier route owns PUT /api/** and
+    // carries no edge CORS policy, so the later route's permission must not
+    // be granted for it; the preflight falls back to ordinary handling and
+    // the browser never sends the cross-origin PUT.
+    let reverse = build_reverse(
+        br#"edges:
+- kind: reverse
+  name: overlap
+  listen: 127.0.0.1:19080
+  routes:
+  - name: ordinary
+    match:
+      method: [PUT]
+      path: [/api/**]
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/plain
+        body: ordinary
+  - name: cors
+    match:
+      method: [PUT]
+      path: [/api/**]
+    http:
+      cors:
+        allowed_origins: [https://app.example]
+        allowed_methods: [PUT]
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/plain
+        body: cors
+"#,
+    );
+    let preflight = Request::builder()
+        .method(Method::OPTIONS)
+        .uri("/api/item")
+        .header("host", "api.example")
+        .header("origin", ALLOWED_ORIGIN)
+        .header("access-control-request-method", "PUT")
+        .body(Body::empty())
+        .expect("preflight request");
+    let (_, preflight_response) =
+        handle_request_with_interim(preflight, reverse.clone(), connection())
+            .await
+            .expect("preflight response");
+    assert_ne!(preflight_response.status(), StatusCode::NO_CONTENT);
+    assert!(
+        !preflight_response
+            .headers()
+            .contains_key("access-control-allow-origin"),
+        "later route permission must not authorize the earlier owner's request"
+    );
+
+    // The actual request still selects the earlier route, without edge CORS.
+    let actual = Request::builder()
+        .method(Method::PUT)
+        .uri("/api/item")
+        .header("host", "api.example")
+        .header("origin", ALLOWED_ORIGIN)
+        .body(Body::empty())
+        .expect("actual request");
+    let (_, actual_response) = handle_request_with_interim(actual, reverse, connection())
+        .await
+        .expect("actual response");
+    assert_eq!(actual_response.status(), StatusCode::OK);
+    assert!(
+        !actual_response
+            .headers()
+            .contains_key("access-control-allow-origin")
+    );
+    assert_eq!(
+        to_bytes(actual_response.into_body())
+            .await
+            .expect("response body"),
+        "ordinary"
+    );
+}

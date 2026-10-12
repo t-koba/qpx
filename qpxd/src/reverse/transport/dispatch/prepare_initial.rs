@@ -61,6 +61,8 @@ pub(super) async fn initial_scan_reverse_routes(
         observation_plan: RequestObservationPlan::default(),
         max_observed_request_body_bytes: state.plan.limits.body.max_observed_request_body_bytes,
         collect_observation_from_remaining: false,
+        first_match_idx: None,
+        preflight_owner_ambiguous: false,
     };
     let sanitized_route_headers = sanitized_headers_for_route_scan(request_headers, state, conn)?;
     let identity_request = if state.security.identity_sources.sources.is_empty() {
