@@ -146,13 +146,16 @@ fn invalidation_keys_for_target(target: &CacheRequestKey) -> Vec<CacheRequestKey
 }
 
 fn invalidated_method_groups(request_method: &str) -> &'static [&'static str] {
+    // RFC 9111 §4.4: invalidate all stored responses for the target URI.
+    // QUERY is safe, so it never triggers invalidation itself, but its primary
+    // holds cached responses that unsafe requests must purge.
     match request_method {
-        "GET" | "HEAD" => &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
-        "POST" => &["GET", "HEAD", "POST"],
-        "PUT" => &["GET", "HEAD", "PUT"],
-        "PATCH" => &["GET", "HEAD", "PATCH"],
-        "DELETE" => &["GET", "HEAD", "DELETE"],
-        _ => &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE"],
+        "GET" | "HEAD" => &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "QUERY"],
+        "POST" => &["GET", "HEAD", "POST", "QUERY"],
+        "PUT" => &["GET", "HEAD", "PUT", "QUERY"],
+        "PATCH" => &["GET", "HEAD", "PATCH", "QUERY"],
+        "DELETE" => &["GET", "HEAD", "DELETE", "QUERY"],
+        _ => &["GET", "HEAD", "POST", "PUT", "PATCH", "DELETE", "QUERY"],
     }
 }
 
