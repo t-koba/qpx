@@ -64,11 +64,16 @@ pub struct FileSystemDataStore {
 
 impl FileSystemDataStore {
     pub fn open(root: impl AsRef<Path>) -> Result<Self> {
-        fs::create_dir_all(root.as_ref())?;
-        let root = root.as_ref().canonicalize()?;
-        if fs::symlink_metadata(&root)?.file_type().is_symlink() {
+        let input = root.as_ref();
+        // Reject a linked root before following it: canonicalize resolves the
+        // link, so checking the resolved path can never fire.
+        if let Ok(metadata) = fs::symlink_metadata(input)
+            && metadata.file_type().is_symlink()
+        {
             return Err(anyhow!("WebDAV root must not be a symlink"));
         }
+        fs::create_dir_all(input)?;
+        let root = input.canonicalize()?;
         Ok(Self {
             root,
             read_cache: ArcSwap::from_pointee(ReadCacheSnapshot::default()),
@@ -637,5 +642,18 @@ mod tests {
                 .read(&ResourceId::parse("/escape/secret").unwrap())
                 .is_err()
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn filesystem_store_rejects_symlinked_root() {
+        use std::os::unix::fs::symlink;
+        let target = tempdir().unwrap();
+        let parent = tempdir().unwrap();
+        let link = parent.path().join("linked-root");
+        symlink(target.path(), &link).unwrap();
+        assert!(FileSystemDataStore::open(&link).is_err());
+        // Direct directory roots keep working.
+        assert!(FileSystemDataStore::open(target.path()).is_ok());
     }
 }
