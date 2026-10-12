@@ -596,6 +596,16 @@ impl CompiledBearerIdentity {
                     dpop.nonce.as_deref(),
                 )
                 .into());
+            } else if access_token_jkt(&payload).is_ok() {
+                // RFC 9449 section 7.2: a DPoP-bound token presented as
+                // Bearer without proof is a downgrade and must be rejected
+                // even when DPoP is optional. Optional mode stays available
+                // for genuinely unbound tokens.
+                return Err(BearerAuthenticationError::new(
+                    "DPoP-bound access token requires the DPoP authorization scheme",
+                    dpop.nonce.as_deref(),
+                )
+                .into());
             }
         }
         match self.claims.extract(&self.name, &payload) {
@@ -1235,6 +1245,209 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("nonce-2")
         );
+    }
+
+    /// RFC 9449 section 7.2 example thumbprint: a well-formed `cnf.jkt`
+    /// binding, usable without any private key.
+    const OPTIONAL_DPOP_JKT: &str = "NzbLsXh8uDCcd-6MNwXF4W_7noWXFZAfHkxZsRGC9Xs";
+
+    fn bearer_test_env_name(label: &str) -> String {
+        format!(
+            "QPX_TEST_BEARER_{}_{}_{}",
+            label,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        )
+    }
+
+    fn encode_bearer_segment(value: &serde_json::Value) -> String {
+        URL_SAFE_NO_PAD.encode(serde_json::to_vec(value).expect("segment json"))
+    }
+
+    fn sign_bearer_es256(private_key_der: &[u8], payload: serde_json::Value) -> String {
+        let header = serde_json::json!({"alg": "ES256", "typ": "JWT"});
+        let signing_input = format!(
+            "{}.{}",
+            encode_bearer_segment(&header),
+            encode_bearer_segment(&payload)
+        );
+        let rng = ring::rand::SystemRandom::new();
+        let key_pair = signature::EcdsaKeyPair::from_pkcs8(
+            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            private_key_der,
+            &rng,
+        )
+        .expect("ecdsa keypair");
+        let signature = key_pair
+            .sign(&rng, signing_input.as_bytes())
+            .expect("ecdsa sign");
+        format!(
+            "{signing_input}.{}",
+            URL_SAFE_NO_PAD.encode(signature.as_ref())
+        )
+    }
+
+    struct OptionalDpopFixture {
+        identity: CompiledBearerIdentity,
+        private_key_der: Vec<u8>,
+        env_name: String,
+    }
+
+    fn optional_dpop_fixture(required: bool) -> OptionalDpopFixture {
+        let key_pair =
+            rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256).expect("keypair");
+        let private_key_der = key_pair.serialize_der();
+        let env_name = bearer_test_env_name("DPOP_PK");
+        // SAFETY: the name is process-unique and the variable is removed at
+        // the end of each test while holding the environment lock.
+        unsafe {
+            std::env::set_var(&env_name, key_pair.public_key_pem());
+        }
+        let config = BearerIdentityConfig {
+            header: None,
+            source: BearerIdentitySourceConfig::Jwt {
+                issuer: "test-issuer".to_string(),
+                audience: "test-audience".to_string(),
+                algorithms: vec!["ES256".to_string()],
+                jwks_url: None,
+                public_key_env: Some(env_name.clone()),
+                clock_skew_seconds: 60,
+            },
+            claims: qpx_core::config::AssertionClaimsMapConfig {
+                user_from_sub: true,
+                ..Default::default()
+            },
+            dpop: Some(DpopConfig {
+                required,
+                ..Default::default()
+            }),
+        };
+        let identity = CompiledBearerIdentity::from_config("bearer", &config).expect("compile");
+        OptionalDpopFixture {
+            identity,
+            private_key_der,
+            env_name,
+        }
+    }
+
+    fn bearer_test_runtime() -> RuntimeState {
+        RuntimeState::build(qpx_core::config::Config {
+            state_dir: None,
+            identity: Default::default(),
+            messages: Default::default(),
+            runtime: Default::default(),
+            telemetry: Default::default(),
+            security: Default::default(),
+            http: Default::default(),
+            traffic: Default::default(),
+            acme: None,
+            edges: Vec::new(),
+            upstreams: Vec::new(),
+            caches: Vec::new(),
+        })
+        .expect("test runtime builds")
+    }
+
+    fn bearer_jwt(fixture: &OptionalDpopFixture, bound: bool) -> String {
+        let mut payload = serde_json::json!({
+            "iss": "test-issuer",
+            "aud": "test-audience",
+            "sub": "alice",
+            "exp": 4_000_000_000i64,
+        });
+        if bound {
+            payload["cnf"] = serde_json::json!({"jkt": OPTIONAL_DPOP_JKT});
+        }
+        sign_bearer_es256(fixture.private_key_der.as_slice(), payload)
+    }
+
+    fn bearer_headers(token: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::AUTHORIZATION,
+            http::HeaderValue::from_str(&format!("Bearer {token}")).expect("auth value"),
+        );
+        headers
+    }
+
+    fn remove_bearer_env(fixture: &OptionalDpopFixture) {
+        // SAFETY: the variable is process-unique and the caller holds the
+        // environment lock.
+        unsafe {
+            std::env::remove_var(&fixture.env_name);
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_dpop_rejects_bound_token_presented_as_bearer() {
+        // The environment lock is held only around setup and teardown: no
+        // environment access happens across the await below.
+        let (fixture, token, state) = {
+            let _guard = crate::test_env_lock().lock().expect("env lock");
+            let fixture = optional_dpop_fixture(false);
+            let token = bearer_jwt(&fixture, true);
+            (fixture, token, bearer_test_runtime())
+        };
+        let err = fixture
+            .identity
+            .extract(&state, &bearer_headers(&token), None)
+            .await
+            .expect_err("bound Bearer without proof must fail");
+        assert!(
+            err.to_string().contains("DPoP-bound"),
+            "unexpected error: {err}"
+        );
+        {
+            let _guard = crate::test_env_lock().lock().expect("env lock");
+            remove_bearer_env(&fixture);
+        }
+    }
+
+    #[tokio::test]
+    async fn optional_dpop_accepts_unbound_token_presented_as_bearer() {
+        let (fixture, token, state) = {
+            let _guard = crate::test_env_lock().lock().expect("env lock");
+            let fixture = optional_dpop_fixture(false);
+            let token = bearer_jwt(&fixture, false);
+            (fixture, token, bearer_test_runtime())
+        };
+        let identity = fixture
+            .identity
+            .extract(&state, &bearer_headers(&token), None)
+            .await
+            .expect("unbound Bearer stays accepted in optional mode");
+        assert_eq!(identity.user.as_deref(), Some("alice"));
+        {
+            let _guard = crate::test_env_lock().lock().expect("env lock");
+            remove_bearer_env(&fixture);
+        }
+    }
+
+    #[tokio::test]
+    async fn required_dpop_still_rejects_unbound_bearer() {
+        let (fixture, token, state) = {
+            let _guard = crate::test_env_lock().lock().expect("env lock");
+            let fixture = optional_dpop_fixture(true);
+            let token = bearer_jwt(&fixture, false);
+            (fixture, token, bearer_test_runtime())
+        };
+        let err = fixture
+            .identity
+            .extract(&state, &bearer_headers(&token), None)
+            .await
+            .expect_err("required mode must keep rejecting Bearer");
+        assert!(
+            err.to_string()
+                .contains("DPoP authorization scheme is required"),
+            "unexpected error: {err}"
+        );
+        {
+            let _guard = crate::test_env_lock().lock().expect("env lock");
+            remove_bearer_env(&fixture);
+        }
     }
 
     #[test]
