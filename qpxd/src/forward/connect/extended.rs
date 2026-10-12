@@ -267,10 +267,18 @@ pub(super) fn spawn_h2_extended_connect_relay(
         let mut upload_done = false;
         let mut download_done = false;
         let mut sent_request_len = 0u64;
+        // Upload bytes accepted from downstream but not yet granted upstream
+        // window. At most one downstream chunk is parked here: while it is
+        // non-empty the upload branch stops reading downstream, so downstream
+        // flow control stalls the producer instead of queueing unboundedly
+        // inside h2. The flush branch below drains it without awaiting inside
+        // the data branches, so downloads keep progressing while the upload
+        // waits for WINDOW_UPDATE.
+        let mut pending_upload = Bytes::new();
 
         loop {
             tokio::select! {
-                next = downstream_body.data(), if !upload_done => {
+                next = downstream_body.data(), if !upload_done && pending_upload.is_empty() => {
                     match next {
                         Some(Ok(chunk)) => {
                             sent_request_len = match sent_request_len.checked_add(chunk.len() as u64) {
@@ -293,7 +301,8 @@ pub(super) fn spawn_h2_extended_connect_relay(
                                     );
                                     return;
                                 }
-                            if !chunk.is_empty() && upstream_send.send_data(chunk, false).is_err() {
+                            pending_upload = chunk;
+                            if !try_send_h2_connect_upload(&mut upstream_send, &mut pending_upload) {
                                 abort_downstream(&mut sender);
                                 return;
                             }
@@ -324,6 +333,24 @@ pub(super) fn spawn_h2_extended_connect_relay(
                             if download_done {
                                 break;
                             }
+                        }
+                    }
+                }
+                capacity = poll_fn(|cx| upstream_send.poll_capacity(cx)), if !pending_upload.is_empty() => {
+                    match capacity {
+                        Some(Ok(_)) => {
+                            if !try_send_h2_connect_upload(&mut upstream_send, &mut pending_upload) {
+                                abort_downstream(&mut sender);
+                                return;
+                            }
+                        }
+                        _ => {
+                            reset_upstream_and_abort(
+                                &mut upstream_send,
+                                H2Reason::INTERNAL_ERROR,
+                                &mut sender,
+                            );
+                            return;
                         }
                     }
                 }
@@ -463,6 +490,33 @@ fn send_empty_h2_end_stream(
     } else {
         true
     }
+}
+
+/// Move parked upload bytes into the upstream send window without waiting:
+/// reserves the outstanding bytes and forwards whatever capacity is currently
+/// granted, leaving the remainder parked. Returns false when the send stream
+/// is dead, in which case the caller aborts. Mirrors the pacing in
+/// `crate::http::codec::h2::send_h2_data`: `send_data` without reserved
+/// capacity buffers unboundedly inside h2 when the peer withholds
+/// WINDOW_UPDATE.
+fn try_send_h2_connect_upload(
+    upstream_send: &mut h2::SendStream<Bytes>,
+    pending: &mut Bytes,
+) -> bool {
+    if pending.is_empty() {
+        return true;
+    }
+    upstream_send.reserve_capacity(pending.len());
+    let mut capacity = upstream_send.capacity();
+    while !pending.is_empty() && capacity > 0 {
+        let len = capacity.min(pending.len());
+        let chunk = pending.split_to(len);
+        capacity -= len;
+        if upstream_send.send_data(chunk, false).is_err() {
+            return false;
+        }
+    }
+    true
 }
 
 fn reset_upstream_and_abort(
