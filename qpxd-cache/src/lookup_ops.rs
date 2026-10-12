@@ -420,11 +420,14 @@ pub async fn maybe_build_stale_if_error_response(
     let now = now_millis();
     let age = current_age_secs(&state.envelope, now);
     let freshness = state.envelope.freshness_lifetime_secs;
-    if age <= freshness {
+    // Freshness is strict per RFC 9111 §4.2 (fresh iff age < freshness), so a
+    // just-expired entry is stale with staleness 0 and falls inside the
+    // stale-if-error window (RFC 5861 §4) rather than bypassing it.
+    if age < freshness {
         return None;
     }
     let staleness = age.saturating_sub(freshness);
-    if staleness == 0 || staleness > limit {
+    if staleness > limit {
         return None;
     }
     if state.request_method == Method::HEAD {
@@ -492,8 +495,10 @@ pub fn classify_for_request(
             return CacheEntryDisposition::ServeStale;
         }
 
-        if staleness > 0
-            && let Some(swr) = resp.stale_while_revalidate
+        // Staleness 0 (the exact expiry second) is inside the window: the
+        // entry is stale per the strict boundary and RFC 5861 §3 permits
+        // serving it while revalidating.
+        if let Some(swr) = resp.stale_while_revalidate
             && !req.no_cache
             && !resp.forbids_stale_reuse()
             && staleness <= swr

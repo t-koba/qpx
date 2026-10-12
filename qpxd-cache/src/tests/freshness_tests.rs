@@ -491,3 +491,118 @@ fn request_max_age_zero_still_permits_fresh_response() {
     let disposition = classify_for_request(&req, &envelope, 0);
     assert!(matches!(disposition, CacheEntryDisposition::ServeFresh));
 }
+
+#[test]
+fn exact_expiry_swr_serves_stale_while_revalidate() {
+    // The exact expiry second is stale with staleness 0, which is inside the
+    // stale-while-revalidate window (RFC 5861 §3).
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("max-age=60, stale-while-revalidate=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::ServeStaleWhileRevalidate
+    ));
+}
+
+#[test]
+fn exact_expiry_only_if_cached_swr_serves_stale() {
+    let req = RequestDirectives {
+        only_if_cached: true,
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("max-age=60, stale-while-revalidate=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
+}
+
+#[test]
+fn exact_expiry_must_revalidate_overrides_swr() {
+    // Control: the stale prohibition still wins over the SWR window.
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("must-revalidate, max-age=60, stale-while-revalidate=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[tokio::test]
+async fn stale_if_error_serves_at_exact_expiry() {
+    let now = super::util::now_millis();
+    let backend = Arc::new(MockBackend::new());
+    backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:sie:edge").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    let state = RevalidationState {
+        backend,
+        namespace: "ns".to_string(),
+        variant_key: "obj:sie:edge".to_string(),
+        request_method: Method::GET,
+        request_directives: RequestDirectives::default(),
+        stale_if_error_secs: Some(60),
+        envelope: s_maxage_envelope("max-age=60, stale-if-error=60", 60),
+        revalidations: test_revalidations(),
+    };
+    let mut state = state;
+    state.envelope.stored_at_ms = now.saturating_sub(60_000);
+    state.envelope.body_len = 5;
+    assert!(maybe_build_stale_if_error_response(&state).await.is_some());
+}
+
+#[tokio::test]
+async fn stale_if_error_serves_zero_lifetime_entry() {
+    // Worst case from review: a max-age=0 entry is always stale, so
+    // stale-if-error must still rescue it during its first second.
+    let now = super::util::now_millis();
+    let backend = Arc::new(MockBackend::new());
+    backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:sie:zero").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    let state = RevalidationState {
+        backend,
+        namespace: "ns".to_string(),
+        variant_key: "obj:sie:zero".to_string(),
+        request_method: Method::GET,
+        request_directives: RequestDirectives::default(),
+        stale_if_error_secs: Some(60),
+        envelope: s_maxage_envelope("max-age=0, stale-if-error=60", 0),
+        revalidations: test_revalidations(),
+    };
+    let mut state = state;
+    state.envelope.stored_at_ms = now;
+    state.envelope.body_len = 5;
+    assert!(maybe_build_stale_if_error_response(&state).await.is_some());
+}
+
+#[tokio::test]
+async fn must_revalidate_blocks_stale_if_error_at_exact_expiry() {
+    // Control: the stale prohibition still wins over the SIE window.
+    let now = super::util::now_millis();
+    let state = RevalidationState {
+        backend: Arc::new(MockBackend::new()),
+        namespace: "ns".to_string(),
+        variant_key: "obj:sie:mr".to_string(),
+        request_method: Method::GET,
+        request_directives: RequestDirectives::default(),
+        stale_if_error_secs: Some(60),
+        envelope: s_maxage_envelope("must-revalidate, max-age=60, stale-if-error=60", 60),
+        revalidations: test_revalidations(),
+    };
+    let mut state = state;
+    state.envelope.stored_at_ms = now.saturating_sub(60_000);
+    assert!(maybe_build_stale_if_error_response(&state).await.is_none());
+}
