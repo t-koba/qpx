@@ -469,11 +469,12 @@ fn is_response_storable(
             _ => return false,
         }
     }
+    // RFC 9111 §3.5: shared reuse of Authorization-bearing responses requires
+    // public, must-revalidate, or s-maxage. proxy-revalidate alone governs
+    // stale revalidation, not storage permission (s-maxage implies
+    // proxy-revalidate semantics, not the reverse).
     if request_headers.contains_key(AUTHORIZATION)
-        && !(directives.public
-            || directives.s_maxage.is_some()
-            || directives.must_revalidate
-            || directives.proxy_revalidate)
+        && !(directives.public || directives.s_maxage.is_some() || directives.must_revalidate)
     {
         return false;
     }

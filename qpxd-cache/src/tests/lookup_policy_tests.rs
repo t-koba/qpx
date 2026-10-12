@@ -458,3 +458,186 @@ async fn authorization_without_vary_opt_out_restores_shared_storage() {
     .expect("lookup");
     assert!(matches!(out, LookupOutcome::Hit(_)));
 }
+
+#[tokio::test]
+async fn authorization_proxy_revalidate_alone_is_not_storable() {
+    // RFC 9111 §3.5: proxy-revalidate alone does not grant shared storage
+    // permission for Authorization-bearing requests. Even the identical
+    // credential must miss.
+    let mut req_a = make_get_request("/auth-proxy-revalidate");
+    req_a.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer A"),
+    );
+    let key = CacheRequestKey::for_lookup(&req_a, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "max-age=60, proxy-revalidate", "private-a");
+    response
+        .headers_mut()
+        .insert(VARY, http::HeaderValue::from_static("Authorization"));
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+    let out_same = lookup(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(
+        !matches!(out_same, LookupOutcome::Hit(_)),
+        "proxy-revalidate alone must not unlock Authorization shared storage"
+    );
+}
+
+#[tokio::test]
+async fn authorization_proxy_revalidate_alone_opt_out_still_misses() {
+    // The no-Vary opt-out cannot bypass the RFC 9111 §3.5 storage gate.
+    let mut req_a = make_get_request("/auth-proxy-revalidate-opt-out");
+    req_a.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer A"),
+    );
+    let key = CacheRequestKey::for_lookup(&req_a, "http")
+        .expect("key")
+        .expect("some key");
+    let response = make_response(StatusCode::OK, "max-age=60, proxy-revalidate", "private-a");
+    let backends = backend_map();
+    let mut p = policy();
+    p.allow_authorization_without_vary_store = true;
+    let _ = store_and_drain(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &p,
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+    let out = lookup(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &p,
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(
+        !matches!(out, LookupOutcome::Hit(_)),
+        "opt-out must not bypass the RFC 9111 §3.5 Authorization storage gate"
+    );
+}
+
+#[tokio::test]
+async fn authorization_must_revalidate_with_vary_is_partitioned_hit() {
+    // Positive control: must-revalidate grants §3.5 permission; Vary partitions.
+    let mut req_a = make_get_request("/auth-must-revalidate");
+    req_a.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer A"),
+    );
+    let key = CacheRequestKey::for_lookup(&req_a, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "max-age=60, must-revalidate", "private-a");
+    response
+        .headers_mut()
+        .insert(VARY, http::HeaderValue::from_static("Authorization"));
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+    let out_same = lookup(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(matches!(out_same, LookupOutcome::Hit(_)));
+}
+
+#[tokio::test]
+async fn authorization_s_maxage_with_vary_is_partitioned_hit() {
+    // Positive control: s-maxage grants §3.5 permission; Vary partitions.
+    let mut req_a = make_get_request("/auth-s-maxage");
+    req_a.headers_mut().insert(
+        http::header::AUTHORIZATION,
+        http::HeaderValue::from_static("Bearer A"),
+    );
+    let key = CacheRequestKey::for_lookup(&req_a, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "max-age=60, s-maxage=60", "private-a");
+    response
+        .headers_mut()
+        .insert(VARY, http::HeaderValue::from_static("Authorization"));
+    let backends = backend_map();
+    let _ = store_and_drain(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+    let out_same = lookup(
+        req_a.method(),
+        req_a.headers(),
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(matches!(out_same, LookupOutcome::Hit(_)));
+}
