@@ -535,7 +535,7 @@ async fn stale_if_error_serves_at_exact_expiry() {
     backend
         .put(
             "ns",
-            cache_body_storage_key("obj:sie:edge").as_str(),
+            cache_body_storage_key("obj:stale_err:edge").as_str(),
             b"hello",
             60,
         )
@@ -544,7 +544,7 @@ async fn stale_if_error_serves_at_exact_expiry() {
     let state = RevalidationState {
         backend,
         namespace: "ns".to_string(),
-        variant_key: "obj:sie:edge".to_string(),
+        variant_key: "obj:stale_err:edge".to_string(),
         request_method: Method::GET,
         request_directives: RequestDirectives::default(),
         stale_if_error_secs: Some(60),
@@ -566,7 +566,7 @@ async fn stale_if_error_serves_zero_lifetime_entry() {
     backend
         .put(
             "ns",
-            cache_body_storage_key("obj:sie:zero").as_str(),
+            cache_body_storage_key("obj:stale_err:zero").as_str(),
             b"hello",
             60,
         )
@@ -575,7 +575,7 @@ async fn stale_if_error_serves_zero_lifetime_entry() {
     let state = RevalidationState {
         backend,
         namespace: "ns".to_string(),
-        variant_key: "obj:sie:zero".to_string(),
+        variant_key: "obj:stale_err:zero".to_string(),
         request_method: Method::GET,
         request_directives: RequestDirectives::default(),
         stale_if_error_secs: Some(60),
@@ -590,12 +590,12 @@ async fn stale_if_error_serves_zero_lifetime_entry() {
 
 #[tokio::test]
 async fn must_revalidate_blocks_stale_if_error_at_exact_expiry() {
-    // Control: the stale prohibition still wins over the SIE window.
+    // Control: the stale prohibition still wins over the stale-if-error window.
     let now = super::util::now_millis();
     let state = RevalidationState {
         backend: Arc::new(MockBackend::new()),
         namespace: "ns".to_string(),
-        variant_key: "obj:sie:mr".to_string(),
+        variant_key: "obj:stale_err:mr".to_string(),
         request_method: Method::GET,
         request_directives: RequestDirectives::default(),
         stale_if_error_secs: Some(60),
