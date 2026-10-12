@@ -123,6 +123,8 @@ bearer:
     algorithms: [ES256, ES384, RS256, RS384, RS512, EdDSA]
 ```
 
+The bearer JWT source above omits `algorithms`, so it verifies `RS256, ES256`. The DPoP `algorithms` list shown is the default; omitting it selects the same six. Unknown algorithms fail closed.
+
 When required, the request must use `Authorization: DPoP ...` and exactly one
 DPoP proof field. qpx verifies the proof signature and public JWK, normalized
 HTTP method and target URI, proof age and identifier, access-token hash,
