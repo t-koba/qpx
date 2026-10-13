@@ -93,6 +93,7 @@ pub(in crate::upstream::origin::http_backend) async fn record_h3_alt_svc(
     let Ok((logical_host, _logical_port)) = origin.logical_parts(default_port) else {
         return;
     };
+    let mut found_valid_advertisement = false;
     for value in headers.get_all(alt_svc).iter() {
         let Ok(value) = value.to_str() else {
             continue;
@@ -101,12 +102,28 @@ pub(in crate::upstream::origin::http_backend) async fn record_h3_alt_svc(
             H3_ALT_SVC_CACHE.remove(&key).await;
             return;
         }
-        if let Some(endpoint) = parse_h3_alt_svc(value)
-            && alt_svc_endpoint_matches_same_origin_host(&endpoint, logical_host.as_str())
-        {
-            H3_ALT_SVC_CACHE.insert(key, endpoint).await;
-            return;
+        // A present Alt-Svc field replaces all cached alternatives for the
+        // origin (RFC7838 section 3.1). Search every alternative in the value
+        // for a usable same-host H3 endpoint so a leading cross-host or
+        // expired entry does not hide a later same-host entry in the same
+        // field.
+        for alternative in split_alt_svc_values(value) {
+            if let Some(endpoint) = parse_h3_alt_svc(alternative)
+                && alt_svc_endpoint_matches_same_origin_host(&endpoint, logical_host.as_str())
+            {
+                H3_ALT_SVC_CACHE.insert(key, endpoint).await;
+                return;
+            }
         }
+        if alt_svc_value_is_valid_advertisement(value) {
+            found_valid_advertisement = true;
+        }
+    }
+    // Present and syntactically valid, but no usable same-host H3 (h2-only,
+    // expired ma=0, or cross-host-only): the origin withdrew the route.
+    // Absent or malformed fields preserve the cached route.
+    if found_valid_advertisement {
+        H3_ALT_SVC_CACHE.remove(&key).await;
     }
 }
 
@@ -137,14 +154,20 @@ fn alt_svc_cache_key(origin: &OriginEndpoint) -> Result<String> {
 pub(super) fn parse_h3_alt_svc(value: &str) -> Option<AltSvcH3Endpoint> {
     for alternative in split_alt_svc_values(value) {
         let mut parts = alternative.split(';').map(str::trim);
-        let first = parts.next()?;
-        let (alpn, authority) = first.split_once('=')?;
+        let Some(first) = parts.next() else {
+            continue;
+        };
+        let Some((alpn, authority)) = first.split_once('=') else {
+            continue;
+        };
         let alpn = alpn.trim().trim_matches('"');
         if !alpn.eq_ignore_ascii_case("h3") && !alpn.to_ascii_lowercase().starts_with("h3-") {
             continue;
         }
         let authority = authority.trim().trim_matches('"');
-        let (connect_host, connect_port) = parse_alt_svc_authority(authority)?;
+        let Some((connect_host, connect_port)) = parse_alt_svc_authority(authority) else {
+            continue;
+        };
         let mut max_age = MAX_H3_ALT_SVC_MAX_AGE;
         for param in parts {
             let Some((name, raw)) = param.split_once('=') else {
@@ -156,10 +179,14 @@ pub(super) fn parse_h3_alt_svc(value: &str) -> Option<AltSvcH3Endpoint> {
                 max_age = Duration::from_secs(seconds).min(MAX_H3_ALT_SVC_MAX_AGE);
             }
         }
+        // An expired alternative does not invalidate the whole field; later
+        // alternatives in the same field may still be usable.
         if max_age.is_zero() {
-            return None;
+            continue;
         }
-        let expires_at = Instant::now().checked_add(max_age)?;
+        let Some(expires_at) = Instant::now().checked_add(max_age) else {
+            continue;
+        };
         return Some(AltSvcH3Endpoint {
             connect_host,
             connect_port,
@@ -167,6 +194,26 @@ pub(super) fn parse_h3_alt_svc(value: &str) -> Option<AltSvcH3Endpoint> {
         });
     }
     None
+}
+
+pub(super) fn alt_svc_value_is_valid_advertisement(value: &str) -> bool {
+    for alternative in split_alt_svc_values(value) {
+        let mut parts = alternative.split(';').map(str::trim);
+        let Some(first) = parts.next() else {
+            continue;
+        };
+        let Some((alpn, authority)) = first.split_once('=') else {
+            continue;
+        };
+        if alpn.trim().trim_matches('"').is_empty() {
+            continue;
+        }
+        let authority = authority.trim().trim_matches('"');
+        if parse_alt_svc_authority(authority).is_some() {
+            return true;
+        }
+    }
+    false
 }
 
 pub(super) fn alt_svc_endpoint_matches_same_origin_host(

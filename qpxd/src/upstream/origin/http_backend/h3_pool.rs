@@ -505,8 +505,11 @@ async fn stream_h3_request_body(
 
 #[cfg(test)]
 mod tests {
+    use crate::upstream::origin::OriginEndpoint;
     use crate::upstream::origin::http_backend::h3_pool::alt_svc::{
-        MAX_H3_ALT_SVC_MAX_AGE, alt_svc_endpoint_matches_same_origin_host, parse_h3_alt_svc,
+        MAX_H3_ALT_SVC_MAX_AGE, alt_svc_endpoint_matches_same_origin_host,
+        alt_svc_value_is_valid_advertisement, cached_alt_svc_h3_endpoint,
+        forget_alt_svc_h3_endpoint, parse_h3_alt_svc, record_h3_alt_svc,
     };
     use crate::upstream::origin::http_backend::h3_pool::response::{
         declared_h3_response_body_length, enforce_h3_body_content_length_complete,
@@ -773,5 +776,155 @@ mod tests {
                 .expect("declared"),
             Some(10)
         );
+    }
+
+    #[test]
+    fn alt_svc_parser_skips_expired_entry_for_later_usable_h3() {
+        let parsed = parse_h3_alt_svc(r#"h3=":443"; ma=0, h3=":8443"; ma=60"#)
+            .expect("later h3 survives ma=0");
+        assert_eq!(parsed.connect_port, 8443);
+    }
+
+    #[test]
+    fn alt_svc_parser_skips_malformed_entry_for_later_usable_h3() {
+        let parsed = parse_h3_alt_svc(r#"not-a-field, h3=":8443"; ma=60"#)
+            .expect("later h3 survives garbage");
+        assert_eq!(parsed.connect_port, 8443);
+    }
+
+    #[test]
+    fn alt_svc_single_expired_h3_has_no_usable_endpoint() {
+        assert!(parse_h3_alt_svc(r#"h3=":8443"; ma=0"#).is_none());
+        assert!(alt_svc_value_is_valid_advertisement(r#"h3=":8443"; ma=0"#));
+        assert!(alt_svc_value_is_valid_advertisement(r#"h2=":443""#));
+        assert!(!alt_svc_value_is_valid_advertisement("not-a-field"));
+        assert!(!alt_svc_value_is_valid_advertisement(""));
+    }
+
+    fn alt_svc_test_origin(suffix: &str) -> OriginEndpoint {
+        OriginEndpoint::direct(format!("https://alt-svc-{suffix}.example:443"))
+    }
+
+    fn alt_svc_headers(values: &[&str]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for value in values {
+            headers.append(
+                http::header::HeaderName::from_static("alt-svc"),
+                value.parse().expect("alt-svc value"),
+            );
+        }
+        headers
+    }
+
+    #[tokio::test]
+    async fn alt_svc_withdrawn_h3_replaces_seeded_route() {
+        let origin = alt_svc_test_origin("withdrawn-replaces");
+        forget_alt_svc_h3_endpoint(&origin).await;
+
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=600"#])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("seeded")
+                .is_some()
+        );
+
+        // Absent header preserves the seeded route.
+        record_h3_alt_svc(&origin, &http::HeaderMap::new()).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("absent keeps")
+                .is_some()
+        );
+
+        // Expired ma=0 withdraws the route.
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=0"#])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("ma=0 clears")
+                .is_none()
+        );
+
+        // h2-only advertisement withdraws the route.
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=600"#])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("reseed")
+                .is_some()
+        );
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h2=":443""#])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("h2-only clears")
+                .is_none()
+        );
+
+        // Malformed field preserves the route.
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=600"#])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("reseed")
+                .is_some()
+        );
+        record_h3_alt_svc(&origin, &alt_svc_headers(&["not-a-field"])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("malformed keeps")
+                .is_some()
+        );
+
+        // Explicit clear removes the route.
+        record_h3_alt_svc(&origin, &alt_svc_headers(&["clear"])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("clear clears")
+                .is_none()
+        );
+
+        forget_alt_svc_h3_endpoint(&origin).await;
+    }
+
+    #[tokio::test]
+    async fn alt_svc_usable_h3_wins_within_mixed_field() {
+        let origin = alt_svc_test_origin("mixed-field-wins");
+        forget_alt_svc_h3_endpoint(&origin).await;
+
+        // Leading cross-host entry must not hide a later same-host entry.
+        record_h3_alt_svc(
+            &origin,
+            &alt_svc_headers(&[r#"h3="other.example:443"; ma=60, h3=":8443"; ma=60"#]),
+        )
+        .await;
+        let cached = cached_alt_svc_h3_endpoint(&origin)
+            .await
+            .expect("mixed")
+            .expect("kept");
+        assert_eq!(
+            cached.connect_authority(443).expect("authority"),
+            "alt-svc-mixed-field-wins.example:8443"
+        );
+
+        // Leading expired entry must not hide a later usable entry.
+        forget_alt_svc_h3_endpoint(&origin).await;
+        record_h3_alt_svc(
+            &origin,
+            &alt_svc_headers(&[r#"h3=":443"; ma=0, h3=":8443"; ma=60"#]),
+        )
+        .await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("expired-first")
+                .is_some()
+        );
+
+        forget_alt_svc_h3_endpoint(&origin).await;
     }
 }

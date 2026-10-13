@@ -689,7 +689,13 @@ async fn proxy_https_with_options(
         )
         .await
         {
-            Ok(proxied) => return Ok(proxied),
+            Ok(proxied) => {
+                // The automatic H3 path also carries Alt-Svc withdrawals
+                // (clear, ma=0, h2-only); feed it through the same replacement
+                // path so a withdrawn route does not outlive its H3 response.
+                h3_pool::record_h3_alt_svc(origin, proxied.response.headers()).await;
+                return Ok(proxied);
+            }
             Err(err) => {
                 h3_pool::forget_alt_svc_h3_endpoint(origin).await;
                 warn!(error = ?err, "Alt-Svc HTTP/3 upstream attempt failed; falling back to HTTPS");
