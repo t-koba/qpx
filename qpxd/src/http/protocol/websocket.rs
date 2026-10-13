@@ -1,5 +1,6 @@
 use hyper_util::rt::TokioIo;
 use qpx_http::body::Body;
+use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
 use tokio::time::timeout;
@@ -20,14 +21,17 @@ pub(crate) fn is_websocket_upgrade(
     if method != http::Method::GET {
         return Err(anyhow::anyhow!("WebSocket upgrade requires GET"));
     }
-    if headers
-        .get_all("sec-websocket-version")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .filter(|value| value.trim() == "13")
-        .count()
-        != 1
-    {
+    let mut versions = headers.get_all("sec-websocket-version").iter();
+    let version = versions
+        .next()
+        .ok_or_else(|| anyhow::anyhow!("WebSocket version must occur exactly once"))?;
+    if versions.next().is_some() {
+        return Err(anyhow::anyhow!("WebSocket version must occur exactly once"));
+    }
+    let version = version
+        .to_str()
+        .map_err(|_| anyhow::anyhow!("WebSocket version is not ASCII"))?;
+    if trim_http_ows(version) != "13" {
         return Err(anyhow::anyhow!("WebSocket version must be exactly 13"));
     }
     let mut keys = headers.get_all("sec-websocket-key").iter();
@@ -44,15 +48,35 @@ pub(crate) fn is_websocket_upgrade(
     if decoded.len() != 16 {
         return Err(anyhow::anyhow!("WebSocket key must decode to 16 bytes"));
     }
+    let _ = parse_websocket_subprotocol_offers(headers)?;
+    Ok(true)
+}
+
+fn trim_http_ows(value: &str) -> &str {
+    value.trim_matches(|character| matches!(character, ' ' | '\t'))
+}
+
+/// Validate the combined, case-sensitive list of client subprotocol offers.
+fn parse_websocket_subprotocol_offers(headers: &http::HeaderMap) -> anyhow::Result<Vec<String>> {
+    let mut seen = HashSet::new();
+    let mut protocols = Vec::new();
     for value in headers.get_all("sec-websocket-protocol") {
         let value = value
             .to_str()
             .map_err(|_| anyhow::anyhow!("WebSocket subprotocol is not ASCII"))?;
-        if value.split(',').any(|token| !is_http_token(token.trim())) {
-            return Err(anyhow::anyhow!("WebSocket subprotocol token is invalid"));
+        for token in value.split(',').map(trim_http_ows) {
+            if !is_http_token(token) {
+                return Err(anyhow::anyhow!("WebSocket subprotocol token is invalid"));
+            }
+            if !seen.insert(token) {
+                return Err(anyhow::anyhow!(
+                    "WebSocket subprotocol offers must be unique"
+                ));
+            }
+            protocols.push(token.to_owned());
         }
     }
-    Ok(true)
+    Ok(protocols)
 }
 
 fn is_http_token(value: &str) -> bool {
@@ -96,7 +120,7 @@ pub(crate) fn websocket_response_expectation(
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|value| value.split(','))
-        .map(str::trim)
+        .map(trim_http_ows)
         .filter(|value| !value.is_empty())
         .map(str::to_string)
         .collect();
@@ -121,23 +145,12 @@ pub(crate) fn validate_extended_connect_websocket_request(
     let versions = headers
         .get_all("sec-websocket-version")
         .iter()
-        .map(|value| value.to_str().map(str::trim))
+        .map(|value| value.to_str().map(trim_http_ows))
         .collect::<Result<Vec<_>, _>>()?;
     if versions.as_slice() != ["13"] {
         return Err(anyhow::anyhow!("WebSocket version must be exactly 13"));
     }
-    let mut protocols = Vec::new();
-    for value in headers.get_all("sec-websocket-protocol") {
-        let value = value
-            .to_str()
-            .map_err(|_| anyhow::anyhow!("WebSocket subprotocol is not ASCII"))?;
-        for token in value.split(',').map(str::trim) {
-            if !is_http_token(token) {
-                return Err(anyhow::anyhow!("WebSocket subprotocol token is invalid"));
-            }
-            protocols.push(token.to_owned());
-        }
-    }
+    let protocols = parse_websocket_subprotocol_offers(headers)?;
     Ok(Some(protocols))
 }
 
@@ -283,6 +296,18 @@ mod tests {
     };
     use http::HeaderMap;
 
+    fn valid_h1_websocket_headers() -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::UPGRADE, "websocket".parse().unwrap());
+        headers.insert(http::header::CONNECTION, "upgrade".parse().unwrap());
+        headers.insert("sec-websocket-version", "13".parse().unwrap());
+        headers.insert(
+            "sec-websocket-key",
+            "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap(),
+        );
+        headers
+    }
+
     #[test]
     fn websocket_upgrade_accepts_list_and_repeated_connection_fields() {
         let mut headers = HeaderMap::new();
@@ -348,6 +373,121 @@ mod tests {
                 &["chat".to_owned()],
             )
             .is_err()
+        );
+    }
+    #[test]
+    fn h1_websocket_requires_one_version_field_containing_13() {
+        let invalid_versions: Vec<Vec<&str>> = vec![
+            vec![],
+            vec!["12"],
+            vec!["13", "12"],
+            vec!["12", "13"],
+            vec!["13", "13"],
+            vec!["13, 12"],
+            vec!["13", ""],
+        ];
+        for values in &invalid_versions {
+            let mut headers = valid_h1_websocket_headers();
+            headers.remove("sec-websocket-version");
+            for value in values {
+                headers.append("sec-websocket-version", value.parse().unwrap());
+            }
+            assert!(
+                is_websocket_upgrade(&http::Method::GET, &headers).is_err(),
+                "accepted versions {values:?}"
+            );
+        }
+
+        let mut headers = valid_h1_websocket_headers();
+        headers.append(
+            "sec-websocket-version",
+            http::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        assert!(is_websocket_upgrade(&http::Method::GET, &headers).is_err());
+
+        let mut headers = valid_h1_websocket_headers();
+        headers.insert(
+            "sec-websocket-version",
+            http::HeaderValue::from_bytes(b" \t13\t ").unwrap(),
+        );
+        assert!(is_websocket_upgrade(&http::Method::GET, &headers).unwrap());
+    }
+
+    #[test]
+    fn websocket_subprotocol_offers_are_unique_across_fields_and_lists() {
+        let invalid_offers: Vec<Vec<&str>> = vec![
+            vec!["chat, chat"],
+            vec!["chat", "chat"],
+            vec!["chat, superchat", "superchat"],
+            vec![" chat\t,chat"],
+        ];
+        for values in &invalid_offers {
+            let mut h1_headers = valid_h1_websocket_headers();
+            for value in values {
+                h1_headers.append("sec-websocket-protocol", value.parse().unwrap());
+            }
+            assert!(
+                is_websocket_upgrade(&http::Method::GET, &h1_headers).is_err(),
+                "accepted duplicate offers {values:?}"
+            );
+        }
+
+        let mut h1_headers = valid_h1_websocket_headers();
+        h1_headers.append("sec-websocket-protocol", "chat".parse().unwrap());
+        h1_headers.append("sec-websocket-protocol", "superchat".parse().unwrap());
+        assert!(is_websocket_upgrade(&http::Method::GET, &h1_headers).unwrap());
+
+        let mut h1_headers = valid_h1_websocket_headers();
+        h1_headers.insert("sec-websocket-protocol", "chat, Chat".parse().unwrap());
+        assert!(is_websocket_upgrade(&http::Method::GET, &h1_headers).unwrap());
+    }
+
+    #[test]
+    fn extended_connect_requires_one_version_and_unique_ordered_offers() {
+        let mut duplicate_version = HeaderMap::new();
+        duplicate_version.insert("sec-websocket-version", "13".parse().unwrap());
+        duplicate_version.append("sec-websocket-version", "12".parse().unwrap());
+        assert!(
+            validate_extended_connect_websocket_request("websocket", &duplicate_version).is_err()
+        );
+
+        let invalid_offers = [
+            vec!["chat, chat"],
+            vec!["chat", "chat"],
+            vec!["chat, superchat", "superchat"],
+            vec![" chat\t,chat"],
+        ];
+        for values in &invalid_offers {
+            let mut headers = HeaderMap::new();
+            headers.insert("sec-websocket-version", "13".parse().unwrap());
+            for value in values {
+                headers.append("sec-websocket-protocol", value.parse().unwrap());
+            }
+            assert!(
+                validate_extended_connect_websocket_request("websocket", &headers).is_err(),
+                "accepted duplicate offers {values:?}"
+            );
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-version", "13".parse().unwrap());
+        headers.append("sec-websocket-protocol", "chat".parse().unwrap());
+        headers.append("sec-websocket-protocol", "superchat".parse().unwrap());
+        assert_eq!(
+            validate_extended_connect_websocket_request("websocket", &headers)
+                .unwrap()
+                .unwrap(),
+            ["chat", "superchat"]
+        );
+
+        let mut case_distinct = HeaderMap::new();
+        case_distinct.insert("sec-websocket-version", "13".parse().unwrap());
+        case_distinct.insert("sec-websocket-protocol", "chat, Chat".parse().unwrap());
+        assert_eq!(
+            validate_extended_connect_websocket_request("websocket", &case_distinct)
+                .unwrap()
+                .unwrap(),
+            ["chat", "Chat"]
         );
     }
 }
