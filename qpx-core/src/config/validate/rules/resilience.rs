@@ -184,9 +184,9 @@ fn validate_resilience_fields(resilience: &ResilienceConfig, context: &str) -> R
                     "{context} resilience.outlier_detection.latency.p95_ms must be >= 1"
                 ));
             }
-            if latency.min_requests.is_some() {
+            if matches!(latency.min_requests, Some(0)) {
                 return Err(anyhow!(
-                    "{context} resilience.outlier_detection.latency.min_requests is not supported"
+                    "{context} resilience.outlier_detection.latency.min_requests must be >= 1"
                 ));
             }
         }
@@ -493,14 +493,14 @@ mod unsupported_knob_tests {
             outlier_detection: Some(OutlierDetectionConfig {
                 latency: Some(LatencyThresholdConfig {
                     p95_ms: Some(100),
-                    min_requests: Some(10),
+                    min_requests: Some(0),
                 }),
                 ..Default::default()
             }),
             ..Default::default()
         };
         let err = validate_resilience_fields(&latency_floor, "test").expect_err("min_requests");
-        assert!(err.to_string().contains("not supported"), "{err}");
+        assert!(err.to_string().contains("must be >= 1"), "{err}");
 
         let half_open = ResilienceConfig {
             half_open: Some(HalfOpenConfig {
@@ -556,7 +556,7 @@ mod unsupported_knob_tests {
             outlier_detection: Some(OutlierDetectionConfig {
                 latency: Some(LatencyThresholdConfig {
                     p95_ms: Some(100),
-                    min_requests: None,
+                    min_requests: Some(50),
                 }),
                 ..Default::default()
             }),

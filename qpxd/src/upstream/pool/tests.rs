@@ -18,6 +18,7 @@ fn policy() -> PassiveHealthPolicy {
         consecutive_resets: 1,
         max_ejection: Duration::from_secs(30),
         latency_threshold: None,
+        latency_min_samples: super::cluster::LATENCY_P95_DEFAULT_MIN_SAMPLES,
     }
 }
 
@@ -148,6 +149,34 @@ fn dynamic_discovery_refresh_reuses_existing_endpoint_state() {
 }
 
 #[test]
+fn pooled_endpoint_outlier_does_not_trip_p95() {
+    let endpoint = Arc::new(ManagedUpstreamEndpoint::new(
+        parse_upstream_proxy_endpoint("http://127.0.0.1:3128").expect("endpoint"),
+    ));
+    let policy = PassiveHealthPolicy {
+        consecutive_5xx: 100,
+        consecutive_timeouts: 100,
+        consecutive_connect_errors: 100,
+        consecutive_resets: 100,
+        max_ejection: Duration::from_secs(30),
+        latency_threshold: Some(Duration::from_millis(100)),
+        latency_min_samples: super::cluster::LATENCY_P95_DEFAULT_MIN_SAMPLES,
+    };
+    for _ in 0..99 {
+        endpoint.mark_passive_latency(Some(&policy), Duration::from_millis(1));
+    }
+    endpoint.mark_passive_latency(Some(&policy), Duration::from_millis(101));
+    assert!(
+        endpoint.is_healthy(now_millis()),
+        "single 101ms sample ejected a pooled endpoint with p95 1ms"
+    );
+    for _ in 0..100 {
+        endpoint.mark_passive_latency(Some(&policy), Duration::from_millis(150));
+    }
+    assert!(!endpoint.is_healthy(now_millis()));
+}
+
+#[test]
 fn cluster_adaptive_failure_rate_ejects_endpoint() {
     let endpoint = Arc::new(ManagedUpstreamEndpoint::new(
         parse_upstream_proxy_endpoint("http://127.0.0.1:3128").expect("endpoint"),
@@ -159,6 +188,7 @@ fn cluster_adaptive_failure_rate_ejects_endpoint() {
         consecutive_resets: 100,
         max_ejection: Duration::from_secs(30),
         latency_threshold: None,
+        latency_min_samples: super::cluster::LATENCY_P95_DEFAULT_MIN_SAMPLES,
     };
     for _ in 0..4 {
         endpoint.mark_passive_success();
