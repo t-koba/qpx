@@ -148,22 +148,37 @@ class PolicyTests(unittest.TestCase):
                     result, count = self.measure(lane, [bad, pair(lane)], f"{index}-{metric}")
                     self.assertEqual((result["status"], count, exit_code([result])), ("REGRESSED", 1, 1))
 
-    def test_invalid_then_first_valid_and_exhaustion(self):
+    def test_only_invalid_pinned_reference_spread_is_retried(self):
         for index, lane in enumerate(self.pair_lanes):
-            for role in ("current", "previous"):
-                invalid = pair(lane, throughput=.5, spread=2000, invalid_role=role)
-                # Invalid measurement must not even evaluate the bad performance.
-                result = evaluate(invalid, lane, True)
-                self.assertEqual(result["status"], "RETRYABLE_INVALID")
-                self.assertNotIn("ratios", result)
-                valid, count = self.measure(lane, [invalid, pair(lane)], f"{index}-{role}-equal")
-                self.assertEqual((valid["status"], count), ("PASSED", 2))
-                bad, count = self.measure(lane, [invalid, pair(lane, p99=1.2), pair(lane)], f"{index}-{role}-bad")
-                self.assertEqual((bad["status"], count), ("REGRESSED", 2))
-                exhausted, count = self.measure(lane, [invalid] * 3, f"{index}-{role}-exhausted")
-                self.assertEqual((exhausted["status"], count, exit_code([exhausted])), ("INCONCLUSIVE", 3, 75))
-                self.assertEqual(summary([exhausted])["coverage"]["valid"], 0)
-                self.assertTrue(summary([exhausted])["coverage"]["unmeasured"])
+            candidate_invalid = pair(lane, throughput=.5, spread=2000, invalid_role="current")
+            result = evaluate(candidate_invalid, lane, True)
+            self.assertEqual(result["status"], "INCONCLUSIVE")
+            self.assertNotIn("ratios", result)
+            # Candidate variance can itself be a regression; a later attractive
+            # sample must not erase this inconclusive measurement.
+            candidate, count = self.measure(
+                lane, [candidate_invalid, pair(lane)], f"{index}-candidate-inconclusive"
+            )
+            self.assertEqual((candidate["status"], count, exit_code([candidate])), ("INCONCLUSIVE", 1, 75))
+
+            reference_invalid = pair(lane, throughput=.5, spread=2000, invalid_role="previous")
+            result = evaluate(reference_invalid, lane, True)
+            self.assertEqual(result["status"], "RETRYABLE_INVALID")
+            self.assertNotIn("ratios", result)
+            valid, count = self.measure(
+                lane, [reference_invalid, pair(lane)], f"{index}-reference-recovered"
+            )
+            self.assertEqual((valid["status"], count), ("PASSED", 2))
+            bad, count = self.measure(
+                lane, [reference_invalid, pair(lane, p99=1.2), pair(lane)], f"{index}-reference-bad"
+            )
+            self.assertEqual((bad["status"], count), ("REGRESSED", 2))
+            exhausted, count = self.measure(
+                lane, [reference_invalid] * 3, f"{index}-reference-exhausted"
+            )
+            self.assertEqual((exhausted["status"], count, exit_code([exhausted])), ("INCONCLUSIVE", 3, 75))
+            self.assertEqual(summary([exhausted])["coverage"]["valid"], 0)
+            self.assertTrue(summary([exhausted])["coverage"]["unmeasured"])
 
     def test_regression_survives_another_inconclusive_lane(self):
         bad, _ = self.measure(self.lanes[0], [pair(self.lanes[0], p99=1.2)], "bad")
@@ -190,12 +205,21 @@ class PolicyTests(unittest.TestCase):
             result, _ = self.measure(lane, [payload], f"identity-{index}")
             self.assertEqual(result["status"], "ERROR")
 
-    def test_competitive_reference_spread_is_retryable_not_passed(self):
+    def test_competitive_candidate_spread_is_not_retried_but_reference_spread_is(self):
         for index, lane in enumerate(self.lanes):
             valid = [record(lane, p) for p in [lane["qpx"], *lane["references"]]]
-            invalid = copy.deepcopy(valid)
-            invalid[-1]["sample_spread"]["requests_per_sec_ratio"] = 2000
-            result, count = self.measure(lane, [invalid, valid], str(index), paired=False)
+            candidate_invalid = copy.deepcopy(valid)
+            candidate_invalid[0]["sample_spread"]["requests_per_sec_ratio"] = 2000
+            result, count = self.measure(
+                lane, [candidate_invalid, valid], f"{index}-candidate", paired=False
+            )
+            self.assertEqual((result["status"], count, exit_code([result])), ("INCONCLUSIVE", 1, 75))
+
+            reference_invalid = copy.deepcopy(valid)
+            reference_invalid[-1]["sample_spread"]["requests_per_sec_ratio"] = 2000
+            result, count = self.measure(
+                lane, [reference_invalid, valid], f"{index}-reference", paired=False
+            )
             self.assertEqual((result["status"], count), ("REPORT_ONLY", 2))
 
     def test_public_checker_entrypoints_and_historical_reports(self):

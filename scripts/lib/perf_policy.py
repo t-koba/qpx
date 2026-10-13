@@ -304,17 +304,22 @@ def evaluate(records, lane, paired=False, mode=None, baseline=None):
     if paired:
         pair_identity(group, lane)
     reasons = []
+    invalid_names = set()
     for index, record in enumerate(group):
         for field, cap in spread_limits(lane, paired or index == 0).items():
             spread = number(record.get("sample_spread", {}), field)
             if spread < 1:
                 fail(f"invalid spread {field}: {spread}")
             if spread > cap + 1e-12:
+                invalid_names.add(names[index])
                 reasons.append(f"{names[index]} {field} {spread:.6f} > cap {cap:.6f}")
     result = {"lane": lane["name"], "assessment": "paired" if paired else "competitive", "mode": mode}
     if reasons:
-        # Performance is deliberately not evaluated for invalid measurements.
-        return {**result, "status": "RETRYABLE_INVALID", "reasons": reasons}
+        # Never remeasure an unstable candidate: only reference-side invalidity
+        # may trigger a retry, since candidate variance can itself be a regression.
+        candidate = "current" if paired else lane["qpx"]
+        status = "INCONCLUSIVE" if candidate in invalid_names else "RETRYABLE_INVALID"
+        return {**result, "status": status, "reasons": reasons}
     current = group[0]
     references = group[1:]
     if not paired and lane["kind"] == "proxy":
@@ -444,7 +449,7 @@ def summary(results):
 
 
 def bounded_measure(lane, paired, measure, artifact_dir, mode=None, baseline=None):
-    """First valid attempt wins. A functional error or valid miss is terminal."""
+    """Retry invalid reference samples only; candidate instability stays inconclusive."""
     assessment_name = "paired" if paired else "competitive"
     if paired:
         skipped = paired_not_applicable(lane, mode)
