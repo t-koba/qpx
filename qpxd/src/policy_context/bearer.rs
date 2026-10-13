@@ -1005,6 +1005,28 @@ impl JwkVerificationKey {
                     key: Arc::from(key),
                 }))
             }
+            "EC" if jwk.crv.as_deref() == Some("P-384")
+                && jwk
+                    .alg
+                    .as_deref()
+                    .is_none_or(|algorithm| algorithm == "ES384") =>
+            {
+                let mut key = vec![4];
+                key.extend(
+                    URL_SAFE_NO_PAD.decode(jwk.x.ok_or_else(|| anyhow!("JWK x is missing"))?)?,
+                );
+                key.extend(
+                    URL_SAFE_NO_PAD.decode(jwk.y.ok_or_else(|| anyhow!("JWK y is missing"))?)?,
+                );
+                if key.len() != 97 {
+                    return Err(anyhow!("P-384 JWK coordinates have invalid length"));
+                }
+                Ok(Some(Self {
+                    kid: jwk.kid,
+                    algorithm: JwtAlgorithm::Es384,
+                    key: Arc::from(key),
+                }))
+            }
             "RSA"
                 if jwk
                     .alg
@@ -1103,6 +1125,27 @@ mod tests {
 
         let keys = verification_keys(document).expect("non-verification keys should be ignored");
 
+        assert!(keys.is_empty());
+    }
+
+    #[test]
+    fn materializes_p384_jwks_key_for_es384() {
+        let x = URL_SAFE_NO_PAD.encode([3u8; 48]);
+        let y = URL_SAFE_NO_PAD.encode([4u8; 48]);
+        let document = parse_jwks(&format!(
+            r#"{{"keys":[{{"kty":"EC","kid":"p384","crv":"P-384","alg":"ES384","x":"{x}","y":"{y}"}}]}}"#
+        ));
+        let keys = verification_keys(document).expect("P-384 keys should convert");
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].kid.as_deref(), Some("p384"));
+        assert_eq!(keys[0].algorithm, JwtAlgorithm::Es384);
+        assert_eq!(keys[0].key.len(), 97);
+        assert_eq!(keys[0].key[0], 4);
+        // Mismatched alg keeps the key out of the verification set.
+        let document = parse_jwks(&format!(
+            r#"{{"keys":[{{"kty":"EC","kid":"p384","crv":"P-384","alg":"RS256","x":"{x}","y":"{y}"}}]}}"#
+        ));
+        let keys = verification_keys(document).expect("mismatched keys convert");
         assert!(keys.is_empty());
     }
 
