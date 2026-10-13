@@ -2065,8 +2065,16 @@ pub struct ClientHints {
 }
 
 impl ClientHints {
-    /// Parses an RFC 8942 comma-separated field-name list.
+    /// Parses an RFC 8942 comma-separated field-name list. An explicitly
+    /// empty value is a valid empty list (e.g. it clears persisted
+    /// Accept-CH hints); it is distinct from an omitted field.
     pub fn parse(value: &str, field: &'static str) -> Result<Self> {
+        if value.trim().is_empty() {
+            return Ok(Self {
+                names: Vec::new(),
+                serialized: String::new(),
+            });
+        }
         let mut names = Vec::new();
         let mut seen = BTreeSet::new();
         for raw in value.split(',') {
@@ -2084,9 +2092,6 @@ impl ClientHints {
                 });
             }
             names.push(name);
-        }
-        if names.is_empty() {
-            return Err(invalid(field, "field-name list must not be empty"));
         }
         let serialized = names
             .iter()
@@ -2815,5 +2820,53 @@ mod fetch_metadata_vary_tests {
             first,
             vec!["Accept-Encoding, sec-fetch-site, sec-fetch-mode, sec-fetch-dest".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod accept_ch_reset_tests {
+    use super::*;
+
+    #[test]
+    fn empty_accept_ch_compiles_and_emits_present_empty_field() {
+        let policy = BrowserResponsePolicy::compile(&BrowserResponsePolicyConfig {
+            accept_ch: Some(String::new()),
+            ..Default::default()
+        })
+        .expect("empty accept_ch compiles");
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT_CH, HeaderValue::from_static("sec-ch-ua"));
+        policy.apply(&mut headers);
+        let value = headers.get(ACCEPT_CH).expect("empty field is present");
+        assert_eq!(value.to_str().expect("ascii value"), "");
+    }
+
+    #[test]
+    fn omitted_accept_ch_emits_no_field() {
+        let policy = BrowserResponsePolicy::compile(&BrowserResponsePolicyConfig {
+            ..Default::default()
+        })
+        .expect("minimal policy compiles");
+        let mut headers = HeaderMap::new();
+        headers.insert(ACCEPT_CH, HeaderValue::from_static("sec-ch-ua"));
+        policy.apply(&mut headers);
+        assert!(!headers.contains_key(ACCEPT_CH));
+    }
+
+    #[test]
+    fn nonempty_critical_ch_with_empty_accept_ch_is_rejected() {
+        let config = BrowserResponsePolicyConfig {
+            accept_ch: Some(String::new()),
+            critical_ch: Some("Sec-CH-UA".to_string()),
+            ..Default::default()
+        };
+        let error = BrowserResponsePolicy::compile(&config).expect_err("invalid combination");
+        assert!(matches!(error, BrowserPolicyError::Inconsistent { .. }));
+    }
+
+    #[test]
+    fn malformed_nonempty_lists_stay_rejected() {
+        assert!(AcceptClientHints::parse("Sec-CH-UA,, Sec-CH-DPR").is_err());
+        assert!(AcceptClientHints::parse("Sec-CH-UA, Sec-CH-UA").is_err());
     }
 }

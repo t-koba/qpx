@@ -47,7 +47,10 @@ clients must use the same route.
 
 `browser_security` values are parsed according to their individual grammars at
 configuration load. Duplicate directives and inconsistent combinations such
-as a Critical-CH value absent from Accept-CH fail startup. qpx removes every
+as a Critical-CH value absent from Accept-CH fail startup. To roll back a
+previously emitted hint opt-in, configure `accept_ch: ""`: qpx emits a
+present-but-empty Accept-CH field, which clears persisted client hints,
+whereas omitting `accept_ch` emits no field at all. qpx removes every
 managed target-provided value before applying the configured value.
 
 Cookie enforcement parses every Set-Cookie field independently and preserves
