@@ -201,6 +201,15 @@ impl CorsPolicy {
         response_headers: &mut HeaderMap,
     ) {
         remove_cors_response_fields(response_headers);
+        if !request.is_some_and(|request| request.is_preflight()) {
+            // The ACAO output for actual responses depends on the request
+            // Origin (exact echo, `*` versus absent, or nothing when
+            // denied), so every variant through a configured policy must
+            // key downstream caches on Origin - including absent and
+            // denied variants that carry no ACAO at all. Preflights keep
+            // their own response contract below.
+            append_vary(response_headers, "Origin");
+        }
         let Some(request) = request.filter(|request| !request.is_preflight()) else {
             return;
         };
@@ -731,5 +740,97 @@ mod tests {
             policy.apply_preflight_response(&request, &mut HeaderMap::new()),
             Err(CorsRejection::Header)
         );
+    }
+}
+
+#[cfg(test)]
+mod actual_vary_tests {
+    use super::*;
+
+    fn test_policy() -> CorsPolicy {
+        CorsPolicy::compile(&CorsConfig {
+            allowed_origins: vec!["https://app.example".to_owned()],
+            allowed_methods: vec!["GET".to_owned()],
+            allowed_headers: Vec::new(),
+            expose_headers: Vec::new(),
+            allow_credentials: false,
+            max_age_seconds: None,
+            allow_private_network: false,
+        })
+        .expect("policy")
+    }
+
+    fn actual_request(origin: &str) -> CorsRequest {
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_str(origin).expect("origin value"));
+        CorsRequest::parse(&Method::GET, &headers)
+            .expect("valid request")
+            .expect("CORS request")
+    }
+
+    fn vary_values(headers: &HeaderMap) -> Vec<String> {
+        headers
+            .get_all(VARY)
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn absent_origin_still_marks_vary_origin() {
+        let policy = test_policy();
+        let mut response = HeaderMap::new();
+        policy.apply_actual_response(None, &mut response);
+        assert!(response.get(ALLOW_ORIGIN).is_none());
+        assert_eq!(vary_values(&response), vec!["Origin".to_string()]);
+    }
+
+    #[test]
+    fn denied_origin_still_marks_vary_origin() {
+        let policy = test_policy();
+        let request = actual_request("https://denied.example");
+        let mut response = HeaderMap::new();
+        policy.apply_actual_response(Some(&request), &mut response);
+        assert!(response.get(ALLOW_ORIGIN).is_none());
+        assert_eq!(vary_values(&response), vec!["Origin".to_string()]);
+    }
+
+    #[test]
+    fn allowed_origin_keeps_single_vary_origin() {
+        let policy = test_policy();
+        let request = actual_request("https://app.example");
+        let mut response = HeaderMap::new();
+        policy.apply_actual_response(Some(&request), &mut response);
+        assert_eq!(response[ALLOW_ORIGIN], "https://app.example");
+        assert_eq!(vary_values(&response), vec!["Origin".to_string()]);
+    }
+
+    #[test]
+    fn existing_vary_lines_survive_denied_origin() {
+        let policy = test_policy();
+        let request = actual_request("https://denied.example");
+        let mut response = HeaderMap::new();
+        response.insert(VARY, HeaderValue::from_static("Accept-Encoding"));
+        policy.apply_actual_response(Some(&request), &mut response);
+        assert_eq!(
+            vary_values(&response),
+            vec!["Accept-Encoding".to_string(), "Origin".to_string()]
+        );
+    }
+
+    #[test]
+    fn preflight_request_keeps_own_contract_without_actual_vary() {
+        let policy = test_policy();
+        let mut headers = HeaderMap::new();
+        headers.insert(ORIGIN, HeaderValue::from_static("https://app.example"));
+        headers.insert(REQUEST_METHOD, HeaderValue::from_static("PUT"));
+        let request = CorsRequest::parse(&Method::OPTIONS, &headers)
+            .expect("valid request")
+            .expect("CORS request");
+        assert!(request.is_preflight());
+        let mut response = HeaderMap::new();
+        policy.apply_actual_response(Some(&request), &mut response);
+        assert!(response.get(ALLOW_ORIGIN).is_none());
+        assert!(vary_values(&response).is_empty());
     }
 }
