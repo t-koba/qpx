@@ -98,32 +98,33 @@ impl ReverseAffinityRuntime {
     pub(in crate::reverse) fn from_config(
         config: Option<&qpx_core::config::ReverseAffinityConfig>,
     ) -> Result<Self> {
-        let key = match config.map(|cfg| cfg.key.trim().to_ascii_lowercase()) {
-            None => ReverseAffinityKey::SrcIp,
-            Some(key) if key == "src_ip" => ReverseAffinityKey::SrcIp,
-            Some(key) if key == "host" => ReverseAffinityKey::Host,
-            Some(key) if key == "header" => ReverseAffinityKey::Header(Arc::<str>::from(
-                config
-                    .and_then(|cfg| cfg.header.as_deref())
-                    .unwrap_or_default()
-                    .trim(),
+        let Some(config) = config else {
+            return Ok(Self {
+                key: ReverseAffinityKey::SrcIp,
+            });
+        };
+        let Some(canonical) = config.canonical_key() else {
+            return Err(anyhow::anyhow!(
+                "unknown reverse affinity key: {}",
+                config.key.trim()
+            ));
+        };
+        let key = match canonical {
+            "src_ip" => ReverseAffinityKey::SrcIp,
+            "host" => ReverseAffinityKey::Host,
+            "header" => ReverseAffinityKey::Header(Arc::<str>::from(
+                config.header.as_deref().unwrap_or_default().trim(),
             )),
-            Some(key) if key == "cookie" => ReverseAffinityKey::Cookie(Arc::<str>::from(
-                config
-                    .and_then(|cfg| cfg.cookie.as_deref())
-                    .unwrap_or_default()
-                    .trim(),
+            "cookie" => ReverseAffinityKey::Cookie(Arc::<str>::from(
+                config.cookie.as_deref().unwrap_or_default().trim(),
             )),
-            Some(key) if key == "user" => ReverseAffinityKey::User,
-            Some(key) if key == "tenant" => ReverseAffinityKey::Tenant,
-            Some(key) if key == "query" => ReverseAffinityKey::Query(Arc::<str>::from(
-                config
-                    .and_then(|cfg| cfg.query.as_deref())
-                    .unwrap_or_default()
-                    .trim(),
+            "user" => ReverseAffinityKey::User,
+            "tenant" => ReverseAffinityKey::Tenant,
+            "query" => ReverseAffinityKey::Query(Arc::<str>::from(
+                config.query.as_deref().unwrap_or_default().trim(),
             )),
-            Some(other) => {
-                return Err(anyhow::anyhow!("unknown reverse affinity key: {}", other));
+            other => {
+                return Err(anyhow::anyhow!("unknown reverse affinity key: {other}"));
             }
         };
         Ok(Self { key })
@@ -507,4 +508,50 @@ pub(in crate::reverse) fn normalize_host_for_match(raw: &str) -> String {
         return authority.host().to_ascii_lowercase();
     }
     raw.to_ascii_lowercase()
+}
+
+#[cfg(test)]
+mod affinity_key_tests {
+    use super::*;
+    use qpx_core::config::ReverseAffinityConfig;
+
+    fn affinity(key: &str) -> ReverseAffinityConfig {
+        ReverseAffinityConfig {
+            key: key.to_string(),
+            header: Some("x-key".to_string()),
+            cookie: Some("sess".to_string()),
+            query: Some("k".to_string()),
+        }
+    }
+
+    #[test]
+    fn every_validated_affinity_key_constructs() {
+        for key in [
+            "src_ip",
+            "source_ip",
+            "host",
+            "header",
+            "cookie",
+            "user",
+            "tenant",
+            "query",
+        ] {
+            let config = affinity(key);
+            let runtime = ReverseAffinityRuntime::from_config(Some(&config)).expect("constructs");
+            assert!(matches!(
+                (key, &runtime.key),
+                ("src_ip" | "source_ip", ReverseAffinityKey::SrcIp)
+                    | ("host", ReverseAffinityKey::Host)
+                    | ("user", ReverseAffinityKey::User)
+                    | ("tenant", ReverseAffinityKey::Tenant)
+                    | ("header" | "cookie" | "query", _)
+            ));
+        }
+    }
+
+    #[test]
+    fn unknown_affinity_key_fails_construction() {
+        let config = affinity("dc");
+        assert!(ReverseAffinityRuntime::from_config(Some(&config)).is_err());
+    }
 }

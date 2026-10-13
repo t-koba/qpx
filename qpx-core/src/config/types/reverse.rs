@@ -413,6 +413,24 @@ pub struct ReverseAffinityConfig {
     #[serde(default)]
     pub query: Option<String>,
 }
+impl ReverseAffinityConfig {
+    /// Canonical affinity key name shared by validation and runtime
+    /// construction, so the accepted vocabulary cannot drift between them.
+    /// Trims, lowercases, and folds the `source_ip` alias onto `src_ip`.
+    /// Returns `None` for unknown keys so callers can report them.
+    pub fn canonical_key(&self) -> Option<&'static str> {
+        match self.key.trim().to_ascii_lowercase().as_str() {
+            "src_ip" | "source_ip" => Some("src_ip"),
+            "host" => Some("host"),
+            "header" => Some("header"),
+            "cookie" => Some("cookie"),
+            "user" => Some("user"),
+            "tenant" => Some("tenant"),
+            "query" => Some("query"),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]

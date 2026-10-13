@@ -358,9 +358,15 @@ pub(crate) fn validate_affinity_config(
     let Some(config) = config else {
         return Ok(());
     };
-    let key = config.key.trim().to_ascii_lowercase();
-    match key.as_str() {
-        "src_ip" | "source_ip" | "host" | "user" | "tenant" => {}
+    let raw = config.key.trim();
+    let Some(canonical) = config.canonical_key() else {
+        return Err(anyhow!(
+            "{context} affinity.key must be one of: src_ip, host, header, cookie, user, tenant, query (got {})",
+            raw.to_ascii_lowercase()
+        ));
+    };
+    match canonical {
+        "src_ip" | "host" | "user" | "tenant" => {}
         "header" => {
             let header = config.header.as_deref().unwrap_or("").trim();
             if header.is_empty() {
@@ -418,4 +424,44 @@ pub(crate) fn validate_xdp_config(kind: &str, name: &str, xdp: Option<&XdpConfig
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod affinity_key_tests {
+    use super::*;
+    use crate::config::ReverseAffinityConfig;
+
+    fn affinity(key: &str) -> ReverseAffinityConfig {
+        ReverseAffinityConfig {
+            key: key.to_string(),
+            header: Some("x-key".to_string()),
+            cookie: Some("sess".to_string()),
+            query: Some("k".to_string()),
+        }
+    }
+
+    #[test]
+    fn validated_affinity_keys_include_source_ip_alias() {
+        for key in [
+            "src_ip",
+            "source_ip",
+            "host",
+            "header",
+            "cookie",
+            "user",
+            "tenant",
+            "query",
+        ] {
+            validate_affinity_config(Some(&affinity(key)), "test").expect("valid key");
+        }
+        assert_eq!(
+            affinity("source_ip").canonical_key(),
+            affinity("src_ip").canonical_key()
+        );
+    }
+
+    #[test]
+    fn unknown_affinity_key_is_rejected() {
+        assert!(validate_affinity_config(Some(&affinity("dc")), "test").is_err());
+    }
 }
