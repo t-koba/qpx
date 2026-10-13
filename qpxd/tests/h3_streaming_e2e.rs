@@ -404,9 +404,11 @@ async fn connect_streaming_deadline_survives_pending_relay() -> Result<()> {
     frame.push(0x00);
     frame.extend_from_slice(&(b"hello".len() as u32).to_be_bytes());
     frame.extend_from_slice(b"hello");
-    // Trickle the body: the relay is still parked in recv_data when the
-    // 300ms stream budget expires, so the deadline reply must go out alone
-    // instead of letting the relay reset the stream.
+    // Send only a prefix and never finish: the relay parks in recv_data
+    // waiting for the rest while the 300ms stream budget expires, so the
+    // deadline reply must go out alone instead of letting the relay reset
+    // the stream. recv_response below waits for the stream's own deadline
+    // reply rather than straddling it with a wall-clock sleep.
     let response = request_h3_post_trickled(
         port,
         &cert_path,
@@ -416,7 +418,6 @@ async fn connect_streaming_deadline_survives_pending_relay() -> Result<()> {
             ("connect-protocol-version", "1"),
         ],
         Bytes::copy_from_slice(&frame[..3]),
-        Duration::from_millis(800),
     )
     .await?;
 
@@ -454,7 +455,6 @@ async fn request_h3_post_trickled(
     path: &str,
     headers: &[(&str, &str)],
     partial_body: Bytes,
-    trickle_delay: Duration,
 ) -> Result<H3ReadResult> {
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(ca_cert)?);
@@ -485,7 +485,9 @@ async fn request_h3_post_trickled(
     let request = request.body(())?;
     let mut stream = sender.send_request(request).await?;
     stream.send_data(partial_body).await?;
-    tokio::time::sleep(trickle_delay).await;
+    // No wall-clock sleep here: the server parks the relay on the partial
+    // body concurrently, and recv_response resolves when the stream's own
+    // 300ms budget fires, however long setup took.
     let response = timeout(Duration::from_secs(30), stream.recv_response())
         .await
         .map_err(|_| anyhow!("H3 response head timed out after 30s"))??;
