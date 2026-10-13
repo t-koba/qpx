@@ -87,23 +87,32 @@ fn remove_header(headers: &mut HeaderMap, name: &'static str) {
 }
 
 fn append_vary(headers: &mut HeaderMap, field: &'static str) {
-    let value = headers
-        .get("vary")
-        .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
-    if value.as_deref().is_some_and(|value| {
-        value
-            .split(',')
-            .any(|item| item.trim().eq_ignore_ascii_case(field))
-    }) {
+    // Collect every Vary line before replacing: insert drops all but the
+    // written line, so reading only the first line deletes later upstream
+    // dimensions (including `*`, which forbids reuse without revalidation).
+    let mut tokens = Vec::new();
+    let mut present = false;
+    for value in headers
+        .get_all("vary")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+    {
+        for item in value.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                continue;
+            }
+            if item.eq_ignore_ascii_case(field) {
+                present = true;
+            }
+            tokens.push(item.to_string());
+        }
+    }
+    if present {
         return;
     }
-    match value {
-        Some(value) if !value.trim().is_empty() => {
-            insert_header(headers, "vary", format!("{value}, {field}").as_str());
-        }
-        _ => insert_header(headers, "vary", field),
-    }
+    tokens.push(field.to_string());
+    insert_header(headers, "vary", tokens.join(", ").as_str());
 }
 
 fn is_token(value: &str) -> bool {
@@ -2731,6 +2740,80 @@ mod report_to_name_tests {
         assert_eq!(
             headers[CROSS_ORIGIN_EMBEDDER_POLICY_REPORT_ONLY],
             "credentialless; report-to=\"default\""
+        );
+    }
+}
+
+#[cfg(test)]
+mod fetch_metadata_vary_tests {
+    use super::*;
+
+    fn vary_policy() -> FetchMetadataPolicy {
+        FetchMetadataPolicy::compile(&FetchMetadataPolicyConfig {
+            allowed_sites: vec![FetchSite::SameOrigin],
+            allowed_modes: vec![],
+            allowed_destinations: vec![],
+            allow_missing: true,
+            require_user_activation_for_navigation: false,
+        })
+        .expect("valid policy")
+    }
+
+    fn vary_lines(headers: &HeaderMap) -> Vec<String> {
+        headers
+            .get_all("vary")
+            .iter()
+            .filter_map(|value| value.to_str().ok().map(str::to_string))
+            .collect()
+    }
+
+    #[test]
+    fn augmentation_preserves_later_upstream_lines() {
+        let mut headers = HeaderMap::new();
+        headers.append("vary", HeaderValue::from_static("Accept-Encoding"));
+        headers.append("vary", HeaderValue::from_static("Cookie"));
+        vary_policy().apply_response_vary(&mut headers);
+        assert_eq!(
+            vary_lines(&headers),
+            vec![
+                "Accept-Encoding, Cookie, sec-fetch-site, sec-fetch-mode, sec-fetch-dest"
+                    .to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn augmentation_preserves_wildcard_in_either_position() {
+        for lines in [vec!["Accept-Encoding", "*"], vec!["*", "Cookie"]] {
+            let mut headers = HeaderMap::new();
+            for line in lines {
+                headers.append("vary", HeaderValue::from_static(line));
+            }
+            vary_policy().apply_response_vary(&mut headers);
+            let merged = vary_lines(&headers).join(", ");
+            assert!(
+                merged.split(',').any(|item| item.trim() == "*"),
+                "wildcard must survive in {merged:?}"
+            );
+            for token in ["sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest"] {
+                assert!(merged.contains(token), "missing {token} in {merged:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn augmentation_is_idempotent_and_deduplicates_later_lines() {
+        let mut headers = HeaderMap::new();
+        headers.append("vary", HeaderValue::from_static("Accept-Encoding"));
+        headers.append("vary", HeaderValue::from_static("sec-fetch-site"));
+        let policy = vary_policy();
+        policy.apply_response_vary(&mut headers);
+        let first = vary_lines(&headers);
+        policy.apply_response_vary(&mut headers);
+        assert_eq!(vary_lines(&headers), first);
+        assert_eq!(
+            first,
+            vec!["Accept-Encoding, sec-fetch-site, sec-fetch-mode, sec-fetch-dest".to_string()]
         );
     }
 }
