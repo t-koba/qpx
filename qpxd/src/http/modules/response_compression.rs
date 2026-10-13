@@ -15,6 +15,7 @@ use qpx_http::body::{Body, to_bytes};
 use qpx_http::compression_dictionary::{
     encode_dcb, encode_dcz, parse_available_dictionary, parse_dictionary_id,
 };
+use qpxd_cache::parse_cache_control_response_directives;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -356,6 +357,11 @@ fn response_is_compressible(
         return Ok(false);
     };
     if content_length < config.min_body_bytes || content_length > config.max_body_bytes {
+        return Ok(false);
+    }
+    if parse_cache_control_response_directives(response.headers()).no_transform {
+        // RFC 9110 section 7.7: a proxy MUST NOT transform a response
+        // carrying Cache-Control: no-transform.
         return Ok(false);
     }
     if !config.force_compress_event_stream && is_event_stream_headers(response.headers()) {

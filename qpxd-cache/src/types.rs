@@ -536,6 +536,7 @@ pub struct ResponseDirectives {
     pub must_revalidate: bool,
     pub proxy_revalidate: bool,
     pub immutable: bool,
+    pub no_transform: bool,
     pub max_age: Option<u64>,
     pub s_maxage: Option<u64>,
     pub invalid_freshness: bool,

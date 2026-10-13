@@ -145,3 +145,55 @@ fn no_body_success_responses_are_not_compressed() {
         None
     );
 }
+
+#[test]
+fn response_no_transform_disables_compression() {
+    let config = ResponseCompressionModuleConfig {
+        min_body_bytes: 1,
+        max_body_bytes: 1024,
+        content_types: Vec::new(),
+        force_compress_event_stream: false,
+        gzip: true,
+        brotli: false,
+        zstd: false,
+        gzip_level: 1,
+        brotli_level: 1,
+        zstd_level: 1,
+        worker_count: 1,
+        low_latency_flush: false,
+        dictionary: None,
+    };
+    let get_request = hyper::Request::builder()
+        .method(Method::GET)
+        .header(http::header::ACCEPT_ENCODING, "gzip")
+        .body(Body::empty())
+        .expect("request");
+    let get_request = HttpModuleRequestView::from_request(&get_request);
+    let compressible = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12")
+        .header(http::header::CACHE_CONTROL, "public, max-age=60")
+        .body(Body::empty())
+        .expect("response");
+    assert_eq!(
+        select_response_encoding(&get_request, &config, &compressible).expect("select encoding"),
+        Some(ContentEncoding::Gzip)
+    );
+    let frozen = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12")
+        .header(
+            http::header::CACHE_CONTROL,
+            "public, no-transform, max-age=60",
+        )
+        .body(Body::empty())
+        .expect("response");
+    assert_eq!(
+        select_response_encoding(&get_request, &config, &frozen).expect("select encoding"),
+        None
+    );
+    // The dictionary path gates on the same shared predicate.
+    assert!(!response_is_compressible(&Method::GET, &config, &frozen).expect("predicate runs"));
+}

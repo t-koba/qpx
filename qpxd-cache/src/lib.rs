@@ -17,6 +17,7 @@ mod types;
 mod util;
 
 pub use backends::build_backends;
+pub use directives::parse_cache_control_response_directives;
 pub use invalidate::{maybe_invalidate, purge_cache_key};
 pub use key::normalize_authority;
 pub use lookup_ops::{

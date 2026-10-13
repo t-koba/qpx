@@ -215,7 +215,10 @@ fn require_non_negative_integer(value: &BareItem) -> Option<u64> {
     u64::try_from(i64::from(*value)).ok()
 }
 
-fn parse_cache_control_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
+/// Parses the standard `Cache-Control` response header only (never the
+/// cache-namespaced targeting headers); shared by caching and by modules
+/// that must honor origin directives such as `no-transform`.
+pub fn parse_cache_control_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
     let mut out = ResponseDirectives::default();
     let mut saw_max_age = false;
     let mut saw_s_maxage = false;
@@ -265,6 +268,9 @@ fn parse_cache_control_response_directives(headers: &http::HeaderMap) -> Respons
                 out.proxy_revalidate = true;
             } else if directive == "immutable" {
                 out.immutable = true;
+            } else if directive == "no-transform" {
+                // Bare or valued: any presence forbids transformation.
+                out.no_transform = true;
             } else if directive == "max-age" {
                 if saw_max_age {
                     out.invalid_freshness = true;
@@ -440,6 +446,21 @@ mod tests {
             assert!(parsed.no_cache, "bare no-cache for {raw:?}");
             assert!(parsed.no_cache_fields.is_empty(), "no fields for {raw:?}");
         }
+    }
+
+    #[test]
+    fn no_transform_is_preserved_as_response_directive() {
+        for raw in [
+            "no-transform",
+            "No-Transform",
+            "public, no-transform, max-age=60",
+            "no-transform=\"x\"",
+        ] {
+            let parsed = response_directives_for_cache_control(raw);
+            assert!(parsed.no_transform, "no-transform for {raw:?}");
+        }
+        let parsed = response_directives_for_cache_control("public, max-age=60");
+        assert!(!parsed.no_transform, "no directive means transformable");
     }
 
     #[test]
