@@ -133,7 +133,7 @@ pub(crate) fn emit_grpc_status_metric(
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-fn extract_connect_stream_status_and_message(
+pub(super) fn extract_connect_stream_status_and_message(
     trailers: Option<&HeaderMap>,
 ) -> (Option<String>, Option<String>) {
     let status = trailers

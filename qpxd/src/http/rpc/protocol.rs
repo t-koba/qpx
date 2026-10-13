@@ -55,21 +55,54 @@ pub(super) fn parse_grpc_web_trailer_block(raw: &[u8]) -> Result<HeaderMap> {
     Ok(headers)
 }
 
+/// Decodes a Connect streaming EndStreamResponse envelope.
+///
+/// Unlike the unary Error shape (`{"code","message"}` at top level), a
+/// streaming envelope carries `{"error":{"code","message"},"metadata":{...}}`
+/// and omits `error` entirely on success. User metadata keys map to repeated
+/// trailer values; the reserved protocol names never come from metadata.
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(super) fn parse_connect_end_stream_metadata(raw: &[u8]) -> Result<HeaderMap> {
     let value: serde_json::Value = serde_json::from_slice(raw)?;
     let mut headers = HeaderMap::new();
-    if let Some(code) = value.get("code").and_then(|v| v.as_str()) {
-        headers.insert(
-            http::header::HeaderName::from_static("connect-code"),
-            http::HeaderValue::from_str(code)?,
-        );
+    match value.get("error") {
+        None | Some(serde_json::Value::Null) => {
+            headers.insert(
+                http::header::HeaderName::from_static("connect-code"),
+                http::HeaderValue::from_static("ok"),
+            );
+        }
+        Some(error) => {
+            if let Some(code) = error.get("code").and_then(|v| v.as_str()) {
+                headers.insert(
+                    http::header::HeaderName::from_static("connect-code"),
+                    http::HeaderValue::from_str(code)?,
+                );
+            }
+            if let Some(message) = error.get("message").and_then(|v| v.as_str()) {
+                headers.insert(
+                    http::header::HeaderName::from_static("connect-message"),
+                    http::HeaderValue::from_str(message)?,
+                );
+            }
+        }
     }
-    if let Some(message) = value.get("message").and_then(|v| v.as_str()) {
-        headers.insert(
-            http::header::HeaderName::from_static("connect-message"),
-            http::HeaderValue::from_str(message)?,
-        );
+    if let Some(metadata) = value.get("metadata").and_then(|v| v.as_object()) {
+        for (name, values) in metadata {
+            if name == "connect-code" || name == "connect-message" {
+                continue;
+            }
+            let name = http::header::HeaderName::from_bytes(name.as_bytes())?;
+            if let Some(single) = values.as_str() {
+                headers.append(name, http::HeaderValue::from_str(single)?);
+            } else if let Some(multiple) = values.as_array() {
+                for item in multiple {
+                    if let Some(item) = item.as_str() {
+                        headers.append(name.clone(), http::HeaderValue::from_str(item)?);
+                    }
+                }
+            }
+        }
     }
     Ok(headers)
 }

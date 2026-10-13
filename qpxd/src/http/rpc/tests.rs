@@ -126,8 +126,8 @@ fn connect_streaming_observer_parses_envelopes() {
     let mut body = Vec::new();
     body.extend_from_slice(&frame_grpc_message(Bytes::from_static(b"hello")));
     body.push(0x02);
-    body.extend_from_slice(&(r#"{"code":"ok","message":"done"}"#.len() as u32).to_be_bytes());
-    body.extend_from_slice(br#"{"code":"ok","message":"done"}"#);
+    body.extend_from_slice(&(r#"{"metadata":{}}"#.len() as u32).to_be_bytes());
+    body.extend_from_slice(br#"{"metadata":{}}"#);
 
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -172,22 +172,34 @@ fn connect_streaming_observer_accepts_compressed_message_envelopes() {
 #[test]
 fn connect_streaming_observer_treats_compressed_end_stream_as_metadata() {
     let mut body = Vec::new();
+    let envelope = r#"{"error":{"code":"unavailable","message":"busy"},"metadata":{"example-trailer":["a","b"]}}"#;
     body.push(0x03);
-    body.extend_from_slice(&(r#"{"code":"ok","message":"done"}"#.len() as u32).to_be_bytes());
-    body.extend_from_slice(br#"{"code":"ok","message":"done"}"#);
+    body.extend_from_slice(&(envelope.len() as u32).to_be_bytes());
+    body.extend_from_slice(envelope.as_bytes());
 
-    let mut observer = ConnectFrameObserver::new(Some(8), Some(64));
+    let mut observer = ConnectFrameObserver::new(Some(8), Some(256));
     observer.feed(body.as_slice()).expect("compressed metadata");
     let summary = observer.finish().expect("summary");
     assert_eq!(summary.message_count, 0);
+    let trailers = summary.trailers.as_ref().expect("trailers");
     assert_eq!(
-        summary
-            .trailers
-            .as_ref()
-            .and_then(|trailers| trailers.get("connect-code"))
+        trailers
+            .get("connect-code")
             .and_then(|value| value.to_str().ok()),
-        Some("ok")
+        Some("unavailable")
     );
+    assert_eq!(
+        trailers
+            .get("connect-message")
+            .and_then(|value| value.to_str().ok()),
+        Some("busy")
+    );
+    let values: Vec<_> = trailers
+        .get_all("example-trailer")
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect();
+    assert_eq!(values, vec!["a", "b"]);
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
@@ -195,8 +207,8 @@ fn connect_streaming_observer_treats_compressed_end_stream_as_metadata() {
 fn connect_streaming_observer_reassembles_eos_metadata_split_one_byte_at_a_time() {
     let mut body = Vec::new();
     body.push(0x02);
-    body.extend_from_slice(&(r#"{"code":"ok","message":"done"}"#.len() as u32).to_be_bytes());
-    body.extend_from_slice(br#"{"code":"ok","message":"done"}"#);
+    body.extend_from_slice(&(r#"{}"#.len() as u32).to_be_bytes());
+    body.extend_from_slice(br#"{}"#);
 
     let mut observer = ConnectFrameObserver::new(Some(8), Some(64));
     for byte in body {
@@ -562,4 +574,48 @@ async fn connect_deadline_response_uses_json_error_body() {
         .expect("body");
     let text = std::str::from_utf8(&bytes).expect("utf8");
     assert!(text.contains("\"code\":\"deadline_exceeded\""));
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_end_stream_reports_omitted_error_as_ok() {
+    let trailers = parse_connect_end_stream_metadata(br#"{"metadata":{}}"#).expect("envelope");
+    assert_eq!(
+        trailers.get("connect-code").and_then(|v| v.to_str().ok()),
+        Some("ok")
+    );
+    assert!(trailers.get("connect-message").is_none());
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_end_stream_metadata_never_overrides_protocol_status() {
+    let raw = br#"{"error":{"code":"unavailable","message":"busy"},"metadata":{"connect-code":["ok"],"connect-message":["fake"]}}"#;
+    let trailers = parse_connect_end_stream_metadata(raw).expect("envelope");
+    assert_eq!(
+        trailers.get("connect-code").and_then(|v| v.to_str().ok()),
+        Some("unavailable")
+    );
+    assert_eq!(
+        trailers
+            .get("connect-message")
+            .and_then(|v| v.to_str().ok()),
+        Some("busy")
+    );
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_end_stream_status_feeds_stream_metric_extraction() {
+    let raw = br#"{"error":{"code":"unavailable","message":"busy"},"metadata":{"example-trailer":["a"]}}"#;
+    let trailers = parse_connect_end_stream_metadata(raw).expect("envelope");
+    assert_eq!(
+        extract_connect_stream_status_and_message(Some(&trailers)),
+        (Some("unavailable".to_string()), Some("busy".to_string()))
+    );
+    let ok = parse_connect_end_stream_metadata(br#"{}"#).expect("empty envelope");
+    assert_eq!(
+        extract_connect_stream_status_and_message(Some(&ok)),
+        (Some("ok".to_string()), None)
+    );
 }
