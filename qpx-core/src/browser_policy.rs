@@ -1473,7 +1473,7 @@ impl CrossOriginOpenerPolicy {
         self.value
     }
 
-    /// Returns the optional reporting endpoint URL.
+    /// Returns the optional Reporting-Endpoints name.
     pub fn report_to(&self) -> Option<&str> {
         self.report_to.as_deref()
     }
@@ -1556,7 +1556,7 @@ impl CrossOriginEmbedderPolicy {
         self.value
     }
 
-    /// Returns the optional reporting endpoint URL.
+    /// Returns the optional Reporting-Endpoints name.
     pub fn report_to(&self) -> Option<&str> {
         self.report_to.as_deref()
     }
@@ -1617,14 +1617,24 @@ fn parse_policy_parameter<'a>(
         }
         let raw_value = raw_value.trim();
         if !raw_value.starts_with('"') || !raw_value.ends_with('"') || raw_value.len() < 2 {
-            return Err(invalid(field, "report-to parameter must be a string URL"));
+            return Err(invalid(
+                field,
+                "report-to parameter must be a quoted endpoint name",
+            ));
         }
         let inner = &raw_value[1..raw_value.len() - 1];
         if inner.contains('"') || inner.contains('\\') {
             return Err(invalid(field, "report-to parameter contains an escape"));
         }
-        let endpoint = parse_http_url(inner, field)?;
-        report_to = Some(endpoint);
+        // HTML Standard sections 7.1.3.1/7.1.4.1: report-to names a
+        // Reporting-Endpoints entry; it is not dereferenced as a URL.
+        if !is_sf_key(inner) {
+            return Err(invalid(
+                field,
+                "report-to parameter is not an endpoint name",
+            ));
+        }
+        report_to = Some(inner.to_string());
     }
     Ok((primary, report_to))
 }
@@ -2536,13 +2546,9 @@ mod tests {
                 "geolocation=(self \"https://maps.example\"), camera=()".to_string(),
             ),
             permissions_policy_report_only: Some("camera=()".to_string()),
-            cross_origin_opener_policy: Some(
-                "same-origin; report-to=\"https://reports.example/coop\"".to_string(),
-            ),
+            cross_origin_opener_policy: Some("same-origin; report-to=\"coop\"".to_string()),
             cross_origin_opener_policy_report_only: Some("same-origin".to_string()),
-            cross_origin_embedder_policy: Some(
-                "require-corp; report-to=\"https://reports.example/coep\"".to_string(),
-            ),
+            cross_origin_embedder_policy: Some("require-corp; report-to=\"coep\"".to_string()),
             cross_origin_embedder_policy_report_only: Some("credentialless".to_string()),
             cross_origin_resource_policy: Some("same-origin".to_string()),
             x_content_type_options: Some("nosniff".to_string()),
@@ -2573,7 +2579,7 @@ mod tests {
         assert_eq!(headers[PERMISSIONS_POLICY_REPORT_ONLY], "camera=()");
         assert_eq!(
             headers[CROSS_ORIGIN_OPENER_POLICY],
-            "same-origin; report-to=\"https://reports.example/coop\""
+            "same-origin; report-to=\"coop\""
         );
         assert_eq!(headers[X_CONTENT_TYPE_OPTIONS], "nosniff");
         assert_eq!(headers[ACCEPT_CH], "sec-ch-ua, sec-ch-ua-mobile");
@@ -2618,5 +2624,77 @@ mod tests {
         policy.apply(&mut headers);
         assert_eq!(headers.get_all(REFERRER_POLICY).iter().count(), 1);
         assert_eq!(headers[REFERRER_POLICY], "origin");
+    }
+}
+
+#[cfg(test)]
+mod report_to_name_tests {
+    use super::*;
+
+    #[test]
+    fn coop_and_coep_report_to_names_reporting_endpoints() {
+        let endpoints = ReportingEndpoints::parse("default=\"/reports\"").expect("valid endpoints");
+        assert_eq!(endpoints.as_str(), "default=\"/reports\"");
+        let coop = CrossOriginOpenerPolicy::parse("same-origin; report-to=\"default\"")
+            .expect("named coop endpoint");
+        assert_eq!(coop.report_to(), Some("default"));
+        let coep = CrossOriginEmbedderPolicy::parse("require-corp; report-to=\"default\"")
+            .expect("named coep endpoint");
+        assert_eq!(coep.report_to(), Some("default"));
+        let mut headers = HeaderMap::new();
+        coop.apply(&mut headers);
+        coep.apply(&mut headers);
+        assert_eq!(
+            headers[CROSS_ORIGIN_OPENER_POLICY],
+            "same-origin; report-to=\"default\""
+        );
+        assert_eq!(
+            headers[CROSS_ORIGIN_EMBEDDER_POLICY],
+            "require-corp; report-to=\"default\""
+        );
+    }
+
+    #[test]
+    fn coop_and_coep_report_to_rejects_url_values() {
+        // A URL is not an endpoint name and would never match a
+        // Reporting-Endpoints dictionary key.
+        assert!(
+            CrossOriginOpenerPolicy::parse(
+                "same-origin; report-to=\"https://reports.example/coop\""
+            )
+            .is_err()
+        );
+        assert!(
+            CrossOriginEmbedderPolicy::parse(
+                "require-corp; report-to=\"https://reports.example/coep\""
+            )
+            .is_err()
+        );
+        assert!(CrossOriginOpenerPolicy::parse("same-origin; report-to=default").is_err());
+        assert!(CrossOriginOpenerPolicy::parse("same-origin; report-to=\"Default\"").is_err());
+    }
+
+    #[test]
+    fn report_only_policies_share_endpoint_name_semantics() {
+        let policy = BrowserResponsePolicy::compile(&BrowserResponsePolicyConfig {
+            cross_origin_opener_policy_report_only: Some(
+                "same-origin; report-to=\"default\"".to_string(),
+            ),
+            cross_origin_embedder_policy_report_only: Some(
+                "credentialless; report-to=\"default\"".to_string(),
+            ),
+            ..Default::default()
+        })
+        .expect("report-only policy compiles");
+        let mut headers = HeaderMap::new();
+        policy.apply(&mut headers);
+        assert_eq!(
+            headers[CROSS_ORIGIN_OPENER_POLICY_REPORT_ONLY],
+            "same-origin; report-to=\"default\""
+        );
+        assert_eq!(
+            headers[CROSS_ORIGIN_EMBEDDER_POLICY_REPORT_ONLY],
+            "credentialless; report-to=\"default\""
+        );
     }
 }
