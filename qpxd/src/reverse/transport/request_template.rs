@@ -39,6 +39,37 @@ impl Drop for SpooledTemplateFile {
     }
 }
 
+/// Owns a freshly created spool path and unlinks it unless disarmed.
+///
+/// Installed immediately at spool creation so every failure path — initial
+/// writes, later chunks, flush, relay errors, timeouts, cancellation — drops
+/// the file. Successful completion disarms the guard and transfers the path
+/// to [`SpooledTemplateFile`], which keeps unlinking the file at the end of
+/// its own lifetime.
+struct SpoolGuard {
+    path: Option<PathBuf>,
+}
+
+impl SpoolGuard {
+    fn new(path: PathBuf) -> Self {
+        Self { path: Some(path) }
+    }
+
+    fn disarm(&mut self) -> PathBuf {
+        self.path
+            .take()
+            .expect("spool guard holds a path until disarm")
+    }
+}
+
+impl Drop for SpoolGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.path.as_ref() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct ReverseRequestHeadTemplate {
     method: http::Method,
@@ -165,7 +196,7 @@ impl ReverseRequestTemplateBody {
 
 struct TemplateBodyRecorder {
     chunks: Vec<Bytes>,
-    file: Option<(TokioFile, PathBuf)>,
+    file: Option<(TokioFile, SpoolGuard)>,
     seen: usize,
     max_body_bytes: usize,
 }
@@ -197,11 +228,14 @@ impl TemplateBodyRecorder {
             return Ok(());
         }
         if self.file.is_none() {
-            let (mut spool, path) = create_template_spool().await?;
+            let (spool, path) = create_template_spool().await?;
+            // Install the guard before any write so a failure below still
+            // unlinks the file when the recorder drops.
+            self.file = Some((spool, SpoolGuard::new(path)));
+            let (spool, _) = self.file.as_mut().expect("spool just installed");
             for existing in self.chunks.drain(..) {
                 spool.write_all(existing.as_ref()).await?;
             }
-            self.file = Some((spool, path));
         }
         if let Some((spool, _)) = self.file.as_mut() {
             spool.write_all(chunk.as_ref()).await?;
@@ -210,9 +244,10 @@ impl TemplateBodyRecorder {
     }
 
     async fn finish(self) -> Result<ReverseRequestTemplateBody> {
-        if let Some((mut spool, path)) = self.file {
+        if let Some((mut spool, mut guard)) = self.file {
             spool.flush().await?;
             drop(spool);
+            let path = guard.disarm();
             return Ok(ReverseRequestTemplateBody::File {
                 file: Arc::new(SpooledTemplateFile { path }),
             });
@@ -372,7 +407,7 @@ async fn collect_body_template(
     body_read_timeout: Duration,
 ) -> Result<ReverseRequestTemplateBody> {
     let mut chunks = Vec::new();
-    let mut file: Option<(TokioFile, PathBuf)> = None;
+    let mut file: Option<(TokioFile, SpoolGuard)> = None;
     let mut seen = 0usize;
     while let Some(frame) = timeout(body_read_timeout, body.data())
         .await
@@ -394,21 +429,24 @@ async fn collect_body_template(
             continue;
         }
         if file.is_none() {
-            let (mut spool, path) = create_template_spool().await?;
+            let (spool, path) = create_template_spool().await?;
+            file = Some((spool, SpoolGuard::new(path)));
+            let (spool, _) = file.as_mut().expect("spool just installed");
             for existing in chunks.drain(..) {
                 spool.write_all(existing.as_ref()).await?;
             }
-            file = Some((spool, path));
         }
         if let Some((spool, _)) = file.as_mut() {
             spool.write_all(chunk.as_ref()).await?;
         }
     }
-    if let Some((mut spool, path)) = file {
+    if let Some((mut spool, mut guard)) = file {
         spool.flush().await?;
         drop(spool);
         return Ok(ReverseRequestTemplateBody::File {
-            file: Arc::new(SpooledTemplateFile { path }),
+            file: Arc::new(SpooledTemplateFile {
+                path: guard.disarm(),
+            }),
         });
     }
     Ok(ReverseRequestTemplateBody::Memory {
@@ -577,5 +615,63 @@ mod tests {
         assert_eq!(replay_first, Bytes::from_static(b"first"));
         assert_eq!(replay_second, Bytes::from_static(b"second"));
         assert!(replay.data().await.is_none());
+    }
+}
+
+#[cfg(test)]
+mod spool_guard_tests {
+    use crate::reverse::transport::request_template::*;
+    use std::collections::BTreeSet;
+
+    fn retry_template_spool_files() -> BTreeSet<PathBuf> {
+        std::fs::read_dir(std::env::temp_dir())
+            .expect("temp dir is readable")
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("qpx-retry-template-"))
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn spool_guard_unlinks_on_drop() {
+        let (_file, path) = create_template_spool().await.expect("spool");
+        assert!(path.exists());
+        drop(SpoolGuard::new(path.clone()));
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn spool_guard_disarm_keeps_file() {
+        let (_file, path) = create_template_spool().await.expect("spool");
+        let mut guard = SpoolGuard::new(path.clone());
+        let kept = guard.disarm();
+        assert_eq!(kept, path);
+        drop(guard);
+        assert!(path.exists());
+        std::fs::remove_file(&path).expect("test cleanup");
+    }
+
+    #[tokio::test]
+    async fn failed_recording_leaves_no_spool_file() {
+        let before = retry_template_spool_files();
+        {
+            let mut recorder = TemplateBodyRecorder::new(RETRY_TEMPLATE_MEMORY_BYTES + 1024);
+            recorder
+                .record_chunk(&Bytes::from(vec![0u8; RETRY_TEMPLATE_MEMORY_BYTES + 1]))
+                .await
+                .expect("first chunk spools");
+            recorder
+                .record_chunk(&Bytes::from(vec![0u8; 2048]))
+                .await
+                .expect_err("second chunk exceeds the limit");
+        }
+        let leaked: Vec<_> = retry_template_spool_files()
+            .difference(&before)
+            .cloned()
+            .collect();
+        assert!(leaked.is_empty(), "spool files left behind: {leaked:?}");
     }
 }
