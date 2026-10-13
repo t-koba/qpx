@@ -5,6 +5,7 @@ use hyper::Request;
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::LazyLock;
+use std::time::SystemTime;
 use tokio::time::{Duration, Instant};
 
 const H3_ALT_SVC_CACHE_SHARDS: usize = 64;
@@ -93,6 +94,11 @@ pub(in crate::upstream::origin::http_backend) async fn record_h3_alt_svc(
     let Ok((logical_host, _logical_port)) = origin.logical_parts(default_port) else {
         return;
     };
+    // ma counts from response generation (RFC7838 section 3.1), not receipt.
+    // The Alt-Svc layer sees only the network response, so response delay and
+    // resident time are treated as zero and current age is max(Age, apparent
+    // age from Date), consistent with RFC9111 age semantics.
+    let response_age = alt_svc_response_age(headers);
     let mut found_valid_advertisement = false;
     for value in headers.get_all(alt_svc).iter() {
         let Ok(value) = value.to_str() else {
@@ -108,12 +114,35 @@ pub(in crate::upstream::origin::http_backend) async fn record_h3_alt_svc(
         // expired entry does not hide a later same-host entry in the same
         // field.
         for alternative in split_alt_svc_values(value) {
-            if let Some(endpoint) = parse_h3_alt_svc(alternative)
-                && alt_svc_endpoint_matches_same_origin_host(&endpoint, logical_host.as_str())
-            {
-                H3_ALT_SVC_CACHE.insert(key, endpoint).await;
-                return;
+            let Some(endpoint) = parse_h3_alt_svc(alternative) else {
+                continue;
+            };
+            if !alt_svc_endpoint_matches_same_origin_host(&endpoint, logical_host.as_str()) {
+                continue;
             }
+            let advertised = endpoint
+                .expires_at
+                .saturating_duration_since(Instant::now());
+            let Some(remaining) = alt_svc_effective_remaining(advertised, response_age) else {
+                // Advertised lifetime already covered by response age; keep
+                // searching later alternatives before treating the field as a
+                // withdrawal.
+                continue;
+            };
+            let Some(expires_at) = Instant::now().checked_add(remaining) else {
+                continue;
+            };
+            H3_ALT_SVC_CACHE
+                .insert(
+                    key,
+                    AltSvcH3Endpoint {
+                        connect_host: endpoint.connect_host,
+                        connect_port: endpoint.connect_port,
+                        expires_at,
+                    },
+                )
+                .await;
+            return;
         }
         if alt_svc_value_is_valid_advertisement(value) {
             found_valid_advertisement = true;
@@ -214,6 +243,38 @@ pub(super) fn alt_svc_value_is_valid_advertisement(value: &str) -> bool {
         }
     }
     false
+}
+
+pub(super) fn alt_svc_response_age(headers: &HeaderMap) -> Duration {
+    let age_value = headers
+        .get_all(http::header::AGE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| value.trim().parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .max()
+        .unwrap_or(Duration::ZERO);
+    let apparent_age = headers
+        .get_all(http::header::DATE)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .filter_map(|value| httpdate::parse_http_date(value).ok())
+        .filter_map(|date| SystemTime::now().duration_since(date).ok())
+        .max()
+        .unwrap_or(Duration::ZERO);
+    age_value.max(apparent_age)
+}
+
+pub(super) fn alt_svc_effective_remaining(
+    advertised: Duration,
+    response_age: Duration,
+) -> Option<Duration> {
+    let remaining = advertised.checked_sub(response_age)?;
+    if remaining.is_zero() {
+        None
+    } else {
+        Some(remaining)
+    }
 }
 
 pub(super) fn alt_svc_endpoint_matches_same_origin_host(

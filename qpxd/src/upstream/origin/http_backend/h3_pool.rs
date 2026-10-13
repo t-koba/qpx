@@ -507,7 +507,8 @@ async fn stream_h3_request_body(
 mod tests {
     use crate::upstream::origin::OriginEndpoint;
     use crate::upstream::origin::http_backend::h3_pool::alt_svc::{
-        MAX_H3_ALT_SVC_MAX_AGE, alt_svc_endpoint_matches_same_origin_host,
+        MAX_H3_ALT_SVC_MAX_AGE, alt_svc_effective_remaining,
+        alt_svc_endpoint_matches_same_origin_host, alt_svc_response_age,
         alt_svc_value_is_valid_advertisement, cached_alt_svc_h3_endpoint,
         forget_alt_svc_h3_endpoint, parse_h3_alt_svc, record_h3_alt_svc,
     };
@@ -923,6 +924,172 @@ mod tests {
                 .await
                 .expect("expired-first")
                 .is_some()
+        );
+
+        forget_alt_svc_h3_endpoint(&origin).await;
+    }
+
+    #[test]
+    fn alt_svc_age_accounting_declines_expired_advertisements() {
+        use std::time::Duration;
+        // ma=60 Age=30 leaves at most 30 seconds.
+        let remaining =
+            alt_svc_effective_remaining(Duration::from_secs(60), Duration::from_secs(30))
+                .expect("30s remain");
+        assert!(remaining <= Duration::from_secs(30));
+        assert!(!remaining.is_zero());
+        // Age covering the whole lifetime declines the endpoint.
+        assert!(
+            alt_svc_effective_remaining(Duration::from_secs(60), Duration::from_secs(60)).is_none()
+        );
+        assert!(
+            alt_svc_effective_remaining(Duration::from_secs(60), Duration::from_secs(120))
+                .is_none()
+        );
+        // No age preserves the advertised lifetime.
+        assert_eq!(
+            alt_svc_effective_remaining(Duration::from_secs(60), Duration::ZERO),
+            Some(Duration::from_secs(60))
+        );
+    }
+
+    #[test]
+    fn alt_svc_response_age_prefers_age_header_then_date() {
+        use std::time::{Duration, SystemTime};
+        let mut headers = http::HeaderMap::new();
+        assert_eq!(alt_svc_response_age(&headers), Duration::ZERO);
+
+        headers.insert(http::header::AGE, "30".parse().expect("age"));
+        assert_eq!(alt_svc_response_age(&headers), Duration::from_secs(30));
+
+        // Malformed Age is ignored.
+        let mut bad = http::HeaderMap::new();
+        bad.insert(http::header::AGE, "not-a-number".parse().expect("bad age"));
+        assert_eq!(alt_svc_response_age(&bad), Duration::ZERO);
+
+        // Fresh Date carries only resident-time noise.
+        let mut fresh = http::HeaderMap::new();
+        fresh.insert(
+            http::header::DATE,
+            httpdate::fmt_http_date(SystemTime::now())
+                .parse()
+                .expect("date"),
+        );
+        assert!(alt_svc_response_age(&fresh) < Duration::from_secs(5));
+
+        // Old Date without Age still ages the response.
+        let mut old = http::HeaderMap::new();
+        old.insert(
+            http::header::DATE,
+            httpdate::fmt_http_date(SystemTime::now() - Duration::from_secs(120))
+                .parse()
+                .expect("old date"),
+        );
+        assert!(alt_svc_response_age(&old) >= Duration::from_secs(119));
+
+        // Age wins when both are present and larger.
+        let mut both = http::HeaderMap::new();
+        both.insert(http::header::AGE, "90".parse().expect("age"));
+        both.insert(
+            http::header::DATE,
+            httpdate::fmt_http_date(SystemTime::now())
+                .parse()
+                .expect("date"),
+        );
+        assert_eq!(alt_svc_response_age(&both), Duration::from_secs(90));
+    }
+
+    fn alt_svc_headers_with_age(
+        alt_svc: &str,
+        age: Option<&str>,
+        date: Option<String>,
+    ) -> http::HeaderMap {
+        let mut headers = alt_svc_headers(&[alt_svc]);
+        if let Some(age) = age {
+            headers.insert(http::header::AGE, age.parse().expect("age"));
+        }
+        if let Some(date) = date {
+            headers.insert(http::header::DATE, date.parse().expect("date"));
+        }
+        headers
+    }
+
+    #[tokio::test]
+    async fn alt_svc_aged_response_declines_expired_h3() {
+        use std::time::SystemTime;
+        let origin = alt_svc_test_origin("aged-declines");
+        forget_alt_svc_h3_endpoint(&origin).await;
+
+        // Seed a usable route first.
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=600"#])).await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("seeded")
+                .is_some()
+        );
+
+        // Age covering ma declines and withdraws the seeded route.
+        record_h3_alt_svc(
+            &origin,
+            &alt_svc_headers_with_age(r#"h3=":8443"; ma=60"#, Some("120"), None),
+        )
+        .await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("aged-out clears")
+                .is_none()
+        );
+
+        // Age within ma keeps a usable route.
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=600"#])).await;
+        record_h3_alt_svc(
+            &origin,
+            &alt_svc_headers_with_age(r#"h3=":8443"; ma=60"#, Some("30"), None),
+        )
+        .await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("within-age keeps")
+                .is_some()
+        );
+
+        // Fresh Date without Age preserves the route.
+        record_h3_alt_svc(
+            &origin,
+            &alt_svc_headers_with_age(
+                r#"h3=":8443"; ma=60"#,
+                None,
+                Some(httpdate::fmt_http_date(SystemTime::now())),
+            ),
+        )
+        .await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("fresh-date keeps")
+                .is_some()
+        );
+
+        // Old Date without Age declines like an aged response.
+        record_h3_alt_svc(
+            &origin,
+            &alt_svc_headers_with_age(
+                r#"h3=":8443"; ma=60"#,
+                None,
+                Some(httpdate::fmt_http_date(
+                    SystemTime::now() - std::time::Duration::from_secs(120),
+                )),
+            ),
+        )
+        .await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("old-date clears")
+                .is_none()
         );
 
         forget_alt_svc_h3_endpoint(&origin).await;
