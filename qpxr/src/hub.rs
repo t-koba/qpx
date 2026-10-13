@@ -155,8 +155,20 @@ impl ExporterHub {
     }
 
     pub(super) async fn history_snapshot(&self) -> Vec<Bytes> {
+        // Age is enforced at read time as well: eviction otherwise runs
+        // only on publish, so an idle hub would serve captures older than
+        // --history-secs indefinitely. Storage is still reclaimed on the
+        // next publish; the byte cap bounds idle retention.
+        let now_unix_nanos = system_now_unix_nanos();
+        let min_ts =
+            now_unix_nanos.saturating_sub(duration_as_saturating_nanos(self.history_limit_age));
         let state = self.history.read().await;
-        state.history.iter().map(|h| h.bytes.clone()).collect()
+        state
+            .history
+            .iter()
+            .filter(|item| item.ts_unix_nanos >= min_ts)
+            .map(|item| item.bytes.clone())
+            .collect()
     }
 
     pub(super) fn gc_sequences_locked(&self, state: &mut SequencesState, now_unix_nanos: u64) {
@@ -236,6 +248,13 @@ impl RotatingFileSink {
         self.blocks_since_flush = 0;
         Ok(())
     }
+}
+
+fn system_now_unix_nanos() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_nanos().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
 }
 
 fn duration_as_saturating_nanos(duration: Duration) -> u64 {
@@ -409,5 +428,38 @@ mod tests {
         assert!(!should_rotate_capture_file(10, 5, 20));
         assert!(should_rotate_capture_file(10, 11, 20));
         assert!(should_rotate_capture_file(u64::MAX - 1, 8, u64::MAX));
+    }
+}
+
+#[cfg(test)]
+mod history_age_tests {
+    use super::*;
+
+    fn test_now_unix_nanos() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos().min(u64::MAX as u128) as u64)
+            .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn history_snapshot_expires_idle_blocks_by_age() {
+        let hub = ExporterHub::new(
+            None,
+            1024,
+            1024 * 1024,
+            Duration::from_millis(1),
+            Arc::new(Vec::new()),
+            1024,
+        )
+        .expect("hub builds");
+        hub.publish_encoded_block(test_now_unix_nanos(), Bytes::from_static(b"block"))
+            .await;
+        assert_eq!(hub.history_snapshot().await.len(), 1);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            hub.history_snapshot().await.is_empty(),
+            "idle history must age out of snapshots"
+        );
     }
 }
