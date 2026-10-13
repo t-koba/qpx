@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{Request, Uri};
 use qpx_http::body::Body;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File as TokioFile;
@@ -30,43 +30,33 @@ enum ReverseRequestTemplateBody {
 }
 
 struct SpooledTemplateFile {
-    path: PathBuf,
+    guard: SpoolGuard,
 }
 
-impl Drop for SpooledTemplateFile {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
-}
-
-/// Owns a freshly created spool path and unlinks it unless disarmed.
+/// Owns a spool path and unlinks it on drop.
 ///
-/// Installed immediately at spool creation so every failure path — initial
-/// writes, later chunks, flush, relay errors, timeouts, cancellation — drops
-/// the file. Successful completion disarms the guard and transfers the path
-/// to [`SpooledTemplateFile`], which keeps unlinking the file at the end of
-/// its own lifetime.
+/// The recorder holds this guard from spool creation, so every failure path —
+/// initial writes, later chunks, flush, relay errors, timeouts, cancellation —
+/// drops the file. Successful completion moves the guard into
+/// [`SpooledTemplateFile`], which therefore unlinks the file at the end of
+/// its own lifetime with no disarm step.
 struct SpoolGuard {
-    path: Option<PathBuf>,
+    path: PathBuf,
 }
 
 impl SpoolGuard {
     fn new(path: PathBuf) -> Self {
-        Self { path: Some(path) }
+        Self { path }
     }
 
-    fn disarm(&mut self) -> PathBuf {
-        self.path
-            .take()
-            .expect("spool guard holds a path until disarm")
+    fn path(&self) -> &Path {
+        &self.path
     }
 }
 
 impl Drop for SpoolGuard {
     fn drop(&mut self) {
-        if let Some(path) = self.path.as_ref() {
-            let _ = std::fs::remove_file(path);
-        }
+        let _ = std::fs::remove_file(&self.path);
     }
 }
 
@@ -228,14 +218,14 @@ impl TemplateBodyRecorder {
             return Ok(());
         }
         if self.file.is_none() {
-            let (spool, path) = create_template_spool().await?;
-            // Install the guard before any write so a failure below still
-            // unlinks the file when the recorder drops.
-            self.file = Some((spool, SpoolGuard::new(path)));
-            let (spool, _) = self.file.as_mut().expect("spool just installed");
+            let (mut spool, path) = create_template_spool().await?;
+            let guard = SpoolGuard::new(path);
+            // A write failure below drops the still-local guard, which
+            // unlinks the file.
             for existing in self.chunks.drain(..) {
                 spool.write_all(existing.as_ref()).await?;
             }
+            self.file = Some((spool, guard));
         }
         if let Some((spool, _)) = self.file.as_mut() {
             spool.write_all(chunk.as_ref()).await?;
@@ -244,12 +234,11 @@ impl TemplateBodyRecorder {
     }
 
     async fn finish(self) -> Result<ReverseRequestTemplateBody> {
-        if let Some((mut spool, mut guard)) = self.file {
+        if let Some((mut spool, guard)) = self.file {
             spool.flush().await?;
             drop(spool);
-            let path = guard.disarm();
             return Ok(ReverseRequestTemplateBody::File {
-                file: Arc::new(SpooledTemplateFile { path }),
+                file: Arc::new(SpooledTemplateFile { guard }),
             });
         }
         Ok(ReverseRequestTemplateBody::Memory {
@@ -299,7 +288,7 @@ async fn stream_and_record_body(
 impl SpooledTemplateFile {
     fn body(self: &Arc<Self>) -> Body {
         let (mut sender, body) = Body::channel_with_capacity(16);
-        let path = self.path.clone();
+        let path = self.guard.path().to_path_buf();
         tokio::spawn(async move {
             let result = async {
                 let mut file = TokioFile::open(path).await?;
@@ -429,24 +418,22 @@ async fn collect_body_template(
             continue;
         }
         if file.is_none() {
-            let (spool, path) = create_template_spool().await?;
-            file = Some((spool, SpoolGuard::new(path)));
-            let (spool, _) = file.as_mut().expect("spool just installed");
+            let (mut spool, path) = create_template_spool().await?;
+            let guard = SpoolGuard::new(path);
             for existing in chunks.drain(..) {
                 spool.write_all(existing.as_ref()).await?;
             }
+            file = Some((spool, guard));
         }
         if let Some((spool, _)) = file.as_mut() {
             spool.write_all(chunk.as_ref()).await?;
         }
     }
-    if let Some((mut spool, mut guard)) = file {
+    if let Some((mut spool, guard)) = file {
         spool.flush().await?;
         drop(spool);
         return Ok(ReverseRequestTemplateBody::File {
-            file: Arc::new(SpooledTemplateFile {
-                path: guard.disarm(),
-            }),
+            file: Arc::new(SpooledTemplateFile { guard }),
         });
     }
     Ok(ReverseRequestTemplateBody::Memory {
@@ -544,7 +531,7 @@ mod tests {
                 .await
                 .expect("template");
         let path = match &template.body {
-            ReverseRequestTemplateBody::File { file } => file.path.clone(),
+            ReverseRequestTemplateBody::File { file } => file.guard.path().to_path_buf(),
             ReverseRequestTemplateBody::Memory { .. } => panic!("large template should spool"),
         };
         assert!(path.exists());
@@ -622,6 +609,41 @@ mod tests {
 mod spool_guard_tests {
     use crate::reverse::transport::request_template::*;
     use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static GUARD_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+    /// A plain temp file for guard tests. Secure spool creation is
+    /// owner-permission based and unavailable on some platforms; the guard
+    /// itself only needs a path.
+    fn plain_guarded_file(tag: &str) -> PathBuf {
+        let id = GUARD_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "qpx-spool-guard-test-{}-{tag}-{id}",
+            std::process::id()
+        ));
+        std::fs::write(&path, b"guarded").expect("test file");
+        path
+    }
+
+    #[test]
+    fn spool_guard_unlinks_on_drop() {
+        let path = plain_guarded_file("drop");
+        assert!(path.exists());
+        drop(SpoolGuard::new(path.clone()));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn completed_template_keeps_unlink_on_drop() {
+        let path = plain_guarded_file("transfer");
+        let template = SpooledTemplateFile {
+            guard: SpoolGuard::new(path.clone()),
+        };
+        assert!(path.exists());
+        drop(template);
+        assert!(!path.exists());
+    }
 
     fn retry_template_spool_files() -> BTreeSet<PathBuf> {
         std::fs::read_dir(std::env::temp_dir())
@@ -636,25 +658,7 @@ mod spool_guard_tests {
     }
 
     #[tokio::test]
-    async fn spool_guard_unlinks_on_drop() {
-        let (_file, path) = create_template_spool().await.expect("spool");
-        assert!(path.exists());
-        drop(SpoolGuard::new(path.clone()));
-        assert!(!path.exists());
-    }
-
-    #[tokio::test]
-    async fn spool_guard_disarm_keeps_file() {
-        let (_file, path) = create_template_spool().await.expect("spool");
-        let mut guard = SpoolGuard::new(path.clone());
-        let kept = guard.disarm();
-        assert_eq!(kept, path);
-        drop(guard);
-        assert!(path.exists());
-        std::fs::remove_file(&path).expect("test cleanup");
-    }
-
-    #[tokio::test]
+    #[cfg(unix)]
     async fn failed_recording_leaves_no_spool_file() {
         let before = retry_template_spool_files();
         {
