@@ -367,3 +367,25 @@ fn higher_encoding_quality_beats_identity() {
         );
     }
 }
+
+#[test]
+fn compression_drops_content_digest_but_keeps_repr_digest() {
+    use qpx_http::digest_fields::{CONTENT_DIGEST, REPR_DIGEST};
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_DIGEST.clone(),
+        http::HeaderValue::from_static("sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"),
+    );
+    headers.insert(
+        REPR_DIGEST.clone(),
+        http::HeaderValue::from_static("sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"),
+    );
+    headers.insert(CONTENT_TYPE, http::HeaderValue::from_static("text/plain"));
+    strip_stale_content_digest(&mut headers);
+    assert!(!headers.contains_key(CONTENT_DIGEST.clone()));
+    assert!(
+        headers.contains_key(REPR_DIGEST.clone()),
+        "repr-digest survives content coding"
+    );
+    assert!(headers.contains_key(CONTENT_TYPE));
+}

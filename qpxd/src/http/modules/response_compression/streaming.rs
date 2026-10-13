@@ -17,6 +17,7 @@ use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use super::metrics;
+use super::strip_stale_content_digest;
 
 const COMPRESSION_PIPELINE_DEPTH: usize = 4;
 const COMPRESSION_WORKER_QUEUE_FACTOR: usize = 2;
@@ -418,7 +419,9 @@ async fn send_compression_result(
                     .await
                     .map_err(|err| anyhow!("response compression output failed: {err}"))?;
             }
-            if let Some(trailers) = trailers {
+            if let Some(mut trailers) = trailers {
+                // Trailers travel with the transformed bytes too.
+                strip_stale_content_digest(&mut trailers);
                 sender
                     .send_trailers(trailers)
                     .await
