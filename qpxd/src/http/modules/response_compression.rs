@@ -103,11 +103,9 @@ impl ResponseCompressionModule {
         response: Response<Body>,
     ) -> Result<Response<Body>> {
         let Some(compression_request) = ctx.extensions().get::<CompressionRequest>() else {
-            // No Accept-Encoding anywhere: the identity response below is
-            // still a negotiated variant for downstream caches when another
-            // client could select compression.
-            let mut response = response;
-            mark_identity_variant(&self.config, &mut response)?;
+            // No Accept-Encoding on the request: the module never runs
+            // downstream for such requests (chain and applies_to gates), so
+            // this response intentionally keeps its origin Vary behavior.
             return Ok(response);
         };
         let response = if self.config.dictionary.is_some() {
@@ -130,6 +128,9 @@ impl ResponseCompressionModule {
             &response,
         )?
         else {
+            // Explicitly negotiated identity (e.g. all encodings q=0): mark
+            // the variant so downstream caches do not mask compression for
+            // later clients. Reachable: the request carried Accept-Encoding.
             let mut response = response;
             mark_identity_variant(&self.config, &mut response)?;
             return Ok(response);
