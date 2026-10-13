@@ -167,6 +167,19 @@ fn merge_body_access(left: BodyAccess, right: BodyAccess) -> BodyAccess {
     match (left, right) {
         (
             BodyAccess::RequestAndResponseBodyBuffered {
+                max_request_bytes: left_request,
+                max_response_bytes: left_response,
+            },
+            BodyAccess::RequestAndResponseBodyBuffered {
+                max_request_bytes: right_request,
+                max_response_bytes: right_response,
+            },
+        ) => BodyAccess::RequestAndResponseBodyBuffered {
+            max_request_bytes: left_request.max(right_request),
+            max_response_bytes: left_response.max(right_response),
+        },
+        (
+            BodyAccess::RequestAndResponseBodyBuffered {
                 max_request_bytes,
                 max_response_bytes,
             },
@@ -251,6 +264,19 @@ mod tests {
             ),
             BodyAccess::ResponseBodyBuffered { max_bytes: 2048 }
         );
+    }
+
+    #[test]
+    fn combined_buffered_merge_takes_componentwise_maxima() {
+        let pair =
+            |max_request_bytes, max_response_bytes| BodyAccess::RequestAndResponseBodyBuffered {
+                max_request_bytes,
+                max_response_bytes,
+            };
+        let merged = pair(100, 200);
+        assert_eq!(merge_body_access(pair(1, 2), pair(100, 200)), merged);
+        assert_eq!(merge_body_access(pair(100, 200), pair(1, 2)), merged);
+        assert_eq!(merge_body_access(pair(100, 2), pair(1, 200)), merged);
     }
 
     #[test]
