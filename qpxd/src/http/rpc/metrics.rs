@@ -143,7 +143,11 @@ pub(super) fn extract_connect_stream_status_and_message(
     let message = trailers
         .and_then(|headers| headers.get("connect-message"))
         .and_then(|value| value.to_str().ok())
-        .map(str::to_string);
+        .map(|value| {
+            percent_encoding::percent_decode_str(value)
+                .decode_utf8_lossy()
+                .to_string()
+        });
     (status, message)
 }
 

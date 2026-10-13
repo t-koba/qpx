@@ -619,3 +619,44 @@ fn connect_end_stream_status_feeds_stream_metric_extraction() {
         (Some("ok".to_string()), None)
     );
 }
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_end_stream_multiline_message_observes_status() {
+    let envelope =
+        r#"{"error":{"code":"unavailable","message":"busy\nretry\tlater ✓"},"metadata":{}}"#;
+    let mut body = Vec::new();
+    body.push(0x02);
+    body.extend_from_slice(&(envelope.len() as u32).to_be_bytes());
+    body.extend_from_slice(envelope.as_bytes());
+
+    let mut observer = ConnectFrameObserver::new(Some(8), Some(256));
+    observer
+        .feed(body.as_slice())
+        .expect("multiline message observes");
+    let summary = observer.finish().expect("summary");
+    let trailers = summary.trailers.as_ref().expect("trailers");
+    assert_eq!(
+        extract_connect_stream_status_and_message(Some(trailers)),
+        (
+            Some("unavailable".to_string()),
+            Some("busy\nretry\tlater ✓".to_string())
+        )
+    );
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_end_stream_skips_unrepresentable_metadata() {
+    let envelope = r#"{"error":{"code":"unavailable","message":"busy"},"metadata":{"bad-trailer":"a\nb","good-trailer":"x"}}"#;
+    let trailers = parse_connect_end_stream_metadata(envelope.as_bytes()).expect("envelope");
+    assert_eq!(
+        extract_connect_stream_status_and_message(Some(&trailers)).0,
+        Some("unavailable".to_string())
+    );
+    assert!(trailers.get("bad-trailer").is_none());
+    assert_eq!(
+        trailers.get("good-trailer").and_then(|v| v.to_str().ok()),
+        Some("x")
+    );
+}

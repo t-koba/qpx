@@ -2,7 +2,7 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
-use percent_encoding::percent_decode_str;
+use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 
 pub(super) fn response_content_type(headers: &HeaderMap) -> Option<String> {
     headers
@@ -80,9 +80,13 @@ pub(super) fn parse_connect_end_stream_metadata(raw: &[u8]) -> Result<HeaderMap>
                 );
             }
             if let Some(message) = error.get("message").and_then(|v| v.as_str()) {
+                // Messages are free-form JSON strings and may carry newlines
+                // or controls; store them with the same percent-encoding the
+                // grpc-message boundary uses so any valid envelope observes.
+                let encoded = utf8_percent_encode(message, NON_ALPHANUMERIC).to_string();
                 headers.insert(
                     http::header::HeaderName::from_static("connect-message"),
-                    http::HeaderValue::from_str(message)?,
+                    http::HeaderValue::from_str(encoded.as_str())?,
                 );
             }
         }
@@ -92,13 +96,22 @@ pub(super) fn parse_connect_end_stream_metadata(raw: &[u8]) -> Result<HeaderMap>
             if name == "connect-code" || name == "connect-message" {
                 continue;
             }
-            let name = http::header::HeaderName::from_bytes(name.as_bytes())?;
-            if let Some(single) = values.as_str() {
-                headers.append(name, http::HeaderValue::from_str(single)?);
+            // User metadata is telemetry only: entries that cannot be
+            // represented as trailers are skipped rather than aborting the
+            // whole observation and losing the protocol status.
+            let Ok(name) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            if let Some(single) = values.as_str()
+                && let Ok(value) = http::HeaderValue::from_str(single)
+            {
+                headers.append(name, value);
             } else if let Some(multiple) = values.as_array() {
                 for item in multiple {
-                    if let Some(item) = item.as_str() {
-                        headers.append(name.clone(), http::HeaderValue::from_str(item)?);
+                    if let Some(item) = item.as_str()
+                        && let Ok(value) = http::HeaderValue::from_str(item)
+                    {
+                        headers.append(name.clone(), value);
                     }
                 }
             }
