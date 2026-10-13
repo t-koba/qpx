@@ -376,18 +376,17 @@ impl HttpRoute {
     ) -> Vec<SelectedMirrorTarget> {
         let mut out = Vec::new();
         for (idx, mirror) in self.mirrors.iter().enumerate() {
-            let sample =
-                (request_seed.wrapping_add((idx as u64 + 1) * 0x9e3779b97f4a7c15) % 10_000) as u32;
+            let sample = mirror_sample(request_seed, idx);
             if sample >= mirror.percent.saturating_mul(100) {
                 continue;
             }
-            let mirror_seed = request_seed.wrapping_add((idx as u64 + 1) * 0x517cc1b727220a95);
+            let seed = mirror_seed(request_seed, idx);
             let endpoints = mirror.upstreams.endpoints();
             if let Some(upstream) = select_upstream_inner(
                 endpoints.as_slice(),
                 &self.policy,
                 &mirror.rr_counter,
-                mirror_seed,
+                seed,
                 sticky_seed,
             ) {
                 out.push(SelectedMirrorTarget {
@@ -410,5 +409,45 @@ impl HttpRoute {
             out.push(mirror.upstreams.clone());
         }
         out
+    }
+}
+
+/// Mixes the mirror index into the request seed for percent sampling.
+/// Explicit wrapping keeps selection identical across build profiles: the
+/// golden-ratio mixer overflows `u64` for every mirror past the first.
+fn mirror_sample(request_seed: u64, mirror_idx: usize) -> u32 {
+    (request_seed.wrapping_add((mirror_idx as u64 + 1).wrapping_mul(0x9e3779b97f4a7c15)) % 10_000)
+        as u32
+}
+
+/// Mixes the mirror index into the seed used for upstream selection within
+/// a mirror. Wrapping for the same reason as [`mirror_sample`].
+fn mirror_seed(request_seed: u64, mirror_idx: usize) -> u64 {
+    request_seed.wrapping_add((mirror_idx as u64 + 1).wrapping_mul(0x517cc1b727220a95))
+}
+
+#[cfg(test)]
+mod mirror_seed_tests {
+    use super::*;
+
+    #[test]
+    fn mirror_seeds_do_not_overflow_with_many_mirrors() {
+        for request_seed in [0, 1, 0x9e3779b97f4a7c15, u64::MAX] {
+            for idx in 0..8 {
+                let sample = mirror_sample(request_seed, idx);
+                assert!(sample < 10_000);
+                let _ = mirror_seed(request_seed, idx);
+            }
+        }
+    }
+
+    #[test]
+    fn mirror_seeds_are_stable_and_index_sensitive() {
+        for idx in 0..8 {
+            assert_eq!(mirror_sample(42, idx), mirror_sample(42, idx));
+            assert_eq!(mirror_seed(42, idx), mirror_seed(42, idx));
+        }
+        assert_ne!(mirror_sample(42, 0), mirror_sample(42, 1));
+        assert_ne!(mirror_seed(42, 0), mirror_seed(42, 1));
     }
 }
