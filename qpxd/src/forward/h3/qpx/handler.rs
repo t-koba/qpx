@@ -117,6 +117,10 @@ impl ForwardQpxHandler {
             crate::http::protocol::sse::emit_sse_reconnect(self.listener_name.as_ref(), "unknown");
         }
         let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
+        let grpc_request_content_type = request_headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let grpc_started = Instant::now();
         let listener_streaming = self.request_streaming_limits(&request.head, remote_addr);
         let grpc_deadline = grpc_protocol.as_deref().map(|protocol| {
@@ -167,7 +171,10 @@ impl ForwardQpxHandler {
                                 self.listener_name.as_ref(),
                                 protocol,
                             );
-                            crate::http::rpc::build_grpc_deadline_exceeded_response(protocol)
+                            crate::http::rpc::build_grpc_deadline_exceeded_response(
+                                protocol,
+                                grpc_request_content_type.as_deref(),
+                            )
                         } else {
                             Err(anyhow!(
                                 "qpx-h3 gRPC stream duration exceeded configured limit"

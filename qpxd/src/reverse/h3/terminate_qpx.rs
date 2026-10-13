@@ -327,6 +327,10 @@ impl ReverseQpxHandler {
             crate::http::protocol::sse::emit_sse_reconnect(self.reverse.name.as_ref(), "unknown");
         }
         let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
+        let grpc_request_content_type = request_headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
         let grpc_started = Instant::now();
         let edge_streaming = self.edge_streaming_limits();
         let request_streaming = super::streaming::request_streaming_limits_for_head(
@@ -389,7 +393,10 @@ impl ReverseQpxHandler {
                             );
                             return Ok::<_, anyhow::Error>((
                                 Vec::new(),
-                                crate::http::rpc::build_grpc_deadline_exceeded_response(protocol)?,
+                                crate::http::rpc::build_grpc_deadline_exceeded_response(
+                                    protocol,
+                                    grpc_request_content_type.as_deref(),
+                                )?,
                             ));
                         }
                         return Err(anyhow!(

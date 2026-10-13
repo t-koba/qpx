@@ -533,7 +533,8 @@ async fn grpc_web_local_response_emits_trailer_frame() {
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[tokio::test]
 async fn grpc_web_deadline_response_uses_body_trailer_frame() {
-    let response = build_grpc_deadline_exceeded_response("grpc_web").expect("deadline response");
+    let response =
+        build_grpc_deadline_exceeded_response("grpc_web", None).expect("deadline response");
     assert_eq!(
         response
             .headers()
@@ -560,7 +561,8 @@ async fn grpc_web_deadline_response_uses_body_trailer_frame() {
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[tokio::test]
 async fn connect_deadline_response_uses_json_error_body() {
-    let response = build_grpc_deadline_exceeded_response("connect").expect("deadline response");
+    let response =
+        build_grpc_deadline_exceeded_response("connect", None).expect("deadline response");
     assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
     assert_eq!(
         response
@@ -574,6 +576,71 @@ async fn connect_deadline_response_uses_json_error_body() {
         .expect("body");
     let text = std::str::from_utf8(&bytes).expect("utf8");
     assert!(text.contains("\"code\":\"deadline_exceeded\""));
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[tokio::test]
+async fn connect_streaming_deadline_response_uses_end_stream_envelope() {
+    for codec in ["application/connect+proto", "application/connect+json"] {
+        let response = build_grpc_deadline_exceeded_response("connect", Some(codec))
+            .expect("deadline response");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some(codec)
+        );
+        let bytes = qpx_http::body::to_bytes(response.into_body())
+            .await
+            .expect("body");
+        assert!(
+            bytes.len() > 5,
+            "framed Connect deadline body must hold one envelope for {codec}"
+        );
+        assert_eq!(
+            bytes[0], 0x02,
+            "deadline envelope must be terminal for {codec}"
+        );
+        let envelope_len = u32::from_be_bytes([bytes[1], bytes[2], bytes[3], bytes[4]]) as usize;
+        assert_eq!(
+            bytes.len(),
+            5 + envelope_len,
+            "deadline reply must carry exactly one envelope and no data messages for {codec}"
+        );
+        let text = std::str::from_utf8(&bytes[5..]).expect("utf8");
+        assert!(text.contains("\"error\":{"));
+        assert!(text.contains("\"code\":\"deadline_exceeded\""));
+        assert!(text.contains("deadline exceeded at proxy"));
+        let trailers = parse_connect_end_stream_metadata(&bytes[5..]).expect("end stream");
+        assert_eq!(
+            trailers.get("connect-code").and_then(|v| v.to_str().ok()),
+            Some("deadline_exceeded")
+        );
+    }
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[tokio::test]
+async fn connect_unary_codecs_keep_json_deadline_body() {
+    for content_type in [
+        None,
+        Some("application/json"),
+        Some("application/proto"),
+        Some("application/connect+unknown"),
+    ] {
+        let response = build_grpc_deadline_exceeded_response("connect", content_type)
+            .expect("deadline response");
+        assert_eq!(response.status(), StatusCode::GATEWAY_TIMEOUT);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("application/json")
+        );
+    }
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]

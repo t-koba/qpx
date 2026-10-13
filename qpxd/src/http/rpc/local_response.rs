@@ -46,6 +46,50 @@ fn build_grpc_web_local_response(
     Ok(response)
 }
 
+/// Request codec for a Connect deadline reply. `application/connect+*`
+/// requests are enveloped on the wire, so the deadline reply must be a framed
+/// EndStreamResponse; every other Connect content type keeps the unary JSON
+/// contract. Mirrors the `connect_response_is_enveloped` rule used for
+/// proxied Connect responses.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn connect_streaming_response_codec(
+    request_content_type: Option<&str>,
+) -> Option<&'static str> {
+    let base = request_content_type?
+        .split(';')
+        .next()?
+        .trim()
+        .to_ascii_lowercase();
+    match base.as_str() {
+        "application/connect+proto" => Some("application/connect+proto"),
+        "application/connect+json" => Some("application/connect+json"),
+        _ => None,
+    }
+}
+
+/// Deadline reply for enveloped Connect requests: HTTP 200 with exactly one
+/// terminal flag-2 envelope carrying the nested `error` object. The
+/// EndStreamResponse payload is JSON for both codecs; only the content type
+/// echoes the request codec.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn build_connect_streaming_deadline_response(codec: &str) -> Result<Response<Body>> {
+    let payload = serde_json::to_vec(&json!({
+        "error": {
+            "code": "deadline_exceeded",
+            "message": "deadline exceeded at proxy",
+        },
+    }))?;
+    let mut framed = Vec::with_capacity(5 + payload.len());
+    framed.push(0x02);
+    framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+    framed.extend_from_slice(&payload);
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(http::header::CONTENT_TYPE, codec)
+        .body(Body::from(framed))?;
+    Ok(response)
+}
+
 fn build_connect_local_response(config: &RpcLocalResponseConfig) -> Result<Response<Body>> {
     let http_status = StatusCode::from_u16(config.http_status.unwrap_or(503))
         .map_err(|_| anyhow!("invalid connect local response HTTP status"))?;

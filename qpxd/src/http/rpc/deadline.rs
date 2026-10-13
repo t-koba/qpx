@@ -1,5 +1,8 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
-use super::local_response::build_rpc_local_response;
+use super::local_response::{
+    build_connect_streaming_deadline_response, build_rpc_local_response,
+    connect_streaming_response_codec,
+};
 use anyhow::Result;
 use http::{HeaderMap, Response};
 use qpx_core::config::RpcLocalResponseConfig;
@@ -146,7 +149,15 @@ pub(crate) fn apply_grpc_deadline_header(headers: &mut HeaderMap, deadline: Reso
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-pub(crate) fn build_grpc_deadline_exceeded_response(protocol: &str) -> Result<Response<Body>> {
+pub(crate) fn build_grpc_deadline_exceeded_response(
+    protocol: &str,
+    request_content_type: Option<&str>,
+) -> Result<Response<Body>> {
+    if protocol == "connect"
+        && let Some(codec) = connect_streaming_response_codec(request_content_type)
+    {
+        return build_connect_streaming_deadline_response(codec);
+    }
     let config = RpcLocalResponseConfig {
         protocol: protocol.to_string(),
         status: Some(match protocol {

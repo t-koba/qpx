@@ -116,6 +116,40 @@ async fn read_request_head(stream: &mut tokio::net::TcpStream) -> std::io::Resul
     ))
 }
 
+pub async fn spawn_delayed_headers_backend(
+    header_delay: Duration,
+    response_headers: Vec<(&'static str, &'static str)>,
+) -> (u16, JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let port = listener.local_addr().expect("addr").port();
+    let task = tokio::spawn(async move {
+        for _ in 0..8 {
+            let Ok((mut stream, _)) = listener.accept().await else {
+                return;
+            };
+            if read_request_head(&mut stream).await.is_err() {
+                continue;
+            }
+            sleep(header_delay).await;
+            let mut head = String::from("HTTP/1.1 200 OK\r\ncontent-length: 0\r\n");
+            for (name, value) in &response_headers {
+                head.push_str(name);
+                head.push_str(": ");
+                head.push_str(value);
+                head.push_str("\r\n");
+            }
+            head.push_str("\r\n");
+            if stream.write_all(head.as_bytes()).await.is_err() {
+                continue;
+            }
+            let _ = stream.flush().await;
+            let _ = stream.shutdown().await;
+            return;
+        }
+    });
+    (port, task)
+}
+
 pub async fn spawn_infinite_stream_backend(
     chunk: Bytes,
     interval: Duration,

@@ -276,6 +276,10 @@ async fn handle_stream<H: H3RequestHandler>(
         crate::http::protocol::sse::emit_sse_reconnect(limits.listener_name.as_ref(), "unknown");
     }
     let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
+    let grpc_request_content_type = request_headers
+        .get(http::header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
     let grpc_started = Instant::now();
     let grpc_deadline = grpc_protocol.as_deref().map(|protocol| {
         crate::http::rpc::resolve_rpc_deadline(
@@ -346,7 +350,10 @@ async fn handle_stream<H: H3RequestHandler>(
                         limits.listener_name.as_ref(),
                         protocol,
                     );
-                    match crate::http::rpc::build_grpc_deadline_exceeded_response(protocol) {
+                    match crate::http::rpc::build_grpc_deadline_exceeded_response(
+                        protocol,
+                        grpc_request_content_type.as_deref(),
+                    ) {
                         Ok(response) => {
                             if let Err(err) = send_h3_response(
                                 response,
