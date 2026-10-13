@@ -27,7 +27,8 @@ pub(crate) struct SseFeedResult {
 pub(crate) struct SseEventObserver {
     line: Vec<u8>,
     line_truncated: bool,
-    in_event: bool,
+    pending_cr: bool,
+    saw_data: bool,
     max_line_bytes: usize,
     max_event_id_bytes: usize,
     summary: SseStreamSummary,
@@ -38,7 +39,8 @@ impl Default for SseEventObserver {
         Self {
             line: Vec::new(),
             line_truncated: false,
-            in_event: false,
+            pending_cr: false,
+            saw_data: false,
             max_line_bytes: SseStreamingPolicy::default().max_line_bytes,
             max_event_id_bytes: SseStreamingPolicy::default().max_event_id_bytes,
             summary: SseStreamSummary::default(),
@@ -68,8 +70,22 @@ impl SseEventObserver {
             } else {
                 self.line_truncated = true;
             }
-            if *byte == b'\n' {
-                self.process_line();
+            match *byte {
+                // CR ends a line; a LF immediately after it (even across
+                // feeds) belongs to the same CRLF terminator.
+                b'\r' => {
+                    self.process_line();
+                    self.pending_cr = true;
+                }
+                b'\n' if self.pending_cr => {
+                    self.pending_cr = false;
+                }
+                b'\n' => {
+                    self.process_line();
+                }
+                _ => {
+                    self.pending_cr = false;
+                }
             }
         }
         SseFeedResult {
@@ -96,9 +112,11 @@ impl SseEventObserver {
             self.line.pop();
         }
         if self.line.is_empty() {
-            if self.in_event {
+            // Dispatch only data-carrying blocks: id/retry/unknown fields
+            // update control state but never count as events.
+            if self.saw_data {
                 self.summary.event_count = self.summary.event_count.saturating_add(1);
-                self.in_event = false;
+                self.saw_data = false;
             }
             return;
         }
@@ -106,8 +124,10 @@ impl SseEventObserver {
             self.line.clear();
             return;
         }
-        self.in_event = true;
-        if let Some(value) = self.line.strip_prefix(b"id:") {
+        // A bare `data` line carries an empty value but still dispatches.
+        if self.line.as_slice() == b"data" || self.line.starts_with(b"data:") {
+            self.saw_data = true;
+        } else if let Some(value) = self.line.strip_prefix(b"id:") {
             let value = value.strip_prefix(b" ").unwrap_or(value);
             let value = &value[..value.len().min(self.max_event_id_bytes)];
             self.summary.last_event_id = Some(String::from_utf8_lossy(value).into_owned());
@@ -162,5 +182,56 @@ mod tests {
             summary.last_event_id.as_ref().map(String::len),
             Some(defaults.max_event_id_bytes)
         );
+    }
+}
+
+#[cfg(test)]
+mod dispatch_tests {
+    use crate::http::protocol::sse::*;
+
+    #[test]
+    fn control_only_blocks_do_not_count_as_events() {
+        for block in ["id: 1\n\n", "retry: 1000\n\n", "unused: value\n\n"] {
+            let mut observer = SseEventObserver::new();
+            assert_eq!(observer.feed(block.as_bytes()).events, 0, "block {block:?}");
+            assert_eq!(observer.summary().event_count, 0);
+        }
+        let mut observer = SseEventObserver::new();
+        observer.feed(b"id: 7\n\n");
+        assert_eq!(observer.summary().last_event_id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn bare_data_line_dispatches_empty_message() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"data\n\n").events, 1);
+    }
+
+    #[test]
+    fn cr_only_terminators_dispatch() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"data: ok\r\r").events, 1);
+        assert_eq!(observer.summary().event_count, 1);
+    }
+
+    #[test]
+    fn split_crlf_counts_single_terminator() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"data: ok\r").events, 0);
+        assert_eq!(observer.feed(b"\n").events, 0);
+        assert_eq!(observer.feed(b"\r\n").events, 1);
+        assert_eq!(observer.summary().event_count, 1);
+    }
+
+    #[test]
+    fn crlf_pairs_do_not_double_dispatch() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"data: ok\r\n\r\n").events, 1);
+    }
+
+    #[test]
+    fn multi_line_data_block_dispatches_once() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"data: a\r\ndata: b\n\n").events, 1);
     }
 }
