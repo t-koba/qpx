@@ -552,7 +552,10 @@ jobs:
           pin=$(python3 -c 'import json; print(json.load(open("perf/proxy-performance-objectives.json"))["ci_policy"]["previous_release"]["sha"])')
           test "$(git -C .perf-previous-release rev-parse HEAD)" = "$pin"
           cargo build -p qpxd --release --locked --features http3-backend-qpx
-          (cd .perf-previous-release && CARGO_TARGET_DIR="$RUNNER_TEMP/qpx-perf-previous-target" cargo build -p qpxd --release --locked --features http3-backend-qpx)
+          # The pinned previous release is a fixed measurement reference, not code
+          # under review: build it without deny-warnings so a newer toolchain's
+          # new lints (e.g. deprecated fetch_update) cannot fail the pair.
+          (cd .perf-previous-release && CARGO_TARGET_DIR="$RUNNER_TEMP/qpx-perf-previous-target" RUSTFLAGS="" cargo build -p qpxd --release --locked --features http3-backend-qpx)
           echo "QPX_PREVIOUS_SOURCE_SHA=$pin" >> "$GITHUB_ENV"
           echo "QPX_PREVIOUS_BIN=$RUNNER_TEMP/qpx-perf-previous-target/release/qpxd" >> "$GITHUB_ENV"
       - name: external proxy comparison bench
@@ -637,7 +640,10 @@ jobs:
           pin=$(python3 -c 'import json; print(json.load(open("perf/proxy-performance-objectives.json"))["ci_policy"]["previous_release"]["sha"])')
           test "$(git -C .perf-previous-release rev-parse HEAD)" = "$pin"
           cargo build -p qpxd --release --locked --features http3-backend-qpx
-          (cd .perf-previous-release && CARGO_TARGET_DIR="$RUNNER_TEMP/qpx-perf-previous-target" cargo build -p qpxd --release --locked --features http3-backend-qpx)
+          # The pinned previous release is a fixed measurement reference, not code
+          # under review: build it without deny-warnings so a newer toolchain's
+          # new lints (e.g. deprecated fetch_update) cannot fail the pair.
+          (cd .perf-previous-release && CARGO_TARGET_DIR="$RUNNER_TEMP/qpx-perf-previous-target" RUSTFLAGS="" cargo build -p qpxd --release --locked --features http3-backend-qpx)
           echo "QPX_PREVIOUS_SOURCE_SHA=$pin" >> "$GITHUB_ENV"
           echo "QPX_PREVIOUS_BIN=$RUNNER_TEMP/qpx-perf-previous-target/release/qpxd" >> "$GITHUB_ENV"
       - name: external http2 comparison bench
