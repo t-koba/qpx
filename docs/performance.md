@@ -283,6 +283,7 @@ remain under `target/perf/{proxy,http2}-policy/` and are uploaded with `if: alwa
 
 At exhaustion the lane is `INCONCLUSIVE`/unmeasured, exit **75**, with explicit
 required/valid/unmeasured coverage. It is **not green and not a qpx regression**.
+In short: lane unmeasured — reported visibly, not failed.
 A different valid regression remains exit **1**, even when another lane is
 inconclusive. A complete shared-runner assessment is green only when every
 required measurement is valid and every qpx pair passes.
