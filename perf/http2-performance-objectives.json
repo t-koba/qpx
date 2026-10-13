@@ -39,7 +39,10 @@
       "body_bytes": 1048576,
       "max_concurrent_streams": 1,
       "max_reference_cpu_sample_spread_ratio": 1.6,
-      "max_reference_throughput_sample_spread_ratio": 5.2
+      "max_reference_throughput_sample_spread_ratio": 5.2,
+      "max_qpx_cpu_sample_spread_ratio": 1.25,
+      "max_qpx_throughput_sample_spread_ratio": 1.25,
+      "note": "1MB m=1 qpx spreads measured 1.139 (CPU) and 1.148 (throughput) on mizu 77c4cc4, content-identical to alpha with no H2-path product change, so the 1.10 default is tighter than runner noise on this lane. Caps 1.25 match the m=100 lane calibration and stay decisive above the observed flaps; dominance and throughput floors are unchanged."
     },
     {
       "body_bytes": 1048576,
