@@ -197,3 +197,117 @@ fn response_no_transform_disables_compression() {
     // The dictionary path gates on the same shared predicate.
     assert!(!response_is_compressible(&Method::GET, &config, &frozen).expect("predicate runs"));
 }
+
+fn identity_test_config() -> ResponseCompressionModuleConfig {
+    ResponseCompressionModuleConfig {
+        min_body_bytes: 1,
+        max_body_bytes: 1024,
+        content_types: Vec::new(),
+        force_compress_event_stream: false,
+        gzip: true,
+        brotli: false,
+        zstd: false,
+        gzip_level: 1,
+        brotli_level: 1,
+        zstd_level: 1,
+        worker_count: 1,
+        low_latency_flush: false,
+        dictionary: None,
+    }
+}
+
+fn vary_values(response: &Response<Body>) -> String {
+    response
+        .headers()
+        .get_all(VARY)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .collect::<Vec<_>>()
+        .join(", ")
+        .to_ascii_lowercase()
+}
+
+#[test]
+fn identity_response_carries_vary_when_compression_negotiable() {
+    // Explicit identity rejection: this client gets identity, but a later
+    // gzip client must not be served it from a downstream cache.
+    let config = identity_test_config();
+    let request = hyper::Request::builder()
+        .method(Method::GET)
+        .header(http::header::ACCEPT_ENCODING, "gzip;q=0")
+        .body(Body::empty())
+        .expect("request");
+    let request = HttpModuleRequestView::from_request(&request);
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12")
+        .header(http::header::CACHE_CONTROL, "public, max-age=60")
+        .body(Body::empty())
+        .expect("response");
+    assert_eq!(
+        select_response_encoding(&request, &config, &response).expect("select encoding"),
+        None
+    );
+    // Selection alone leaves identity unmarked: the old observable gap.
+    assert!(!response.headers().contains_key(VARY));
+    mark_identity_variant(&config, &mut response).expect("mark identity");
+    assert!(
+        vary_values(&response).contains("accept-encoding"),
+        "identity needs Vary, got {:?}",
+        response.headers().get_all(VARY)
+    );
+}
+
+#[test]
+fn identity_response_keeps_fast_path_when_nothing_negotiable() {
+    let config = identity_test_config();
+    // Non-compressible body: negotiation cannot change the output.
+    let mut image = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "image/png")
+        .header(CONTENT_LENGTH, "12")
+        .body(Body::empty())
+        .expect("response");
+    mark_identity_variant(&config, &mut image).expect("mark identity");
+    assert!(!image.headers().contains_key(VARY));
+    // Nothing enabled: even a compressible body stays untouched.
+    let disabled = ResponseCompressionModuleConfig {
+        gzip: false,
+        ..identity_test_config()
+    };
+    let mut text = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12")
+        .body(Body::empty())
+        .expect("response");
+    mark_identity_variant(&disabled, &mut text).expect("mark identity");
+    assert!(!text.headers().contains_key(VARY));
+}
+
+#[test]
+fn identity_response_carries_dictionary_vary_when_dictionary_configured() {
+    let config = ResponseCompressionModuleConfig {
+        gzip: false,
+        brotli: false,
+        zstd: false,
+        dictionary: Some(qpx_core::config::ResponseCompressionDictionaryConfig {
+            path: "/nonexistent".to_string(),
+            id: Some("example".to_string()),
+            encoding: "dcz".to_string(),
+        }),
+        ..identity_test_config()
+    };
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12")
+        .body(Body::empty())
+        .expect("response");
+    mark_identity_variant(&config, &mut response).expect("mark identity");
+    let vary = vary_values(&response);
+    for token in ["accept-encoding", "available-dictionary", "dictionary-id"] {
+        assert!(vary.contains(token), "missing {token}, got {vary:?}");
+    }
+}

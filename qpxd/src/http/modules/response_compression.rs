@@ -103,6 +103,11 @@ impl ResponseCompressionModule {
         response: Response<Body>,
     ) -> Result<Response<Body>> {
         let Some(compression_request) = ctx.extensions().get::<CompressionRequest>() else {
+            // No Accept-Encoding anywhere: the identity response below is
+            // still a negotiated variant for downstream caches when another
+            // client could select compression.
+            let mut response = response;
+            mark_identity_variant(&self.config, &mut response)?;
             return Ok(response);
         };
         let response = if self.config.dictionary.is_some() {
@@ -125,6 +130,8 @@ impl ResponseCompressionModule {
             &response,
         )?
         else {
+            let mut response = response;
+            mark_identity_variant(&self.config, &mut response)?;
             return Ok(response);
         };
         let (mut parts, body) = response.into_parts();
@@ -338,7 +345,21 @@ fn response_is_compressible(
 ) -> Result<bool> {
     if request_method == Method::HEAD
         || (request_method == Method::CONNECT && response.status().is_success())
-        || response.status().is_informational()
+    {
+        return Ok(false);
+    }
+    response_body_is_compressible(config, response)
+}
+
+/// Body/status gates shared by encoding selection and by identity Vary
+/// marking. The request method is deliberately ignored here: a superfluous
+/// Vary on a bodiless response is harmless, while a missing one lets
+/// downstream caches mask negotiation.
+fn response_body_is_compressible(
+    config: &ResponseCompressionModuleConfig,
+    response: &Response<Body>,
+) -> Result<bool> {
+    if response.status().is_informational()
         || response.status() == StatusCode::NO_CONTENT
         || response.status() == StatusCode::RESET_CONTENT
         || response.status() == StatusCode::NOT_MODIFIED
@@ -371,6 +392,30 @@ fn response_is_compressible(
         return Ok(false);
     }
     Ok(true)
+}
+
+/// Marks an uncompressed response as a negotiated variant when another
+/// client could select compression, so downstream shared caches key it
+/// correctly. Keeps the untouched fast path where negotiation cannot change
+/// the output (no encoding available or body not compressible).
+fn mark_identity_variant(
+    config: &ResponseCompressionModuleConfig,
+    response: &mut Response<Body>,
+) -> Result<()> {
+    if !response_body_is_compressible(config, response)? {
+        return Ok(());
+    }
+    if config.gzip || config.brotli || config.zstd {
+        append_vary_accept_encoding(response.headers_mut());
+    }
+    if config.dictionary.is_some() {
+        // Dictionary selection also reads Accept-Encoding alongside the
+        // dictionary negotiation headers; mirror the compressed variant.
+        append_vary_accept_encoding(response.headers_mut());
+        append_vary_token(response.headers_mut(), "available-dictionary")?;
+        append_vary_token(response.headers_mut(), "dictionary-id")?;
+    }
+    Ok(())
 }
 
 fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
