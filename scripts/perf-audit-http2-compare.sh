@@ -288,7 +288,6 @@ runtime:
   acceptor_tasks_per_listener: ${SERVER_WORKERS}
   reuse_port: true
   upstream_proxy_max_concurrent_per_endpoint: 2048
-  upstream_max_idle_connections_per_origin: 1024
 edges:
   - kind: reverse
     name: benchmark-h2
@@ -433,8 +432,13 @@ if len(latencies_us) != done:
     )
 if not latencies_us:
     raise SystemExit("h2load latency log is empty")
-if any(status < 200 or status >= 300 for status in latency_statuses):
-    raise SystemExit("h2load latency log contains a non-2xx response")
+# A parsed non-2xx row is an invalid sample, not malformed output. Keep it
+# in the error counters so only the reference role can request a retry.
+latency_non_2xx = sum(status < 200 or status >= 300 for status in latency_statuses)
+if any(value < 0 for value in latencies_us):
+    raise SystemExit("h2load latency log contains a negative latency")
+if not 0 <= succeeded <= done <= started <= requests or status_2xx > done:
+    raise SystemExit("inconsistent h2load request counters")
 
 latencies_us.sort()
 
@@ -467,6 +471,9 @@ else:
     )
     if first_byte:
         first_byte_mean_ms = ms(first_byte.group(5), first_byte.group(6))
+if any(value is None or not math.isfinite(value) or value <= 0 for value in
+       (duration, requests_per_sec, mean_ms, latency_p99_ms, latency_max_ms)):
+    raise SystemExit("missing or invalid h2load timing metrics")
 print(json.dumps({
     "duration_seconds": duration,
     "requests_per_sec": requests_per_sec,
@@ -476,7 +483,7 @@ print(json.dumps({
     "succeeded_requests": succeeded,
     "failed_requests": failed + errored + timeout + process_failures,
     "process_request_failures": process_failures,
-    "non_2xx_responses": max(done - status_2xx, 0),
+    "non_2xx_responses": max(done - status_2xx, latency_non_2xx),
     "mean_time_per_request_ms": mean_ms,
     "latency_min_ms": latency_min_ms,
     "latency_max_ms": latency_max_ms,
@@ -727,13 +734,11 @@ run_one() {
       wait "$profile_pid" || true
     fi
     if ! metrics="$(parse_h2load "$out" "$latency_file")"; then
-      rm -f "$latency_file"
       failed_sample="$out"
       echo "${proxy} produced unparsable HTTP/2 metrics on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
       exit 1
     fi
-    rm -f "$latency_file"
     valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys
@@ -742,6 +747,7 @@ print("true" if m["requests"] > 0 and m["requests"] == m["started_requests"] == 
 PY
     )"
     if [ "$valid" = true ]; then
+      rm -f "$latency_file"
       requests_per_cpu_second="$(python3 - "$metrics" "$cpu_ms" <<'PY'
 import json
 import sys
@@ -852,7 +858,12 @@ PY
     failed_sample="$out"
     echo "${proxy} produced an invalid HTTP/2 benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
     cat "$out" >&2 || true
-    exit 1
+    # Only parsed reference-side invalid samples are transient. qpx (including
+    # the previous binary) and malformed/tool/startup failures stay hard errors.
+    case "$proxy" in
+      direct-backend|nginx) exit 75 ;;
+      *) exit 1 ;;
+    esac
   done
   valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
   if [ "$valid_sample_count" -lt "$MIN_VALID_SAMPLES" ]; then

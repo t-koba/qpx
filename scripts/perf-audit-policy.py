@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-from perf_policy import (ROOT, assessment, bounded_measure, consistent, evaluate, exit_code,
+from perf_policy import (ROOT, RetryableInvalid, assessment, bounded_measure, consistent, evaluate, exit_code,
                          http2_aggregate, load_baseline, load_jsonl, matches, objectives, summary, validate,
                          write_json, write_jsonl)
 from perf_records import collect_ratios, fail, number
@@ -22,7 +22,7 @@ def aggregate(samples, lane):
     # failed/crashed/wrong-response sample can be discarded as an outlier.
     for record in samples:
         validate(record, lane)
-    consistent(samples, lane, False)
+    consistent(samples, lane, False, same_role=True)
     record = dict(samples[0])
     spread = dict(record["sample_spread"])
     for field in ("requests_per_sec", "requests_per_cpu_second", "requests_per_total_cpu_second",
@@ -72,6 +72,8 @@ class Sampler:
         script = ROOT / "scripts" / ("perf-audit-http2-compare.sh" if lane["kind"] == "http2" else "perf-audit-proxy-compare.sh")
         with (directory / "command.log").open("w") as log:
             process = subprocess.run([str(script), str(out)], env=env, stdout=log, stderr=subprocess.STDOUT)
+        if process.returncode == 75 and not paired and role == "current":
+            raise RetryableInvalid(f"reference sample invalid; see {directory.name}/command.log (sampler exit 75)")
         if process.returncode:
             fail(f"sampler exited {process.returncode}; see {directory.name}/command.log (not retryable)")
         records = load_jsonl(out)

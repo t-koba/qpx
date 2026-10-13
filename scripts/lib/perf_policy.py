@@ -138,6 +138,14 @@ def objectives(kind, path=None):
         fail("objectives require lanes")
     names = set()
     for lane in lanes:
+        compatibility = lane.get("pair_compatibility")
+        if compatibility is not None:
+            if (not isinstance(compatibility, dict)
+                    or type(compatibility.get("applicable")) is not bool
+                    or compatibility.get("previous_sha") != pin["sha"]
+                    or not isinstance(compatibility.get("reason"), str)
+                    or not compatibility["reason"].strip()):
+                fail("invalid or stale lane pair compatibility")
         lane.update(kind=kind, policy=policy, limits={**defaults, **lane})
         lane["name"] = f'{lane["bench"]}/{lane["body_bytes"]}'
         if kind == "http2":
@@ -203,18 +211,20 @@ def spread_limits(lane, qpx):
             "latency_p99_ratio": number(limits, "max_p99_sample_spread_ratio")}
 
 
-def consistent(records, lane, paired):
+def consistent(records, lane, paired, same_role=False):
     fields = ["sample_attempts", "sampling_order", "aggregation", "benchmark_schema_version", "resource_measurement", "concurrency"]
     if lane["kind"] == "http2":
         fields += ["target_duration_seconds", "client_threads", "server_workers", "max_concurrent_streams"]
     else:
         fields += ["duration_seconds", "threads", "backend_workers", "health_check_interval_ms", "logical_cpus", "sample_spread_basis", "workload_profile"]
-    if paired:
+    if same_role:
+        fields += ["proxy"]
+    if paired or same_role:
         fields += ["role_workers", "blocking_workers", "execution_model", "toolchain", "runner", "pair_order"]
     for field in fields:
         if any(r.get(field) != records[0].get(field) for r in records[1:]):
             fail(f'{lane["name"]}: records disagree on {field}')
-    if lane["kind"] == "origin" and not paired:
+    if lane["kind"] == "origin" and not paired and not same_role:
         qpx, ref = records
         for record, role in ((qpx, "qpx"), (ref, "reference")):
             for field in ("role_workers", "blocking_workers"):
@@ -257,8 +267,26 @@ def pair_identity(records, lane):
         fail("previous pair identity does not match the pinned release")
 
 
+def paired_not_applicable(lane, mode=None):
+    """Only explicitly declared, pin-bound incompatibility can skip a pair."""
+    compatibility = lane.get("pair_compatibility", {})
+    if compatibility.get("applicable") is False:
+        return {"lane": lane["name"], "assessment": "paired", "mode": mode or assessment(),
+                "status": "NOT_APPLICABLE", "reason": compatibility["reason"],
+                "previous_sha": compatibility["previous_sha"]}
+    return None
+
+
+class RetryableInvalid(ValueError):
+    """A sampler's parsed reference-side transient invalid sample (exit 75)."""
+
+
 def evaluate(records, lane, paired=False, mode=None, baseline=None):
     mode = mode or assessment()
+    if paired:
+        skipped = paired_not_applicable(lane, mode)
+        if skipped:
+            return skipped
     names = ["current", "previous"] if paired else [lane["qpx"], *lane["references"]]
     selected = {}
     for record in records:
@@ -408,7 +436,9 @@ def exit_code(results):
 def summary(results):
     code = exit_code(results)
     return {"status": "FAILED" if code == 1 else "INCONCLUSIVE" if code == 75 else "COMPLETE",
-            "coverage": {"required": len(results), "valid": sum(r["status"] in ("PASSED", "REGRESSED", "OBJECTIVE_MISS", "REPORT_ONLY") for r in results),
+            "coverage": {"declared": len(results), "required": sum(r["status"] != "NOT_APPLICABLE" for r in results),
+                         "not_applicable": [f'{r["lane"]}:{r["assessment"]}' for r in results if r["status"] == "NOT_APPLICABLE"],
+                         "valid": sum(r["status"] in ("PASSED", "REGRESSED", "OBJECTIVE_MISS", "REPORT_ONLY") for r in results),
                          "unmeasured": [f'{r["lane"]}:{r["assessment"]}' for r in results if r["status"] in ("INCONCLUSIVE", "RETRYABLE_INVALID", "ERROR")]},
             "results": results}
 
@@ -416,6 +446,11 @@ def summary(results):
 def bounded_measure(lane, paired, measure, artifact_dir, mode=None, baseline=None):
     """First valid attempt wins. A functional error or valid miss is terminal."""
     assessment_name = "paired" if paired else "competitive"
+    if paired:
+        skipped = paired_not_applicable(lane, mode)
+        if skipped:
+            write_json(Path(artifact_dir) / "result.json", skipped)
+            return skipped
     for attempt in range(1, lane["policy"]["max_attempts"] + 1):
         directory = Path(artifact_dir) / f"attempt-{attempt}"
         directory.mkdir(parents=True, exist_ok=False)
@@ -423,6 +458,9 @@ def bounded_measure(lane, paired, measure, artifact_dir, mode=None, baseline=Non
             records = measure(lane, paired, directory)
             write_jsonl(directory / "measurements.jsonl", records)
             result = evaluate(records, lane, paired, mode, baseline)
+        except RetryableInvalid as error:
+            result = {"lane": lane["name"], "assessment": assessment_name,
+                      "status": "RETRYABLE_INVALID", "reasons": [str(error)]}
         except (ValueError, KeyError, TypeError, OSError) as error:
             result = {"lane": lane["name"], "assessment": assessment_name, "status": "ERROR", "error": str(error)}
         result["attempt"] = attempt

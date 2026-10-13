@@ -47,7 +47,12 @@
       "qpx_role_workers": 2,
       "reference": "apache-webdav",
       "reference_role_workers": 400,
-      "workload_profile": "webdav_filesystem_redb_symlink_safe_v2"
+      "workload_profile": "webdav_filesystem_redb_symlink_safe_v2",
+      "pair_compatibility": {
+        "previous_sha": "d67a148e7ccbbd272750415213601005af0f38c5",
+        "applicable": false,
+        "reason": "v0.4.2 cannot express the WebDAV origins configuration (unsupported top-level origins)."
+      }
     },
     {
       "bench": "origin_webdav_http1",
@@ -61,7 +66,12 @@
       "qpx_role_workers": 2,
       "reference": "apache-webdav",
       "reference_role_workers": 400,
-      "workload_profile": "webdav_filesystem_redb_symlink_safe_v2"
+      "workload_profile": "webdav_filesystem_redb_symlink_safe_v2",
+      "pair_compatibility": {
+        "previous_sha": "d67a148e7ccbbd272750415213601005af0f38c5",
+        "applicable": false,
+        "reason": "v0.4.2 cannot express the WebDAV origins configuration (unsupported top-level origins)."
+      }
     },
     {
       "bench": "proxy_cache_hit_http1",
@@ -112,7 +122,12 @@
       "qpx_role_workers": 4,
       "reference": "nginx-feature-rich",
       "reference_role_workers": 4,
-      "workload_profile": "feature_rich_cache_hit_v1"
+      "workload_profile": "feature_rich_cache_hit_v1",
+      "pair_compatibility": {
+        "previous_sha": "d67a148e7ccbbd272750415213601005af0f38c5",
+        "applicable": false,
+        "reason": "v0.4.2 cannot express the feature-rich forwarding policy (unsupported http.forwarded)."
+      }
     },
     {
       "bench": "feature_rich_cache_hit_http1",
@@ -126,7 +141,12 @@
       "qpx_role_workers": 4,
       "reference": "nginx-feature-rich",
       "reference_role_workers": 4,
-      "workload_profile": "feature_rich_cache_hit_v1"
+      "workload_profile": "feature_rich_cache_hit_v1",
+      "pair_compatibility": {
+        "previous_sha": "d67a148e7ccbbd272750415213601005af0f38c5",
+        "applicable": false,
+        "reason": "v0.4.2 cannot express the feature-rich forwarding policy (unsupported http.forwarded)."
+      }
     }
   ],
   "metric": "multi_axis_origin_cache_dominance",

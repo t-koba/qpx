@@ -249,8 +249,30 @@ Each pair records the current and previous source SHA, executable SHA-256,
 `rustc -Vv`, runner/job identity and sampling order. Missing binaries or a
 mismatched release pin are errors, not unmeasured performance.
 
-For every declared workload, the pair reuses the existing sampler, config,
-workers, client and functional probes. Three rounds measure current/previous,
+For every pair-compatible workload, the pair reuses the existing sampler,
+config, workers, client and functional probes. Pair compatibility defaults to
+applicable. The four exceptions are declared per lane in
+`perf/origin-cache-performance-objectives.json` via `pair_compatibility`, with
+`applicable: false`, the exact `previous_sha` and an explanatory `reason`:
+
+- WebDAV, 1KB and 1MB: v0.4.2 cannot express the top-level `origins` config.
+- Feature-rich cache hit, 1KB and 1MB: v0.4.2 cannot express `http.forwarded`.
+
+Only those qpx-vs-qpx pairs produce `NOT_APPLICABLE`, without sampling. Their
+competitive functional probes, workloads and objective measurements still run
+unchanged. A stale compatibility SHA is an error when the pin changes, not an
+automatic exemption for a new pin. Summaries retain every declared assessment,
+list skipped pairs in `coverage.not_applicable`, and include the pin and reason
+in each result; `coverage.required` excludes these non-expressible pairs.
+
+The shared HTTP/2 config omits `runtime.upstream_max_idle_connections_per_origin`
+because v0.4.2 does not support it; neither binary gets a role-specific config.
+Qpx cache probes recognize both RFC `Cache-Status` and v0.4.2's `X-Qpx-Cache`,
+while still requiring the actual HIT/MISS result, status and body validation.
+Same-role samples (including origin-local) are checked for internal workload and
+worker consistency before aggregation, separately from competitive equivalence.
+
+Three rounds measure current/previous,
 previous/current, then current/previous. Startup and warmup are outside the timed
 workload; restarting both implementations gives each sample the same initial
 state. Per-round current/previous ratios are recorded, and their median is
@@ -272,10 +294,25 @@ full max/min of the three samples, not a best subset or a blend of attempts.
 
 Evaluation always validates schema, request/error accounting, responses,
 resources, workload equivalence and identities **before** checking spread or
-performance. Functional/data errors produce `ERROR` and exit **1**, immediately
-and without retries. Only an over-cap spread produces `RETRYABLE_INVALID`.
-The driver re-measures the **whole relevant pair or competitive lane group** in
-that job, with at most **two additional attempts** (three total). It accepts the
+performance. Qpx functional failures (current **or previous**), malformed data,
+startup/tool failures and wrong-body/cache-result failures produce `ERROR` and
+exit **1**, immediately and without retries. Over-cap spread still produces
+`RETRYABLE_INVALID`. A parsed **reference-side transient invalid sample** can
+also request a retry via sampler exit **75**:
+
+- HTTP/2: invalid request/error or non-2xx accounting from nginx or the direct
+  control backend, after successful parsing of counters, timings and latency
+  rows. A malformed/missing latency log or timing remains a hard error.
+- HTTP/1 proxy/origin/cache: a reference read-error overrun, only with otherwise
+  clean request accounting, status probes, response lengths and cache results.
+  The existing **1000ppm** default read-error ceiling is unchanged. Other
+  transport/functional failures remain hard errors.
+
+The driver maps that competitive-only exit to `RETRYABLE_INVALID`; exit 75 from
+a current/previous qpx-only sampler is always an error, never a retry request.
+No spread caps, paired regression floors or functional error tolerances are
+widened. The driver re-measures the **whole relevant pair or competitive lane
+group** in that job, with at most **two additional attempts** (three total). It accepts the
 first valid attempt, even if that attempt regresses, and never retries a valid
 regression or selects the best attempt. Other already-valid lanes are not
 re-measured. All raw samples, logs, measurements and results from every attempt
@@ -286,7 +323,8 @@ required/valid/unmeasured coverage. It is **not green and not a qpx regression**
 In short: lane unmeasured — reported visibly, not failed.
 A different valid regression remains exit **1**, even when another lane is
 inconclusive. A complete shared-runner assessment is green only when every
-required measurement is valid and every qpx pair passes.
+required measurement is valid and every applicable qpx pair passes.
+`NOT_APPLICABLE` is explicit coverage exclusion, not a passing measurement.
 
 Competitive dominance (including WebDAV), nginx/apache/lighttpd comparisons,
 and historical absolute and normalized qpx baselines remain visible as JSON
@@ -301,7 +339,11 @@ The standalone shell checkers inspect competitive JSONL and return exit 75 for
 invalid spread; they do not assert that the paired regression gate ran. Existing
 streaming and netem checks are separate assessments, unchanged by this policy.
 
-Run the small synthetic JSONL fixture demo (no full benches or network):
+Run the synthetic policy and sampler fixtures (no full benches or network).
+They exercise real shell sampler functions with deterministic tool output,
+retry bounds, compatibility exclusions and origin pairing. The generated wrk
+Lua cache probe is also executed when the LuaJIT library (provided by `wrk` on
+CI runners) is installed; otherwise that one test is reported as skipped:
 
 ```bash
 python3 scripts/test-perf-policy.py

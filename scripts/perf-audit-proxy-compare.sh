@@ -977,18 +977,6 @@ extract_metric() {
   awk -v key="$key" '$1 == key { print $2; exit }' "$file"
 }
 
-extract_metric_or_zero() {
-  local file="$1"
-  local key="$2"
-  local value
-  value="$(extract_metric "$file" "$key")"
-  if [ -z "$value" ]; then
-    echo 0
-  else
-    echo "$value"
-  fi
-}
-
 probe_status() {
   local port="$1"
   local path="${2:-/bench-$(first_body_size)}"
@@ -1096,6 +1084,13 @@ expect_cache_hit() {
   local port="$2"
   local header_pattern="$3"
   local path="$4"
+  # The pinned release uses X-Qpx-Cache; newer qpx uses RFC Cache-Status.
+  # Keep reference headers separate and require the same actual HIT result.
+  case "$name" in
+    qpxd-cache|qpxd-feature-rich)
+      header_pattern='^cache-status:.*[;[:space:]]hit([;[:space:]]|$)|^x-qpx-cache:[[:space:]]*hit[[:space:]]*$'
+      ;;
+  esac
   local headers="$TMP_DIR/${name}.cache-headers"
   local tries=0
   while [ "$tries" -lt 40 ]; do
@@ -1233,7 +1228,14 @@ response = function(status, headers, body)
   if "${expected_cache_result}" ~= "" then
     local matched = false
     for name, value in pairs(headers) do
-      if string.lower(name) == "${expected_cache_header}" and string.find(string.lower(value), "${expected_cache_result}", 1, true) then
+      local header = string.lower(name)
+      local result = string.lower(value)
+      if header == "${expected_cache_header}" and string.find(result, "${expected_cache_result}", 1, true) then
+        matched = true
+        break
+      end
+      if "${expected_cache_header}" == "cache-status" and header == "x-qpx-cache"
+          and string.match(result, "^%s*(%a+)%s*$") == "${expected_cache_result}" then
         matched = true
         break
       end
@@ -1297,6 +1299,7 @@ LUA
   else
     status_before="$(safe_probe_status "$port" "$probe_path")"
   fi
+  local metric_value
   local complete summary_requests failed fatal_errors non_2xx bad_length cache_result_errors cache_writeback_verified write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
   local latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms requests_per_cpu_second
   samples_file="$TMP_DIR/${artifact_name}.valid-samples.tsv"
@@ -1406,11 +1409,11 @@ LUA
     fi
     compact_feature_rich_access_log "$proxy"
     settle_feature_rich_log_compaction "$proxy"
-    complete="$(extract_metric_or_zero "$out" "qpx_complete_requests")"
-    summary_requests="$(extract_metric_or_zero "$out" "qpx_summary_requests")"
-    non_2xx="$(extract_metric_or_zero "$out" "qpx_non_2xx_responses")"
-    bad_length="$(extract_metric_or_zero "$out" "qpx_bad_length_responses")"
-    cache_result_errors="$(extract_metric_or_zero "$out" "qpx_cache_result_errors")"
+    complete="$(extract_metric "$out" "qpx_complete_requests")"
+    summary_requests="$(extract_metric "$out" "qpx_summary_requests")"
+    non_2xx="$(extract_metric "$out" "qpx_non_2xx_responses")"
+    bad_length="$(extract_metric "$out" "qpx_bad_length_responses")"
+    cache_result_errors="$(extract_metric "$out" "qpx_cache_result_errors")"
     rps="$(extract_metric "$out" "qpx_requests_per_sec")"
     transfer_kbps="$(extract_metric "$out" "qpx_transfer_kbytes_per_sec")"
     latency_p50_ms="$(extract_metric "$out" "qpx_latency_p50_ms")"
@@ -1433,17 +1436,36 @@ LUA
     read_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "read") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
     write_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "write") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
     timeout_errors="$(awk '/Socket errors:/ { for (i = 1; i <= NF; i++) if ($i == "timeout") { value = $(i + 1); gsub(/,/, "", value); print value; exit } }' "$out")"
+    if grep -q 'Socket errors:' "$out" &&
+      { [ -z "$connect_errors" ] || [ -z "$read_errors" ] || [ -z "$write_errors" ] || [ -z "$timeout_errors" ]; }; then
+      echo "${proxy} wrk output has malformed socket counters" >&2
+      exit 1
+    fi
     connect_errors="${connect_errors:-0}"
     read_errors="${read_errors:-0}"
     write_errors="${write_errors:-0}"
     timeout_errors="${timeout_errors:-0}"
+    for metric_value in "$complete" "$summary_requests" "$non_2xx" "$bad_length" "$cache_result_errors" \
+      "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors"; do
+      if [[ ! "$metric_value" =~ ^[0-9]+$ ]]; then
+        echo "${proxy} wrk output has missing or malformed request counters" >&2
+        cat "$out" >&2 || true
+        exit 1
+      fi
+    done
     fatal_errors=$((connect_errors + write_errors + timeout_errors))
     failed=$((connect_errors + read_errors + write_errors + timeout_errors))
     commit="${GITHUB_SHA:-unknown}"
-    if [ -z "$rps" ] || [ -z "$mean_ms" ] || [ -z "$transfer_kbps" ] || [ -z "$latency_p99_ms" ]; then
-      echo "${proxy} wrk output is missing required throughput fields" >&2
-      cat "$out" >&2 || true
-      failed_sample="$out"
+    for metric_value in "$rps" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" \
+      "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms"; do
+      if [[ ! "$metric_value" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+        echo "${proxy} wrk output has missing or malformed throughput/latency fields" >&2
+        cat "$out" >&2 || true
+        exit 1
+      fi
+    done
+    if ! awk -v rps="$rps" -v mean="$mean_ms" -v p99="$latency_p99_ms" 'BEGIN { exit !(rps > 0 && mean > 0 && p99 > 0) }'; then
+      echo "${proxy} wrk output has non-positive throughput/latency fields" >&2
       exit 1
     fi
     requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
@@ -1471,6 +1493,19 @@ LUA
     echo "${proxy} produced an invalid benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
     echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} connect_errors=${connect_errors} read_errors=${read_errors} write_errors=${write_errors} timeout_errors=${timeout_errors} max_read_error_rate_ppm=${MAX_READ_ERROR_RATE_PPM} non_2xx=${non_2xx} bad_length=${bad_length} cache_result_errors=${cache_result_errors} status_before=${status_before} status_after=${status_after}" >&2
     cat "$out" >&2 || true
+    # Retry only a reference read-error overrun with otherwise clean functional
+    # and request accounting. Wrong bodies/cache results/statuses are errors,
+    # and the read-error ceiling itself is unchanged.
+    case "$proxy" in
+      direct-backend|nginx|apache|lighttpd|squid|nginx-static|apache-webdav|nginx-cache|nginx-feature-rich)
+        if [ "$complete" -gt 0 ] && [ "$summary_requests" = "$complete" ] &&
+          [ "$fatal_errors" = 0 ] && ! read_error_rate_allowed "$read_errors" "$complete" &&
+          [ "$non_2xx" = 0 ] && [ "$bad_length" = 0 ] && [ "$cache_result_errors" = 0 ] &&
+          [ "$status_before" = 200 ] && [ "$status_after" = 200 ]; then
+          exit 75
+        fi
+        ;;
+    esac
     exit 1
   done
   valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
