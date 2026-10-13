@@ -1,7 +1,7 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use super::frame::FramedBodySummary;
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-use super::protocol::{extract_grpc_status_and_message, normalize_connect_code};
+use super::protocol::{extract_connect_stream_status_and_message, extract_grpc_status_and_message};
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use http::HeaderMap;
 use metrics::counter;
@@ -130,25 +130,6 @@ pub(crate) fn emit_grpc_status_metric(
         )
         .increment(1);
     }
-}
-
-#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-pub(super) fn extract_connect_stream_status_and_message(
-    trailers: Option<&HeaderMap>,
-) -> (Option<String>, Option<String>) {
-    let status = trailers
-        .and_then(|headers| headers.get("connect-code"))
-        .and_then(|value| value.to_str().ok())
-        .map(normalize_connect_code);
-    let message = trailers
-        .and_then(|headers| headers.get("connect-message"))
-        .and_then(|value| value.to_str().ok())
-        .map(|value| {
-            percent_encoding::percent_decode_str(value)
-                .decode_utf8_lossy()
-                .to_string()
-        });
-    (status, message)
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]

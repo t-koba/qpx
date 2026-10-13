@@ -660,3 +660,135 @@ fn connect_end_stream_skips_unrepresentable_metadata() {
         Some("x")
     );
 }
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+mod connect_inspection_tests {
+    use super::*;
+    use crate::http::body::size::{buffer_response_body, buffer_response_body_with_reason};
+
+    fn frame_connect_payload(payload: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(5 + payload.len());
+        out.push(0x00);
+        out.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        out.extend_from_slice(payload);
+        out
+    }
+
+    fn frame_connect_end_stream(envelope: &str) -> Vec<u8> {
+        let mut out = Vec::with_capacity(5 + envelope.len());
+        out.push(0x02);
+        out.extend_from_slice(&(envelope.len() as u32).to_be_bytes());
+        out.extend_from_slice(envelope.as_bytes());
+        out
+    }
+
+    async fn connect_request_ctx() -> RpcMatchContext {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/connect+json")
+            .body(Body::empty())
+            .expect("request");
+        inspect_request(&req).await
+    }
+
+    fn framed_error_body() -> Vec<u8> {
+        let mut body = frame_connect_payload(b"hi");
+        body.extend_from_slice(&frame_connect_payload(b"bye"));
+        body.extend_from_slice(&frame_connect_end_stream(
+            r#"{"error":{"code":"unavailable","message":"busy"},"metadata":{}}"#,
+        ));
+        body
+    }
+
+    async fn check_framed_error_inspection(response: http::Response<Body>) {
+        let ctx = connect_request_ctx().await;
+        let inspected = inspect_response(&ctx, &response).await;
+        assert_eq!(inspected.protocol.as_deref(), Some("connect"));
+        assert_eq!(inspected.status.as_deref(), Some("unavailable"));
+        assert_eq!(inspected.message.as_deref(), Some("busy"));
+        assert_eq!(inspected.response_message_count, Some(2));
+        assert_eq!(inspected.response_message_bytes, Some(5));
+    }
+
+    #[tokio::test]
+    async fn precomputed_connect_error_reports_status_and_message_counts() {
+        let response = http::Response::builder()
+            .header(http::header::CONTENT_TYPE, "application/connect+json")
+            .body(Body::from(framed_error_body()))
+            .expect("response");
+
+        let response =
+            buffer_response_body_with_reason(response, 1024, Duration::from_secs(1), "rpc.body")
+                .await
+                .expect("buffered");
+        let precomputed = response
+            .extensions()
+            .get::<PrecomputedRpcBodySummary>()
+            .expect("precomputed connect summary");
+        let (count, bytes, trailers) = precomputed.clone().0.into_parts();
+        assert_eq!(count, 2);
+        assert_eq!(bytes, 5);
+        assert!(trailers.is_some());
+
+        check_framed_error_inspection(response).await;
+    }
+
+    #[tokio::test]
+    async fn buffered_connect_error_reports_status_and_message_counts() {
+        let response = http::Response::builder()
+            .header(http::header::CONTENT_TYPE, "application/connect+json")
+            .body(Body::from(framed_error_body()))
+            .expect("response");
+
+        let response = buffer_response_body(response, 1024, Duration::from_secs(1))
+            .await
+            .expect("buffered");
+        assert!(
+            response
+                .extensions()
+                .get::<PrecomputedRpcBodySummary>()
+                .is_none()
+        );
+
+        check_framed_error_inspection(response).await;
+    }
+
+    #[tokio::test]
+    async fn unary_connect_error_keeps_body_status() {
+        let response = http::Response::builder()
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("connect-protocol-version", "1")
+            .body(Body::from(r#"{"code":"unavailable","message":"busy"}"#))
+            .expect("response");
+
+        let response = buffer_response_body(response, 1024, Duration::from_secs(1))
+            .await
+            .expect("buffered");
+        let ctx = connect_request_ctx().await;
+        let inspected = inspect_response(&ctx, &response).await;
+        assert_eq!(inspected.protocol.as_deref(), Some("connect"));
+        assert_eq!(inspected.status.as_deref(), Some("unavailable"));
+        assert_eq!(inspected.message.as_deref(), Some("busy"));
+    }
+
+    #[test]
+    fn connect_trailers_win_over_unary_body() {
+        let trailers = parse_connect_end_stream_metadata(
+            br#"{"error":{"code":"unavailable","message":"busy"}}"#,
+        )
+        .expect("envelope");
+        let body = Bytes::from_static(br#"{"code":"ok","message":"nope"}"#);
+        let headers = HeaderMap::new();
+        assert_eq!(
+            extract_rpc_status_and_message(Some("connect"), &headers, Some(&trailers), Some(&body)),
+            (Some("unavailable".to_string()), Some("busy".to_string()))
+        );
+
+        let body = Bytes::from_static(br#"{"code":"unavailable","message":"busy"}"#);
+        assert_eq!(
+            extract_rpc_status_and_message(Some("connect"), &headers, None, Some(&body)),
+            (Some("unavailable".to_string()), Some("busy".to_string()))
+        );
+    }
+}

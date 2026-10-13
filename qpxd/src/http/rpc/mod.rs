@@ -48,12 +48,13 @@ use http::{HeaderMap, Request, StatusCode};
 #[cfg(test)]
 use local_response::{frame_grpc_message, frame_grpc_web_trailers};
 #[cfg(all(test, any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
-use metrics::extract_connect_stream_status_and_message;
+use protocol::extract_connect_stream_status_and_message;
 #[cfg(all(test, any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
 use protocol::parse_connect_end_stream_metadata;
 #[cfg(test)]
 use protocol::{
-    extract_connect_status_and_message, extract_grpc_status_and_message, extract_service_and_method,
+    extract_connect_status_and_message, extract_grpc_status_and_message,
+    extract_rpc_status_and_message, extract_service_and_method,
 };
 #[cfg(test)]
 use qpx_http::body::Body;

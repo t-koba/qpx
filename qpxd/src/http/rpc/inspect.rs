@@ -5,6 +5,8 @@ use super::protocol::{
     detect_rpc_protocol, extract_rpc_status_and_message, extract_service_and_method,
     infer_request_streaming, infer_response_streaming, response_content_type,
 };
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use super::streaming::ConnectFrameObserver;
 use crate::http::body::size::{
     ObservedBodyReader, observed_request_body_reader, observed_request_size,
     observed_request_trailers, observed_response_body_reader, observed_response_size,
@@ -231,11 +233,7 @@ async fn summarize_observed_response_body(
             )
             .await?
         }
-        Some("connect") => FramedBodySummary {
-            message_count: usize::from(body.len() > 0),
-            message_bytes: body.len(),
-            trailers: None,
-        },
+        Some("connect") => connect_response_summary(body, content_type).await?,
         _ => FramedBodySummary {
             message_count: usize::from(body.len() > 0),
             message_bytes: body.len(),
@@ -243,6 +241,57 @@ async fn summarize_observed_response_body(
         },
     };
     Ok(Some(summary))
+}
+
+fn connect_response_is_enveloped(content_type: Option<&str>) -> bool {
+    content_type.is_some_and(|value| value.starts_with("application/connect+"))
+}
+
+/// Summarizes a buffered Connect response body with the same envelope rule
+/// the streaming observer uses: enveloped streaming bodies parse frames for
+/// message counts and end-stream trailers, while unary JSON keeps the
+/// whole-body fallback.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+async fn connect_response_summary(
+    body: &ObservedBodyReader,
+    content_type: Option<&str>,
+) -> Result<FramedBodySummary> {
+    if !connect_response_is_enveloped(content_type) {
+        return Ok(FramedBodySummary {
+            message_count: usize::from(body.len() > 0),
+            message_bytes: body.len(),
+            trailers: None,
+        });
+    }
+    let mut observer = ConnectFrameObserver::new(None, None);
+    observe_connect_observed_body(body, &mut observer).await?;
+    observer.finish().map_err(Into::into)
+}
+
+#[cfg(not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
+async fn connect_response_summary(
+    body: &ObservedBodyReader,
+    content_type: Option<&str>,
+) -> Result<FramedBodySummary> {
+    let _ = content_type;
+    Ok(FramedBodySummary {
+        message_count: usize::from(body.len() > 0),
+        message_bytes: body.len(),
+        trailers: None,
+    })
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+async fn observe_connect_observed_body(
+    body: &ObservedBodyReader,
+    observer: &mut ConnectFrameObserver,
+) -> Result<()> {
+    body.feed_chunks(|chunk| {
+        observer.feed(chunk)?;
+        Ok(())
+    })
+    .await?;
+    Ok(())
 }
 
 async fn observe_grpc_observed_body(

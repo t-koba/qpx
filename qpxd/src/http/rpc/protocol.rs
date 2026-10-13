@@ -128,6 +128,11 @@ pub(super) fn extract_rpc_status_and_message(
 ) -> (Option<String>, Option<String>) {
     match protocol {
         Some("grpc") | Some("grpc_web") => extract_grpc_status_and_message(headers, trailers),
+        // Parsed end-stream trailers win when present; otherwise the body is
+        // a unary JSON error.
+        Some("connect") if trailers.is_some_and(|t| t.contains_key("connect-code")) => {
+            extract_connect_stream_status_and_message(trailers)
+        }
         Some("connect") => extract_connect_status_and_message(body),
         _ => (None, None),
     }
@@ -166,6 +171,25 @@ pub(super) fn extract_connect_status_and_message(
         .get("message")
         .and_then(|value| value.as_str())
         .map(str::to_string);
+    (status, message)
+}
+
+/// Extracts Connect status from parsed end-stream trailers.
+///
+/// Reading the decoded trailer form keeps buffered and streaming observation
+/// on one path; the message is stored percent-encoded at the trailer
+/// boundary, mirroring `grpc-message`.
+pub(super) fn extract_connect_stream_status_and_message(
+    trailers: Option<&HeaderMap>,
+) -> (Option<String>, Option<String>) {
+    let status = trailers
+        .and_then(|headers| headers.get("connect-code"))
+        .and_then(|value| value.to_str().ok())
+        .map(normalize_connect_code);
+    let message = trailers
+        .and_then(|headers| headers.get("connect-message"))
+        .and_then(|value| value.to_str().ok())
+        .map(|value| percent_decode_str(value).decode_utf8_lossy().to_string());
     (status, message)
 }
 

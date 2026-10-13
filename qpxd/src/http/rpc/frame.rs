@@ -1,5 +1,7 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use super::protocol::{detect_rpc_protocol, parse_grpc_web_trailer_block, response_content_type};
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use super::streaming::ConnectFrameObserver;
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -19,16 +21,32 @@ pub(crate) struct PrecomputedRpcBodySummary(pub(super) FramedBodySummary);
 
 #[derive(Debug)]
 pub(crate) struct RpcBodySummaryObserver {
-    inner: GrpcFrameObserver,
+    inner: RpcSummaryInner,
+}
+
+#[derive(Debug)]
+enum RpcSummaryInner {
+    Grpc(GrpcFrameObserver),
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    Connect(ConnectFrameObserver),
 }
 
 impl RpcBodySummaryObserver {
     pub(crate) fn feed(&mut self, chunk: &[u8]) -> bool {
-        self.inner.feed(chunk).is_ok()
+        match &mut self.inner {
+            RpcSummaryInner::Grpc(inner) => inner.feed(chunk).is_ok(),
+            #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+            RpcSummaryInner::Connect(inner) => inner.feed(chunk).is_ok(),
+        }
     }
 
     pub(crate) fn finish(self) -> Option<PrecomputedRpcBodySummary> {
-        self.inner.finish().ok().map(PrecomputedRpcBodySummary)
+        let summary = match self.inner {
+            RpcSummaryInner::Grpc(inner) => inner.finish().ok(),
+            #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+            RpcSummaryInner::Connect(inner) => inner.finish().ok(),
+        };
+        summary.map(PrecomputedRpcBodySummary)
     }
 }
 
@@ -50,24 +68,47 @@ fn body_summary_observer(
     let protocol = match protocol_or_content_type {
         Some(value) if value.starts_with("application/grpc-web") => Some("grpc_web"),
         Some(value) if value.starts_with("application/grpc") => Some("grpc"),
+        Some(value) if value.starts_with("application/connect+") => Some("connect"),
         Some("grpc_web") => Some("grpc_web"),
         Some("grpc") => Some("grpc"),
+        Some("connect") => Some("connect"),
         _ => None,
     }?;
+    if protocol == "connect" {
+        return connect_summary_observer(headers);
+    }
     let content_type = response_content_type(headers);
     let inner = match protocol {
-        "grpc" => GrpcFrameObserver::new(None),
-        "grpc_web" => GrpcFrameObserver::grpc_web(
+        "grpc" => RpcSummaryInner::Grpc(GrpcFrameObserver::new(None)),
+        "grpc_web" => RpcSummaryInner::Grpc(GrpcFrameObserver::grpc_web(
             content_type
                 .as_deref()
                 .map(|value| value.starts_with("application/grpc-web-text"))
                 .unwrap_or(false),
             None,
             None,
-        ),
+        )),
         _ => return None,
     };
     Some(RpcBodySummaryObserver { inner })
+}
+
+/// Observes enveloped Connect bodies with the same envelope rule the
+/// streaming observer uses. Unary Connect bodies carry no framing, so they
+/// stay unobserved here and keep the buffered whole-body fallback.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+fn connect_summary_observer(headers: &HeaderMap) -> Option<RpcBodySummaryObserver> {
+    response_content_type(headers)
+        .as_deref()
+        .is_some_and(|value| value.starts_with("application/connect+"))
+        .then(|| RpcBodySummaryObserver {
+            inner: RpcSummaryInner::Connect(ConnectFrameObserver::new(None, None)),
+        })
+}
+
+#[cfg(not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
+fn connect_summary_observer(_headers: &HeaderMap) -> Option<RpcBodySummaryObserver> {
+    None
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
