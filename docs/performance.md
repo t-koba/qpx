@@ -46,11 +46,15 @@ Competitive targets remain in `perf/proxy-performance-objectives.json`: the
 lanes aim for at least 15% more throughput and CPU efficiency than the strongest
 external result per axis, at least 5% lower p99, and dominance of at least 1.1.
 Existing spread caps are unchanged: 1.10 for throughput/CPU and 1.25 for p99.
-Over-cap spread by qpx, the direct backend **or any external reference** makes
-that entire competitive lane `RETRYABLE_INVALID`; it is never a pass or a
-regression. Direct-backend efficiency/headroom remains a diagnostic, not a proxy
-ceiling. RSS compares qpx to nginx's same-class resident footprint while the
-other resource axes retain best-of-breed external references.
+Over-cap spread by qpx makes the lane `INCONCLUSIVE` without remeasurement;
+candidate variance can itself signal a regression. When the candidate spread is
+within cap, over-cap spread by the direct backend **or any external reference**
+is `RETRYABLE_INVALID` and may trigger a bounded remeasurement. Candidate-side
+inconclusive status takes precedence if both candidate and reference spreads
+exceed their caps. Neither status is a pass or a scored regression. Direct-backend
+efficiency/headroom remains a diagnostic, not a proxy ceiling. RSS compares qpx
+to nginx's same-class resident footprint while the other resource axes retain
+best-of-breed external references.
 
 These are competitive objectives, not a shared-runner regression oracle. The
 required current-versus-pinned-release pair, bounded validity retries, fixed
@@ -296,9 +300,11 @@ Evaluation always validates schema, request/error accounting, responses,
 resources, workload equivalence and identities **before** checking spread or
 performance. Qpx functional failures (current **or previous**), malformed data,
 startup/tool failures and wrong-body/cache-result failures produce `ERROR` and
-exit **1**, immediately and without retries. Over-cap spread still produces
-`RETRYABLE_INVALID`. A parsed **reference-side transient invalid sample** can
-also request a retry via sampler exit **75**:
+exit **1**, immediately and without retries. An over-cap spread on the current
+qpx candidate produces `INCONCLUSIVE` immediately and is not remeasured; it can
+never be hidden by a later attractive sample. A reference-only over-cap spread
+produces `RETRYABLE_INVALID`. A parsed **reference-side transient invalid sample**
+can also request a retry via sampler exit **75**:
 
 - HTTP/2: invalid request/error or non-2xx accounting from nginx or the direct
   control backend, after successful parsing of counters, timings and latency
@@ -311,12 +317,14 @@ also request a retry via sampler exit **75**:
 The driver maps that competitive-only exit to `RETRYABLE_INVALID`; exit 75 from
 a current/previous qpx-only sampler is always an error, never a retry request.
 No spread caps, paired regression floors or functional error tolerances are
-widened. The driver re-measures the **whole relevant pair or competitive lane
-group** in that job, with at most **two additional attempts** (three total). It accepts the
-first valid attempt, even if that attempt regresses, and never retries a valid
-regression or selects the best attempt. Other already-valid lanes are not
-re-measured. All raw samples, logs, measurements and results from every attempt
-remain under `target/perf/{proxy,http2}-policy/` and are uploaded with `if: always()`.
+widened. After `RETRYABLE_INVALID`, the driver re-measures the **whole relevant
+pair or competitive lane group** in that job, with at most **two additional
+attempts** (three total). Candidate-side `INCONCLUSIVE` results are terminal and
+do not start another measurement. The driver accepts the first valid attempt,
+even if that attempt regresses, and never retries a valid regression or selects
+the best attempt. Other already-valid lanes are not re-measured. All raw
+samples, logs, measurements and results from every attempt remain under
+`target/perf/{proxy,http2}-policy/` and are uploaded with `if: always()`.
 
 At exhaustion the lane is `INCONCLUSIVE`/unmeasured, exit **75**, with explicit
 required/valid/unmeasured coverage. It is **not green and not a qpx regression**.
@@ -350,7 +358,8 @@ python3 scripts/test-perf-policy.py
 ```
 
 It covers equal pairs with competitive/queue-delay misses, each independent
-metric regression, invalid then equal/regressed, three invalid attempts,
+metric regression, terminal candidate-side spread invalidity, retryable
+reference-side spread invalidity followed by equal/regressed/exhausted outcomes,
 regression plus an inconclusive lane, missing/corrupt/schema/wrong-response
 errors, interleaved order, and the public checker entrypoints. It retains all
 fixture attempts and coverage summaries in `target/perf/policy-fixtures/`.
