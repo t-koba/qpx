@@ -211,12 +211,9 @@ impl ForwardQpxHandler {
         // failures still surface before the deadline.
         let relay_fut = async {
             match grpc_deadline {
-                Some(deadline) => {
-                    match tokio::time::timeout_at(deadline.instant(), relay_body_fut).await {
-                        Ok(result) => Some(result),
-                        Err(_) => None,
-                    }
-                }
+                Some(deadline) => tokio::time::timeout_at(deadline.instant(), relay_body_fut)
+                    .await
+                    .ok(),
                 None => Some(relay_body_fut.await),
             }
         };
