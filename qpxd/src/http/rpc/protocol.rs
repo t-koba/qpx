@@ -2,7 +2,7 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
-use percent_encoding::{NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
+use percent_encoding::percent_decode_str;
 
 pub(super) fn response_content_type(headers: &HeaderMap) -> Option<String> {
     headers
@@ -63,6 +63,8 @@ pub(super) fn parse_grpc_web_trailer_block(raw: &[u8]) -> Result<HeaderMap> {
 /// trailer values; the reserved protocol names never come from metadata.
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(super) fn parse_connect_end_stream_metadata(raw: &[u8]) -> Result<HeaderMap> {
+    use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
     let value: serde_json::Value = serde_json::from_slice(raw)?;
     let mut headers = HeaderMap::new();
     match value.get("error") {

@@ -243,6 +243,7 @@ async fn summarize_observed_response_body(
     Ok(Some(summary))
 }
 
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 fn connect_response_is_enveloped(content_type: Option<&str>) -> bool {
     content_type.is_some_and(|value| value.starts_with("application/connect+"))
 }
