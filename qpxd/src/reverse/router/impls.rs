@@ -474,7 +474,13 @@ fn resilience_to_passive_health(
             .and_then(|cfg| cfg.connect_errors)
             .unwrap_or_default(),
         consecutive_resets: consecutive.and_then(|cfg| cfg.resets).unwrap_or_default(),
-        max_ejection: Duration::from_millis(
+        ejection_base: Duration::from_millis(
+            ejection
+                .and_then(|cfg| cfg.base_ms.or(cfg.max_ms))
+                .unwrap_or(30_000)
+                .max(1),
+        ),
+        ejection_max: Duration::from_millis(
             ejection
                 .and_then(|cfg| cfg.max_ms.or(cfg.base_ms))
                 .unwrap_or(30_000)
@@ -547,6 +553,33 @@ mod affinity_key_tests {
                     | ("header" | "cookie" | "query", _)
             ));
         }
+    }
+
+    #[test]
+    fn ejection_compiler_keeps_base_and_max_distinct() {
+        use qpx_core::config::{EjectionConfig, ResilienceConfig};
+
+        let both = ResilienceConfig {
+            ejection: Some(EjectionConfig {
+                base_ms: Some(1_000),
+                max_ms: Some(5_000),
+            }),
+            ..Default::default()
+        };
+        let runtime = resilience_to_passive_health(&both);
+        assert_eq!(runtime.ejection_base, Duration::from_millis(1_000));
+        assert_eq!(runtime.ejection_max, Duration::from_millis(5_000));
+
+        let max_only = ResilienceConfig {
+            ejection: Some(EjectionConfig {
+                base_ms: None,
+                max_ms: Some(5_000),
+            }),
+            ..Default::default()
+        };
+        let runtime = resilience_to_passive_health(&max_only);
+        assert_eq!(runtime.ejection_base, Duration::from_millis(5_000));
+        assert_eq!(runtime.ejection_max, Duration::from_millis(5_000));
     }
 
     #[test]

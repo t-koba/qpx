@@ -205,6 +205,13 @@ fn validate_resilience_fields(resilience: &ResilienceConfig, context: &str) -> R
         if matches!(ejection.max_ms, Some(0)) {
             return Err(anyhow!("{context} resilience.ejection.max_ms must be >= 1"));
         }
+        if let (Some(base_ms), Some(max_ms)) = (ejection.base_ms, ejection.max_ms)
+            && max_ms < base_ms
+        {
+            return Err(anyhow!(
+                "{context} resilience.ejection.max_ms ({max_ms}) must be >= ejection.base_ms ({base_ms}): ejection grows from base and never exceeds max"
+            ));
+        }
     }
     Ok(())
 }
@@ -449,8 +456,8 @@ mod affinity_key_tests {
 mod unsupported_knob_tests {
     use super::*;
     use crate::config::{
-        AdaptiveThresholdConfig, HalfOpenConfig, LatencyThresholdConfig, OutlierDetectionConfig,
-        ResilienceConfig, ResilienceRetryConfig, RetryBudgetConfig,
+        AdaptiveThresholdConfig, EjectionConfig, HalfOpenConfig, LatencyThresholdConfig,
+        OutlierDetectionConfig, ResilienceConfig, ResilienceRetryConfig, RetryBudgetConfig,
     };
 
     #[test]
@@ -505,6 +512,37 @@ mod unsupported_knob_tests {
         };
         let err = validate_resilience_fields(&half_open, "test").expect_err("half_open");
         assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[test]
+    fn ejection_max_below_base_is_rejected() {
+        let inverted = ResilienceConfig {
+            ejection: Some(EjectionConfig {
+                base_ms: Some(5_000),
+                max_ms: Some(1_000),
+            }),
+            ..Default::default()
+        };
+        let err = validate_resilience_fields(&inverted, "test").expect_err("max below base");
+        assert!(err.to_string().contains("must be >="), "{err}");
+
+        let ordered = ResilienceConfig {
+            ejection: Some(EjectionConfig {
+                base_ms: Some(1_000),
+                max_ms: Some(5_000),
+            }),
+            ..Default::default()
+        };
+        validate_resilience_fields(&ordered, "test").expect("base below max");
+
+        let single = ResilienceConfig {
+            ejection: Some(EjectionConfig {
+                base_ms: None,
+                max_ms: Some(5_000),
+            }),
+            ..Default::default()
+        };
+        validate_resilience_fields(&single, "test").expect("max alone");
     }
 
     #[test]

@@ -39,7 +39,8 @@ pub(super) struct PassiveHealthRuntime {
     pub(super) consecutive_timeouts: u32,
     pub(super) consecutive_connect_errors: u32,
     pub(super) consecutive_resets: u32,
-    pub(super) max_ejection: Duration,
+    pub(super) ejection_base: Duration,
+    pub(super) ejection_max: Duration,
     pub(super) latency_threshold: Option<Duration>,
 }
 
@@ -270,7 +271,7 @@ impl UpstreamEndpoint {
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         if fails >= policy.fail_threshold {
-            self.eject(policy.cooldown, EjectionReason::ActiveFailure);
+            self.eject(policy.cooldown, None, EjectionReason::ActiveFailure);
         }
     }
 
@@ -312,9 +313,9 @@ impl UpstreamEndpoint {
         }
         .saturating_add(1);
         let reason = passive_failure_reason(kind);
-        self.note_adaptive_failure(policy.max_ejection, reason);
+        self.note_adaptive_failure(policy.ejection_base, policy.ejection_max, reason);
         if count >= threshold {
-            self.eject(policy.max_ejection, reason);
+            self.eject(policy.ejection_base, Some(policy.ejection_max), reason);
             self.reset_passive_counters();
         }
     }
@@ -330,15 +331,24 @@ impl UpstreamEndpoint {
         let Some(threshold) = policy.latency_threshold else {
             return;
         };
-        self.note_adaptive_latency(policy.max_ejection, threshold, elapsed);
+        self.note_adaptive_latency(
+            policy.ejection_base,
+            policy.ejection_max,
+            threshold,
+            elapsed,
+        );
         if elapsed >= threshold {
-            self.eject(policy.max_ejection, EjectionReason::Latency);
+            self.eject(
+                policy.ejection_base,
+                Some(policy.ejection_max),
+                EjectionReason::Latency,
+            );
         } else {
             self.reset_passive_counters();
         }
     }
 
-    fn eject(&self, duration: Duration, reason: EjectionReason) {
+    fn eject(&self, base: Duration, cap: Option<Duration>, reason: EjectionReason) {
         let shift = self
             .ejection_backoff_shift
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -346,7 +356,11 @@ impl UpstreamEndpoint {
             })
             .unwrap_or(0)
             .min(ADAPTIVE_MAX_BACKOFF_SHIFT);
-        let scaled_ms = (duration.as_millis() as u64).saturating_mul(1u64 << shift);
+        let scaled_ms = (base.as_millis() as u64).saturating_mul(1u64 << shift);
+        let scaled_ms = match cap {
+            Some(cap) => scaled_ms.min(cap.as_millis().min(u128::from(u64::MAX)) as u64),
+            None => scaled_ms,
+        };
         let until = now_millis().saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
         self.admission_state_active.store(true, Ordering::Release);
@@ -434,7 +448,12 @@ impl UpstreamEndpoint {
         self.maybe_trim_adaptive_window();
     }
 
-    fn note_adaptive_failure(&self, max_ejection: Duration, _reason: EjectionReason) {
+    fn note_adaptive_failure(
+        &self,
+        ejection_base: Duration,
+        ejection_cap: Duration,
+        _reason: EjectionReason,
+    ) {
         let failures = self
             .adaptive_failures
             .fetch_add(1, Ordering::Relaxed)
@@ -445,7 +464,11 @@ impl UpstreamEndpoint {
             && failures.saturating_mul(ADAPTIVE_FAILURE_RATE_DEN)
                 >= total.saturating_mul(ADAPTIVE_FAILURE_RATE_NUM)
         {
-            self.eject(max_ejection, EjectionReason::SuccessRate);
+            self.eject(
+                ejection_base,
+                Some(ejection_cap),
+                EjectionReason::SuccessRate,
+            );
             return;
         }
         self.maybe_trim_adaptive_window();
@@ -453,7 +476,8 @@ impl UpstreamEndpoint {
 
     fn note_adaptive_latency(
         &self,
-        max_ejection: Duration,
+        ejection_base: Duration,
+        ejection_cap: Duration,
         threshold: Duration,
         elapsed: Duration,
     ) {
@@ -472,7 +496,7 @@ impl UpstreamEndpoint {
         let avg_ms = total_ms / u64::from(samples.max(1));
         let threshold_ms = threshold.as_millis().min(u128::from(u64::MAX)) as u64;
         if avg_ms >= threshold_ms.saturating_mul(ADAPTIVE_LATENCY_MULTIPLIER) {
-            self.eject(max_ejection, EjectionReason::Latency);
+            self.eject(ejection_base, Some(ejection_cap), EjectionReason::Latency);
         } else {
             self.maybe_trim_adaptive_window();
         }
@@ -549,7 +573,8 @@ mod tests {
             consecutive_timeouts: 100,
             consecutive_connect_errors: 100,
             consecutive_resets: 100,
-            max_ejection: Duration::from_secs(30),
+            ejection_base: Duration::from_secs(30),
+            ejection_max: Duration::from_secs(30),
             latency_threshold: Some(Duration::from_millis(10)),
         }
     }
@@ -576,6 +601,48 @@ mod tests {
             endpoint.mark_passive_latency(Some(&policy), Duration::from_millis(25));
         }
         assert!(!endpoint.is_healthy(now_millis()));
+    }
+
+    fn bounded_policy() -> PassiveHealthRuntime {
+        PassiveHealthRuntime {
+            consecutive_5xx: 1,
+            consecutive_timeouts: 100,
+            consecutive_connect_errors: 100,
+            consecutive_resets: 100,
+            ejection_base: Duration::from_millis(1_000),
+            ejection_max: Duration::from_millis(5_000),
+            latency_threshold: None,
+        }
+    }
+
+    fn ejection_span_ms(endpoint: &UpstreamEndpoint) -> u64 {
+        endpoint
+            .unhealthy_until_ms
+            .load(Ordering::Relaxed)
+            .saturating_sub(now_millis())
+    }
+
+    #[test]
+    fn passive_ejection_starts_at_base_and_never_exceeds_max() {
+        let endpoint = UpstreamEndpoint::new("http://example".to_string());
+        let policy = bounded_policy();
+        endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+        let first = ejection_span_ms(&endpoint);
+        assert!(
+            first <= 1_000,
+            "first ejection {first}ms exceeds base_ms 1000"
+        );
+        endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+        let second = ejection_span_ms(&endpoint);
+        assert!(
+            second > first,
+            "backoff stalled: first {first}ms second {second}ms"
+        );
+        for _ in 0..8 {
+            endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+        }
+        let worst = ejection_span_ms(&endpoint);
+        assert!(worst <= 5_000, "ejection {worst}ms exceeds max_ms 5000");
     }
 
     #[test]
