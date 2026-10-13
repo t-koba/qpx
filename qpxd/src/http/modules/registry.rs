@@ -67,8 +67,15 @@ impl HttpModuleRegistryBuilder {
         if type_name.trim().is_empty() {
             return Err(anyhow!("http module type name must not be empty"));
         }
-        if self.factories.insert(type_name.clone(), factory).is_some() {
-            return Err(anyhow!("http module type already registered: {type_name}"));
+        // Insert only into a vacant slot: a rejected duplicate must not
+        // replace the original registration.
+        match self.factories.entry(type_name.clone()) {
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(factory);
+            }
+            std::collections::hash_map::Entry::Occupied(_) => {
+                return Err(anyhow!("http module type already registered: {type_name}"));
+            }
         }
         Ok(self)
     }
@@ -96,5 +103,56 @@ impl HttpModuleRegistry {
 
     pub fn get(&self, type_name: &str) -> Option<&Arc<dyn HttpModuleFactory>> {
         self.factories.get(type_name)
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::super::HttpModule;
+    use super::*;
+    use qpx_core::config::HttpModuleConfig;
+
+    struct IdFactory;
+    impl HttpModuleFactory for IdFactory {
+        fn build(&self, _spec: &HttpModuleConfig) -> Result<Arc<dyn HttpModule>> {
+            Err(anyhow!("stub factory never builds"))
+        }
+    }
+
+    #[test]
+    fn rejected_duplicate_registration_keeps_original_factory() {
+        let first: Arc<dyn HttpModuleFactory> = Arc::new(IdFactory);
+        let mut builder = HttpModuleRegistryBuilder::new();
+        builder
+            .register_factory_arc("custom", first.clone())
+            .expect("first registration");
+        assert!(
+            builder
+                .register_factory_arc("custom", Arc::new(IdFactory))
+                .is_err()
+        );
+        let registry = builder.build();
+        let kept = registry.get("custom").expect("registration survives");
+        assert!(Arc::ptr_eq(kept, &first));
+    }
+
+    #[test]
+    fn rejected_builtin_collision_keeps_builtin_factory() {
+        let mut builder = HttpModuleRegistryBuilder::with_builtins();
+        let builtin = builder
+            .factories
+            .get("cache_purge")
+            .cloned()
+            .expect("builtin");
+        assert!(
+            builder
+                .register_factory_arc("cache_purge", Arc::new(IdFactory))
+                .is_err()
+        );
+        let kept = builder
+            .factories
+            .get("cache_purge")
+            .expect("builtin survives");
+        assert!(Arc::ptr_eq(kept, &builtin));
     }
 }
