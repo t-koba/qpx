@@ -78,7 +78,7 @@ fn validate_strict_authority(input: &str) -> Option<&str> {
     }
 }
 
-fn has_explicit_port(authority: &str) -> bool {
+pub(crate) fn has_explicit_port(authority: &str) -> bool {
     authority
         .strip_prefix('[')
         .and_then(|value| value.find(']').map(|close| &value[close + 1..]))

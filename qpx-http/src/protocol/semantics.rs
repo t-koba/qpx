@@ -267,6 +267,8 @@ pub fn is_intrinsically_valid_common_h2_request<B>(req: &http::Request<B>) -> bo
     req.uri().scheme().is_some()
         && !authority.host().is_empty()
         && !authority.as_str().contains('@')
+        && !(super::address::has_explicit_port(authority.as_str())
+            && authority.port_u16().is_none())
         && req.uri().path().starts_with('/')
 }
 
@@ -603,6 +605,11 @@ fn parse_authority_parts(input: &str) -> Option<AuthorityParts> {
         return None;
     }
     let port = authority.port_u16();
+    // `port_u16` reports an explicit invalid port the same way as an omitted
+    // one; an explicit port must parse to be a validated authority.
+    if super::address::has_explicit_port(input) && port.is_none() {
+        return None;
+    }
     Some(AuthorityParts { authority, port })
 }
 
@@ -610,9 +617,13 @@ fn authority_parts_from_uri(authority: &http::uri::Authority) -> Option<Authorit
     if authority.as_str().contains('@') || authority.host().is_empty() {
         return None;
     }
+    let port = authority.port_u16();
+    if super::address::has_explicit_port(authority.as_str()) && port.is_none() {
+        return None;
+    }
     Some(AuthorityParts {
         authority: authority.clone(),
-        port: authority.port_u16(),
+        port,
     })
 }
 

@@ -280,29 +280,52 @@ mod tests {
     }
 
     #[test]
-    fn extraction_reuses_preflight_authority_metadata() {
+    fn extraction_rejects_explicit_invalid_port_at_validation() {
         let req = Request::builder()
             .version(http::Version::HTTP_11)
             .uri("/")
             .header(http::header::HOST, "example.com:http")
             .body(())
             .expect("request");
-        let validated =
-            qpx_http::protocol::semantics::validate_incoming_request_with_metadata(&req)
-                .expect("validated request");
-        let fields = extract_base_request_fields(
-            &req,
-            BaseRequestContext {
-                validated_request: Some(validated),
-                ..Default::default()
-            },
+        let err = qpx_http::protocol::semantics::validate_incoming_request_with_metadata(&req)
+            .expect_err("explicit invalid port must fail validation");
+        assert_eq!(
+            err,
+            qpx_http::protocol::semantics::RequestValidationError::InvalidHostHeader
         );
+    }
+
+    #[test]
+    fn extraction_without_preflight_metadata_keeps_invalid_header() {
+        let req = Request::builder()
+            .version(http::Version::HTTP_11)
+            .uri("/")
+            .header(http::header::HOST, "example.com:http")
+            .body(())
+            .expect("request");
+        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+
+        assert!(matches!(
+            fields.authority,
+            Some(BaseAuthority::InvalidHeader(_))
+        ));
+        assert_eq!(fields.host(), Some("example.com:http"));
+        assert_eq!(fields.dst_port, None);
+    }
+
+    #[test]
+    fn extraction_without_preflight_metadata_keeps_invalid_port() {
+        let req = Request::builder()
+            .version(http::Version::HTTP_11)
+            .uri("http://example.com:http/")
+            .body(())
+            .expect("request");
+        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
 
         assert!(matches!(
             fields.authority,
             Some(BaseAuthority::InvalidPort(_))
         ));
-        assert_eq!(fields.host(), Some("example.com:http"));
         assert_eq!(fields.dst_port, None);
     }
 }

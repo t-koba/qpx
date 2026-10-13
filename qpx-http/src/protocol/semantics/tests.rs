@@ -559,6 +559,78 @@ fn common_h2_retrieval_predicate_defers_validation_sensitive_fields() {
 }
 
 #[test]
+fn validate_rejects_explicit_invalid_host_ports() {
+    for host in ["example.test:65536", "example.test:", "example.test:abc"] {
+        let mut req = http::Request::builder()
+            .version(Version::HTTP_11)
+            .method(Method::POST)
+            .uri("http://example.test/upload")
+            .body(())
+            .expect("request");
+        req.headers_mut()
+            .insert(HOST, HeaderValue::from_str(host).expect("header"));
+        let err = validate_incoming_request(&req).expect_err("must fail");
+        assert_eq!(err, RequestValidationError::InvalidHostHeader, "{host}");
+    }
+}
+
+#[test]
+fn validate_rejects_explicit_invalid_uri_authority_ports() {
+    for uri in [
+        "http://example.test:65536/upload",
+        "http://example.test:/upload",
+        "http://example.test:abc/upload",
+    ] {
+        let mut req = http::Request::builder()
+            .version(Version::HTTP_11)
+            .method(Method::POST)
+            .uri(uri)
+            .body(())
+            .expect("request");
+        req.headers_mut()
+            .insert(HOST, HeaderValue::from_static("example.test"));
+        let err = validate_incoming_request(&req).expect_err("must fail");
+        assert_eq!(err, RequestValidationError::InvalidRequestTarget, "{uri}");
+    }
+}
+
+#[test]
+fn validate_keeps_explicit_valid_host_ports() {
+    for (uri, host) in [
+        ("http://example.test:8080/upload", "example.test:8080"),
+        ("https://example.test:443/upload", "example.test:443"),
+    ] {
+        let mut req = http::Request::builder()
+            .version(Version::HTTP_11)
+            .method(Method::POST)
+            .uri(uri)
+            .body(())
+            .expect("request");
+        req.headers_mut()
+            .insert(HOST, HeaderValue::from_str(host).expect("header"));
+        validate_incoming_request(&req).expect("valid explicit port");
+    }
+}
+
+#[test]
+fn common_h2_retrieval_predicate_rejects_explicit_invalid_ports() {
+    for uri in [
+        "https://example.com:65536/resource",
+        "https://example.com:/resource",
+        "https://example.com:abc/resource",
+    ] {
+        let request = http::Request::builder()
+            .version(Version::HTTP_2)
+            .method(Method::GET)
+            .uri(uri)
+            .body(())
+            .expect("request");
+        assert!(!is_intrinsically_valid_common_h2_request(&request), "{uri}");
+        assert!(validate_incoming_request(&request).is_err(), "{uri}");
+    }
+}
+
+#[test]
 fn common_h2_retrieval_predicate_rejects_other_protocol_shapes() {
     for request in [
         http::Request::builder()
