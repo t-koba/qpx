@@ -168,7 +168,10 @@ where
             line.truncate(idx);
             return Ok(line.to_vec());
         }
-        fill_buffer_capped(reader, buf, 1, MAX_HEADER_BYTES, read_timeout).await?;
+        // Require one more byte than already buffered so an incomplete line
+        // cannot return without polling the transport (and its timeout).
+        let need = buf.len().saturating_add(1);
+        fill_buffer_capped(reader, buf, need, MAX_HEADER_BYTES, read_timeout).await?;
     }
 }
 
@@ -193,7 +196,8 @@ where
                 return Ok(Some(trailers));
             }
             httparse::Status::Partial => {
-                fill_buffer_capped(reader, buf, 1, MAX_HEADER_BYTES, read_timeout).await?
+                let need = buf.len().saturating_add(1);
+                fill_buffer_capped(reader, buf, need, MAX_HEADER_BYTES, read_timeout).await?
             }
         }
     }
@@ -231,9 +235,14 @@ where
         if buf.len() >= max_len {
             return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
         }
-        let n = read_buf_with_timeout(reader, buf, read_timeout).await?;
+        // Bound each read so one segment cannot push past the cap.
+        let remaining = max_len.saturating_sub(buf.len());
+        let n = read_buf_limited_with_timeout(reader, buf, remaining, read_timeout).await?;
         if n == 0 {
             return Err(anyhow!("peer connection closed unexpectedly"));
+        }
+        if buf.len() > max_len {
+            return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
         }
     }
     Ok(())
@@ -274,6 +283,18 @@ mod tests {
     use crate::http::codec::h1_request_body::*;
     use qpx_http::body::Body;
     use tokio::io::{AsyncWriteExt, duplex};
+
+    fn run_with_hard_timeout<T: Send + 'static>(
+        hard: std::time::Duration,
+        f: impl FnOnce() -> T + Send + 'static,
+    ) -> T {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        rx.recv_timeout(hard)
+            .expect("parsing did not return within hard timeout (spin?)")
+    }
 
     #[tokio::test]
     async fn chunked_request_reader_rejects_oversized_chunk_before_payload_allocation() {
@@ -319,5 +340,96 @@ mod tests {
         .await
         .expect_err("idle body must time out");
         assert!(err.to_string().contains("request body read timed out"));
+    }
+
+    #[test]
+    fn chunk_size_partial_line_times_out_instead_of_spinning() {
+        run_with_hard_timeout(std::time::Duration::from_secs(2), || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let (mut client, server) = duplex(1024);
+                client.write_all(b"4").await.expect("partial chunk-size");
+                let (read_half, write_half) = tokio::io::split(server);
+                drop(write_half);
+                let (sender, _body) = Body::channel();
+                let err = forward_chunked_request_body(
+                    read_half,
+                    BytesMut::new(),
+                    sender,
+                    Duration::from_millis(20),
+                )
+                .await
+                .expect_err("partial chunk-size must time out");
+                assert!(
+                    err.to_string().contains("timed out"),
+                    "unexpected error: {err}"
+                );
+                // Keep the peer open until the read times out so the server
+                // side pends instead of seeing EOF.
+                drop(client);
+            })
+        });
+    }
+
+    #[test]
+    fn trailer_partial_headers_time_out_instead_of_spinning() {
+        run_with_hard_timeout(std::time::Duration::from_secs(2), || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let (mut client, server) = duplex(4096);
+                client
+                    .write_all(b"0\r\nX-Test: partial")
+                    .await
+                    .expect("partial trailers");
+                let (read_half, write_half) = tokio::io::split(server);
+                drop(write_half);
+                let (sender, _body) = Body::channel();
+                let err = forward_chunked_request_body(
+                    read_half,
+                    BytesMut::new(),
+                    sender,
+                    Duration::from_millis(20),
+                )
+                .await
+                .expect_err("partial trailers must time out");
+                assert!(
+                    err.to_string().contains("timed out"),
+                    "unexpected error: {err}"
+                );
+                drop(client);
+            })
+        });
+    }
+
+    #[test]
+    fn oversized_partial_line_fails_on_cap_instead_of_spinning() {
+        run_with_hard_timeout(std::time::Duration::from_secs(2), || {
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("runtime");
+            rt.block_on(async {
+                let (client, server) = duplex(4096);
+                let (mut read_half, write_half) = tokio::io::split(server);
+                drop(write_half);
+                let mut buf = BytesMut::new();
+                buf.extend_from_slice(&vec![b'A'; super::super::h1_common::MAX_HEADER_BYTES + 1]);
+                let err =
+                    super::read_crlf_line(&mut read_half, &mut buf, Duration::from_millis(20))
+                        .await
+                        .expect_err("oversized partial line must fail on cap");
+                assert!(
+                    err.to_string().contains("exceeded"),
+                    "unexpected error: {err}"
+                );
+                drop(client);
+            })
+        });
     }
 }
