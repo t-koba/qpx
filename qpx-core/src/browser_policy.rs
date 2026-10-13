@@ -1992,20 +1992,35 @@ pub enum TimingAllowOrigin {
 }
 
 impl TimingAllowOrigin {
-    /// Parses `*` or a space-separated serialized-origin list.
+    /// Parses `*` or a comma-separated serialized-origin list (Resource
+    /// Timing section 3.5.2). A `*` member is rejected: allow-all is
+    /// spelled as a bare `*`.
     pub fn parse(value: &str) -> Result<Self> {
         let value = value.trim();
         if value == "*" {
             return Ok(Self::Any);
         }
-        if value.is_empty() || value.contains(',') {
+        if value.is_empty() {
             return Err(invalid(
                 TIMING_ALLOW_ORIGIN,
-                "origin list must be space-separated",
+                "origin list must not be empty",
             ));
         }
         let mut origins = Vec::new();
-        for item in value.split_ascii_whitespace() {
+        for item in value.split(',') {
+            let item = item.trim();
+            if item.is_empty() {
+                return Err(invalid(
+                    TIMING_ALLOW_ORIGIN,
+                    "origin list contains an empty member",
+                ));
+            }
+            if item == "*" {
+                return Err(invalid(
+                    TIMING_ALLOW_ORIGIN,
+                    "allow-all is spelled as a bare '*'",
+                ));
+            }
             let origin = parse_origin(item, TIMING_ALLOW_ORIGIN)?;
             if origins.contains(&origin) {
                 return Err(BrowserPolicyError::Duplicate {
@@ -2015,12 +2030,6 @@ impl TimingAllowOrigin {
             }
             origins.push(origin);
         }
-        if origins.is_empty() {
-            return Err(invalid(
-                TIMING_ALLOW_ORIGIN,
-                "origin list must not be empty",
-            ));
-        }
         Ok(Self::Origins(origins))
     }
 
@@ -2028,7 +2037,7 @@ impl TimingAllowOrigin {
     pub fn as_str(&self) -> String {
         match self {
             Self::Any => "*".to_string(),
-            Self::Origins(origins) => origins.join(" "),
+            Self::Origins(origins) => origins.join(", "),
         }
     }
 
@@ -2555,7 +2564,7 @@ mod tests {
             origin_agent_cluster: Some("?1".to_string()),
             clear_site_data: Some("\"cache\", \"storage\"".to_string()),
             reporting_endpoints: Some("default=\"https://reports.example/csp\"".to_string()),
-            timing_allow_origin: Some("https://app.example https://admin.example".to_string()),
+            timing_allow_origin: Some("https://app.example, https://admin.example".to_string()),
             accept_ch: Some("Sec-CH-UA, Sec-CH-UA-Mobile".to_string()),
             critical_ch: Some("Sec-CH-UA-Mobile".to_string()),
         };
@@ -2599,7 +2608,34 @@ mod tests {
             "default=\"/reports\""
         );
         assert!(TimingAllowOrigin::parse("* https://app.example").is_err());
-        assert!(TimingAllowOrigin::parse("https://app.example, https://admin.example").is_err());
+        assert!(TimingAllowOrigin::parse("https://app.example https://admin.example").is_err());
+        assert_eq!(
+            TimingAllowOrigin::parse("https://app.example, https://admin.example")
+                .expect("comma list parses")
+                .as_str(),
+            "https://app.example, https://admin.example"
+        );
+        assert_eq!(
+            TimingAllowOrigin::parse("https://app.example")
+                .expect("single origin parses")
+                .as_str(),
+            "https://app.example"
+        );
+        assert_eq!(
+            TimingAllowOrigin::parse("null")
+                .expect("null parses")
+                .as_str(),
+            "null"
+        );
+        assert_eq!(
+            TimingAllowOrigin::parse("*")
+                .expect("wildcard parses")
+                .as_str(),
+            "*"
+        );
+        assert!(TimingAllowOrigin::parse("https://app.example,").is_err());
+        assert!(TimingAllowOrigin::parse("*, https://app.example").is_err());
+        assert!(TimingAllowOrigin::parse("https://app.example, https://app.example").is_err());
         assert!(PermissionsPolicy::parse("geolocation=(self none)").is_err());
         assert!(PermissionsPolicy::parse("geolocation=(\"https://*.example.com\")").is_ok());
         assert!(AcceptClientHints::parse("Sec-CH-UA, sec-ch-ua").is_err());
