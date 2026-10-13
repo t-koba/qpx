@@ -450,15 +450,36 @@ impl ReverseQpxHandler {
                     Some(Ok((_bytes, summary))) => {
                         request_summary = summary;
                         relay_done = true;
+                        response_fut.await?
                     }
                     Some(Err(err)) => {
                         warn!(error = ?err, "reverse qpx-h3 request body relay failed");
                         response_stream.abort_message_stream();
                         return Err(err);
                     }
-                    None => {}
+                    // The budget expired with the body incomplete: only the
+                    // synthetic deadline reply may proceed. A normal reply with
+                    // an incomplete body ends like any relay failure, and the
+                    // exhausted relay future must never be polled again.
+                    None => {
+                        let output = response_fut.await?;
+                        if output
+                            .1
+                            .extensions()
+                            .get::<crate::http::rpc::RpcDeadlineReply>()
+                            .is_none()
+                        {
+                            warn!(
+                                "reverse qpx-h3 request body relay exceeded the stream budget"
+                            );
+                            response_stream.abort_message_stream();
+                            return Err(anyhow!(
+                                "reverse qpx-h3 request body relay exceeded the stream budget"
+                            ));
+                        }
+                        output
+                    }
                 }
-                response_fut.await?
             }
             response_result = &mut response_fut => response_result?,
         };

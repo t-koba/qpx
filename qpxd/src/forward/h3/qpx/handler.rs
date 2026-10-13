@@ -227,15 +227,35 @@ impl ForwardQpxHandler {
                     Some(Ok((_bytes, summary))) => {
                         request_summary = summary;
                         relay_done = true;
+                        response_fut.await?
                     }
                     Some(Err(err)) => {
                         warn!(error = ?err, "forward qpx-h3 request body relay failed");
                         response_stream.abort_message_stream();
                         return Err(err);
                     }
-                    None => {}
+                    // The budget expired with the body incomplete: only the
+                    // synthetic deadline reply may proceed. A normal reply with
+                    // an incomplete body ends like any relay failure, and the
+                    // exhausted relay future must never be polled again.
+                    None => {
+                        let response = response_fut.await?;
+                        if response
+                            .extensions()
+                            .get::<crate::http::rpc::RpcDeadlineReply>()
+                            .is_none()
+                        {
+                            warn!(
+                                "forward qpx-h3 request body relay exceeded the stream budget"
+                            );
+                            response_stream.abort_message_stream();
+                            return Err(anyhow!(
+                                "forward qpx-h3 request body relay exceeded the stream budget"
+                            ));
+                        }
+                        response
+                    }
                 }
-                response_fut.await?
             }
             response = &mut response_fut => response?,
         };
