@@ -464,7 +464,12 @@ impl ReverseQpxHandler {
                 fallback_grpc_protocol: grpc_protocol.as_deref(),
                 max_grpc_message_bytes: Some(response_streaming.max_grpc_message_bytes),
                 max_grpc_web_trailer_bytes: Some(response_streaming.max_grpc_web_trailer_bytes),
-                grpc_stream_deadline: grpc_deadline.map(|deadline| deadline.instant()),
+                // The deadline reply is built after the stream budget expired;
+                // enforcing the expired instant here would reset the reply
+                // about the expiry. The send keeps its own body_send_timeout.
+                grpc_stream_deadline: grpc_deadline
+                    .map(|deadline| deadline.instant())
+                    .filter(|instant| *instant > Instant::now()),
                 sse_policy: Some(response_streaming.sse),
                 observe_grpc_messages: response_streaming.observe_grpc_messages,
             },
