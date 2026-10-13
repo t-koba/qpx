@@ -357,3 +357,47 @@ fn redacting_content_type_preserves_json_body_redaction() {
         assert!(!text.contains("synthetic-marker"));
     }
 }
+
+#[test]
+fn saturated_queue_drops_multi_chunk_suffix_after_first_chunk() {
+    // The proxy-side queue is always non-blocking: once saturated, only
+    // whole chunks that still fit are kept; the suffix is dropped even
+    // though no backpressure reaches the proxy pipeline.
+    let (tx, mut rx) = mpsc::channel(2);
+    let session = ExportSession {
+        tx: tx.clone(),
+        session_id: "test-session".to_string(),
+        client: "client".to_string(),
+        server: "server".to_string(),
+        capture_plaintext: true,
+        capture_encrypted: false,
+        max_plaintext_bytes: None,
+        max_chunk_bytes: 1,
+        redaction: Arc::new(CaptureRedaction::from_config(&CaptureRedactionConfig {
+            headers: Vec::new(),
+            query_keys: Vec::new(),
+            json_paths: Vec::new(),
+        })),
+    };
+
+    tx.try_send(CaptureEvent::new(
+        "queued".to_string(),
+        CapturePlane::ClientServerPlaintext,
+        CaptureDirection::ClientToServer,
+        "client".to_string(),
+        "server".to_string(),
+        b"queued",
+    ))
+    .expect("fill queue");
+
+    session.emit_plaintext(true, b"abcdef");
+
+    let first = rx.try_recv().expect("filler remains");
+    assert_eq!(first.session_id, "queued");
+    let second = rx.try_recv().expect("first chunk fits");
+    assert_eq!(second.payload_bytes(), b"a");
+    assert!(
+        rx.try_recv().is_err(),
+        "saturated queue drops the chunk suffix"
+    );
+}

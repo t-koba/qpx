@@ -319,8 +319,11 @@ async fn run_export_loop(
                         metrics::increment(metrics::EVENTS_DROPPED);
                         break;
                     } else {
-                        // Lossless mode. Wait and try again.
-                        // Note: This backpressures the mpsc channel, which backpressures the proxy pipeline.
+                        // Lossless ring mode: wait for space and try again.
+                        // This only paces this exporter task against the
+                        // shared ring. The proxy-side event queue stays
+                        // non-blocking and drops under saturation (counted),
+                        // so capture can never stall proxied traffic.
                         metrics::increment(metrics::WRITE_BLOCKED);
                         if let Err(e) = ring.wait_for_space(wire_len).await {
                             warn!(error = ?e, "fatal error waiting for shared memory ring space");

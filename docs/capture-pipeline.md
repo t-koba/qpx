@@ -81,7 +81,15 @@ telemetry:
         headers: [authorization, cookie, set-cookie, proxy-authorization]
         query_keys: [token, password, session, access_token]
         json_paths: ["$.password", "$.access_token"]
+
 ```
+
+`lossy` governs only the shared-memory ring stage: with `false` the
+exporter waits for ring space instead of dropping there. The
+proxy-side event queue (`max_queue_events`) is always non-blocking
+regardless of this flag — a saturated queue drops captures (counted
+in `qpx_exporter_events_dropped_total`) rather than stalling proxied
+traffic.
 
 For targeted plaintext debugging, attach `capture` to an edge or reverse route.
 Plaintext body capture is explicit and requires `max_body_bytes`:

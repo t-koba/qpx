@@ -155,6 +155,12 @@ pub struct ExporterConfig {
     pub shm_path: String,
     #[serde(default = "default_exporter_shm_size_mb")]
     pub shm_size_mb: usize,
+    /// Drop policy for the shared-memory ring stage only: when the ring
+    /// is full, `true` drops the event and `false` waits for space. The
+    /// proxy-side event queue is always non-blocking regardless of this
+    /// flag: a saturated queue drops captures (metered by
+    /// `qpx_exporter_events_dropped_total`) instead of stalling proxied
+    /// traffic.
     #[serde(default)]
     pub lossy: bool,
     #[serde(default = "default_exporter_max_queue_events")]
