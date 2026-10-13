@@ -60,6 +60,9 @@ pub(crate) fn build_pcap_preface() -> Result<Vec<u8>> {
         options: vec![
             InterfaceDescriptionOption::IfName(Cow::Borrowed(name)),
             InterfaceDescriptionOption::IfDescription(Cow::Borrowed(desc)),
+            // Timestamps are nanosecond counts: without this readers assume
+            // the PCAPNG default of microseconds and scale time by 1000.
+            InterfaceDescriptionOption::IfTsResol(9),
         ],
     }) {
         Block::InterfaceDescription(iface).write_to::<LittleEndian, _>(&mut out)?;
@@ -145,5 +148,39 @@ mod tests {
         let endpoint = parse_endpoint("127.0.0.1:8443", 80, "server");
         assert_eq!(endpoint.ip, Ipv4Addr::new(127, 0, 0, 1));
         assert_eq!(endpoint.port, 8443);
+    }
+}
+
+#[cfg(test)]
+mod tsresol_tests {
+    use super::*;
+    use pcap_file::pcapng::PcapNgReader;
+
+    #[test]
+    fn preface_advertises_nanosecond_resolution_on_every_interface() {
+        let preface = build_pcap_preface().expect("preface builds");
+        let mut reader = PcapNgReader::new(&preface[..]).expect("preface parses");
+        let mut interfaces = 0;
+        while let Some(block) = reader.next_block() {
+            let Block::InterfaceDescription(iface) = block.expect("block parses") else {
+                continue;
+            };
+            interfaces += 1;
+            assert!(
+                iface
+                    .options
+                    .contains(&InterfaceDescriptionOption::IfTsResol(9)),
+                "interface {interfaces} must advertise nanoseconds"
+            );
+        }
+        assert_eq!(interfaces, 3);
+    }
+
+    #[test]
+    fn enhanced_packet_counter_is_nanoseconds() {
+        let bytes = encode_enhanced_packet(0, 1_000_000_000, vec![0xAA]).expect("packet encodes");
+        let high = u32::from_le_bytes(bytes[12..16].try_into().expect("ts high")) as u64;
+        let low = u32::from_le_bytes(bytes[16..20].try_into().expect("ts low")) as u64;
+        assert_eq!((high << 32) | low, 1_000_000_000u64);
     }
 }
