@@ -150,16 +150,35 @@ where
     // Always start the stream with a valid section header + interfaces.
     write_stream_block(&mut writer, &hub.pcap_preface).await?;
 
+    // Subscribe before reading history: publications during the transfer
+    // stay in the live buffer, and the snapshot boundary below drops the
+    // overlap, so nothing falls between snapshot and subscription.
+    let live_rx = if matches!(mode, StreamMode::Live | StreamMode::Follow) {
+        Some(hub.live_tx.subscribe())
+    } else {
+        None
+    };
+    let mut follow_boundary = None;
     if matches!(mode, StreamMode::History | StreamMode::Follow) {
-        for block in hub.history_snapshot().await {
-            write_stream_block(&mut writer, &block).await?;
+        let snapshot = hub.history_snapshot().await;
+        for block in &snapshot.blocks {
+            write_stream_block(&mut writer, block).await?;
+        }
+        if matches!(mode, StreamMode::Follow) {
+            follow_boundary = Some(snapshot);
         }
     }
-    if matches!(mode, StreamMode::Live | StreamMode::Follow) {
-        let mut rx = hub.live_tx.subscribe();
+    if let Some(mut rx) = live_rx {
         loop {
             match rx.recv().await {
-                Ok(block) => write_stream_block(&mut writer, &block).await?,
+                Ok(block) => {
+                    if let Some(boundary) = &follow_boundary
+                        && boundary.is_already_sent(block.seq)
+                    {
+                        continue;
+                    }
+                    write_stream_block(&mut writer, &block.bytes).await?;
+                }
                 Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => break,
             }

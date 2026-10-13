@@ -19,7 +19,7 @@ pub(crate) struct ExporterHub {
     pub(super) sequences: Arc<Mutex<SequencesState>>,
     pub(super) history: Arc<RwLock<HistoryState>>,
     file_sink: Option<mpsc::Sender<Bytes>>,
-    pub(super) live_tx: broadcast::Sender<Bytes>,
+    pub(super) live_tx: broadcast::Sender<SequencedBlock>,
     history_limit_bytes: usize,
     history_limit_age: Duration,
     pub(super) pcap_preface: Arc<Vec<u8>>,
@@ -34,11 +34,33 @@ pub(super) struct SequencesState {
 pub(super) struct HistoryState {
     history: VecDeque<HistoryItem>,
     history_bytes: usize,
+    next_seq: u64,
 }
 
 struct HistoryItem {
+    seq: u64,
     ts_unix_nanos: u64,
     bytes: Bytes,
+}
+
+/// A live publication tagged with its history position so FOLLOW can skip
+/// the overlap between its pre-read subscription and its snapshot.
+#[derive(Clone, Debug)]
+pub(super) struct SequencedBlock {
+    pub(super) seq: u64,
+    pub(super) bytes: Bytes,
+}
+
+/// A history read plus the boundary FOLLOW needs for exactly-once handoff.
+pub(super) struct HistorySnapshot {
+    pub(super) blocks: Vec<Bytes>,
+    pub(super) last_seq: Option<u64>,
+}
+
+impl HistorySnapshot {
+    pub(super) fn is_already_sent(&self, seq: u64) -> bool {
+        self.last_seq.is_some_and(|last| seq <= last)
+    }
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -90,7 +112,7 @@ impl ExporterHub {
             }
             None => None,
         };
-        let (live_tx, _) = broadcast::channel::<Bytes>(4096);
+        let (live_tx, _) = broadcast::channel::<SequencedBlock>(4096);
         Ok(Self {
             sequences: Arc::new(Mutex::new(SequencesState {
                 sequences: HashMap::new(),
@@ -99,6 +121,7 @@ impl ExporterHub {
             history: Arc::new(RwLock::new(HistoryState {
                 history: VecDeque::new(),
                 history_bytes: 0,
+                next_seq: 0,
             })),
             file_sink,
             live_tx,
@@ -112,9 +135,16 @@ impl ExporterHub {
     pub(super) async fn publish_encoded_block(&self, ts_unix_nanos: u64, encoded: Bytes) {
         {
             let mut history = self.history.write().await;
-            self.push_history_locked(&mut history, ts_unix_nanos, encoded.clone());
+            let seq = self.push_history_locked(&mut history, ts_unix_nanos, encoded.clone());
+            // Publish to live subscribers in the same critical section as
+            // the history push so both orders always agree; broadcast::send
+            // is synchronous and never blocks. FOLLOW relies on this shared
+            // order for its exactly-once handoff.
+            let _ = self.live_tx.send(SequencedBlock {
+                seq,
+                bytes: encoded.clone(),
+            });
         }
-        let _ = self.live_tx.send(encoded.clone());
         if let Some(tx) = self.file_sink.as_ref()
             && let Err(err) = tx.try_send(encoded)
         {
@@ -122,16 +152,25 @@ impl ExporterHub {
         }
     }
 
-    fn push_history_locked(&self, state: &mut HistoryState, ts_unix_nanos: u64, bytes: Bytes) {
+    fn push_history_locked(
+        &self,
+        state: &mut HistoryState,
+        ts_unix_nanos: u64,
+        bytes: Bytes,
+    ) -> u64 {
+        let seq = state.next_seq;
+        state.next_seq = state.next_seq.saturating_add(1);
         if self.history_limit_bytes == 0 {
-            return;
+            return seq;
         }
         state.history_bytes += bytes.len();
         state.history.push_back(HistoryItem {
+            seq,
             ts_unix_nanos,
             bytes,
         });
         self.evict_history_locked(state, ts_unix_nanos);
+        seq
     }
 
     fn evict_history_locked(&self, state: &mut HistoryState, now_unix_nanos: u64) {
@@ -154,7 +193,7 @@ impl ExporterHub {
         }
     }
 
-    pub(super) async fn history_snapshot(&self) -> Vec<Bytes> {
+    pub(super) async fn history_snapshot(&self) -> HistorySnapshot {
         // Age is enforced at read time as well: eviction otherwise runs
         // only on publish, so an idle hub would serve captures older than
         // --history-secs indefinitely. Storage is still reclaimed on the
@@ -163,12 +202,15 @@ impl ExporterHub {
         let min_ts =
             now_unix_nanos.saturating_sub(duration_as_saturating_nanos(self.history_limit_age));
         let state = self.history.read().await;
-        state
+        let mut last_seq = None;
+        let blocks = state
             .history
             .iter()
             .filter(|item| item.ts_unix_nanos >= min_ts)
+            .inspect(|item| last_seq = Some(item.seq))
             .map(|item| item.bytes.clone())
-            .collect()
+            .collect();
+        HistorySnapshot { blocks, last_seq }
     }
 
     pub(super) fn gc_sequences_locked(&self, state: &mut SequencesState, now_unix_nanos: u64) {
@@ -455,11 +497,80 @@ mod history_age_tests {
         .expect("hub builds");
         hub.publish_encoded_block(test_now_unix_nanos(), Bytes::from_static(b"block"))
             .await;
-        assert_eq!(hub.history_snapshot().await.len(), 1);
+        assert_eq!(hub.history_snapshot().await.blocks.len(), 1);
         tokio::time::sleep(Duration::from_millis(20)).await;
         assert!(
-            hub.history_snapshot().await.is_empty(),
+            hub.history_snapshot().await.blocks.is_empty(),
             "idle history must age out of snapshots"
         );
+    }
+}
+
+#[cfg(test)]
+mod follow_handoff_tests {
+    use super::*;
+
+    fn follow_test_now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_nanos().min(u64::MAX as u128) as u64)
+            .unwrap_or(0)
+    }
+
+    fn follow_test_hub() -> ExporterHub {
+        ExporterHub::new(
+            None,
+            1024,
+            1024 * 1024,
+            Duration::from_secs(3600),
+            Arc::new(Vec::new()),
+            1024,
+        )
+        .expect("hub builds")
+    }
+
+    #[tokio::test]
+    async fn follow_handoff_skips_snapshot_overlap_exactly_once() {
+        let hub = follow_test_hub();
+        let now = follow_test_now();
+        // FOLLOW order: subscribe before reading history.
+        let mut rx = hub.live_tx.subscribe();
+        hub.publish_encoded_block(now, Bytes::from_static(b"A"))
+            .await;
+        let snapshot = hub.history_snapshot().await;
+        assert_eq!(snapshot.blocks.len(), 1);
+        hub.publish_encoded_block(now, Bytes::from_static(b"B"))
+            .await;
+        // Drain exactly the two live publications with the FOLLOW skip.
+        let mut delivered = Vec::new();
+        for _ in 0..2 {
+            let block = rx.recv().await.expect("live block");
+            if snapshot.is_already_sent(block.seq) {
+                continue;
+            }
+            delivered.push(block.bytes);
+        }
+        assert_eq!(delivered, vec![Bytes::from_static(b"B")]);
+        let mut full = snapshot.blocks;
+        full.extend(delivered);
+        assert_eq!(
+            full,
+            vec![Bytes::from_static(b"A"), Bytes::from_static(b"B")]
+        );
+    }
+
+    #[test]
+    fn snapshot_boundary_skips_nothing_when_empty() {
+        let empty = HistorySnapshot {
+            blocks: Vec::new(),
+            last_seq: None,
+        };
+        assert!(!empty.is_already_sent(0));
+        let boundary = HistorySnapshot {
+            blocks: Vec::new(),
+            last_seq: Some(7),
+        };
+        assert!(boundary.is_already_sent(7));
+        assert!(!boundary.is_already_sent(8));
     }
 }
