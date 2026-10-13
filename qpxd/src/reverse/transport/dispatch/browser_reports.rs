@@ -1,5 +1,6 @@
 use anyhow::{Result, anyhow};
 use hyper::{Request, Response, StatusCode};
+use qpx_core::redaction::redact_uri_query_keys;
 use qpx_http::body::Body;
 
 pub(super) async fn collect_browser_reports(
@@ -9,6 +10,7 @@ pub(super) async fn collect_browser_reports(
     request_version: http::Version,
     proxy_name: &str,
     route_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
+    redact_query_keys: &[String],
 ) -> Result<Response<Body>> {
     if request_method != http::Method::POST {
         let mut response = reporting_problem_response(
@@ -111,24 +113,28 @@ pub(super) async fn collect_browser_reports(
             ));
         }
     };
-    let report_count =
-        match validate_and_observe_browser_reports(&payload, legacy, config.max_reports) {
-            Ok(report_count) => report_count,
-            Err(error) => {
-                return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-                    request_method,
-                    request_version,
-                    proxy_name,
-                    reporting_problem_response(
-                        StatusCode::BAD_REQUEST,
-                        "Invalid browser report",
-                        error.to_string().as_str(),
-                    )?,
-                    route_headers,
-                    false,
-                ));
-            }
-        };
+    let report_count = match validate_and_observe_browser_reports(
+        &payload,
+        legacy,
+        config.max_reports,
+        redact_query_keys,
+    ) {
+        Ok((report_count, _)) => report_count,
+        Err(error) => {
+            return Ok(crate::http::protocol::l7::finalize_response_with_headers(
+                request_method,
+                request_version,
+                proxy_name,
+                reporting_problem_response(
+                    StatusCode::BAD_REQUEST,
+                    "Invalid browser report",
+                    error.to_string().as_str(),
+                )?,
+                route_headers,
+                false,
+            ));
+        }
+    };
     crate::reverse::transport::metrics::browser_reports_received(report_count as u64, legacy);
     let response = Response::builder()
         .status(StatusCode::NO_CONTENT)
@@ -180,11 +186,17 @@ async fn collect_bounded_report_body(mut body: Body, limit: usize) -> Result<Vec
     Ok(bytes)
 }
 
+/// Validates report payloads and emits one structured event per report.
+///
+/// Returns the accepted count with the exact redacted URL strings that were
+/// emitted, so tests can pin the observability surface without depending on
+/// a tracing subscriber.
 fn validate_and_observe_browser_reports(
     payload: &serde_json::Value,
     legacy: bool,
     max_reports: usize,
-) -> Result<usize> {
+    redact_query_keys: &[String],
+) -> Result<(usize, Vec<String>)> {
     if legacy {
         let report = payload
             .as_object()
@@ -192,12 +204,13 @@ fn validate_and_observe_browser_reports(
             .and_then(serde_json::Value::as_object)
             .ok_or_else(|| anyhow!("legacy CSP report must contain a csp-report object"))?;
         let document_uri = bounded_report_string(report.get("document-uri"), "document-uri", 4096)?;
+        let report_url = redact_uri_query_keys(document_uri, redact_query_keys);
         tracing::info!(
             report_type = "csp-violation",
-            report_url = document_uri,
+            report_url = report_url.as_str(),
             "browser report received"
         );
-        return Ok(1);
+        return Ok((1, vec![report_url]));
     }
     let reports = payload
         .as_array()
@@ -207,18 +220,25 @@ fn validate_and_observe_browser_reports(
             "Reporting API payload must contain between 1 and {max_reports} reports"
         ));
     }
+    let mut observed_urls = Vec::with_capacity(reports.len());
     for report in reports {
         let report = report
             .as_object()
             .ok_or_else(|| anyhow!("each Reporting API entry must be an object"))?;
         let report_type = bounded_report_string(report.get("type"), "type", 128)?;
-        let report_url = bounded_report_string(report.get("url"), "url", 4096)?;
+        let raw_url = bounded_report_string(report.get("url"), "url", 4096)?;
         if !report.get("body").is_some_and(serde_json::Value::is_object) {
             return Err(anyhow!("Reporting API report body must be an object"));
         }
-        tracing::info!(report_type, report_url, "browser report received");
+        let report_url = redact_uri_query_keys(raw_url, redact_query_keys);
+        tracing::info!(
+            report_type,
+            report_url = report_url.as_str(),
+            "browser report received"
+        );
+        observed_urls.push(report_url);
     }
-    Ok(reports.len())
+    Ok((reports.len(), observed_urls))
 }
 
 fn bounded_report_string<'a>(
@@ -279,6 +299,7 @@ mod browser_report_tests {
             http::Version::HTTP_2,
             "qpx",
             None,
+            &[],
         )
         .await
         .expect("collect report");
@@ -302,6 +323,7 @@ mod browser_report_tests {
             http::Version::HTTP_11,
             "qpx",
             None,
+            &[],
         )
         .await
         .expect("reject invalid report");
@@ -322,9 +344,96 @@ mod browser_report_tests {
             http::Version::HTTP_11,
             "qpx",
             None,
+            &[],
         )
         .await
         .expect("reject oversized report");
         assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    }
+}
+
+#[cfg(test)]
+mod report_redaction_tests {
+    use super::*;
+
+    fn redaction_keys() -> Vec<String> {
+        vec!["access_token".to_owned(), "custom_secret".to_owned()]
+    }
+
+    #[test]
+    fn modern_report_url_redacts_configured_query_keys() {
+        let payload = serde_json::json!([{
+            "type": "csp-violation",
+            "url": "https://app.example/callback?access_token=MARKER_TOKEN&custom_secret=MARKER_CUSTOM&next=keep",
+            "body": {},
+        }]);
+        let (count, observed) =
+            validate_and_observe_browser_reports(&payload, false, 4, &redaction_keys())
+                .expect("valid report");
+        assert_eq!(count, 1);
+        assert_eq!(observed.len(), 1);
+        assert!(
+            !observed[0].contains("MARKER_TOKEN") && !observed[0].contains("MARKER_CUSTOM"),
+            "observed URL must not carry marker values: {}",
+            observed[0]
+        );
+        assert!(observed[0].contains("access_token=<redacted>"));
+        assert!(observed[0].contains("custom_secret=<redacted>"));
+        assert!(observed[0].contains("next=keep"));
+    }
+
+    #[test]
+    fn modern_report_url_redacts_query_like_fragment() {
+        let payload = serde_json::json!([{
+            "type": "csp-violation",
+            "url": "https://app.example/cb#access_token=MARKER_FRAG",
+            "body": {},
+        }]);
+        let (_, observed) =
+            validate_and_observe_browser_reports(&payload, false, 4, &redaction_keys())
+                .expect("valid report");
+        assert!(
+            !observed[0].contains("MARKER_FRAG"),
+            "observed: {}",
+            observed[0]
+        );
+        assert!(observed[0].contains("#access_token=<redacted>"));
+    }
+
+    #[test]
+    fn legacy_document_uri_redacts_configured_query_keys() {
+        let payload = serde_json::json!({
+            "csp-report": {
+                "document-uri": "https://app.example/page?access_token=MARKER_LEGACY&ok=1",
+            },
+        });
+        let (count, observed) =
+            validate_and_observe_browser_reports(&payload, true, 4, &redaction_keys())
+                .expect("valid legacy report");
+        assert_eq!(count, 1);
+        assert!(
+            !observed[0].contains("MARKER_LEGACY"),
+            "observed: {}",
+            observed[0]
+        );
+        assert!(observed[0].contains("access_token=<redacted>"));
+        assert!(observed[0].contains("ok=1"));
+    }
+
+    #[test]
+    fn unconfigured_keys_pass_through() {
+        let payload = serde_json::json!([{
+            "type": "csp-violation",
+            "url": "https://app.example/cb?other=MARKER_PLAIN",
+            "body": {},
+        }]);
+        let (_, observed) =
+            validate_and_observe_browser_reports(&payload, false, 4, &redaction_keys())
+                .expect("valid report");
+        assert!(
+            observed[0].contains("other=MARKER_PLAIN"),
+            "observed: {}",
+            observed[0]
+        );
     }
 }

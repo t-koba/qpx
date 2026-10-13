@@ -81,7 +81,10 @@ The collector intercepts the selected route after identity and access policy
 enforcement. It accepts `application/reports+json`, validates a bounded array
 of report objects, returns 204 with `Cache-Control: no-store`, writes structured
 report type and URL events, and increments
-`qpx_browser_reports_received_total`. The configured target is intentionally
+`qpx_browser_reports_received_total`. Submitted report URLs (`url` and legacy
+`document-uri`) are redacted with the unified observability sensitive
+query-key policy before emission, matching access/export/OTEL telemetry;
+unconfigured keys pass through unchanged. The configured target is intentionally
 not invoked. Legacy `application/csp-report` is available only through the
 explicit compatibility switch.
 

@@ -555,6 +555,7 @@ async fn execute_reverse_request(
             request_version,
             proxy_name,
             route_headers.as_deref(),
+            &state.resources.access_log.redact.query_keys,
         )
         .await?;
         return Ok(attach_streaming_limits(
