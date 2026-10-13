@@ -311,3 +311,59 @@ fn identity_response_carries_dictionary_vary_when_dictionary_configured() {
         assert!(vary.contains(token), "missing {token}, got {vary:?}");
     }
 }
+
+#[test]
+fn identity_preferred_ranks_explicit_quality_only() {
+    // Absent identity keeps encoding selection; ties do too.
+    assert!(!identity_preferred(1000, 0));
+    assert!(!identity_preferred(1000, 1000));
+    assert!(!identity_preferred(0, 0));
+    // Explicit identity above the encoding wins; below loses.
+    assert!(identity_preferred(100, 1000));
+    assert!(!identity_preferred(1000, 500));
+}
+
+#[test]
+fn explicit_identity_quality_beats_lower_encoding() {
+    let config = identity_test_config();
+    let request = hyper::Request::builder()
+        .method(Method::GET)
+        .header(http::header::ACCEPT_ENCODING, "gzip;q=0.1, identity;q=1")
+        .body(Body::empty())
+        .expect("request");
+    let request = HttpModuleRequestView::from_request(&request);
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12")
+        .body(Body::empty())
+        .expect("response");
+    assert_eq!(
+        select_response_encoding(&request, &config, &response).expect("select encoding"),
+        None
+    );
+}
+
+#[test]
+fn higher_encoding_quality_beats_identity() {
+    let config = identity_test_config();
+    for accept in ["gzip, identity;q=0.5", "gzip;q=1, identity;q=1"] {
+        let request = hyper::Request::builder()
+            .method(Method::GET)
+            .header(http::header::ACCEPT_ENCODING, accept)
+            .body(Body::empty())
+            .expect("request");
+        let request = HttpModuleRequestView::from_request(&request);
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response");
+        assert_eq!(
+            select_response_encoding(&request, &config, &response).expect("select encoding"),
+            Some(ContentEncoding::Gzip),
+            "encoding keeps ties and higher quality for {accept:?}"
+        );
+    }
+}

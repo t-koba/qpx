@@ -188,9 +188,12 @@ impl ResponseCompressionModule {
             .map(|value| parse_dictionary_id(value.as_bytes()))
             .transpose()?;
         let preferences = parse_accept_encoding(request_headers);
+        let encoding_q = accept_encoding_q(&profile.encoding, &preferences);
+        let identity_q = accept_encoding_q("identity", &preferences);
         if available != Some(expected_hash)
             || dictionary_id.as_deref() != profile.id.as_deref()
-            || accept_encoding_q(&profile.encoding, &preferences) <= 0
+            || encoding_q <= 0
+            || identity_preferred(encoding_q, identity_q)
             || !response_is_compressible(request_method, &self.config, &response)?
         {
             return Ok(DictionaryCompressionOutcome::Unchanged(response));
@@ -305,6 +308,13 @@ fn select_response_encoding(
     select_response_encoding_parts(request.method(), request.headers(), config, response)
 }
 
+/// Whether an explicit identity quality outranks an encoding: identity
+/// participates only through its listed (or wildcard) quality, so an absent
+/// identity entry keeps existing encoding selection; ties do too.
+fn identity_preferred(encoding_q: i32, identity_q: i32) -> bool {
+    identity_q > encoding_q
+}
+
 fn select_response_encoding_parts(
     request_method: &Method,
     request_headers: &HeaderMap,
@@ -316,6 +326,7 @@ fn select_response_encoding_parts(
     }
 
     let preferences = parse_accept_encoding(request_headers);
+    let identity_q = accept_encoding_q("identity", &preferences);
     let supported = [
         (ContentEncoding::Brotli, config.brotli),
         (ContentEncoding::Zstd, config.zstd),
@@ -335,7 +346,11 @@ fn select_response_encoding_parts(
             _ => best = Some((q, encoding)),
         }
     }
-    Ok(best.map(|(_, encoding)| encoding))
+    // RFC 9110 section 12.5.3: serve the most preferred acceptable coding.
+    match best {
+        Some((best_q, _)) if identity_preferred(best_q, identity_q) => Ok(None),
+        best => Ok(best.map(|(_, encoding)| encoding)),
+    }
 }
 
 fn response_is_compressible(
