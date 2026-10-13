@@ -2982,11 +2982,14 @@ fn ci_acceptance_violations(
         "target/perf/runner.jsonl",
         "sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk",
         "cargo build -p qpxd --release --locked",
-        "scripts/perf-audit-proxy-matrix.sh \"$QPX_PROXY_COMPARE_JSON\"",
-        "target/perf/perf-audit-proxy-compare.jsonl",
-        "scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json",
-        "scripts/perf-audit-http2-compare.sh \"$QPX_HTTP2_COMPARE_JSON\"",
-        "target/perf/perf-audit-http2-compare.jsonl",
+        "python3 scripts/test-perf-policy.py",
+        "checkout pinned previous release",
+        "d67a148e7ccbbd272750415213601005af0f38c5",
+        "python3 scripts/perf-audit-policy.py run proxy",
+        "target/perf/proxy-policy/**",
+        "python3 scripts/perf-audit-policy.py run http2",
+        "target/perf/http2-policy/**",
+        "QPX_PERF_ASSESSMENT: shared",
         "target/perf/http2-compare-logs/**",
         "scripts/perf-audit-streaming-compare.sh \"$QPX_STREAMING_COMPARE_JSON\"",
         "target/perf/perf-audit-streaming-compare.jsonl",
@@ -3002,7 +3005,6 @@ fn ci_acceptance_violations(
         "scripts/h3-interop/run.sh all",
         "target/perf/qpx-h3-interop-matrix.json",
         "target/perf/proxy-compare-logs/**",
-        "scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json",
         "scripts/perf-audit-profile.sh",
         "target/perf/perf-audit-profile-summary.jsonl",
         "target/perf/perf-audit-profile-events.jsonl",
@@ -5304,11 +5306,6 @@ mod tests {
             target/perf/runner.jsonl
             sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk
             cargo build -p qpxd --release --locked
-            scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
-            target/perf/perf-audit-proxy-compare.jsonl
-            scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json
-            scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
-            target/perf/perf-audit-http2-compare.jsonl
             target/perf/http2-compare-logs/**
             scripts/perf-audit-streaming-compare.sh "$QPX_STREAMING_COMPARE_JSON"
             target/perf/perf-audit-streaming-compare.jsonl
@@ -5324,7 +5321,14 @@ mod tests {
             scripts/h3-interop/run.sh all
             target/perf/qpx-h3-interop-matrix.json
             target/perf/proxy-compare-logs/**
-            scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json
+            python3 scripts/test-perf-policy.py
+            checkout pinned previous release
+            d67a148e7ccbbd272750415213601005af0f38c5
+            python3 scripts/perf-audit-policy.py run proxy
+            target/perf/proxy-policy/**
+            python3 scripts/perf-audit-policy.py run http2
+            target/perf/http2-policy/**
+            QPX_PERF_ASSESSMENT: shared
             scripts/perf-audit-profile.sh
             target/perf/perf-audit-profile-summary.jsonl
             target/perf/perf-audit-profile-events.jsonl
