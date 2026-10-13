@@ -65,20 +65,23 @@ impl SseEventObserver {
         let before = self.summary.event_count;
         self.summary.byte_count = self.summary.byte_count.saturating_add(chunk.len() as u64);
         for byte in chunk {
+            // The second half of a CRLF pair carries no content, even across
+            // feeds; dropping it before buffering keeps the next line clean.
+            if *byte == b'\n' && self.pending_cr {
+                self.pending_cr = false;
+                continue;
+            }
             if self.line.len() < self.max_line_bytes {
                 self.line.push(*byte);
             } else {
                 self.line_truncated = true;
             }
             match *byte {
-                // CR ends a line; a LF immediately after it (even across
-                // feeds) belongs to the same CRLF terminator.
+                // CR ends a line; a LF immediately after it belongs to the
+                // same CRLF terminator (handled above).
                 b'\r' => {
                     self.process_line();
                     self.pending_cr = true;
-                }
-                b'\n' if self.pending_cr => {
-                    self.pending_cr = false;
                 }
                 b'\n' => {
                     self.process_line();
@@ -233,5 +236,23 @@ mod dispatch_tests {
     fn multi_line_data_block_dispatches_once() {
         let mut observer = SseEventObserver::new();
         assert_eq!(observer.feed(b"data: a\r\ndata: b\n\n").events, 1);
+    }
+}
+
+#[cfg(test)]
+mod crlf_regression_tests {
+    use crate::http::protocol::sse::*;
+
+    #[test]
+    fn crlf_does_not_corrupt_following_id_line() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"data: a\r\nid: 1\n\n").events, 1);
+        assert_eq!(observer.summary().last_event_id.as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn crlf_comment_does_not_swallow_following_data() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b": hi\r\ndata: x\n\n").events, 1);
     }
 }
