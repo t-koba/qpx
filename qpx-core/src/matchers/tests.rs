@@ -283,3 +283,26 @@ fn known_request_response_rule_match_does_not_evaluate_headers() {
     assert!(!compiled.matches(&ctx));
     assert!(compiled.matches_known_request_without_body_observation(&ctx));
 }
+
+#[test]
+fn unary_streaming_matcher_selects_connect_get_label() {
+    let cfg = MatchConfig {
+        rpc: Some(RpcMatchConfig {
+            streaming: vec!["unary".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let unary = RuleMatchContext {
+        rpc_streaming: Some("unary"),
+        ..Default::default()
+    };
+    assert!(compiled.matches(&unary));
+    let server = RuleMatchContext {
+        rpc_streaming: Some("server"),
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&server));
+}

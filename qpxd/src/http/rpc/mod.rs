@@ -55,7 +55,8 @@ use protocol::extract_rpc_status_and_message;
 use protocol::parse_connect_end_stream_metadata;
 #[cfg(test)]
 use protocol::{
-    extract_connect_status_and_message, extract_grpc_status_and_message, extract_service_and_method,
+    extract_connect_status_and_message, extract_grpc_status_and_message,
+    extract_service_and_method, infer_request_streaming,
 };
 #[cfg(test)]
 use qpx_http::body::Body;

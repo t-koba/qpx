@@ -232,7 +232,8 @@ pub(super) fn infer_request_streaming(
     request_messages: Option<usize>,
 ) -> Option<&'static str> {
     match protocol {
-        Some("connect") if method.eq_ignore_ascii_case("GET") => Some("server"),
+        // Connect GET is a unary variant, never server streaming.
+        Some("connect") if method.eq_ignore_ascii_case("GET") => Some("unary"),
         Some("grpc") | Some("grpc_web") if request_messages.unwrap_or(0) > 1 => Some("client"),
         _ => None,
     }

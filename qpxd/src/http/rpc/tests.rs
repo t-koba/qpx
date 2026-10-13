@@ -792,3 +792,35 @@ mod connect_inspection_tests {
         );
     }
 }
+
+#[test]
+fn connect_get_is_labeled_unary() {
+    assert_eq!(
+        infer_request_streaming(Some("connect"), "GET", None),
+        Some("unary")
+    );
+    assert_eq!(infer_request_streaming(Some("connect"), "POST", None), None);
+    assert_eq!(
+        infer_request_streaming(Some("connect"), "get", Some(3)),
+        Some("unary")
+    );
+}
+
+#[tokio::test]
+async fn recognized_connect_get_keeps_unary_label_on_response() {
+    let req = Request::builder()
+        .method("GET")
+        .uri("/demo.Echo/Say?connect=v1&message=%7B%7D")
+        .header(http::header::CONTENT_TYPE, "application/connect+json")
+        .body(Body::empty())
+        .expect("request");
+    let ctx = inspect_request(&req).await;
+    assert_eq!(ctx.protocol.as_deref(), Some("connect"));
+    assert_eq!(ctx.streaming.as_deref(), Some("unary"));
+
+    let response = http::Response::builder()
+        .body(Body::empty())
+        .expect("response");
+    let inspected = inspect_response(&ctx, &response).await;
+    assert_eq!(inspected.streaming.as_deref(), Some("unary"));
+}
