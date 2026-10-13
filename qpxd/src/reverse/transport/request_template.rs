@@ -608,7 +608,6 @@ mod tests {
 #[cfg(test)]
 mod spool_guard_tests {
     use crate::reverse::transport::request_template::*;
-    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static GUARD_TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -645,7 +644,8 @@ mod spool_guard_tests {
         assert!(!path.exists());
     }
 
-    fn retry_template_spool_files() -> BTreeSet<PathBuf> {
+    #[cfg(unix)]
+    fn retry_template_spool_files() -> std::collections::BTreeSet<PathBuf> {
         std::fs::read_dir(std::env::temp_dir())
             .expect("temp dir is readable")
             .filter_map(Result::ok)
