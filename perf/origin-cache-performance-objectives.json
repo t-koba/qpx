@@ -1,7 +1,24 @@
 {
+  "ci_policy": {
+    "max_attempts": 3,
+    "pair_samples": 3,
+    "paired_regression": {
+      "max_p99_latency_ratio": 1.1,
+      "min_cpu_efficiency_ratio": 0.95,
+      "min_throughput_ratio": 0.95
+    },
+    "previous_release": {
+      "sha": "d67a148e7ccbbd272750415213601005af0f38c5",
+      "tag": "v0.4.2"
+    },
+    "scheduler_queue_delay": "diagnostic_only",
+    "schema_version": 1,
+    "shared_competitive": "report_only"
+  },
   "defaults": {
     "max_fd_peak_ratio": 1.0,
     "max_p99_latency_ratio": 0.8,
+    "max_p99_sample_spread_ratio": 1.25,
     "max_qpx_sample_spread_ratio": 1.15,
     "max_reference_sample_spread_ratio": 1.15,
     "max_rss_peak_ratio": 1.0,
@@ -49,12 +66,12 @@
     {
       "bench": "proxy_cache_hit_http1",
       "body_bytes": 1024,
+      "min_throughput_ratio": 1.2,
       "qpx": "qpxd-cache",
       "qpx_role_workers": 4,
       "reference": "nginx-cache",
       "reference_role_workers": 4,
-      "workload_profile": "persistent_cache_hit_v1",
-      "min_throughput_ratio": 1.2
+      "workload_profile": "persistent_cache_hit_v1"
     },
     {
       "bench": "proxy_cache_hit_http1",
@@ -73,6 +90,7 @@
       "bench": "proxy_cache_miss_http1",
       "body_bytes": 1024,
       "max_p99_latency_ratio": 7.5,
+      "max_reference_sample_spread_ratio": 1.5,
       "max_scheduler_queue_delay_ratio": 2.6,
       "min_cpu_efficiency_ratio": 0.5,
       "min_dominance_score": 0.37,
@@ -81,8 +99,7 @@
       "qpx_role_workers": 4,
       "reference": "nginx-cache",
       "reference_role_workers": 4,
-      "workload_profile": "persistent_cache_unique_miss_v1",
-      "max_reference_sample_spread_ratio": 1.5
+      "workload_profile": "persistent_cache_unique_miss_v1"
     },
     {
       "bench": "feature_rich_cache_hit_http1",

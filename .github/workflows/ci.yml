@@ -522,6 +522,8 @@ jobs:
   perf_audit_proxy:
     name: perf audit (proxy comparison)
     runs-on: ubuntu-latest
+    env:
+      QPX_PERF_ASSESSMENT: shared
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -536,20 +538,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
+      - name: check performance policy fixtures
+        run: python3 scripts/test-perf-policy.py
+      - name: checkout pinned previous release
+        uses: actions/checkout@v5
+        with:
+          ref: d67a148e7ccbbd272750415213601005af0f38c5 # v0.4.2; also pinned in the objectives
+          path: .perf-previous-release
+      - name: build current and previous qpxd on the same toolchain
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          pin=$(python3 -c 'import json; print(json.load(open("perf/proxy-performance-objectives.json"))["ci_policy"]["previous_release"]["sha"])')
+          test "$(git -C .perf-previous-release rev-parse HEAD)" = "$pin"
+          cargo build -p qpxd --release --locked --features http3-backend-qpx
+          (cd .perf-previous-release && CARGO_TARGET_DIR="$RUNNER_TEMP/qpx-perf-previous-target" cargo build -p qpxd --release --locked --features http3-backend-qpx)
+          echo "QPX_PREVIOUS_SOURCE_SHA=$pin" >> "$GITHUB_ENV"
+          echo "QPX_PREVIOUS_BIN=$RUNNER_TEMP/qpx-perf-previous-target/release/qpxd" >> "$GITHUB_ENV"
       - name: external proxy comparison bench
         id: external_proxy_comparison_bench
         continue-on-error: true
-        env:
-          RUSTFLAGS: "-D warnings"
-          QPX_PROXY_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-proxy-compare.jsonl
-          QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV: "MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728"
         run: |
-          cargo build -p qpxd --release --locked --features http3-backend-qpx
-          scripts/perf-audit-proxy-matrix.sh "$QPX_PROXY_COMPARE_JSON"
-      - name: enforce cache origin and feature-rich performance objectives
-        id: enforce_cache_origin_feature_rich_performance_objectives
-        continue-on-error: true
-        run: scripts/check-origin-cache-performance.sh target/perf/perf-audit-proxy-compare.jsonl perf/origin-cache-performance-objectives.json
+          python3 scripts/perf-audit-policy.py run proxy target/perf/proxy-policy \
+            --previous-bin "$QPX_PREVIOUS_BIN" --previous-sha "$QPX_PREVIOUS_SOURCE_SHA"
       - name: external long streaming comparison bench
         id: external_long_streaming_comparison_bench
         continue-on-error: true
@@ -560,18 +571,12 @@ jobs:
         id: enforce_streaming_performance_objectives
         continue-on-error: true
         run: scripts/check-streaming-performance.sh target/perf/perf-audit-streaming-compare.jsonl perf/streaming-performance-objectives.json
-      - name: compare proxy baseline
-        id: compare_proxy_baseline
-        continue-on-error: true
-        run: scripts/compare-proxy-baseline.sh target/perf/perf-audit-proxy-compare.jsonl perf/baseline-proxy-compare.json perf/proxy-performance-objectives.json
       - name: fail if any perf audit evaluation failed
         if: always()
         env:
           EXTERNAL_PROXY_COMPARISON_BENCH: ${{ steps.external_proxy_comparison_bench.outcome }}
-          ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_cache_origin_feature_rich_performance_objectives.outcome }}
           EXTERNAL_LONG_STREAMING_COMPARISON_BENCH: ${{ steps.external_long_streaming_comparison_bench.outcome }}
           ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_streaming_performance_objectives.outcome }}
-          COMPARE_PROXY_BASELINE: ${{ steps.compare_proxy_baseline.outcome }}
         run: |
           failed=0
           check_step() {
@@ -583,10 +588,8 @@ jobs:
             fi
           }
           check_step "external proxy comparison bench" "$EXTERNAL_PROXY_COMPARISON_BENCH"
-          check_step "cache origin and feature-rich performance objectives" "$ENFORCE_CACHE_ORIGIN_FEATURE_RICH_PERFORMANCE_OBJECTIVES"
           check_step "external long streaming comparison bench" "$EXTERNAL_LONG_STREAMING_COMPARISON_BENCH"
           check_step "streaming performance objectives" "$ENFORCE_STREAMING_PERFORMANCE_OBJECTIVES"
-          check_step "compare proxy baseline" "$COMPARE_PROXY_BASELINE"
           exit "$failed"
       - name: upload perf audit artifact
         uses: actions/upload-artifact@v7
@@ -596,6 +599,7 @@ jobs:
           path: |
             target/perf/*.jsonl
             target/perf/*.json
+            target/perf/proxy-policy/**
             target/perf/proxy-compare-logs/**
             target/perf/streaming-compare-logs/**
           if-no-files-found: ignore
@@ -603,6 +607,8 @@ jobs:
   perf_audit_protocol:
     name: perf audit (protocol comparison)
     runs-on: ubuntu-latest
+    env:
+      QPX_PERF_ASSESSMENT: shared
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -617,20 +623,29 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
-      - name: build qpxd release binary
+      - name: check performance policy fixtures
+        run: python3 scripts/test-perf-policy.py
+      - name: checkout pinned previous release
+        uses: actions/checkout@v5
+        with:
+          ref: d67a148e7ccbbd272750415213601005af0f38c5 # v0.4.2; also pinned in the objectives
+          path: .perf-previous-release
+      - name: build current and previous qpxd on the same toolchain
         env:
           RUSTFLAGS: "-D warnings"
-        run: cargo build -p qpxd --release --locked --features http3-backend-qpx
+        run: |
+          pin=$(python3 -c 'import json; print(json.load(open("perf/proxy-performance-objectives.json"))["ci_policy"]["previous_release"]["sha"])')
+          test "$(git -C .perf-previous-release rev-parse HEAD)" = "$pin"
+          cargo build -p qpxd --release --locked --features http3-backend-qpx
+          (cd .perf-previous-release && CARGO_TARGET_DIR="$RUNNER_TEMP/qpx-perf-previous-target" cargo build -p qpxd --release --locked --features http3-backend-qpx)
+          echo "QPX_PREVIOUS_SOURCE_SHA=$pin" >> "$GITHUB_ENV"
+          echo "QPX_PREVIOUS_BIN=$RUNNER_TEMP/qpx-perf-previous-target/release/qpxd" >> "$GITHUB_ENV"
       - name: external http2 comparison bench
         id: external_http2_comparison_bench
         continue-on-error: true
-        env:
-          QPX_HTTP2_COMPARE_JSON: ${{ github.workspace }}/target/perf/perf-audit-http2-compare.jsonl
-        run: scripts/perf-audit-http2-compare.sh "$QPX_HTTP2_COMPARE_JSON"
-      - name: enforce http2 performance objectives
-        id: enforce_http2_performance_objectives
-        continue-on-error: true
-        run: scripts/check-http2-performance.sh target/perf/perf-audit-http2-compare.jsonl perf/http2-performance-objectives.json
+        run: |
+          python3 scripts/perf-audit-policy.py run http2 target/perf/http2-policy \
+            --previous-bin "$QPX_PREVIOUS_BIN" --previous-sha "$QPX_PREVIOUS_SOURCE_SHA"
       - name: netem proxy comparison bench
         id: netem_proxy_comparison_bench
         continue-on-error: true
@@ -642,7 +657,6 @@ jobs:
         if: always()
         env:
           EXTERNAL_HTTP2_COMPARISON_BENCH: ${{ steps.external_http2_comparison_bench.outcome }}
-          ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES: ${{ steps.enforce_http2_performance_objectives.outcome }}
           NETEM_PROXY_COMPARISON_BENCH: ${{ steps.netem_proxy_comparison_bench.outcome }}
         run: |
           failed=0
@@ -655,7 +669,6 @@ jobs:
             fi
           }
           check_step "external http2 comparison bench" "$EXTERNAL_HTTP2_COMPARISON_BENCH"
-          check_step "http2 performance objectives" "$ENFORCE_HTTP2_PERFORMANCE_OBJECTIVES"
           check_step "netem proxy comparison bench" "$NETEM_PROXY_COMPARISON_BENCH"
           exit "$failed"
       - name: upload perf audit artifact
@@ -666,6 +679,7 @@ jobs:
           path: |
             target/perf/*.jsonl
             target/perf/*.json
+            target/perf/http2-policy/**
             target/perf/http2-compare-logs/**
             target/perf/netem-proxy-compare-logs/**
           if-no-files-found: ignore

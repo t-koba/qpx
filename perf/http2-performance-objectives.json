@@ -1,4 +1,20 @@
 {
+  "ci_policy": {
+    "max_attempts": 3,
+    "pair_samples": 3,
+    "paired_regression": {
+      "max_p99_latency_ratio": 1.1,
+      "min_cpu_efficiency_ratio": 0.95,
+      "min_throughput_ratio": 0.95
+    },
+    "previous_release": {
+      "sha": "d67a148e7ccbbd272750415213601005af0f38c5",
+      "tag": "v0.4.2"
+    },
+    "scheduler_queue_delay": "diagnostic_only",
+    "schema_version": 1,
+    "shared_competitive": "report_only"
+  },
   "defaults": {
     "max_lane_latency_ratio": 1.0,
     "max_lane_mean_latency_ratio": 1.05,
@@ -7,8 +23,10 @@
     "max_lane_total_fd_peak_ratio": 1.0,
     "max_lane_total_rss_peak_ratio": 1.0,
     "max_qpx_cpu_sample_spread_ratio": 1.1,
+    "max_qpx_p99_sample_spread_ratio": 1.25,
     "max_qpx_throughput_sample_spread_ratio": 1.1,
     "max_reference_cpu_sample_spread_ratio": 1.25,
+    "max_reference_p99_sample_spread_ratio": 1.25,
     "max_reference_throughput_sample_spread_ratio": 1.25,
     "min_aggregate_dominance_score": 1.5,
     "min_lane_dominance_score": 1.25,
@@ -38,21 +56,21 @@
     {
       "body_bytes": 1048576,
       "max_concurrent_streams": 1,
-      "max_reference_cpu_sample_spread_ratio": 1.6,
-      "max_reference_throughput_sample_spread_ratio": 5.2,
       "max_qpx_cpu_sample_spread_ratio": 1.25,
       "max_qpx_throughput_sample_spread_ratio": 1.25,
+      "max_reference_cpu_sample_spread_ratio": 1.6,
+      "max_reference_throughput_sample_spread_ratio": 5.2,
       "note": "1MB m=1 qpx spreads measured 1.139 (CPU) and 1.148 (throughput) on mizu 77c4cc4, content-identical to alpha with no H2-path product change, so the 1.10 default is tighter than runner noise on this lane. Caps 1.25 match the m=100 lane calibration and stay decisive above the observed flaps; dominance and throughput floors are unchanged."
     },
     {
       "body_bytes": 1048576,
       "max_concurrent_streams": 100,
       "max_lane_scheduler_queue_delay_ratio": 4.0,
+      "max_qpx_cpu_sample_spread_ratio": 1.25,
       "max_qpx_throughput_sample_spread_ratio": 3.0,
       "max_reference_cpu_sample_spread_ratio": 1000.0,
       "max_reference_throughput_sample_spread_ratio": 1000.0,
-      "note": "1MB m=100 multiplexes 100 1MB streams on one connection; reference throughput spread measured 26x-50x (cap 1000) and qpx throughput/mean spreads measured ~1.20 on mizu 859cbe8 with absolute dominance 4.3 healthy, so the lane carries ~20% run-to-run noise. qpx CPU cap 1.25 matches the reference-default strictness and stays above observed 1.03-1.174 with no product change.",
-      "max_qpx_cpu_sample_spread_ratio": 1.25
+      "note": "1MB m=100 multiplexes 100 1MB streams on one connection; reference throughput spread measured 26x-50x (cap 1000) and qpx throughput/mean spreads measured ~1.20 on mizu 859cbe8 with absolute dominance 4.3 healthy, so the lane carries ~20% run-to-run noise. qpx CPU cap 1.25 matches the reference-default strictness and stays above observed 1.03-1.174 with no product change."
     }
   ],
   "metric": "multi_axis_total_system_http2_dominance",

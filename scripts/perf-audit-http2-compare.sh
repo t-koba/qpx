@@ -6,6 +6,14 @@ source "$ROOT_DIR/scripts/lib/temp-dir.sh"
 OUT_JSON="${1:-${QPX_HTTP2_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_HTTP2_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/http2-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
+PROXY_FILTER="${QPX_HTTP2_COMPARE_PROXY_FILTER:-direct-backend,qpxd,nginx}"
+proxy_selected() {
+  case ",${PROXY_FILTER}," in *",${1},"*) return 0 ;; *) return 1 ;; esac
+}
+case "$PROXY_FILTER" in
+  qpxd|direct-backend,qpxd,nginx) ;;
+  *) echo "unsupported HTTP/2 proxy filter: $PROXY_FILTER" >&2; exit 1 ;;
+esac
 TARGET_DURATION_SECONDS="${QPX_HTTP2_COMPARE_TARGET_DURATION_SECONDS:-10}"
 CALIBRATION_BYTES="${QPX_HTTP2_COMPARE_CALIBRATION_BYTES:-16777216}"
 CALIBRATION_MIN_DURATION_MS="${QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS:-2000}"
@@ -70,6 +78,7 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.h2load' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.latency.tsv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.sample.txt' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  cp "$TMP_DIR/interleaved-raw.jsonl" "$LOG_ARTIFACT_DIR/" 2>/dev/null || true
   find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
 }
 
@@ -675,8 +684,7 @@ run_one() {
       if [ -n "$profile_pid" ]; then
         wait "$profile_pid" || true
       fi
-      attempt=$((attempt + 1))
-      continue
+      exit 1
     fi
     cpu_after_ms="$(process_tree_cpu_ms "$resource_pid")"
     if [ "$resource_pid" = "$backend_pid" ]; then
@@ -723,8 +731,7 @@ run_one() {
       failed_sample="$out"
       echo "${proxy} produced unparsable HTTP/2 metrics on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       cat "$out" >&2 || true
-      attempt=$((attempt + 1))
-      continue
+      exit 1
     fi
     rm -f "$latency_file"
     valid="$(python3 - "$metrics" <<'PY'
@@ -845,7 +852,7 @@ PY
     failed_sample="$out"
     echo "${proxy} produced an invalid HTTP/2 benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
     cat "$out" >&2 || true
-    attempt=$((attempt + 1))
+    exit 1
   done
   valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
   if [ "$valid_sample_count" -lt "$MIN_VALID_SAMPLES" ]; then
@@ -1045,17 +1052,17 @@ fi
 make_certs
 prepare_backend_files
 start_http_backend qpx "$BACKEND_PORT"
-start_http_backend nginx "$NGINX_BACKEND_PORT"
-start_direct_backend
+if proxy_selected nginx; then start_http_backend nginx "$NGINX_BACKEND_PORT"; fi
+if proxy_selected direct-backend; then start_direct_backend; fi
 start_qpxd_h2
-start_nginx_h2
+if proxy_selected nginx; then start_nginx_h2; fi
 
 FINAL_OUT_JSON="$OUT_JSON"
 RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
 REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
 REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
 OUT_JSON="$RAW_OUT_JSON"
-SAMPLE_ATTEMPTS=3
+SAMPLE_ATTEMPTS=1
 MIN_VALID_SAMPLES=1
 STOP_AFTER_FIRST_VALID_SAMPLE=true
 : >"$OUT_JSON"
@@ -1064,9 +1071,9 @@ run_http2_proxy_by_index() {
   local index="$1"
   local body_bytes="$2"
   case "$index" in
-    0) run_one "direct-backend" "$BACKEND_H2_PORT" "$DIRECT_BACKEND_PID" "$DIRECT_BACKEND_PID" "$body_bytes" ;;
+    0) proxy_selected direct-backend || return 0; run_one "direct-backend" "$BACKEND_H2_PORT" "$DIRECT_BACKEND_PID" "$DIRECT_BACKEND_PID" "$body_bytes" ;;
     1) run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$QPX_BACKEND_PID" "$body_bytes" ;;
-    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$NGINX_BACKEND_PID" "$body_bytes" ;;
+    2) proxy_selected nginx || return 0; run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$NGINX_BACKEND_PID" "$body_bytes" ;;
     *) echo "invalid HTTP/2 benchmark index: ${index}" >&2; exit 1 ;;
   esac
 }
@@ -1095,19 +1102,19 @@ done
 
 python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" \
   "$REQUESTED_MIN_VALID_SAMPLES" "$BODY_SIZES" "$MAX_CONCURRENT_STREAMS_VALUES" \
-  "$TARGET_DURATION_SECONDS" <<'PY'
+  "$TARGET_DURATION_SECONDS" "$PROXY_FILTER" <<'PY'
 import json
 import math
 import sys
 from collections import defaultdict
 
-raw_path, out_path, attempts, minimum, body_sizes, stream_values, target_duration = sys.argv[1:8]
+raw_path, out_path, attempts, minimum, body_sizes, stream_values, target_duration, proxies = sys.argv[1:9]
 attempts = int(attempts)
 minimum = int(minimum)
 target_duration = float(target_duration)
 expected = {
     (proxy, int(body_bytes), int(max_streams))
-    for proxy in ("direct-backend", "qpxd", "nginx")
+    for proxy in proxies.split(",")
     for body_bytes in body_sizes.split()
     for max_streams in stream_values.split()
 }
@@ -1269,6 +1276,7 @@ for key in sorted(expected):
                 records, "requests_per_total_cpu_second"
             ),
             "mean_time_per_request_ms_ratio": spread(records, "mean_time_per_request_ms"),
+            "latency_p99_ratio": spread(records, "latency_p99_ms"),
         },
         "valid_samples": len(records),
     })

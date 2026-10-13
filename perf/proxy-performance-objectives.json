@@ -1,4 +1,20 @@
 {
+  "ci_policy": {
+    "max_attempts": 3,
+    "pair_samples": 3,
+    "paired_regression": {
+      "max_p99_latency_ratio": 1.1,
+      "min_cpu_efficiency_ratio": 0.95,
+      "min_throughput_ratio": 0.95
+    },
+    "previous_release": {
+      "sha": "d67a148e7ccbbd272750415213601005af0f38c5",
+      "tag": "v0.4.2"
+    },
+    "scheduler_queue_delay": "diagnostic_only",
+    "schema_version": 1,
+    "shared_competitive": "report_only"
+  },
   "defaults": {
     "max_cpu_sample_spread_ratio": 1.1,
     "max_fd_peak_ratio": 1.0,

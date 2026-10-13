@@ -27,6 +27,7 @@ APACHE_BIN="${QPX_PROXY_COMPARE_APACHE_BIN:-}"
 SCALE_WORKERS="${QPX_PROXY_COMPARE_SCALE_WORKERS:-}"
 MAX_SCALE_WORKERS="${QPX_PROXY_COMPARE_MAX_SCALE_WORKERS:-4}"
 PROXY_FILTER="${QPX_PROXY_COMPARE_PROXY_FILTER:-}"
+BENCH_FILTER="${QPX_PROXY_COMPARE_BENCH_FILTER:-}"
 PROFILE_PROXY="${QPX_PROXY_COMPARE_PROFILE_PROXY:-}"
 PROFILE_SECONDS="${QPX_PROXY_COMPARE_PROFILE_SECONDS:-0}"
 ARTIFACT_LOG_HEAD_LINES="${QPX_PROXY_COMPARE_ARTIFACT_LOG_HEAD_LINES:-3}"
@@ -306,6 +307,7 @@ record_invalid_sample() {
   printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":0,"aggregation":"single_sample","requests":0,"complete_requests":0,"failed_requests":1,"connect_errors":0,"read_errors":0,"write_errors":0,"timeout_errors":0,"max_read_error_rate_ppm":%s,"non_2xx_responses":0,"bad_length_responses":0,"status_before":"%s","status_after":"%s","requests_per_sec":0,"mean_time_per_request_ms":null,"latency_p50_ms":null,"latency_p90_ms":null,"latency_p95_ms":null,"latency_p99_ms":null,"latency_p999_ms":null,"transfer_kbytes_per_sec":0,"cpu_ms":null,"rss_kb":null,"rss_peak_kb":null,"requests_per_cpu_second":null,"valid":false,"error":"%s","commit":"%s"}\n' \
     "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$MAX_READ_ERROR_RATE_PPM" "$status_before" "$status_after" "$error_code" "$commit" >>"$OUT_JSON"
   INVALID_SAMPLES=$((INVALID_SAMPLES + 1))
+  exit 1
 }
 
 dump_service_log() {
@@ -1156,6 +1158,7 @@ wait_forward() {
 
 run_one() {
   local bench="$1"
+  if [ -n "$BENCH_FILTER" ] && [ "$bench" != "$BENCH_FILTER" ]; then return 0; fi
   local proxy="$2"
   local port="$3"
   local mode="$4"
@@ -1373,8 +1376,7 @@ LUA
       fi
       compact_feature_rich_access_log "$proxy"
       settle_feature_rich_log_compaction "$proxy"
-      attempt=$((attempt + 1))
-      continue
+      exit 1
     fi
     if [ -n "$profile_pid" ]; then
       wait "$profile_pid" || true
@@ -1442,8 +1444,7 @@ LUA
       echo "${proxy} wrk output is missing required throughput fields" >&2
       cat "$out" >&2 || true
       failed_sample="$out"
-      attempt=$((attempt + 1))
-      continue
+      exit 1
     fi
     requests_per_cpu_second="$(awk -v requests="$summary_requests" -v cpu_ms="$cpu_ms" 'BEGIN { if (cpu_ms > 0) printf "%.6f", requests / (cpu_ms / 1000); else printf "null" }')"
     scheduler_queue_delay_us_per_request="$(awk -v delay_ns="$scheduler_run_delay_ns" -v requests="$summary_requests" 'BEGIN { if (requests > 0) printf "%.6f", delay_ns / requests / 1000; else printf "null" }')"
@@ -1470,7 +1471,7 @@ LUA
     echo "${proxy} produced an invalid benchmark sample on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
     echo "complete=${complete} summary_requests=${summary_requests} failed=${failed} connect_errors=${connect_errors} read_errors=${read_errors} write_errors=${write_errors} timeout_errors=${timeout_errors} max_read_error_rate_ppm=${MAX_READ_ERROR_RATE_PPM} non_2xx=${non_2xx} bad_length=${bad_length} cache_result_errors=${cache_result_errors} status_before=${status_before} status_after=${status_after}" >&2
     cat "$out" >&2 || true
-    attempt=$((attempt + 1))
+    exit 1
   done
   valid_sample_count="$(wc -l <"$samples_file" | tr -d '[:space:]')"
   if [ "$valid_sample_count" -lt "$MIN_VALID_SAMPLES" ]; then
@@ -1703,7 +1704,7 @@ REQUESTED_SAMPLE_ATTEMPTS="$SAMPLE_ATTEMPTS"
 REQUESTED_MISS_SAMPLE_ATTEMPTS="$MISS_SAMPLE_ATTEMPTS"
 REQUESTED_MIN_VALID_SAMPLES="$MIN_VALID_SAMPLES"
 OUT_JSON="$RAW_OUT_JSON"
-SAMPLE_ATTEMPTS=3
+SAMPLE_ATTEMPTS=1
 MIN_VALID_SAMPLES=1
 STOP_AFTER_FIRST_VALID_SAMPLE=true
 : >"$OUT_JSON"
@@ -1946,8 +1947,7 @@ jq -cs \
         # a single preempted sample on a shared runner would otherwise decide
         # the whole lane (worst-of-qpxd vs best-of-externals). Every primary
         # metric above aggregates with a median, so the delay pair uses the
-        # conservative upper median too: a systematic regression still fails
-        # on a majority of bad samples, but one noisy sample cannot.
+        # conservative upper median too. It never decides the performance gate.
         | .scheduler_run_delay_ns = ([$valid[].scheduler_run_delay_ns] | upper_median)
         | .scheduler_queue_delay_us_per_request = ([$valid[].scheduler_queue_delay_us_per_request] | upper_median)
         | .kernel_resource_metrics = ([$valid[].kernel_resource_metrics] | all)

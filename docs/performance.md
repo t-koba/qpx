@@ -32,52 +32,32 @@ Runner-local values are regression signals only. Compare them against the same
 runner class and the same benchmark lane; do not use CI artifacts as absolute
 throughput claims.
 
-The HTTP/1 comparison writes `target/perf/perf-audit-proxy-compare.jsonl` with
-`direct-backend`, `qpxd`, nginx, Apache, and lighttpd rows. The benchmark
-interleaves every implementation across three rounds and requires a majority of
-valid samples. It aggregates each metric independently: lower medians for
-throughput and CPU efficiency, upper medians for latency, and maxima for error
-and memory counters. This prevents an unusually fast request-rate sample from
-silently carrying unrelated latency or CPU measurements into the result.
-`scripts/compare-proxy-baseline.sh` evaluates all of these axes against the best
-external result on the same runner:
+The standalone HTTP/1 comparison writes
+`target/perf/perf-audit-proxy-compare.jsonl` with `direct-backend`, `qpxd`, nginx,
+Apache, and lighttpd rows. It interleaves implementations across three rounds.
+Every timed sample must be functionally valid. Each metric aggregates
+independently: lower medians for throughput and CPU efficiency, upper medians
+for latency, and maxima for error and memory counters. This prevents a fast
+request-rate sample from carrying unrelated latency or CPU values into a result.
+`scripts/compare-proxy-baseline.sh` reports throughput, CPU efficiency, p99,
+multi-axis dominance, and historical absolute/normalized qpx comparisons.
 
-- request throughput;
-- requests per process-tree CPU second;
-- p99 latency;
-- the geometric multi-axis dominance score.
+Competitive targets remain in `perf/proxy-performance-objectives.json`: the
+lanes aim for at least 15% more throughput and CPU efficiency than the strongest
+external result per axis, at least 5% lower p99, and dominance of at least 1.1.
+Existing spread caps are unchanged: 1.10 for throughput/CPU and 1.25 for p99.
+Over-cap spread by qpx, the direct backend **or any external reference** makes
+that entire competitive lane `RETRYABLE_INVALID`; it is never a pass or a
+regression. Direct-backend efficiency/headroom remains a diagnostic, not a proxy
+ceiling. RSS compares qpx to nginx's same-class resident footprint while the
+other resource axes retain best-of-breed external references.
 
-The gate also preserves the prior runner-relative baseline. On every lane, qpx
-must exceed the independently strongest external throughput and CPU-efficiency
-results by at least 15%, beat the best external p99 latency by at least 5%, and
-reach a geometric multi-axis dominance score of at least 1.1
-(`perf/proxy-performance-objectives.json` lanes; the file is the source of
-truth). This is stricter
-than comparing qpx with a single chosen competitor because the reference may
-come from a different implementation on each axis. It rejects qpx throughput or
-CPU sample spread above 10% and qpx p99 sample spread above 25% (green 1.176 on
-mizu 168076a, noisy 1.499 on mizu aebb6cc). A breaching competitor sample leaves
-the lane unmeasured — reported visibly, not failed — since competitor noise is
-not a qpx regression; a breaching qpx or direct-backend sample still fails as
-invalid, since an unstable backend load invalidates the lane. Direct-backend efficiency and headroom
-remain in the artifact so backend saturation and runner noise remain visible,
-but headroom is recorded, not gated.
-
-All objective checkers judge misses against lane measurement noise: each lane
-derives a noise band from qpx's own observed throughput and CPU sample spread,
-floored by a global 5% run-to-run tolerance; reference spreads never widen the
-band, so competitor instability can neither fail qpx nor excuse a qpx miss; p99 baseline
-and objective misses use the p99 spread instead, capped at the documented p99
-spread cap so an unstable tail is invalid rather than a wider pass. Shared CI
-runners vary run to run more than any single interleaved lane spread shows
-(observed decisive misses at 0.7-1.2% with lane spreads near 1.005, each on a
-different objective with no causal product change), so a miss inside
-max(lane spread, 1.05) is reported as marginal, kept visible for trend review
-but not a failure, while a miss beyond it is decisive and fails the gate.
-Stability and sample-spread caps still fail decisively, and on the baseline
-and origin-cache gates higher-is-better bars never drop below their evidence
-floors, so the objectives keep their teeth. Objectives files are unchanged;
-only the measurement-noise interpretation carries the floor.
+These are competitive objectives, not a shared-runner regression oracle. The
+required current-versus-pinned-release pair, bounded validity retries, fixed
+per-metric regression tolerances and controlled-hardware opt-in are described
+under **Shared-runner validity and paired-regression contract** below. The old
+spread-derived allowance and global run-to-run noise floor are removed from
+these checkers: spread establishes validity and cannot widen a pass allowance.
 
 The same interleaved HTTP/1 harness also measures qpx in its other production
 roles instead of inferring their performance from the minimal proxy lane:
@@ -180,7 +160,7 @@ nginx reference: three for local-origin, four for cache, and four for the
 feature-rich role. WebDAV uses two qpx async-I/O workers; this preserves the
 single-frame `Bytes` fast path without cross-worker memory-bandwidth contention
 under the fixed 64-connection load. The qpx WebDAV runtime bounds its blocking
-filesystem pool at 16 threads, independently of async I/O. The pool remains
+filesystem pool at 128 threads, independently of async I/O. The pool remains
 idle when no blocking operation is queued, retains cold-file and metadata
 parallelism, and is included in process-tree CPU accounting. Apache event MPM
 uses one request thread per active request while its
@@ -206,27 +186,15 @@ allocator or two mutually exclusive TLS execution choices does not represent a
 production request path. Runtime features are measured by the feature-rich
 route rather than treated as zero-cost merely because they compile.
 
-`scripts/check-origin-cache-performance.sh` enforces every declared lane in
-`perf/origin-cache-performance-objectives.json` (the file is the source of
-truth). Defaults require 25% more throughput and CPU efficiency, 20% lower p99
-latency, and a geometric multi-axis dominance score of at least 1.25; lanes
-override what their evidence supports. WebDAV 1 KiB requires 10% more
-throughput at default CPU and p99. The 1 MiB cache and feature-rich lanes
-forbid throughput regression, cap p99 at 1.15x, and hold CPU efficiency at
-1.0-1.05x with dominance of at least 1.1. WebDAV 1 MiB requires 50% higher CPU
-efficiency with a relaxed p99 cap, while the cache-miss and feature-rich 1 KiB
-lanes carry the lower bounds their roles sustain. For 1 MiB loopback lanes, memory
-bandwidth and the client can become the shared throughput ceiling. This prevents a
-bandwidth ceiling from hiding material efficiency or tail-latency gains without
-accepting a merely marginal overall result. Missing
-roles, unequal worker counts, unverified responses, unstable samples, or a
-partially emitted matrix fail the release gate. Stability uses the narrowest
-majority window of valid interleaved samples, matching the conservative median
-instead of allowing one discarded outlier to dominate a max/min spread. Sample
-spread is capped at 15% for qpx and the reference by default. Connect, write,
-timeout, non-2xx, and body-length errors must be zero. `wrk` read errors caused at the
-sampling boundary are accepted only within the recorded 1000 ppm ceiling, and
-failed-request accounting must match that bounded count exactly.
+`scripts/check-origin-cache-performance.sh` reports every declared competitive
+lane in `perf/origin-cache-performance-objectives.json`. The objectives retain
+throughput, CPU-efficiency, p99, dominance, RSS and FD targets; the shared-runner
+policy below determines which measurements can decide CI. The workload and role
+topology in the objectives are mandatory in both the competitive measurement and
+the current-versus-release pair. Connect, write, timeout, non-2xx and body-length
+errors must be zero. `wrk` read errors at the sampling boundary retain their
+recorded 1000 ppm ceiling and exact failed-request accounting. No failed sample
+is discarded or replaced by a later functional success.
 
 The TLS HTTP/2 comparison uses h2load against the direct static HTTP/2 backend,
 qpx, and nginx. It covers both one stream per connection and 100 multiplexed
@@ -241,20 +209,14 @@ CPU and backend CPU separately, then compares qpx and nginx by requests per
 total-system CPU second. The direct backend is a workload and saturation
 reference; its request rate is not treated as a proxy ceiling because its
 TLS/H2 topology differs from the two proxy lanes.
-`scripts/check-http2-performance.sh` enforces every lane in
-`perf/http2-performance-objectives.json` (the file is the source of truth).
-Defaults require no throughput or total-system CPU-efficiency regression, bound
-mean latency to 1.05x, p99 to 1.1x, and maximum latency to the external leader,
-with lane dominance of at least 1.25; the multiplexed 1 KiB lane tolerates
-bounded regression (0.95x throughput, 0.85x CPU, 0.94 dominance) and the other
-1 KiB lanes carry the relaxed latency and dominance caps their evidence
-supports. The geometric dominance score across the
-complete four-lane matrix must reach 1.5. qpx sample spread is capped at 10% by
-default (3.0x on the fully multiplexed 1 MiB lane);
-reference spread is recorded and capped separately so runner noise cannot
-silently excuse a qpx regression; a breaching competitor sample is reported as
-unmeasured rather than failing the gate, while a breaching qpx or
-direct-backend sample still fails as invalid. The qpx HTTP/2 server runs streams
+`scripts/check-http2-performance.sh` reports the four competitive lanes in
+`perf/http2-performance-objectives.json`, including the 1.5 aggregate dominance
+objective. Existing throughput/CPU spread caps and all competitive objectives
+are unchanged. HTTP/2 now also records p99 spread, with a 1.25 cap for each
+implementation; the HTTP/1 origin/cache lanes use the same p99 cap. A spread
+breach by **any** required implementation leaves that measurement invalid; it
+is never scored as passed or regressed.
+The qpx HTTP/2 server runs streams
 concurrently in the owning connection task. The single active stream reuses its
 boxed future allocation; a second stream promotes both streams into the
 connection-local concurrent scheduler. The scheduler drains ready completions
@@ -273,6 +235,94 @@ counting only for the fixed measured request batch. This prevents TLS key
 exchange and connection setup from dominating what is reported as an HTTP/2
 request-path profile. The measured batch still uses the production TLS and
 HTTP/2 implementation; only the location of the profiling window changes.
+
+### Shared-runner validity and paired-regression contract
+
+The proxy and HTTP/2 CI jobs use `scripts/perf-audit-policy.py run`, not a
+competitive objective as a regression oracle. Their JSON objectives declare
+`ci_policy`; all three files must agree. The required previous-release reference
+is **v0.4.2**, pinned to `d67a148e7ccbbd272750415213601005af0f38c5`.
+CI checks out that exact revision and builds both binaries in the same job using
+one Rust toolchain, `--release --locked --features http3-backend-qpx` and identical
+`RUSTFLAGS`. Separate target directories prevent accidental binary reuse.
+Each pair records the current and previous source SHA, executable SHA-256,
+`rustc -Vv`, runner/job identity and sampling order. Missing binaries or a
+mismatched release pin are errors, not unmeasured performance.
+
+For every declared workload, the pair reuses the existing sampler, config,
+workers, client and functional probes. Three rounds measure current/previous,
+previous/current, then current/previous. Startup and warmup are outside the timed
+workload; restarting both implementations gives each sample the same initial
+state. Per-round current/previous ratios are recorded, and their median is
+gated **separately for each metric**:
+
+| Metric | Valid-pair regression tolerance |
+| --- | --- |
+| Requests per second | current/previous must be at least **0.95** (at most 5% loss) |
+| Requests per CPU second | current/previous must be at least **0.95** (at most 5% efficiency loss) |
+| p99 response latency | current/previous must be at most **1.10** (at most 10% increase) |
+
+HTTP/2 CPU includes the proxy and backend; HTTP/1 retains its process-tree CPU
+measurement. These fixed tolerances are explicit CI policy, **not** a spread
+band: no observed spread, queue delay, dominance average, historical baseline or
+competitor advantage changes them. In particular, a throughput gain cannot
+cancel a p99 regression. Both qpx identities use the existing **qpx** spread
+caps, never the more permissive external-reference cap. Paired spread uses the
+full max/min of the three samples, not a best subset or a blend of attempts.
+
+Evaluation always validates schema, request/error accounting, responses,
+resources, workload equivalence and identities **before** checking spread or
+performance. Functional/data errors produce `ERROR` and exit **1**, immediately
+and without retries. Only an over-cap spread produces `RETRYABLE_INVALID`.
+The driver re-measures the **whole relevant pair or competitive lane group** in
+that job, with at most **two additional attempts** (three total). It accepts the
+first valid attempt, even if that attempt regresses, and never retries a valid
+regression or selects the best attempt. Other already-valid lanes are not
+re-measured. All raw samples, logs, measurements and results from every attempt
+remain under `target/perf/{proxy,http2}-policy/` and are uploaded with `if: always()`.
+
+At exhaustion the lane is `INCONCLUSIVE`/unmeasured, exit **75**, with explicit
+required/valid/unmeasured coverage. It is **not green and not a qpx regression**.
+A different valid regression remains exit **1**, even when another lane is
+inconclusive. A complete shared-runner assessment is green only when every
+required measurement is valid and every qpx pair passes.
+
+Competitive dominance (including WebDAV), nginx/apache/lighttpd comparisons,
+and historical absolute and normalized qpx baselines remain visible as JSON
+artifacts/trends. `QPX_PERF_ASSESSMENT=shared` is the documented default and is
+explicit in these CI jobs; competitive misses are `REPORT_ONLY`. A separately
+configured **controlled-hardware** assessment may set
+`QPX_PERF_ASSESSMENT=controlled` to gate the unchanged competitive targets and
+historical thresholds, without noise allowances or retries of valid misses.
+Do not enable that mode on an ordinary shared runner. Scheduler queue-delay
+ratios are diagnostics only in **both** modes and never affect the exit decision.
+The standalone shell checkers inspect competitive JSONL and return exit 75 for
+invalid spread; they do not assert that the paired regression gate ran. Existing
+streaming and netem checks are separate assessments, unchanged by this policy.
+
+Run the small synthetic JSONL fixture demo (no full benches or network):
+
+```bash
+python3 scripts/test-perf-policy.py
+```
+
+It covers equal pairs with competitive/queue-delay misses, each independent
+metric regression, invalid then equal/regressed, three invalid attempts,
+regression plus an inconclusive lane, missing/corrupt/schema/wrong-response
+errors, interleaved order, and the public checker entrypoints. It retains all
+fixture attempts and coverage summaries in `target/perf/policy-fixtures/`.
+To run the actual pair assessment after building the two binaries as above:
+
+```bash
+python3 scripts/perf-audit-policy.py run proxy target/perf/proxy-policy \
+  --previous-bin "$QPX_PREVIOUS_BIN" \
+  --previous-sha d67a148e7ccbbd272750415213601005af0f38c5
+python3 scripts/perf-audit-policy.py run http2 target/perf/http2-policy \
+  --previous-bin "$QPX_PREVIOUS_BIN" \
+  --previous-sha d67a148e7ccbbd272750415213601005af0f38c5
+```
+
+Output directories must be new, so a run cannot overwrite earlier attempts.
 
 To update the proxy baseline, download the latest `qpx-nightly-perf-jsonl`
 artifact from the scheduled `nightly_perf_bench` job and regenerate the baseline
