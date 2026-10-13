@@ -154,10 +154,8 @@ pub(crate) fn parse_content_length_fields(headers: &http::HeaderMap) -> Result<O
             return Err(anyhow!("empty Content-Length header"));
         }
         for part in raw.split(',') {
-            let next = part
-                .trim()
-                .parse::<u64>()
-                .map_err(|err| anyhow!("invalid Content-Length value: {err}"))?;
+            let next = qpx_http::protocol::semantics::parse_content_length_member(part)
+                .ok_or_else(|| anyhow!("invalid Content-Length value: {}", part.trim()))?;
             match parsed {
                 Some(existing) if existing != next => {
                     return Err(anyhow!("conflicting Content-Length values"));

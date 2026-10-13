@@ -627,6 +627,18 @@ fn default_port_for_scheme(scheme: &str) -> Option<u16> {
     }
 }
 
+/// Parses one Content-Length comma-list member per RFC 9110 §8.6
+/// (`1*DIGIT`): the trimmed member must be a nonempty ASCII digit sequence,
+/// then the `u64` value. Plain integer parsing would also accept a leading
+/// `+` sign, which is not valid field syntax.
+pub fn parse_content_length_member(part: &str) -> Option<u64> {
+    let digits = part.trim();
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    digits.parse::<u64>().ok()
+}
+
 fn validate_request_body_length_headers(
     version: Version,
     headers: &HeaderMap,
@@ -641,10 +653,8 @@ fn validate_request_body_length_headers(
             return Err(RequestValidationError::InvalidContentLength);
         }
         for part in raw.split(',') {
-            let parsed = part
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| RequestValidationError::InvalidContentLength)?;
+            let parsed = parse_content_length_member(part)
+                .ok_or(RequestValidationError::InvalidContentLength)?;
             if let Some(existing) = parsed_content_length {
                 if existing != parsed {
                     return Err(RequestValidationError::InvalidContentLength);

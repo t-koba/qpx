@@ -522,10 +522,8 @@ fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u64>, String
             return Err("empty Content-Length header".to_string());
         }
         for part in raw.split(',') {
-            let value = part
-                .trim()
-                .parse::<u64>()
-                .map_err(|err| format!("invalid Content-Length value: {err}"))?;
+            let value = qpx_http::protocol::semantics::parse_content_length_member(part)
+                .ok_or_else(|| format!("invalid Content-Length value: {}", part.trim()))?;
             match parsed {
                 Some(existing) if existing != value => {
                     return Err("conflicting Content-Length values".to_string());

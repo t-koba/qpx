@@ -257,6 +257,52 @@ fn validate_rejects_mismatched_content_length_values() {
     assert_eq!(err, RequestValidationError::InvalidContentLength);
 }
 
+fn request_with_content_length(value: &str) -> http::Request<()> {
+    let mut req = http::Request::builder()
+        .version(Version::HTTP_11)
+        .method(Method::POST)
+        .uri("http://example.com/upload")
+        .body(())
+        .expect("request");
+    req.headers_mut()
+        .insert(HOST, HeaderValue::from_static("example.com"));
+    req.headers_mut().insert(
+        CONTENT_LENGTH,
+        HeaderValue::from_str(value).expect("header"),
+    );
+    req
+}
+
+#[test]
+fn validate_rejects_signed_content_length_members() {
+    for value in ["+0", "+123", "  +5  ", "5, +5"] {
+        let err =
+            validate_incoming_request(&request_with_content_length(value)).expect_err("must fail");
+        assert_eq!(err, RequestValidationError::InvalidContentLength, "{value}");
+    }
+}
+
+#[test]
+fn validate_holds_content_length_overflow_boundary() {
+    validate_incoming_request(&request_with_content_length("18446744073709551615"))
+        .expect("u64::MAX is valid");
+    let err = validate_incoming_request(&request_with_content_length("18446744073709551616"))
+        .expect_err("must fail");
+    assert_eq!(err, RequestValidationError::InvalidContentLength);
+}
+
+#[test]
+fn validate_keeps_digit_only_content_length_forms() {
+    for value in ["0", "007", "42", "42, 42", " 42 "] {
+        validate_incoming_request(&request_with_content_length(value)).expect("valid");
+    }
+    for value in ["", "4,", ",4", "4,,4", "4, 5"] {
+        let err =
+            validate_incoming_request(&request_with_content_length(value)).expect_err("must fail");
+        assert_eq!(err, RequestValidationError::InvalidContentLength, "{value}");
+    }
+}
+
 #[test]
 fn validate_rejects_transfer_encoding_with_content_length() {
     let mut req = http::Request::builder()

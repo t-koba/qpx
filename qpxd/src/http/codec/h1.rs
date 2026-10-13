@@ -586,10 +586,8 @@ fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
             .to_str()
             .map_err(|_| anyhow!("invalid content-length header"))?;
         for part in raw.split(',') {
-            let len = part
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| anyhow!("invalid content-length value: {}", part.trim()))?;
+            let len = qpx_http::protocol::semantics::parse_content_length_member(part)
+                .ok_or_else(|| anyhow!("invalid content-length value: {}", part.trim()))?;
             match parsed {
                 Some(existing) if existing != len => {
                     return Err(anyhow!("conflicting content-length values"));
