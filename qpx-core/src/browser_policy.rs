@@ -1246,14 +1246,20 @@ impl PermissionsPolicy {
                 });
             }
             let raw_allowlist = raw_allowlist.trim();
-            if !raw_allowlist.starts_with('(') || !raw_allowlist.ends_with(')') {
-                return Err(invalid(
-                    PERMISSIONS_POLICY,
-                    "allowlist must be enclosed in parentheses",
-                ));
-            }
-            let contents = raw_allowlist[1..raw_allowlist.len() - 1].trim();
-            let allowlist = parse_permission_allowlist(contents)?;
+            let allowlist = if raw_allowlist.starts_with('(') {
+                if !raw_allowlist.ends_with(')') {
+                    return Err(invalid(
+                        PERMISSIONS_POLICY,
+                        "allowlist must be enclosed in parentheses",
+                    ));
+                }
+                let contents = raw_allowlist[1..raw_allowlist.len() - 1].trim();
+                parse_permission_allowlist(contents)?
+            } else {
+                // Bare member form (`*`, `self`, or a quoted origin):
+                // canonicalized to the parenthesized form on serialize.
+                parse_permission_allowlist_bare_member(raw_allowlist)?
+            };
             directives.push(PermissionsDirective { feature, allowlist });
         }
         if directives.is_empty() {
@@ -1323,6 +1329,21 @@ fn split_top_level(value: &str, separator: char) -> Result<Vec<String>> {
     }
     parts.push(value[start..].to_string());
     Ok(parts)
+}
+
+/// Parses a bare allowlist member: exactly one value (`*`, `self`,
+/// `src`, `none`, or a quoted origin). Inner lists keep their own path.
+fn parse_permission_allowlist_bare_member(value: &str) -> Result<PermissionAllowlist> {
+    if value.is_empty() {
+        return Err(invalid(PERMISSIONS_POLICY, "allowlist must not be empty"));
+    }
+    if value.split_ascii_whitespace().count() != 1 {
+        return Err(invalid(
+            PERMISSIONS_POLICY,
+            "bare allowlist must be a single value",
+        ));
+    }
+    parse_permission_allowlist(value)
 }
 
 fn parse_permission_allowlist(value: &str) -> Result<PermissionAllowlist> {
@@ -2653,6 +2674,26 @@ mod tests {
         assert!(PermissionsPolicy::parse("geolocation=(self none)").is_err());
         assert!(PermissionsPolicy::parse("geolocation=(\"https://*.example.com\")").is_ok());
         assert!(AcceptClientHints::parse("Sec-CH-UA, sec-ch-ua").is_err());
+    }
+
+    #[test]
+    fn permissions_policy_accepts_bare_member_allowlists() {
+        for (input, canonical) in [
+            ("camera=*", "camera=(*)"),
+            ("camera=(*)", "camera=(*)"),
+            ("camera=self", "camera=(self)"),
+            ("camera=(self)", "camera=(self)"),
+            (
+                "camera=\"https://camera.example\"",
+                "camera=(\"https://camera.example\")",
+            ),
+        ] {
+            let policy = PermissionsPolicy::parse(input).expect("bare member parses");
+            assert_eq!(policy.as_str(), canonical, "canonical form for {input:?}");
+        }
+        assert!(PermissionsPolicy::parse("camera=").is_err());
+        assert!(PermissionsPolicy::parse("camera=* self").is_err());
+        assert!(PermissionsPolicy::parse("camera=(self").is_err());
     }
 
     #[test]
