@@ -445,7 +445,8 @@ h2load() {{
 
     def proxy_sample(self, proxy, name, read_errors=18, changes=None, cache_header="", cache_result=""):
         metrics = dict(qpx_complete_requests=9302, qpx_summary_requests=9302, qpx_non_2xx_responses=0,
-                       qpx_bad_length_responses=0, qpx_cache_result_errors=0, qpx_requests_per_sec=930.2,
+                       qpx_bad_length_responses=0, qpx_first_bad_length_status=None,
+                       qpx_first_bad_length_bytes=None, qpx_cache_result_errors=0, qpx_requests_per_sec=930.2,
                        qpx_transfer_kbytes_per_sec=100, qpx_latency_p50_ms=1, qpx_latency_p90_ms=1,
                        qpx_latency_p95_ms=1, qpx_latency_p99_ms=1, qpx_latency_p999_ms=1)
         metrics.update(changes or {})
@@ -467,6 +468,14 @@ h2load() {{
             name = f"{key}-{value}"
             process, _ = self.proxy_sample("apache", name, changes={key: value})
             self.assertEqual(process.returncode, 1, process.stderr)
+        process, _ = self.proxy_sample(
+            "apache", "bad-length-diagnostics", read_errors=0,
+            changes={"qpx_bad_length_responses": 1, "qpx_first_bad_length_status": 200,
+                     "qpx_first_bad_length_bytes": 0}
+        )
+        self.assertEqual(process.returncode, 1, process.stderr)
+        self.assertIn("qpx_first_bad_length_status 200", process.stderr)
+        self.assertIn("qpx_first_bad_length_bytes 0", process.stderr)
         # Keep the existing 1000ppm ceiling: 9/9302 allowed, 10/9302 invalid.
         for read_errors, expected in ((9, 0), (10, 75)):
             process, _ = self.proxy_sample("apache", str(read_errors), read_errors=read_errors)
@@ -524,6 +533,8 @@ check({["X-Qpx-Cache"]="HIT"}, "abcd", 200, 1, 0, 0)
 check({["X-Qpx-Cache"]="MISSISH"}, "abcd", 200, 1, 0, 0)
 check({}, "abcd", 200, 1, 0, 0)
 check({["X-Qpx-Cache"]="MISS"}, "bad-body", 200, 0, 1, 0)
+assert(first_bad_length_status == 200, "first bad status")
+assert(first_bad_length_bytes == 8, "first bad body bytes")
 check({["X-Qpx-Cache"]="MISS"}, "abcd", 500, 0, 0, 1)
 '''
         state = lua.luaL_newstate()

@@ -1203,6 +1203,8 @@ init = function(args)
   responses = 0
   non_200 = 0
   bad_length = 0
+  first_bad_length_status = 0
+  first_bad_length_bytes = -2
   cache_result_errors = 0
   request_sequence = 0
   request_namespace = (args and args[1]) or "default"
@@ -1224,6 +1226,10 @@ response = function(status, headers, body)
   end
   if body == nil or string.len(body) ~= expected then
     bad_length = bad_length + 1
+    if first_bad_length_bytes == -2 then
+      first_bad_length_status = status
+      first_bad_length_bytes = body == nil and -1 or string.len(body)
+    end
   end
   if "${expected_cache_result}" ~= "" then
     local matched = false
@@ -1252,16 +1258,27 @@ done = function(summary, latency, requests)
   local total_non_200 = 0
   local total_bad_length = 0
   local total_cache_result_errors = 0
+  local first_bad_status = 0
+  local first_bad_bytes = -2
   for _, thread in ipairs(threads) do
     total_responses = total_responses + tonumber(thread:get("responses") or 0)
     total_non_200 = total_non_200 + tonumber(thread:get("non_200") or 0)
     total_bad_length = total_bad_length + tonumber(thread:get("bad_length") or 0)
     total_cache_result_errors = total_cache_result_errors + tonumber(thread:get("cache_result_errors") or 0)
+    local thread_bad_bytes = tonumber(thread:get("first_bad_length_bytes") or -2)
+    if first_bad_bytes == -2 and thread_bad_bytes ~= -2 then
+      first_bad_status = tonumber(thread:get("first_bad_length_status") or 0)
+      first_bad_bytes = thread_bad_bytes
+    end
   end
   io.write(string.format("qpx_complete_requests %d\n", total_responses))
   io.write(string.format("qpx_summary_requests %d\n", summary.requests))
   io.write(string.format("qpx_non_2xx_responses %d\n", total_non_200))
   io.write(string.format("qpx_bad_length_responses %d\n", total_bad_length))
+  if first_bad_bytes ~= -2 then
+    io.write(string.format("qpx_first_bad_length_status %d\n", first_bad_status))
+    io.write(string.format("qpx_first_bad_length_bytes %d\n", first_bad_bytes))
+  end
   io.write(string.format("qpx_cache_result_errors %d\n", total_cache_result_errors))
   io.write(string.format("qpx_requests_per_sec %.6f\n", summary.requests / seconds))
   io.write(string.format("qpx_transfer_kbytes_per_sec %.6f\n", summary.bytes / 1024 / seconds))
