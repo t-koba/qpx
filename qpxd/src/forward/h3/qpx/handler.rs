@@ -187,7 +187,7 @@ impl ForwardQpxHandler {
             }
         };
         let (mut response_stream, mut request_body_stream) = req_stream.split();
-        let relay_fut = crate::http3::qpx_stream::relay_qpx_request_body_observed_from_recv(
+        let relay_body_fut = crate::http3::qpx_stream::relay_qpx_request_body_observed_from_recv(
             &mut request_body_stream,
             sender,
             crate::http3::qpx_stream::QpxRequestBodyRelayOptions {
@@ -198,10 +198,28 @@ impl ForwardQpxHandler {
                 listener_name: Some(self.listener_name.as_ref()),
                 max_grpc_message_bytes: Some(listener_streaming.max_grpc_message_bytes),
                 max_grpc_web_trailer_bytes: Some(listener_streaming.max_grpc_web_trailer_bytes),
-                grpc_stream_deadline: grpc_deadline.map(|deadline| deadline.instant()),
+                // The relay wrapper below owns the stream budget: it cancels
+                // the relay at expiry instead of failing it, so the inner
+                // relay must not abort the stream on the same instant.
+                grpc_stream_deadline: None,
                 observe_grpc_messages: listener_streaming.observe_grpc_messages,
             },
         );
+        // Cancel (do not fail) the relay when the stream budget expires: the
+        // response is then the synthetic deadline reply, and a relay expiry
+        // error must not win the race and reset the stream. Genuine relay
+        // failures still surface before the deadline.
+        let relay_fut = async {
+            match grpc_deadline {
+                Some(deadline) => {
+                    match tokio::time::timeout_at(deadline.instant(), relay_body_fut).await {
+                        Ok(result) => Some(result),
+                        Err(_) => None,
+                    }
+                }
+                None => Some(relay_body_fut.await),
+            }
+        };
         tokio::pin!(relay_fut);
         tokio::pin!(response_fut);
         let mut request_summary = None;
@@ -209,15 +227,16 @@ impl ForwardQpxHandler {
         let response = tokio::select! {
             relay_result = &mut relay_fut => {
                 match relay_result {
-                    Ok((_bytes, summary)) => {
+                    Some(Ok((_bytes, summary))) => {
                         request_summary = summary;
                         relay_done = true;
                     }
-                    Err(err) => {
+                    Some(Err(err)) => {
                         warn!(error = ?err, "forward qpx-h3 request body relay failed");
                         response_stream.abort_message_stream();
                         return Err(err);
                     }
+                    None => {}
                 }
                 response_fut.await?
             }
@@ -272,11 +291,20 @@ impl ForwardQpxHandler {
         } else {
             let (response_result, relay_result) = tokio::join!(response_fut, relay_fut);
             request_summary = match relay_result {
-                Ok((_bytes, summary)) => summary,
-                Err(err) => {
+                Some(Ok((_bytes, summary))) => summary,
+                Some(Err(err)) => {
                     warn!(error = ?err, "forward qpx-h3 request body relay failed");
                     response_stream.abort_message_stream();
                     return Err(err);
+                }
+                // No deadline reply is in flight on this path, so an expired
+                // relay ends the exchange exactly like any relay failure.
+                None => {
+                    warn!("forward qpx-h3 request body relay exceeded the stream budget");
+                    response_stream.abort_message_stream();
+                    return Err(anyhow!(
+                        "forward qpx-h3 request body relay exceeded the stream budget"
+                    ));
                 }
             };
             match response_result {
