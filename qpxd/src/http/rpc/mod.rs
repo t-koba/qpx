@@ -20,6 +20,8 @@ pub(crate) use frame::{
 pub(crate) use inspect::{inspect_request, inspect_response};
 pub(crate) use local_response::build_rpc_local_response;
 
+#[cfg(feature = "http3-backend-qpx")]
+pub(crate) use deadline::RpcDeadlineReply;
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(crate) use deadline::{
     ResolvedGrpcDeadline, apply_grpc_deadline_header, build_grpc_deadline_exceeded_response,

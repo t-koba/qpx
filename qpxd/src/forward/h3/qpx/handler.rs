@@ -223,6 +223,10 @@ impl ForwardQpxHandler {
             }
             response = &mut response_fut => response?,
         };
+        let is_deadline_reply = response
+            .extensions()
+            .get::<crate::http::rpc::RpcDeadlineReply>()
+            .is_some();
         let response_streaming = response_streaming_limits(&response, listener_streaming);
         let response_fut = crate::http3::qpx_stream::send_qpx_response_stream_observed_to_send(
             &mut response_stream,
@@ -247,6 +251,17 @@ impl ForwardQpxHandler {
             },
         );
         let response_summary = if relay_done {
+            match response_fut.await {
+                Ok(summary) => summary,
+                Err(err) => {
+                    crate::http3::response_error::emit_h3_response_send_error("qpx_h3", &err);
+                    return Err(err.into_inner());
+                }
+            }
+        } else if is_deadline_reply {
+            // The synthetic reply is self-contained: a still-pending relay
+            // can only fail on the expired budget, so send the reply alone
+            // instead of letting the relay reset the stream.
             match response_fut.await {
                 Ok(summary) => summary,
                 Err(err) => {

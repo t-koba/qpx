@@ -451,6 +451,10 @@ impl ReverseQpxHandler {
             send_reverse_qpx_interim_response(&mut response_stream, head, edge_streaming).await?;
         }
 
+        let is_deadline_reply = response
+            .extensions()
+            .get::<crate::http::rpc::RpcDeadlineReply>()
+            .is_some();
         let response_streaming = response_streaming_limits(&response, edge_streaming);
         let response_fut = crate::http3::qpx_stream::send_qpx_response_stream_observed_to_send(
             &mut response_stream,
@@ -475,6 +479,11 @@ impl ReverseQpxHandler {
             },
         );
         let response_summary = if relay_done {
+            reverse_qpx_response_summary(response_fut.await)?
+        } else if is_deadline_reply {
+            // The synthetic reply is self-contained: a still-pending relay
+            // can only fail on the expired budget, so send the reply alone
+            // instead of letting the relay reset the stream.
             reverse_qpx_response_summary(response_fut.await)?
         } else {
             let (response_result, relay_result) = tokio::join!(response_fut, relay_fut);

@@ -148,26 +148,41 @@ pub(crate) fn apply_grpc_deadline_header(headers: &mut HeaderMap, deadline: Reso
     }
 }
 
+/// Marker carried on synthetic deadline replies. The reply is
+/// self-contained: once built, a still-pending request-body relay must not
+/// reset the stream when it fails on the expired budget.
+#[cfg(feature = "http3-backend-qpx")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct RpcDeadlineReply;
+
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(crate) fn build_grpc_deadline_exceeded_response(
     protocol: &str,
     request_content_type: Option<&str>,
 ) -> Result<Response<Body>> {
-    if protocol == "connect"
+    let response = if protocol == "connect"
         && let Some(codec) = connect_streaming_response_codec(request_content_type)
     {
-        return build_connect_streaming_deadline_response(codec);
-    }
-    let config = RpcLocalResponseConfig {
-        protocol: protocol.to_string(),
-        status: Some(match protocol {
-            "connect" => "deadline_exceeded".to_string(),
-            _ => "4".to_string(),
-        }),
-        message: Some("deadline exceeded at proxy".to_string()),
-        http_status: Some(if protocol == "connect" { 504 } else { 200 }),
-        headers: Default::default(),
-        trailers: Default::default(),
+        build_connect_streaming_deadline_response(codec)?
+    } else {
+        let config = RpcLocalResponseConfig {
+            protocol: protocol.to_string(),
+            status: Some(match protocol {
+                "connect" => "deadline_exceeded".to_string(),
+                _ => "4".to_string(),
+            }),
+            message: Some("deadline exceeded at proxy".to_string()),
+            http_status: Some(if protocol == "connect" { 504 } else { 200 }),
+            headers: Default::default(),
+            trailers: Default::default(),
+        };
+        build_rpc_local_response(&config, &[])?
     };
-    build_rpc_local_response(&config, &[])
+    #[cfg(feature = "http3-backend-qpx")]
+    let response = {
+        let mut response = response;
+        response.extensions_mut().insert(RpcDeadlineReply);
+        response
+    };
+    Ok(response)
 }

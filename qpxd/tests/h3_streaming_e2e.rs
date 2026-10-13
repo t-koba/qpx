@@ -386,6 +386,141 @@ async fn connect_streaming_deadline_replies_framed() -> Result<()> {
     Ok(())
 }
 
+#[cfg(feature = "http3-backend-qpx")]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn connect_streaming_deadline_survives_pending_relay() -> Result<()> {
+    let (backend_port, backend_task) = streaming_backend::spawn_delayed_headers_backend(
+        Duration::from_secs(5),
+        vec![("content-type", "application/connect+proto")],
+    )
+    .await;
+    let (proxy, port, cert_path) = spawn_reverse_h3_proxy(
+        backend_port,
+        "    grpc:\n      max_stream_duration_ms: 300\n",
+    )
+    .await?;
+
+    let mut frame = Vec::new();
+    frame.push(0x00);
+    frame.extend_from_slice(&(b"hello".len() as u32).to_be_bytes());
+    frame.extend_from_slice(b"hello");
+    // Trickle the body: the relay is still parked in recv_data when the
+    // 300ms stream budget expires, so the deadline reply must go out alone
+    // instead of letting the relay reset the stream.
+    let response = request_h3_post_trickled(
+        port,
+        &cert_path,
+        "/svc.Service/Method",
+        &[
+            ("content-type", "application/connect+proto"),
+            ("connect-protocol-version", "1"),
+        ],
+        Bytes::copy_from_slice(&frame[..3]),
+        Duration::from_millis(800),
+    )
+    .await?;
+
+    assert_eq!(response.status, http::StatusCode::OK);
+    assert_eq!(
+        response
+            .headers
+            .get(http::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok()),
+        Some("application/connect+proto")
+    );
+    assert!(response.body.len() > 5);
+    assert_eq!(response.body[0], 0x02);
+    let envelope_len = u32::from_be_bytes([
+        response.body[1],
+        response.body[2],
+        response.body[3],
+        response.body[4],
+    ]) as usize;
+    assert_eq!(response.body.len(), 5 + envelope_len);
+    let text = std::str::from_utf8(&response.body[5..])?;
+    assert!(text.contains("\"code\":\"deadline_exceeded\""));
+    assert!(
+        !proxy.log_tail().contains("request body relay failed"),
+        "pending relay must not reset the synthetic deadline reply"
+    );
+    let _ = timeout(Duration::from_secs(10), backend_task).await?;
+    Ok(())
+}
+
+#[cfg(feature = "http3-backend-qpx")]
+async fn request_h3_post_trickled(
+    port: u16,
+    ca_cert: &Path,
+    path: &str,
+    headers: &[(&str, &str)],
+    partial_body: Bytes,
+    trickle_delay: Duration,
+) -> Result<H3ReadResult> {
+    let mut endpoint = build_quinn_client_endpoint()?;
+    endpoint.set_default_client_config(build_h3_test_client_config(ca_cert)?);
+    let started = Instant::now();
+    let conn = timeout(
+        Duration::from_secs(5),
+        endpoint.connect(SocketAddr::from(([127, 0, 0, 1], port)), H3_HOST)?,
+    )
+    .await??;
+
+    let mut builder = ::h3::client::builder();
+    let (mut h3_conn, mut sender) = builder
+        .build::<_, _, Bytes>(h3_quinn::Connection::new(conn.clone()))
+        .await?;
+    let driver = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
+    });
+
+    let uri = http::Uri::builder()
+        .scheme("https")
+        .authority(format!("{H3_HOST}:{port}"))
+        .path_and_query(path)
+        .build()?;
+    let mut request = http::Request::builder().method(http::Method::POST).uri(uri);
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let request = request.body(())?;
+    let mut stream = sender.send_request(request).await?;
+    stream.send_data(partial_body).await?;
+    tokio::time::sleep(trickle_delay).await;
+    let response = timeout(Duration::from_secs(30), stream.recv_response())
+        .await
+        .map_err(|_| anyhow!("H3 response head timed out after 30s"))??;
+    let ttfb = started.elapsed();
+    let status = response.status();
+    let headers = response.headers().clone();
+    let mut response_body = Vec::new();
+    loop {
+        match timeout(Duration::from_secs(30), stream.recv_data())
+            .await
+            .map_err(|_| anyhow!("H3 response body chunk timed out after 30s"))?
+        {
+            Ok(Some(mut chunk)) => {
+                let chunk_len = chunk.remaining();
+                response_body.extend_from_slice(&chunk.copy_to_bytes(chunk_len));
+            }
+            Ok(None) => break,
+            Err(err) => return Err(anyhow!("H3 response body error: {err}")),
+        }
+    }
+    driver.abort();
+    let _ = driver.await;
+    Ok(H3ReadResult {
+        status,
+        headers,
+        ttfb,
+        first_data_at: None,
+        ttlb: started.elapsed(),
+        body_len: response_body.len(),
+        body: response_body,
+        trailers: None,
+        data_error: None,
+    })
+}
+
 async fn request_h3_post(
     port: u16,
     ca_cert: &Path,
