@@ -285,7 +285,10 @@ impl DpopRuntime {
 impl DpopReplayStore for DpopReplayCache {
     fn check_and_store(&mut self, key: &DpopReplayKey) -> std::result::Result<(), DpopReplayError> {
         let now = unix_seconds();
-        self.entries.retain(|_, expires_at| *expires_at > now);
+        // Proof acceptance is inclusive of `iat + lifetime`, so retention
+        // must be inclusive too: purging at `expires_at == now` would let a
+        // still-valid proof replay in its final second.
+        self.entries.retain(|_, expires_at| *expires_at >= now);
         let replay_key = (key.jkt.clone(), key.jti.clone());
         if self.entries.contains_key(&replay_key) {
             return Err(DpopReplayError::Replay);
@@ -1205,6 +1208,51 @@ mod tests {
         assert_eq!(
             cache.check_and_store(&same_jti_different_iat),
             Err(DpopReplayError::Replay)
+        );
+    }
+
+    #[test]
+    fn replay_cache_holds_entries_through_the_inclusive_expiry_second() {
+        let now = unix_seconds();
+        let mut cache = DpopReplayCache {
+            entries: HashMap::new(),
+            capacity: 8,
+            lifetime_seconds: 300,
+        };
+        let key = |jti: &str, iat: i64| DpopReplayKey {
+            jkt: "key".to_string(),
+            jti: jti.to_string(),
+            iat,
+        };
+        // An entry expiring exactly now guards a proof that is still valid
+        // this second: a duplicate must report Replay, not store again.
+        cache
+            .entries
+            .insert(("key".to_string(), "expiring".to_string()), now);
+        assert_eq!(
+            cache.check_and_store(&key("expiring", now - 300)),
+            Err(DpopReplayError::Replay)
+        );
+        // An entry expired a second ago no longer guards anything: it is
+        // purged and the key stores fresh.
+        cache.entries.insert(
+            ("key".to_string(), "lapsed".to_string()),
+            now.saturating_sub(1),
+        );
+        assert!(cache.check_and_store(&key("lapsed", now)).is_ok());
+        // A full cache of live entries stays fail-closed.
+        let mut full = DpopReplayCache {
+            entries: HashMap::new(),
+            capacity: 1,
+            lifetime_seconds: 300,
+        };
+        full.entries.insert(
+            ("key".to_string(), "live".to_string()),
+            now.saturating_add(300),
+        );
+        assert_eq!(
+            full.check_and_store(&key("other", now)),
+            Err(DpopReplayError::Unavailable)
         );
     }
 
