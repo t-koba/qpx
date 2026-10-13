@@ -147,17 +147,10 @@ fn validate_resilience_fields(resilience: &ResilienceConfig, context: &str) -> R
                 "{context} resilience.retry.retry_body_threshold_bytes must be >= 1"
             ));
         }
-        if let Some(budget) = retry.budget.as_ref() {
-            if matches!(budget.ratio, Some(0)) {
-                return Err(anyhow!(
-                    "{context} resilience.retry.budget.ratio must be >= 1"
-                ));
-            }
-            if matches!(budget.min_retry_tokens, Some(0)) {
-                return Err(anyhow!(
-                    "{context} resilience.retry.budget.min_retry_tokens must be >= 1"
-                ));
-            }
+        if retry.budget.is_some() {
+            return Err(anyhow!(
+                "{context} resilience.retry.budget is not supported: retry tokens derive from attempts"
+            ));
         }
     }
     if matches!(resilience.max_upstream_concurrency, Some(0)) {
@@ -180,11 +173,9 @@ fn validate_resilience_fields(resilience: &ResilienceConfig, context: &str) -> R
                 }
             }
         }
-        if let Some(success_rate) = outlier.success_rate.as_ref()
-            && matches!(success_rate.min_requests, Some(0))
-        {
+        if outlier.success_rate.is_some() {
             return Err(anyhow!(
-                "{context} resilience.outlier_detection.success_rate.min_requests must be >= 1"
+                "{context} resilience.outlier_detection.success_rate is not supported: adaptive health uses fixed sampling"
             ));
         }
         if let Some(latency) = outlier.latency.as_ref() {
@@ -193,29 +184,17 @@ fn validate_resilience_fields(resilience: &ResilienceConfig, context: &str) -> R
                     "{context} resilience.outlier_detection.latency.p95_ms must be >= 1"
                 ));
             }
-            if matches!(latency.min_requests, Some(0)) {
+            if latency.min_requests.is_some() {
                 return Err(anyhow!(
-                    "{context} resilience.outlier_detection.latency.min_requests must be >= 1"
+                    "{context} resilience.outlier_detection.latency.min_requests is not supported"
                 ));
             }
         }
     }
-    if let Some(half_open) = resilience.half_open.as_ref() {
-        if matches!(half_open.max_probes, Some(0)) {
-            return Err(anyhow!(
-                "{context} resilience.half_open.max_probes must be >= 1"
-            ));
-        }
-        if matches!(half_open.successes_to_close, Some(0)) {
-            return Err(anyhow!(
-                "{context} resilience.half_open.successes_to_close must be >= 1"
-            ));
-        }
-        if matches!(half_open.probe_timeout_ms, Some(0)) {
-            return Err(anyhow!(
-                "{context} resilience.half_open.probe_timeout_ms must be >= 1"
-            ));
-        }
+    if resilience.half_open.is_some() {
+        return Err(anyhow!(
+            "{context} resilience.half_open is not supported: probing uses fixed single-success close"
+        ));
     }
     if let Some(ejection) = resilience.ejection.as_ref() {
         if matches!(ejection.base_ms, Some(0)) {
@@ -463,5 +442,88 @@ mod affinity_key_tests {
     #[test]
     fn unknown_affinity_key_is_rejected() {
         assert!(validate_affinity_config(Some(&affinity("dc")), "test").is_err());
+    }
+}
+
+#[cfg(test)]
+mod unsupported_knob_tests {
+    use super::*;
+    use crate::config::{
+        AdaptiveThresholdConfig, HalfOpenConfig, LatencyThresholdConfig, OutlierDetectionConfig,
+        ResilienceConfig, ResilienceRetryConfig, RetryBudgetConfig,
+    };
+
+    #[test]
+    fn discarded_resilience_knobs_are_rejected() {
+        let budget = ResilienceConfig {
+            retry: Some(ResilienceRetryConfig {
+                attempts: 3,
+                retry_body_threshold_bytes: 1024,
+                budget: Some(RetryBudgetConfig {
+                    ratio: Some(20),
+                    min_retry_tokens: Some(10),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = validate_resilience_fields(&budget, "test").expect_err("budget");
+        assert!(err.to_string().contains("not supported"), "{err}");
+
+        let success_rate = ResilienceConfig {
+            outlier_detection: Some(OutlierDetectionConfig {
+                success_rate: Some(AdaptiveThresholdConfig {
+                    min_requests: Some(100),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = validate_resilience_fields(&success_rate, "test").expect_err("success_rate");
+        assert!(err.to_string().contains("not supported"), "{err}");
+
+        let latency_floor = ResilienceConfig {
+            outlier_detection: Some(OutlierDetectionConfig {
+                latency: Some(LatencyThresholdConfig {
+                    p95_ms: Some(100),
+                    min_requests: Some(10),
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let err = validate_resilience_fields(&latency_floor, "test").expect_err("min_requests");
+        assert!(err.to_string().contains("not supported"), "{err}");
+
+        let half_open = ResilienceConfig {
+            half_open: Some(HalfOpenConfig {
+                max_probes: Some(2),
+                successes_to_close: Some(2),
+                probe_timeout_ms: Some(500),
+            }),
+            ..Default::default()
+        };
+        let err = validate_resilience_fields(&half_open, "test").expect_err("half_open");
+        assert!(err.to_string().contains("not supported"), "{err}");
+    }
+
+    #[test]
+    fn live_resilience_knobs_still_validate() {
+        let live = ResilienceConfig {
+            retry: Some(ResilienceRetryConfig {
+                attempts: 3,
+                retry_body_threshold_bytes: 1024,
+                ..Default::default()
+            }),
+            outlier_detection: Some(OutlierDetectionConfig {
+                latency: Some(LatencyThresholdConfig {
+                    p95_ms: Some(100),
+                    min_requests: None,
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        validate_resilience_fields(&live, "test").expect("live knobs");
     }
 }

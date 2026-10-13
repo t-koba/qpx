@@ -236,7 +236,7 @@ cargo build -p qpxd -p qpxf
 - `resilience.outlier_detection.consecutive_failures.resets` counts transport resets alongside 5xx/timeouts for ejection decisions on named upstreams.
 - `reverse-tls-acme-letsencrypt.yaml` now also shows `acme.directory_url` for staging/private ACME endpoints.
 - Transport-aware shaping uses one canonical surface: `rate_limit` / `rate_limit_profiles` with `apply_to`, `requests`, `traffic`, and `sessions`. WebTransport supports session-wide `webtransport` plus `webtransport_bidi`, `webtransport_uni`, `webtransport_datagram`, and direction-specific `*_downstream` / `*_upstream` scopes.
-- Reverse-route retry/ejection/concurrency policy is expressed with `resilience`; named upstreams use the same `resilience` surface.
+- Reverse-route retry/ejection/concurrency policy is expressed with `resilience`; named upstreams use the same `resilience` surface. `resilience.retry.budget`, `resilience.outlier_detection.success_rate`, `resilience.outlier_detection.latency.min_requests`, and `resilience.half_open` are not implemented and fail validation when set.
 - Response-stage rules live under `edges[].http.response_rules` and `edges[kind=reverse].routes[].http.response_rules`, and the same response-aware policy surface is enforced in forward, MITM, transparent HTTP, and reverse HTTP paths.
 - Multi-file config merge has fixed semantics. Named collections append across files and are then validated for duplicate names: `edges`, `upstreams`, `caches`, `http.guard_profiles`, `http.module_chains`, `traffic.rate_limit_profiles`, `security.identity_sources`, `security.named_sets`, `security.upstream_trust_profiles`, `security.decisions.services`, and `security.auth.users`. Scalar settings and ordinary objects are overlaid by later files.
 
