@@ -227,7 +227,7 @@ def consistent(records, lane, paired, same_role=False):
     for field in fields:
         if any(r.get(field) != records[0].get(field) for r in records[1:]):
             fail(f'{lane["name"]}: records disagree on {field}')
-    if lane["kind"] == "origin" and not paired and not same_role:
+    if lane["kind"] == "origin" and not paired and not same_role and len(records) == 2:
         qpx, ref = records
         for record, role in ((qpx, "qpx"), (ref, "reference")):
             for field in ("role_workers", "blocking_workers"):
@@ -242,28 +242,36 @@ def consistent(records, lane, paired, same_role=False):
             fail("incompatible origin/cache execution models")
 
 
+def validate_pair_record(record, lane):
+    if record.get("proxy") != lane["qpx"]:
+        fail("paired regression requires two qpx lanes")
+    deltas = record.get("paired_metric_ratios")
+    if not isinstance(deltas, list) or len(deltas) != lane["policy"]["pair_samples"]:
+        fail("pair is missing per-round metric deltas")
+    for delta in deltas:
+        if not isinstance(delta, dict):
+            fail("invalid paired delta record")
+        for metric in ("throughput_ratio", "cpu_efficiency_ratio", "p99_latency_ratio"):
+            number(delta, metric)
+    for field, width in (("source_sha", 40), ("binary_sha256", 64)):
+        if not re.fullmatch(f"[0-9a-f]{{{width}}}", record.get(field, "")):
+            fail(f"pair is missing {field}")
+    for field in ("toolchain", "runner"):
+        if not isinstance(record.get(field), str) or not record[field]:
+            fail(f"pair is missing {field}")
+    if record.get("pair_order") != [["current", "previous"], ["previous", "current"], ["current", "previous"]]:
+        fail("pair was not measured in the required alternating order")
+    if record.get("sample_attempts") != lane["policy"]["pair_samples"]:
+        fail("pair is missing its required samples")
+
+
 def pair_identity(records, lane):
     for record in records:
-        if record.get("proxy") != lane["qpx"]:
-            fail("paired regression requires two qpx lanes")
-        deltas = record.get("paired_metric_ratios")
-        if not isinstance(deltas, list) or len(deltas) != lane["policy"]["pair_samples"]:
-            fail("pair is missing per-round metric deltas")
-        for delta in deltas:
-            if not isinstance(delta, dict):
-                fail("invalid paired delta record")
-            for metric in ("throughput_ratio", "cpu_efficiency_ratio", "p99_latency_ratio"):
-                number(delta, metric)
-        for field, width in (("source_sha", 40), ("binary_sha256", 64)):
-            if not re.fullmatch(f"[0-9a-f]{{{width}}}", record.get(field, "")):
-                fail(f"pair is missing {field}")
-        for field in ("toolchain", "runner"):
-            if not isinstance(record.get(field), str) or not record[field]:
-                fail(f"pair is missing {field}")
-        if record.get("pair_order") != [["current", "previous"], ["previous", "current"], ["current", "previous"]]:
-            fail("pair was not measured in the required alternating order")
-        if record.get("sample_attempts") != lane["policy"]["pair_samples"]:
-            fail("pair is missing its required samples")
+        validate_pair_record(record, lane)
+    if len(records) == 1:
+        return
+    if len(records) != 2:
+        fail("pair requires one current and one previous qpx record")
     if records[0]["paired_metric_ratios"] != records[1]["paired_metric_ratios"]:
         fail("pair disagrees on per-round deltas")
     if records[1]["source_sha"] != lane["policy"]["previous_release"]["sha"]:
@@ -324,7 +332,12 @@ def evaluate(records, lane, paired=False, mode=None, baseline=None):
             fail(f"invalid spread {field}: {spread}")
         if spread > cap + 1e-12:
             candidate_spread_issues.append(f"{candidate_key} {field} {spread:.6f} > cap {cap:.6f}")
+    available = [selected[name] for name in names if name in selected]
+    consistent(available, lane, paired)
     if paired:
+        # The current sample carries an independently checkable pair identity;
+        # missing previous data must not conceal malformed candidate metadata.
+        pair_identity([selected[candidate_key]], lane)
         if "previous" in missing or "previous" in invalid_references:
             reference_issue = invalid_references.get("previous", "pinned reference qpx measurement is missing")
             return {**result, "status": "INCONCLUSIVE", "reasons": [reference_issue, *candidate_spread_issues],
@@ -337,7 +350,6 @@ def evaluate(records, lane, paired=False, mode=None, baseline=None):
             return {**result, "status": "INCONCLUSIVE", "reasons": [*reference_issues, *candidate_spread_issues],
                     "unmeasured": True}
     group = [selected[n] for n in names]
-    consistent(group, lane, paired)
     if paired:
         pair_identity(group, lane)
     reasons = []

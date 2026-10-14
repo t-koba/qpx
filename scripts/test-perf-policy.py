@@ -424,6 +424,26 @@ class PolicyTests(unittest.TestCase):
                 self.assertEqual((result["status"], count), (expected, 1))
                 self.assertEqual(exit_code([result]), 1 if role == 0 else 0)
 
+    def test_incomplete_lanes_still_validate_available_consistency_and_pair_identity(self):
+        lane = next(lane for lane in self.lanes if lane["kind"] == "proxy")
+        self.assertEqual(lane["references"][-1], "lighttpd")
+        records = [record(lane, proxy) for proxy in [lane["qpx"], *lane["references"]]]
+        incomplete = copy.deepcopy(records[:-1])  # lighttpd is unavailable
+        direct_backend = next(r for r in incomplete if r["proxy"] == "direct-backend")
+        direct_backend["concurrency"] = 65
+        with self.assertRaisesRegex(ValueError, "records disagree on concurrency"):
+            evaluate(incomplete, lane, mode="shared")
+
+        paired_lane = self.pair_lanes[0]
+        current_only = pair(paired_lane)[0]
+        result = evaluate([current_only], paired_lane, paired=True, mode="shared")
+        self.assertEqual((result["status"], exit_code([result])), ("INCONCLUSIVE", 0))
+
+        invalid_identity = copy.deepcopy(current_only)
+        invalid_identity["source_sha"] = "not-a-source-sha"
+        with self.assertRaisesRegex(ValueError, "pair is missing source_sha"):
+            evaluate([invalid_identity], paired_lane, paired=True, mode="shared")
+
     def test_incomplete_competitive_lanes_are_reported_without_blocking(self):
         for lane in self.lanes:
             records = [record(lane, proxy) for proxy in [lane["qpx"], *lane["references"]]]
