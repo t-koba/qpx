@@ -106,6 +106,17 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 
 ## Cache, integrity, authentication, and API behavior
 
+Cache writeback checks a valid declared `Content-Length` against the streamed
+cache mirror before a backend can publish the body, metadata, or variant index.
+Short and overlong bodies are not stored; malformed or conflicting length fields
+bypass storage. This check does not change the primary/client response stream.
+HEAD and body-forbidden responses (1xx, 204, 205, 304, and successful CONNECT)
+are excluded from the byte comparison, consistent with response normalization.
+Disk writes publish only after successful stream completion, and Redis writes
+stage under an expiring temporary key before rename. An HTTP cache gateway must
+likewise publish only after receiving the complete PUT body: a mirror error
+aborts the chunked request without its terminating chunk.
+
 | RFC | Classification | Implemented contract | Evidence |
 |---|---|---|---|
 | 5861 | native | stale-while-revalidate and stale-if-error | `qpxd-cache` freshness/scenario tests |

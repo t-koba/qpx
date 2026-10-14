@@ -213,6 +213,9 @@ pub trait CacheBackend: Send + Sync {
             )),
         }
     }
+    /// Consume the complete body stream before publishing the object. Any
+    /// stream error must fail the write without publishing or replacing the
+    /// target object; temporary staging data must not be visible as a hit.
     async fn put_object_stream(
         &self,
         _namespace: &str,

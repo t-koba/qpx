@@ -84,3 +84,93 @@ async fn buffered_resp_parser_preserves_bulk_payload_after_line_overread() {
         7
     );
 }
+
+#[tokio::test]
+async fn redis_response_stream_error_never_renames_staged_body() {
+    use crate::types::{BodyStreamWriteOptions, CacheBackend};
+    use qpx_http::body::Body;
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    async fn command(reader: &mut BufReader<tokio::io::DuplexStream>) -> Vec<Vec<u8>> {
+        let mut line = String::new();
+        reader.read_line(&mut line).await.expect("array header");
+        let count: usize = line.trim().strip_prefix('*').unwrap().parse().unwrap();
+        let mut parts = Vec::new();
+        for _ in 0..count {
+            line.clear();
+            reader.read_line(&mut line).await.expect("bulk header");
+            let len: usize = line.trim().strip_prefix('$').unwrap().parse().unwrap();
+            let mut data = vec![0; len + 2];
+            reader.read_exact(&mut data).await.expect("bulk bytes");
+            assert_eq!(&data[len..], b"\r\n");
+            data.truncate(len);
+            parts.push(data);
+        }
+        parts
+    }
+
+    let backend = RedisCacheBackend::new(cfg("redis://unused.invalid")).expect("backend");
+    let (client, server) = tokio::io::duplex(4096);
+    backend.idle.lock().await.push(RedisConnection {
+        stream: Box::new(client),
+        read_buf: BytesMut::new(),
+    });
+    let (mut sender, body) = Body::channel();
+    sender
+        .send_data(bytes::Bytes::from_static(b"partial"))
+        .await
+        .expect("data");
+    let server = tokio::spawn(async move {
+        let mut reader = BufReader::new(server);
+        let init = command(&mut reader).await;
+        assert_eq!(init[0], b"SET");
+        assert!(String::from_utf8_lossy(&init[1]).contains(":tmp:"));
+        assert!(init[2].is_empty());
+        assert_eq!(init[3], b"EX");
+        assert_eq!(init[4], b"60");
+        reader
+            .get_mut()
+            .write_all(b"+OK\r\n")
+            .await
+            .expect("SET reply");
+        let append = command(&mut reader).await;
+        assert_eq!(append[0], b"APPEND");
+        assert_eq!(append[1], init[1]);
+        assert_eq!(append[2], b"partial");
+        // Abort only after staged bytes exist. No RENAME or metadata SET may
+        // follow; the failed connection is closed, and the temp key expires.
+        sender.abort();
+        reader
+            .get_mut()
+            .write_all(b":7\r\n")
+            .await
+            .expect("APPEND reply");
+        let mut remaining = Vec::new();
+        reader
+            .read_to_end(&mut remaining)
+            .await
+            .expect("connection closes");
+        assert!(
+            remaining.is_empty(),
+            "unexpected publish command: {remaining:?}"
+        );
+    });
+    backend
+        .put_response(
+            "ns",
+            "variant",
+            body,
+            BodyStreamWriteOptions {
+                max_body_bytes: 1024,
+                body_read_timeout: Duration::from_secs(1),
+                ttl_secs: 60,
+            },
+            Box::new(|_| panic!("metadata must not be encoded after a stream error")),
+        )
+        .await
+        .expect_err("reject body stream error");
+    tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .expect("server completes")
+        .expect("server");
+}

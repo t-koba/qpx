@@ -1,4 +1,5 @@
 use crate::store::*;
+use bytes::Bytes;
 use http::header::{CACHE_CONTROL, CONTENT_LENGTH, HOST};
 
 fn test_policy() -> CachePolicyConfig {
@@ -101,4 +102,63 @@ fn must_understand_rejects_unknown_final_status_codes() {
         Some(60),
         &directives,
     ));
+}
+
+#[test]
+fn body_length_expectation_matches_no_body_response_semantics() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("123"));
+    for (method, status) in [
+        (Method::HEAD, StatusCode::OK),
+        (Method::GET, StatusCode::CONTINUE),
+        (Method::GET, StatusCode::SWITCHING_PROTOCOLS),
+        (Method::GET, StatusCode::NO_CONTENT),
+        (Method::GET, StatusCode::RESET_CONTENT),
+        (Method::GET, StatusCode::NOT_MODIFIED),
+        (Method::CONNECT, StatusCode::OK),
+        (Method::CONNECT, StatusCode::CREATED),
+    ] {
+        assert_eq!(
+            expected_body_length(&method, status, &headers).unwrap(),
+            None
+        );
+    }
+    assert_eq!(
+        expected_body_length(&Method::GET, StatusCode::OK, &headers).unwrap(),
+        Some(123)
+    );
+    assert_eq!(
+        expected_body_length(&Method::CONNECT, StatusCode::FORBIDDEN, &headers).unwrap(),
+        Some(123)
+    );
+}
+
+#[tokio::test]
+async fn length_checked_body_validates_terminal_frames_and_preserves_source_errors() {
+    use hyper::body::Body as _;
+    for source in [
+        Body::empty(),
+        Body::replay(Bytes::new(), Some(http::HeaderMap::new())),
+    ] {
+        let mut checked = validate_body_length(source, Some(1));
+        assert!(
+            !checked.is_end_stream(),
+            "must poll EOF even for an empty source"
+        );
+        assert_eq!(checked.size_hint().exact(), None);
+        assert!(checked.data().await.unwrap().is_err());
+    }
+    let checked = validate_body_length(
+        Body::replay(Bytes::from_static(b"ok"), Some(http::HeaderMap::new())),
+        Some(2),
+    );
+    assert_eq!(qpx_http::body::to_bytes(checked).await.unwrap(), "ok");
+
+    let (mut sender, source) = Body::channel();
+    sender.abort();
+    let mut checked = validate_body_length(source, Some(0));
+    assert!(
+        checked.data().await.unwrap().is_err(),
+        "source errors must not become EOF"
+    );
 }

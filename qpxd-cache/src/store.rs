@@ -26,6 +26,9 @@ use std::time::Duration;
 use tokio::task::JoinSet;
 use tracing::warn;
 
+mod body;
+use self::body::{expected_body_length, validate_body_length};
+
 const CACHE_WRITEBACK_MIRROR_CHANNEL_CAPACITY: usize = 128;
 pub struct CacheStoreTiming {
     pub response_delay_secs: u64,
@@ -83,6 +86,18 @@ pub async fn maybe_store(
             .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
         return Ok(response);
     }
+    let expected_body_length =
+        match expected_body_length(request_method, response.status(), response.headers()) {
+            Ok(length) => length,
+            Err(_) => {
+                // Malformed framing is not cacheable, but the client stream is
+                // still the protocol writer's responsibility, not the cache's.
+                response
+                    .headers_mut()
+                    .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+                return Ok(response);
+            }
+        };
     let vary = parse_vary(response.headers());
     let vary = match vary {
         VarySpec::Any => {
@@ -158,7 +173,10 @@ pub async fn maybe_store(
     );
     if let Some(mirror_body) = mirrors.pop() {
         tokio::spawn(async move {
-            if let Err(err) = writeback.store(mirror_body).await {
+            if let Err(err) = writeback
+                .store(validate_body_length(mirror_body, expected_body_length))
+                .await
+            {
                 warn!(error = ?err, "cache writeback failed");
             }
         });

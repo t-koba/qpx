@@ -1810,6 +1810,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn disk_response_stream_error_publishes_no_object_or_metadata() {
+        let dir = temp_dir("response-stream-error");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let (mut sender, body) = Body::channel();
+        sender
+            .send_data(Bytes::from_static(b"partial"))
+            .await
+            .expect("send data");
+        sender.abort();
+        backend
+            .put_response(
+                "ns",
+                "variant",
+                body,
+                BodyStreamWriteOptions {
+                    max_body_bytes: 1024,
+                    body_read_timeout: Duration::from_secs(1),
+                    ttl_secs: 60,
+                },
+                Box::new(|_| panic!("metadata must not be encoded after a stream error")),
+            )
+            .await
+            .expect_err("reject body stream error");
+        let body_key = cache_body_storage_key("variant");
+        assert!(
+            backend
+                .get("ns", &body_key)
+                .await
+                .expect("get body")
+                .is_none()
+        );
+        assert!(
+            backend
+                .read_response_metadata("ns", "variant")
+                .await
+                .expect("metadata")
+                .is_none()
+        );
+        assert!(collect_cache_files(&dir).expect("cache files").is_empty());
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
     async fn disk_backend_reads_after_restart() {
         let dir = temp_dir("restart");
         let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
