@@ -157,11 +157,11 @@ where
             }
     }
 
-    pub(crate) fn finalize(&mut self, request_version: http::Version, proxy_name: &str) {
+    pub(crate) fn finalize(&mut self, proxy_name: &str) {
         if self.raw.is_finalized() {
             return;
         }
-        Arc::make_mut(&mut self.raw).finalize(request_version, proxy_name);
+        Arc::make_mut(&mut self.raw).finalize(proxy_name);
     }
 
     pub(crate) fn into_http_response(self) -> Result<Http1ResponseWithInterim> {

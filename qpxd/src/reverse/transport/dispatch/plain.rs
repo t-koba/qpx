@@ -143,15 +143,56 @@ pub(super) async fn dispatch_plain_reverse_http(
     let mut response = response;
     crate::http::capture::stream::limit_response_body_for_plan_in_place(&mut response, &route.plan);
     if !response_finalized {
-        crate::http::protocol::l7::finalize_response_with_headers_in_place(
-            request_method,
-            request_version,
-            proxy_name,
-            &mut response,
-            None,
-            false,
-        );
+        finalize_plain_reverse_response(request_method, proxy_name, &mut response);
     }
     debug_assert_ne!(request_version, http::Version::HTTP_3);
     Ok((interim, response))
+}
+
+fn finalize_plain_reverse_response(
+    request_method: &http::Method,
+    proxy_name: &str,
+    response: &mut Response<Body>,
+) {
+    // RFC 9110 §7.6.3: Via records the upstream response protocol, independently
+    // of the downstream request version used for wire encoding.
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        request_method,
+        response.version(),
+        proxy_name,
+        response,
+        None,
+        false,
+    );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plain_response_via_uses_upstream_version_for_http2_downstream() {
+        let request = Request::builder()
+            .version(http::Version::HTTP_2)
+            .body(Body::empty())
+            .expect("downstream request");
+        let mut response = Response::builder()
+            .version(http::Version::HTTP_11)
+            .header(http::header::VIA, "1.0 first")
+            .header(http::header::VIA, "1.1 second")
+            .body(Body::from("ok"))
+            .expect("upstream response");
+
+        finalize_plain_reverse_response(request.method(), "qpx", &mut response);
+
+        let via: Vec<_> = response
+            .headers()
+            .get_all(http::header::VIA)
+            .iter()
+            .map(|value| value.to_str().expect("Via value"))
+            .collect();
+        assert_eq!(via, ["1.0 first", "1.1 second", "1.1 qpx"]);
+        assert_eq!(response.version(), http::Version::HTTP_11);
+        assert_eq!(request.version(), http::Version::HTTP_2);
+    }
 }

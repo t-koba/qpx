@@ -30,6 +30,7 @@ pub(crate) struct RawHttp1ResponseHead {
     has_date: bool,
     finalized: bool,
     status: StatusCode,
+    upstream_version: Version,
     materialized_headers: OnceLock<HeaderMap>,
     serialized_http11_head: OnceLock<Bytes>,
 }
@@ -54,6 +55,7 @@ impl Clone for RawHttp1ResponseHead {
             has_date: self.has_date,
             finalized: self.finalized,
             status: self.status,
+            upstream_version: self.upstream_version,
             materialized_headers,
             serialized_http11_head,
         }
@@ -152,12 +154,13 @@ impl RawHttp1ResponseHead {
             has_date,
             finalized: false,
             status,
+            upstream_version: version,
             materialized_headers: OnceLock::new(),
             serialized_http11_head: OnceLock::new(),
         })
     }
 
-    pub(crate) fn finalize(&mut self, request_version: Version, proxy_name: &str) {
+    pub(crate) fn finalize(&mut self, proxy_name: &str) {
         if self.finalized {
             return;
         }
@@ -167,8 +170,10 @@ impl RawHttp1ResponseHead {
             append_header_line(&mut self.header_lines, b"Date", date.as_bytes());
         }
         self.append_proxy_status(proxy_name);
+        // RFC 9110 §7.6.3: response Via describes the upstream sender, not the
+        // downstream protocol used to serialize this head.
         if let Some(via) =
-            qpx_http::protocol::semantics::via_header_value(request_version, proxy_name)
+            qpx_http::protocol::semantics::via_header_value(self.upstream_version, proxy_name)
         {
             append_header_line(&mut self.header_lines, b"Via", via.as_bytes());
         }
@@ -431,7 +436,7 @@ mod tests {
             Version::HTTP_11,
         )
         .expect("raw head");
-        raw.finalize(Version::HTTP_11, "qpx");
+        raw.finalize("qpx");
         let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
         assert!(encoded.contains("Content-Length: 4\r\n"));
         assert!(encoded.contains("Content-Type: text/plain\r\n"));
@@ -489,7 +494,7 @@ mod tests {
             Version::HTTP_11,
         )
         .expect("raw head");
-        raw.finalize(Version::HTTP_11, "qpx");
+        raw.finalize("qpx");
         let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
         assert!(encoded.contains("Proxy-Status: qpx\r\n"));
         assert!(!encoded.contains("untrusted"));

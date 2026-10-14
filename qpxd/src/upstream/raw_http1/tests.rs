@@ -365,7 +365,7 @@ async fn inline_raw_content_length_response_recycles_before_body_release() {
     let mut raw =
         RawHttp1ResponseHead::from_parsed(&headers, &Method::GET, StatusCode::OK, Version::HTTP_11)
             .expect("raw response head");
-    raw.finalize(Version::HTTP_2, "qpx");
+    raw.finalize("qpx");
     let response = build_raw_response(
         stream,
         RawParsedResponseHead {
@@ -677,4 +677,103 @@ impl AsyncWrite for RecordingStream {
     fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
         Poll::Ready(Ok(()))
     }
+}
+
+#[tokio::test]
+async fn finalized_raw_head_cache_preserves_upstream_via_protocol() {
+    for downstream_version in [Version::HTTP_11, Version::HTTP_2] {
+        for (wire, upstream_version, expected_via) in [
+            (
+                &b"HTTP/1.0 200 OK\r\nContent-Length: 4\r\nVia: 1.0 first\r\nVia: 1.1 second\r\n\r\nBODY"[..],
+                Version::HTTP_10,
+                "1.0 via-cache-test",
+            ),
+            (
+                &b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nVia: 1.0 first\r\nVia: 1.1 second\r\n\r\nBODY"[..],
+                Version::HTTP_11,
+                "1.1 via-cache-test",
+            ),
+        ] {
+            let mut stream = wire;
+            let (interim, parsed, remainder) = read_finalized_raw_response_head_with_interim(
+                &mut stream,
+                BytesMut::new(),
+                &Method::GET,
+                downstream_version,
+                "via-cache-test",
+            )
+            .await
+            .expect("read finalized upstream head");
+            assert!(interim.is_empty());
+            assert_eq!(parsed.version, upstream_version);
+            assert_eq!(remainder.as_ref(), b"BODY");
+            let headers = parsed.raw.materialized_headers().expect("headers");
+            let via: Vec<_> = headers
+                .get_all("via")
+                .iter()
+                .map(|value| value.to_str().expect("Via value"))
+                .collect();
+            assert_eq!(via, ["1.0 first", "1.1 second", expected_via]);
+
+            // The external-deadline reader used by direct reverse relay must
+            // reuse the same finalized head for an identical cache key.
+            let mut stream = wire;
+            let (_, cached, remainder) =
+                super::response::read_finalized_raw_response_head_with_interim_under_external_deadline(
+                    &mut stream,
+                    BytesMut::new(),
+                    &Method::GET,
+                    downstream_version,
+                    "via-cache-test",
+                )
+                .await
+                .expect("read cached upstream head");
+            assert!(Arc::ptr_eq(&parsed.raw, &cached.raw), "finalized cache hit");
+            assert_eq!(cached.version, upstream_version);
+            assert_eq!(cached.raw.materialized_headers().expect("cached headers"), headers);
+            assert_eq!(remainder.as_ref(), b"BODY");
+        }
+    }
+}
+
+#[tokio::test]
+async fn raw_direct_relay_finalization_preserves_upstream_via_protocol() {
+    let headers = [
+        httparse::Header {
+            name: "Content-Length",
+            value: b"0",
+        },
+        httparse::Header {
+            name: "Via",
+            value: b"1.1 earlier",
+        },
+    ];
+    let raw = Arc::new(
+        RawHttp1ResponseHead::from_parsed(&headers, &Method::GET, StatusCode::OK, Version::HTTP_10)
+            .expect("upstream HTTP/1.0 head"),
+    );
+    let (stream, _peer) = tokio::io::duplex(64);
+    let mut relay = super::RawHttp1ResponseRelay {
+        interim: Vec::new(),
+        version: Version::HTTP_10,
+        status: StatusCode::OK,
+        raw: raw.clone(),
+        stream: Some(stream),
+        read_buf: BytesMut::new(),
+        write_buf: BytesMut::new(),
+        recycler: None,
+        active_permit: None,
+    };
+    assert!(relay.supports_direct_relay(0));
+    relay.finalize("qpx");
+    relay.finalize("qpx");
+    assert!(
+        !raw.is_finalized(),
+        "relay finalized a clone of the shared head"
+    );
+    let serialized = relay.raw.serialized_http11_head();
+    let wire = std::str::from_utf8(&serialized).expect("ASCII response");
+    assert!(wire.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(wire.find("Via: 1.1 earlier\r\n").unwrap() < wire.find("Via: 1.0 qpx\r\n").unwrap());
+    assert_eq!(wire.matches("Via: 1.0 qpx\r\n").count(), 1);
 }

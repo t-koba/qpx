@@ -291,7 +291,8 @@ async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<
             .headers()
             .get(http::header::VIA)
             .and_then(|value| value.to_str().ok()),
-        Some("2 qpx-test")
+        Some("1.1 qpx-test"),
+        "response Via records the HTTP/1.1 origin protocol, not the HTTP/2 downstream version"
     );
     assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
 

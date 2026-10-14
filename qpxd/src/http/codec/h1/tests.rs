@@ -471,7 +471,7 @@ async fn finalized_raw_response_head_uses_direct_http1_serialization() {
         Version::HTTP_11,
     )
     .expect("raw response head");
-    raw_head.finalize(Version::HTTP_11, "qpx");
+    raw_head.finalize("qpx");
     let mut response = Response::new(Body::from("body"));
     response.extensions_mut().insert(Arc::new(raw_head));
     let mut head_buf = BytesMut::new();
@@ -532,7 +532,7 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
         Version::HTTP_11,
     )
     .expect("raw response head");
-    raw_head.finalize(Version::HTTP_11, "qpx");
+    raw_head.finalize("qpx");
 
     let (recycled_tx, mut recycled_rx) = tokio::sync::mpsc::unbounded_channel();
     let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
@@ -806,4 +806,96 @@ async fn unsupported_expect_with_100_continue_does_not_send_interim_continue() {
         qpx_http::protocol::semantics::validate_expect_header(&parsed.headers).is_err(),
         "preflight must still reject the unsupported Expect token"
     );
+}
+
+#[tokio::test]
+async fn raw_response_via_uses_upstream_version_for_http11_downstream() {
+    let parsed = [
+        httparse::Header {
+            name: "Content-Length",
+            value: b"4",
+        },
+        httparse::Header {
+            name: "Via",
+            value: b"1.0 first",
+        },
+        httparse::Header {
+            name: "Via",
+            value: b"1.1 second",
+        },
+    ];
+    let raw = Arc::new(
+        crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+            &parsed,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_10,
+        )
+        .expect("upstream HTTP/1.0 head"),
+    );
+    let mut response = Response::builder()
+        .version(Version::HTTP_10)
+        .body(Body::from("body"))
+        .expect("upstream response");
+    response.extensions_mut().insert(raw.clone());
+
+    crate::http::protocol::l7::finalize_response_in_place(
+        &Method::GET,
+        Version::HTTP_11,
+        "qpx",
+        &mut response,
+        false,
+    );
+    assert_eq!(response.version(), Version::HTTP_10);
+    assert!(
+        !raw.is_finalized(),
+        "shared unfinalized head stays unchanged"
+    );
+    let finalized = response
+        .extensions()
+        .get::<Arc<crate::upstream::raw_http1::RawHttp1ResponseHead>>()
+        .expect("finalized raw head");
+    let headers = finalized.materialized_headers().expect("materialized head");
+    let via: Vec<_> = headers
+        .get_all("via")
+        .iter()
+        .map(|value| value.to_str().expect("Via value"))
+        .collect();
+    assert_eq!(via, ["1.0 first", "1.1 second", "1.0 qpx"]);
+
+    // Clone after warming both header caches and finalize again: neither the
+    // upstream provenance nor the already-appended Via may change.
+    let serialized = finalized.serialized_http11_head();
+    let mut cloned = finalized.as_ref().clone();
+    cloned.finalize("qpx");
+    assert_eq!(
+        cloned.materialized_headers().expect("cloned headers"),
+        headers
+    );
+    assert_eq!(cloned.serialized_http11_head(), serialized);
+    assert!(serialized.starts_with(b"HTTP/1.1 200 OK\r\n"));
+
+    let (mut writer, mut reader) = tokio::io::duplex(4096);
+    let mut head_buf = BytesMut::new();
+    let keep_alive = send_http1_response_with_interim(
+        &mut writer,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("encode downstream response");
+    drop(writer);
+    let mut wire = Vec::new();
+    reader.read_to_end(&mut wire).await.expect("read response");
+    let wire = std::str::from_utf8(&wire).expect("ASCII response");
+    assert!(keep_alive);
+    assert!(wire.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(wire.contains("Via: 1.0 first\r\nVia: 1.1 second\r\n"));
+    assert!(wire.find("Via: 1.1 second\r\n").unwrap() < wire.find("Via: 1.0 qpx\r\n").unwrap());
+    assert!(wire.ends_with("\r\n\r\nbody"));
 }

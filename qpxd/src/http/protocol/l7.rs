@@ -52,7 +52,7 @@ pub(crate) fn finalize_response_in_place(
             .get_mut::<Arc<crate::upstream::raw_http1::RawHttp1ResponseHead>>()
         {
             if !raw.is_finalized() {
-                Arc::make_mut(raw).finalize(request_version, proxy_name);
+                Arc::make_mut(raw).finalize(proxy_name);
             }
             wrap_body_sanitizing_response_trailers(response);
             return;

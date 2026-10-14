@@ -48,6 +48,8 @@ pub(super) struct RawParsedResponseHead {
 }
 
 struct CachedFinalizedRawResponseHead {
+    // The complete upstream head includes its protocol/version. Keep the existing
+    // downstream-version partition, but it no longer supplies response Via.
     wire_head: Box<[u8]>,
     request_method: Method,
     request_version: Version,
@@ -207,7 +209,7 @@ async fn read_finalized_raw_response_head_with_interim_inner(
         let mut raw =
             raw.ok_or_else(|| anyhow!("final raw response is missing response metadata"))?;
         if !raw.is_finalized() {
-            Arc::make_mut(&mut raw).finalize(request_version, proxy_name);
+            Arc::make_mut(&mut raw).finalize(proxy_name);
             let wire_head = wire_head
                 .ok_or_else(|| anyhow!("new raw response is missing its serialized head"))?;
             cache_finalized_raw_response_head(
