@@ -2,10 +2,12 @@ use super::io::{determine_response_body_kind, response_body_allows_reuse};
 use super::response::{
     ParsedResponseHead, RawParsedResponseHead, ResponseBodyKind, build_raw_response,
     build_response, forward_chunked_body, forward_close_delimited_body,
+    read_finalized_raw_response_head_with_interim, read_response_head_with_interim,
 };
 use super::{
-    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-    RawHttp1ResponseHead, parse_declared_content_length, send_http1_request_with_interim,
+    Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_HEADER_BYTES,
+    RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1ResponseHead, UpstreamConnectionClosed,
+    parse_declared_content_length, send_http1_request_with_interim,
 };
 use bytes::{Bytes, BytesMut};
 use http_body_util::BodyExt;
@@ -85,6 +87,102 @@ async fn send_http1_request_with_interim_parses_early_hints() {
             .expect("body bytes"),
         Bytes::from_static(b"OK")
     );
+}
+
+#[tokio::test]
+async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
+    let response_bytes = Bytes::from_static(
+        b"HTTP/1.1 200 OK\r\nX-Partial: segmented\r\nContent-Length: 4\r\n\r\nBODY",
+    );
+    let mut parsed_reader = RecordingStream::segmented(response_bytes.clone(), 11, false);
+    let (interim, parsed, remainder) =
+        read_response_head_with_interim(&mut parsed_reader, BytesMut::new(), &Method::GET)
+            .await
+            .expect("read fragmented response head");
+    assert!(interim.is_empty());
+    assert_eq!(parsed.status, StatusCode::OK);
+    assert!(matches!(
+        parsed.body_kind,
+        ResponseBodyKind::ContentLength(4)
+    ));
+    assert_eq!(remainder.as_ref(), b"BODY");
+    assert!(parsed_reader.read_polls > 1);
+
+    let mut raw_reader = RecordingStream::segmented(response_bytes, 11, false);
+    let (interim, parsed, remainder) = read_finalized_raw_response_head_with_interim(
+        &mut raw_reader,
+        BytesMut::new(),
+        &Method::GET,
+        Version::HTTP_11,
+        "segmented-timed-test",
+    )
+    .await
+    .expect("read fragmented raw response head");
+    assert!(interim.is_empty());
+    assert_eq!(parsed.status, StatusCode::OK);
+    assert_eq!(remainder.as_ref(), b"BODY");
+    assert!(raw_reader.read_polls > 1);
+
+    let mut incomplete_head = b"HTTP/1.1 200 OK\r\nX-Large: ".to_vec();
+    incomplete_head.resize(MAX_HEADER_BYTES, b'x');
+    let incomplete_head = Bytes::from(incomplete_head);
+    let mut limited_reader = RecordingStream::segmented(incomplete_head.clone(), usize::MAX, false);
+    let read_buf = BytesMut::with_capacity(MAX_HEADER_BYTES * 2);
+    let error =
+        match read_response_head_with_interim(&mut limited_reader, read_buf, &Method::GET).await {
+            Ok(_) => panic!("partial head at the byte cap must fail"),
+            Err(error) => error,
+        };
+    assert!(
+        error
+            .to_string()
+            .contains("HTTP/1 header block exceeded configured limit")
+    );
+    assert_eq!(limited_reader.read_polls, 1);
+
+    let mut raw_limited_reader = RecordingStream::segmented(incomplete_head, usize::MAX, false);
+    let read_buf = BytesMut::with_capacity(MAX_HEADER_BYTES * 2);
+    let error = match read_finalized_raw_response_head_with_interim(
+        &mut raw_limited_reader,
+        read_buf,
+        &Method::GET,
+        Version::HTTP_11,
+        "partial-at-limit-test",
+    )
+    .await
+    {
+        Ok(_) => panic!("partial raw head at the byte cap must fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("HTTP/1 header block exceeded configured limit")
+    );
+    assert_eq!(raw_limited_reader.read_polls, 1);
+
+    let partial = Bytes::from_static(b"HTTP/1.1 200 OK\r\nX-Partial:");
+    let mut eof_reader = RecordingStream::segmented(partial.clone(), usize::MAX, false);
+    let error =
+        match read_response_head_with_interim(&mut eof_reader, BytesMut::new(), &Method::GET).await
+        {
+            Ok(_) => panic!("EOF after partial response head must fail"),
+            Err(error) => error,
+        };
+    assert!(error.downcast_ref::<UpstreamConnectionClosed>().is_some());
+    assert_eq!(eof_reader.read_polls, 2);
+
+    let mut stalled_reader = RecordingStream::segmented(partial, usize::MAX, true);
+    let result = tokio::time::timeout(
+        Duration::from_millis(50),
+        read_response_head_with_interim(&mut stalled_reader, BytesMut::new(), &Method::GET),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "partial input must yield to the outer deadline"
+    );
+    assert!(stalled_reader.read_polls >= 2);
 }
 
 #[tokio::test]
@@ -513,6 +611,9 @@ struct RecordingStream {
     input: Bytes,
     offset: usize,
     max_read_capacity: Arc<AtomicUsize>,
+    max_read_size: usize,
+    pending_after_input: bool,
+    read_polls: usize,
 }
 
 impl RecordingStream {
@@ -521,22 +622,41 @@ impl RecordingStream {
             input,
             offset: 0,
             max_read_capacity,
+            max_read_size: usize::MAX,
+            pending_after_input: false,
+            read_polls: 0,
+        }
+    }
+
+    fn segmented(input: Bytes, max_read_size: usize, pending_after_input: bool) -> Self {
+        Self {
+            input,
+            offset: 0,
+            max_read_capacity: Arc::new(AtomicUsize::new(0)),
+            max_read_size,
+            pending_after_input,
+            read_polls: 0,
         }
     }
 }
 
 impl AsyncRead for RecordingStream {
     fn poll_read(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         _cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
-        self.max_read_capacity
+        let this = self.get_mut();
+        this.read_polls += 1;
+        this.max_read_capacity
             .fetch_max(buf.remaining(), Ordering::SeqCst);
-        let remaining = &self.input[self.offset..];
-        let len = remaining.len().min(buf.remaining());
+        if this.offset == this.input.len() && this.pending_after_input {
+            return Poll::Pending;
+        }
+        let remaining = &this.input[this.offset..];
+        let len = remaining.len().min(buf.remaining()).min(this.max_read_size);
         buf.put_slice(&remaining[..len]);
-        self.offset += len;
+        this.offset += len;
         Poll::Ready(Ok(()))
     }
 }

@@ -60,14 +60,12 @@ thread_local! {
         const { RefCell::new(None) };
 }
 
-pub(super) async fn read_response_head_with_interim<S>(
-    stream: &mut S,
+// Keep the timeout/read state machine shared across transport implementations.
+pub(super) async fn read_response_head_with_interim(
+    stream: &mut (dyn AsyncRead + Unpin + Send),
     mut buf: BytesMut,
     request_method: &Method,
-) -> Result<(Vec<InterimResponseHead>, ParsedResponseHead, BytesMut)>
-where
-    S: AsyncRead + Unpin,
-{
+) -> Result<(Vec<InterimResponseHead>, ParsedResponseHead, BytesMut)> {
     buf.clear();
     buf.reserve(INITIAL_READ_BUF_SIZE);
     let mut interim = Vec::new();
@@ -87,10 +85,11 @@ where
             match try_parse_response_head(&buf, request_method)? {
                 Some(parsed) => break parsed,
                 None => {
+                    let next_min_len = buf.len().saturating_add(1);
                     fill_buffer_capped(
                         stream,
                         &mut buf,
-                        1,
+                        next_min_len,
                         MAX_HEADER_BYTES,
                         RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
                         None,
@@ -119,16 +118,13 @@ where
     }
 }
 
-pub(super) async fn read_finalized_raw_response_head_with_interim<S>(
-    stream: &mut S,
+pub(super) async fn read_finalized_raw_response_head_with_interim(
+    stream: &mut (dyn AsyncRead + Unpin + Send),
     buf: BytesMut,
     request_method: &Method,
     request_version: Version,
     proxy_name: &str,
-) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)>
-where
-    S: AsyncRead + Unpin,
-{
+) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)> {
     read_finalized_raw_response_head_with_interim_inner(
         stream,
         buf,
@@ -140,16 +136,13 @@ where
     .await
 }
 
-pub(super) async fn read_finalized_raw_response_head_with_interim_under_external_deadline<S>(
-    stream: &mut S,
+pub(super) async fn read_finalized_raw_response_head_with_interim_under_external_deadline(
+    stream: &mut (dyn AsyncRead + Unpin + Send),
     buf: BytesMut,
     request_method: &Method,
     request_version: Version,
     proxy_name: &str,
-) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)>
-where
-    S: AsyncRead + Unpin,
-{
+) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)> {
     read_finalized_raw_response_head_with_interim_inner(
         stream,
         buf,
@@ -161,17 +154,14 @@ where
     .await
 }
 
-async fn read_finalized_raw_response_head_with_interim_inner<S>(
-    stream: &mut S,
+async fn read_finalized_raw_response_head_with_interim_inner(
+    stream: &mut (dyn AsyncRead + Unpin + Send),
     mut buf: BytesMut,
     request_method: &Method,
     request_version: Version,
     proxy_name: &str,
     enforce_idle_timeout: bool,
-) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)>
-where
-    S: AsyncRead + Unpin,
-{
+) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)> {
     buf.clear();
     buf.reserve(INITIAL_READ_BUF_SIZE);
     let mut interim = Vec::new();
@@ -242,27 +232,25 @@ where
     }
 }
 
-async fn fill_raw_response_head_buffer<S>(
-    stream: &mut S,
+async fn fill_raw_response_head_buffer(
+    stream: &mut (dyn AsyncRead + Unpin + Send),
     buf: &mut BytesMut,
     enforce_idle_timeout: bool,
-) -> Result<()>
-where
-    S: AsyncRead + Unpin,
-{
+) -> Result<()> {
+    if buf.len() >= MAX_HEADER_BYTES {
+        return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
+    }
+    let next_min_len = buf.len() + 1;
     if enforce_idle_timeout {
         return fill_buffer_capped(
             stream,
             buf,
-            1,
+            next_min_len,
             MAX_HEADER_BYTES,
             RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
             None,
         )
         .await;
-    }
-    if buf.len() >= MAX_HEADER_BYTES {
-        return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
     }
     buf.reserve(1);
     if stream.read_buf(buf).await? == 0 {
@@ -402,6 +390,9 @@ fn finish_raw_response_head(
     consumed: usize,
     request_method: &Method,
 ) -> Result<RawParsedResponseHeadTuple> {
+    if consumed > MAX_HEADER_BYTES {
+        return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
+    }
     let version = parse_version(response.version, "missing upstream HTTP version")?;
     let code = response
         .code
@@ -438,6 +429,9 @@ fn finish_parsed_response_head(
     consumed: usize,
     request_method: &Method,
 ) -> Result<ParsedResponseHeadTuple> {
+    if consumed > MAX_HEADER_BYTES {
+        return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
+    }
     let version = parse_version(response.version, "missing upstream HTTP version")?;
     let code = response
         .code
@@ -711,8 +705,31 @@ where
 mod parse_tests {
     use super::*;
 
+    fn expect_parse_error<T>(result: anyhow::Result<T>, message: &str) -> anyhow::Error {
+        match result {
+            Ok(_) => panic!("{message}"),
+            Err(error) => error,
+        }
+    }
+
+    fn response_head_with_total_bytes(total_bytes: usize, extra_headers: usize) -> Vec<u8> {
+        let mut prefix = b"HTTP/1.1 200 OK\r\n".to_vec();
+        for index in 0..extra_headers {
+            prefix.extend_from_slice(format!("X-Test-{index}: value\r\n").as_bytes());
+        }
+        prefix.extend_from_slice(b"X-Large: ");
+        let suffix = b"\r\n\r\n";
+        assert!(total_bytes >= prefix.len() + suffix.len());
+        let mut response = Vec::with_capacity(total_bytes);
+        response.extend_from_slice(&prefix);
+        response.resize(total_bytes - suffix.len(), b'x');
+        response.extend_from_slice(suffix);
+        assert_eq!(response.len(), total_bytes);
+        response
+    }
+
     #[test]
-    fn response_head_parser_promotes_storage_for_many_headers() {
+    fn response_head_parser_promotes_storage_and_enforces_byte_limit() {
         let mut raw = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n".to_vec();
         for index in 0..40 {
             raw.extend_from_slice(format!("X-Test-{index}: value\r\n").as_bytes());
@@ -723,5 +740,52 @@ mod parse_tests {
             .expect("parse")
             .expect("complete");
         assert_eq!(parsed.3.len(), 41);
+
+        for extra_headers in [0, 40] {
+            let exact = response_head_with_total_bytes(MAX_HEADER_BYTES, extra_headers);
+            let parsed = try_parse_response_head(&exact, &Method::GET)
+                .expect("parse exact response head")
+                .expect("complete exact response head");
+            assert_eq!(parsed.0, MAX_HEADER_BYTES);
+            let parsed_raw = try_parse_raw_response_head(&exact, &Method::GET)
+                .expect("parse exact raw response head")
+                .expect("complete exact raw response head");
+            assert_eq!(parsed_raw.0, MAX_HEADER_BYTES);
+
+            let oversized = response_head_with_total_bytes(MAX_HEADER_BYTES + 1, extra_headers);
+            for error in [
+                expect_parse_error(
+                    try_parse_response_head(&oversized, &Method::GET),
+                    "parsed response byte limit",
+                ),
+                expect_parse_error(
+                    try_parse_raw_response_head(&oversized, &Method::GET),
+                    "raw response byte limit",
+                ),
+            ] {
+                assert!(
+                    error
+                        .to_string()
+                        .contains("HTTP/1 header block exceeded configured limit"),
+                    "{error}"
+                );
+            }
+        }
+
+        let body = vec![b'b'; MAX_HEADER_BYTES + 1];
+        let head = format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n", body.len());
+        let head_len = head.len();
+        let mut head_and_body = head.as_bytes().to_vec();
+        head_and_body.extend_from_slice(&body);
+        let parsed = try_parse_response_head(&head_and_body, &Method::GET)
+            .expect("parse head with read-ahead body")
+            .expect("complete head with read-ahead body");
+        assert_eq!(parsed.0, head_len);
+        assert_eq!(&head_and_body[parsed.0..], body.as_slice());
+        let parsed = try_parse_raw_response_head(&head_and_body, &Method::GET)
+            .expect("parse raw head with read-ahead body")
+            .expect("complete raw head with read-ahead body");
+        assert_eq!(parsed.0, head_len);
+        assert_eq!(&head_and_body[parsed.0..], body.as_slice());
     }
 }

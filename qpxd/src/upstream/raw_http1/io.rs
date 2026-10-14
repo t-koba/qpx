@@ -30,7 +30,16 @@ where
             line.truncate(idx);
             return Ok(line.to_vec());
         }
-        fill_buffer_capped(stream, buf, 1, MAX_HEADER_BYTES, read_timeout, Some(sender)).await?;
+        let next_min_len = buf.len().saturating_add(1);
+        fill_buffer_capped(
+            stream,
+            buf,
+            next_min_len,
+            MAX_HEADER_BYTES,
+            read_timeout,
+            Some(sender),
+        )
+        .await?;
     }
 }
 
@@ -57,8 +66,16 @@ where
                 return Ok(Some(trailers));
             }
             httparse::Status::Partial => {
-                fill_buffer_capped(stream, buf, 1, MAX_HEADER_BYTES, read_timeout, Some(sender))
-                    .await?
+                let next_min_len = buf.len().saturating_add(1);
+                fill_buffer_capped(
+                    stream,
+                    buf,
+                    next_min_len,
+                    MAX_HEADER_BYTES,
+                    read_timeout,
+                    Some(sender),
+                )
+                .await?
             }
         }
     }
@@ -93,7 +110,7 @@ pub(super) async fn fill_buffer_capped<S>(
     sender: Option<&qpx_http::body::Sender>,
 ) -> Result<()>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncRead + Unpin + ?Sized,
 {
     while buf.len() < min_len {
         if buf.len() >= max_len {
@@ -114,7 +131,7 @@ pub(super) async fn read_buf_with_timeout<S>(
     sender: Option<&qpx_http::body::Sender>,
 ) -> Result<usize>
 where
-    S: AsyncRead + Unpin,
+    S: AsyncRead + Unpin + ?Sized,
 {
     if let Some(sender) = sender {
         tokio::select! {
