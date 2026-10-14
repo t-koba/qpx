@@ -2986,9 +2986,9 @@ fn ci_acceptance_violations(
         "checkout pinned previous release",
         "d67a148e7ccbbd272750415213601005af0f38c5",
         "python3 scripts/perf-audit-policy.py run proxy",
-        "target/perf/proxy-policy/**",
+        "${{ runner.temp }}/qpx-perf-policy/proxy/**",
         "python3 scripts/perf-audit-policy.py run http2",
-        "target/perf/http2-policy/**",
+        "${{ runner.temp }}/qpx-perf-policy/http2/**",
         "QPX_PERF_ASSESSMENT: shared",
         "target/perf/http2-compare-logs/**",
         "scripts/perf-audit-streaming-compare.sh \"$QPX_STREAMING_COMPARE_JSON\"",
@@ -5325,9 +5325,9 @@ mod tests {
             checkout pinned previous release
             d67a148e7ccbbd272750415213601005af0f38c5
             python3 scripts/perf-audit-policy.py run proxy
-            target/perf/proxy-policy/**
+            ${{ runner.temp }}/qpx-perf-policy/proxy/**
             python3 scripts/perf-audit-policy.py run http2
-            target/perf/http2-policy/**
+            ${{ runner.temp }}/qpx-perf-policy/http2/**
             QPX_PERF_ASSESSMENT: shared
             scripts/perf-audit-profile.sh
             target/perf/perf-audit-profile-summary.jsonl
