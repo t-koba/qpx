@@ -7,6 +7,6 @@ if [ -z "$JSONL" ]; then
   echo "usage: scripts/check-http2-performance.sh <jsonl> [objectives-json]" >&2
   exit 2
 fi
-# Competitive report only on shared runners; exit 75 means spread-invalid,
-# never PASSED. Use perf-audit-policy.py run for paired gating and retries.
+# Competitive report only on shared runners; INCONCLUSIVE reference lanes
+# remain visible but do not fail the job. This does not imply the paired gate ran.
 exec python3 "$ROOT_DIR/scripts/perf-audit-policy.py" check http2 "$JSONL" --objectives "$OBJECTIVES"

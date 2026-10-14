@@ -1,7 +1,8 @@
 """Validity first; independent paired regressions; competitive reports.
 
-Exit 1 is an error/regression (or a controlled competitive miss), 75 is
-INCONCLUSIVE. Only RETRYABLE_INVALID permits another measurement.
+Exit 1 is a hard error/regression (or a controlled competitive miss).
+INCONCLUSIVE measurements remain visible but are non-blocking. Only
+RETRYABLE_INVALID permits another measurement.
 """
 import json
 import math
@@ -30,7 +31,8 @@ def load_json(path):
     return value
 
 
-def load_jsonl(path):
+def load_jsonl(path, validate_records=True):
+    """Load records, optionally deferring role-aware measurement validation."""
     records = []
     seen = set()
     with open(path, encoding="utf-8") as handle:
@@ -47,10 +49,11 @@ def load_jsonl(path):
             if key in seen:
                 fail(f"{path}:{index}: duplicate record {key}")
             seen.add(key)
-            if record["bench"] == "proxy_compare_http2_reverse":
-                validate_http2(record)
-            else:
-                validate_http1(record, record["bench"] + "/" + record["proxy"])
+            if validate_records:
+                if record["bench"] == "proxy_compare_http2_reverse":
+                    validate_http2(record)
+                else:
+                    validate_http1(record, record["bench"] + "/" + record["proxy"])
             records.append(record)
     if not records:
         fail(f"{path}: no measurements")
@@ -281,6 +284,10 @@ class RetryableInvalid(ValueError):
     """A sampler's parsed reference-side transient invalid sample (exit 75)."""
 
 
+class InconclusiveReference(ValueError):
+    """A comparison reference supplied no valid measurement for its lane."""
+
+
 def evaluate(records, lane, paired=False, mode=None, baseline=None):
     mode = mode or assessment()
     if paired:
@@ -289,16 +296,46 @@ def evaluate(records, lane, paired=False, mode=None, baseline=None):
             return skipped
     names = ["current", "previous"] if paired else [lane["qpx"], *lane["references"]]
     selected = {}
+    invalid_references = {}
     for record in records:
         if matches(record, lane):
             key = record.get("pair_role") if paired else record.get("proxy")
             if key in names:
-                if key in selected:
+                if key in selected or key in invalid_references:
                     fail(f'{lane["name"]}: duplicate record {key}')
-                validate(record, lane)
+                try:
+                    validate(record, lane)
+                except (ValueError, KeyError, TypeError) as error:
+                    is_reference = key == "previous" if paired else key != lane["qpx"]
+                    if not is_reference:
+                        raise
+                    invalid_references[key] = str(error)
+                    continue
                 selected[key] = record
-    if set(selected) != set(names):
-        fail(f'{lane["name"]}: missing records {sorted(set(names) - set(selected))}')
+    missing = set(names) - set(selected) - set(invalid_references)
+    result = {"lane": lane["name"], "assessment": "paired" if paired else "competitive", "mode": mode}
+    candidate_key = "current" if paired else lane["qpx"]
+    if candidate_key not in selected:
+        fail(f'{lane["name"]}: missing candidate qpx measurement')
+    candidate_spread_issues = []
+    for field, cap in spread_limits(lane, True).items():
+        spread = number(selected[candidate_key].get("sample_spread", {}), field)
+        if spread < 1:
+            fail(f"invalid spread {field}: {spread}")
+        if spread > cap + 1e-12:
+            candidate_spread_issues.append(f"{candidate_key} {field} {spread:.6f} > cap {cap:.6f}")
+    if paired:
+        if "previous" in missing or "previous" in invalid_references:
+            reference_issue = invalid_references.get("previous", "pinned reference qpx measurement is missing")
+            return {**result, "status": "INCONCLUSIVE", "reasons": [reference_issue, *candidate_spread_issues],
+                    "unmeasured": True}
+    else:
+        reference_issues = [f"{name}: {invalid_references[name]}" for name in names
+                            if name in invalid_references]
+        reference_issues.extend(f"{name}: missing measurement" for name in names if name in missing)
+        if reference_issues:
+            return {**result, "status": "INCONCLUSIVE", "reasons": [*reference_issues, *candidate_spread_issues],
+                    "unmeasured": True}
     group = [selected[n] for n in names]
     consistent(group, lane, paired)
     if paired:
@@ -313,7 +350,6 @@ def evaluate(records, lane, paired=False, mode=None, baseline=None):
             if spread > cap + 1e-12:
                 invalid_names.add(names[index])
                 reasons.append(f"{names[index]} {field} {spread:.6f} > cap {cap:.6f}")
-    result = {"lane": lane["name"], "assessment": "paired" if paired else "competitive", "mode": mode}
     if reasons:
         # Never remeasure an unstable candidate: only reference-side invalidity
         # may trigger a retry, since candidate variance can itself be a regression.
@@ -431,16 +467,19 @@ def historical_comparison(records, lane, baseline):
 
 
 def exit_code(results):
-    if any(r["status"] in ("ERROR", "REGRESSED", "OBJECTIVE_MISS") for r in results):
+    allowed = {"PASSED", "REGRESSED", "REPORT_ONLY", "OBJECTIVE_MISS", "INCONCLUSIVE",
+               "RETRYABLE_INVALID", "NOT_APPLICABLE", "ERROR"}
+    if not results or any(r.get("status") not in allowed or r["status"] in ("ERROR", "REGRESSED", "OBJECTIVE_MISS")
+                          for r in results):
         return 1
-    if any(r["status"] in ("INCONCLUSIVE", "RETRYABLE_INVALID") for r in results):
-        return 75
     return 0
 
 
 def summary(results):
     code = exit_code(results)
-    return {"status": "FAILED" if code == 1 else "INCONCLUSIVE" if code == 75 else "COMPLETE",
+    inconclusive = any(r["status"] in ("INCONCLUSIVE", "RETRYABLE_INVALID") for r in results)
+    status = "FAILED" if code == 1 else "INCONCLUSIVE" if inconclusive else "COMPLETE"
+    return {"status": status,
             "coverage": {"declared": len(results), "required": sum(r["status"] != "NOT_APPLICABLE" for r in results),
                          "not_applicable": [f'{r["lane"]}:{r["assessment"]}' for r in results if r["status"] == "NOT_APPLICABLE"],
                          "valid": sum(r["status"] in ("PASSED", "REGRESSED", "OBJECTIVE_MISS", "REPORT_ONLY") for r in results),
@@ -463,6 +502,9 @@ def bounded_measure(lane, paired, measure, artifact_dir, mode=None, baseline=Non
             records = measure(lane, paired, directory)
             write_jsonl(directory / "measurements.jsonl", records)
             result = evaluate(records, lane, paired, mode, baseline)
+        except InconclusiveReference as error:
+            result = {"lane": lane["name"], "assessment": assessment_name,
+                      "status": "INCONCLUSIVE", "reasons": [str(error)], "unmeasured": True}
         except RetryableInvalid as error:
             result = {"lane": lane["name"], "assessment": assessment_name,
                       "status": "RETRYABLE_INVALID", "reasons": [str(error)]}

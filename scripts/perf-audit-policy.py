@@ -9,9 +9,25 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
-from perf_policy import (ROOT, RetryableInvalid, assessment, bounded_measure, consistent, evaluate, exit_code,
-                         http2_aggregate, load_baseline, load_jsonl, matches, objectives, summary, validate,
-                         write_json, write_jsonl)
+from perf_policy import (
+    ROOT,
+    InconclusiveReference,
+    RetryableInvalid,
+    assessment,
+    bounded_measure,
+    consistent,
+    evaluate,
+    exit_code,
+    http2_aggregate,
+    load_baseline,
+    load_jsonl,
+    matches,
+    objectives,
+    summary,
+    validate,
+    write_json,
+    write_jsonl,
+)
 from perf_records import collect_ratios, fail, number
 
 ORDER = [["current", "previous"], ["previous", "current"], ["current", "previous"]]
@@ -74,13 +90,39 @@ class Sampler:
             process = subprocess.run([str(script), str(out)], env=env, stdout=log, stderr=subprocess.STDOUT)
         if process.returncode == 75 and not paired and role == "current":
             raise RetryableInvalid(f"reference sample invalid; see {directory.name}/command.log (sampler exit 75)")
+        if process.returncode and role == "previous":
+            message = f"sampler exited {process.returncode}; see {directory.name}/command.log (not retryable)"
+            raise InconclusiveReference(f"pinned reference measurement unavailable: {message}")
+        if process.returncode and not paired and role == "current":
+            try:
+                records = load_jsonl(out, validate_records=False)
+                result = evaluate(records, lane, mode="shared")
+            except (ValueError, KeyError, TypeError, OSError):
+                fail(
+                    f"sampler exited {process.returncode}; candidate measurement invalid or unavailable; "
+                    f"see {directory.name}/command.log"
+                )
+            if result["status"] == "INCONCLUSIVE":
+                reasons = result.get("reasons", [])
+                if any(reason.startswith(lane["qpx"] + " ") for reason in reasons):
+                    return records  # Preserve a candidate-spread diagnosis for evaluate().
+                details = "; ".join(reasons) or "comparison has no valid reference lane"
+                raise InconclusiveReference(
+                    f"competitive sampler exited {process.returncode}: {details}; "
+                    f"see {directory.name}/command.log and samples.jsonl"
+                )
+            fail(f"sampler exited {process.returncode}; see {directory.name}/command.log (not retryable)")
         if process.returncode:
             fail(f"sampler exited {process.returncode}; see {directory.name}/command.log (not retryable)")
-        records = load_jsonl(out)
-        for record in records:
-            if not matches(record, lane):
-                fail(f"sampler returned an unexpected workload for {lane['name']}")
-            validate(record, lane)
+        try:
+            records = load_jsonl(out, validate_records=False)
+            for record in records:
+                if not matches(record, lane):
+                    fail(f"sampler returned an unexpected workload for {lane['name']}")
+        except (ValueError, KeyError, TypeError, OSError) as error:
+            if role == "previous":
+                raise InconclusiveReference(f"pinned reference measurement invalid: {error}") from error
+            raise
         return records
 
     def __call__(self, lane, paired, directory):
@@ -93,12 +135,20 @@ class Sampler:
                 if len(records) != 1 or records[0]["proxy"] != lane["qpx"]:
                     fail("paired sampler did not return exactly one qpx lane")
                 samples[role].append(records[0])
+        aggregated = {}
+        for role in ("current", "previous"):
+            try:
+                aggregated[role] = aggregate(samples[role], lane)
+            except (ValueError, KeyError, TypeError, OSError) as error:
+                if role == "previous":
+                    raise InconclusiveReference(f"pinned reference measurement invalid: {error}") from error
+                raise
         cpu = "requests_per_total_cpu_second" if lane["kind"] == "http2" else "requests_per_cpu_second"
         deltas = [{"throughput_ratio": number(c, "requests_per_sec") / number(p, "requests_per_sec"),
                    "cpu_efficiency_ratio": number(c, cpu) / number(p, cpu),
                    "p99_latency_ratio": number(c, "latency_p99_ms") / number(p, "latency_p99_ms")}
                   for c, p in zip(samples["current"], samples["previous"])]
-        return [{**aggregate(samples[role], lane), **self.identities[role], "pair_role": role, "pair_order": ORDER, "sample_spread_basis": "full_range", "paired_metric_ratios": deltas} for role in ("current", "previous")]
+        return [{**aggregated[role], **self.identities[role], "pair_role": role, "pair_order": ORDER, "sample_spread_basis": "full_range", "paired_metric_ratios": deltas} for role in ("current", "previous")]
 
 
 def run(args):
@@ -144,7 +194,7 @@ def run(args):
 
 def check(args):
     config, lanes = objectives(args.kind, args.objectives)
-    records = load_jsonl(args.jsonl)
+    records = load_jsonl(args.jsonl, validate_records=False)
     baseline = load_baseline(args.baseline) if args.baseline else None
     results = []
     for lane in lanes:

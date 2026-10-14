@@ -296,56 +296,72 @@ cancel a p99 regression. Both qpx identities use the existing **qpx** spread
 caps, never the more permissive external-reference cap. Paired spread uses the
 full max/min of the three samples, not a best subset or a blend of attempts.
 
-Evaluation always validates schema, request/error accounting, responses,
-resources, workload equivalence and identities **before** checking spread or
-performance. Qpx functional failures (current **or previous**), malformed data,
-startup/tool failures and wrong-body/cache-result failures produce `ERROR` and
-exit **1**, immediately and without retries. An over-cap spread on the current
-qpx candidate produces `INCONCLUSIVE` immediately and is not remeasured; it can
-never be hidden by a later attractive sample. A reference-only over-cap spread
-produces `RETRYABLE_INVALID`. A parsed **reference-side transient invalid sample**
-can also request a retry via sampler exit **75**:
+Evaluation validates schema, request/error accounting, responses, resources,
+workload equivalence and identities **before** checking spread or performance.
+Candidate qpx functional failures, malformed candidate measurements, and
+candidate-side startup/tool or wrong-body/cache-result failures produce `ERROR`
+and exit **1**, immediately and without retries. An invalid pinned-release sample
+or measurement makes its paired lane `INCONCLUSIVE`/unmeasured, retaining the
+reason and logs; it is not retried because re-running the whole pair could hide
+candidate instability. A pinned-binary identity/configuration error remains a
+hard `ERROR`. An over-cap spread on the current qpx candidate also produces
+`INCONCLUSIVE` immediately and is not remeasured; it can never be hidden by a
+later attractive sample. A reference-only over-cap spread produces
+`RETRYABLE_INVALID`. A parsed **competitive reference-side transient invalid
+sample** can request a retry via sampler exit **75**:
 
-- HTTP/2: invalid request/error or non-2xx accounting from nginx or the direct
-  control backend, after successful parsing of counters, timings and latency
-  rows. A malformed/missing latency log or timing remains a hard error.
+- HTTP/2: parsed invalid-request/error or non-2xx accounting from nginx or the
+  direct control backend, after counters, timings and latency rows are parsed.
+  Other invalid reference data leaves the lane `INCONCLUSIVE`; candidate qpx
+  errors remain `ERROR`.
 - HTTP/1 proxy/origin/cache: a reference read-error overrun, only with otherwise
   clean request accounting, status probes, response lengths and cache results.
   The existing **1000ppm** default read-error ceiling is unchanged. Other
-  transport/functional failures remain hard errors.
+  invalid reference data leaves the lane `INCONCLUSIVE`; candidate qpx errors
+  remain `ERROR`.
 
-The driver maps that competitive-only exit to `RETRYABLE_INVALID`; exit 75 from
-a current/previous qpx-only sampler is always an error, never a retry request.
-No spread caps, paired regression floors or functional error tolerances are
-widened. After `RETRYABLE_INVALID`, the driver re-measures the **whole relevant
-pair or competitive lane group** in that job, with at most **two additional
-attempts** (three total). Candidate-side `INCONCLUSIVE` results are terminal and
-do not start another measurement. The driver accepts the first valid attempt,
-even if that attempt regresses, and never retries a valid regression or selects
-the best attempt. Other already-valid lanes are not re-measured. All raw
-samples, logs, measurements and results from every attempt remain under
+The driver maps competitive sampler exit 75 to `RETRYABLE_INVALID`. Candidate
+qpx sampler failures are `ERROR`; a competitive sampler failure with a valid
+candidate record but missing/invalid reference lanes is `INCONCLUSIVE`. An
+invalid pinned previous-release sample is also `INCONCLUSIVE`, never a retry
+request. No spread caps, paired regression floors or functional error
+tolerances are widened. After `RETRYABLE_INVALID`, the driver re-measures the
+**whole relevant pair or competitive lane group**, with at most **two additional
+attempts** (three total). Candidate-side spread and non-transient pinned-reference
+failures are terminal and do not start another measurement. The driver accepts
+the first valid attempt, even if that attempt regresses, and never retries a
+valid regression or selects the best attempt.
+Other already-valid lanes are not re-measured. All raw samples, logs,
+measurements and results from every attempt remain under
 `target/perf/{proxy,http2}-policy/` and are uploaded with `if: always()`.
 
-At exhaustion the lane is `INCONCLUSIVE`/unmeasured, exit **75**, with explicit
-required/valid/unmeasured coverage. It is **not green and not a qpx regression**.
-In short: lane unmeasured — reported visibly, not failed.
-A different valid regression remains exit **1**, even when another lane is
-inconclusive. A complete shared-runner assessment is green only when every
-required measurement is valid and every applicable qpx pair passes.
-`NOT_APPLICABLE` is explicit coverage exclusion, not a passing measurement.
+At exhaustion, or when a paired reference sample is invalid, the lane is
+`INCONCLUSIVE`/unmeasured with explicit required/valid/unmeasured coverage. The
+summary remains visibly `INCONCLUSIVE`, but the shared-runner job exits **0**:
+there is no measured qpx regression to report. This is neither a measured pass
+nor a qpx regression. A valid paired regression or candidate `ERROR` remains
+exit **1**, even when another lane is inconclusive. Controlled competitive
+objective misses remain blocking. `NOT_APPLICABLE` is explicit coverage
+exclusion, not a passing measurement. A report is `COMPLETE` only when every
+required lane is measured; an inconclusive report can still be non-blocking.
 
 Competitive dominance (including WebDAV), nginx/apache/lighttpd comparisons,
 and historical absolute and normalized qpx baselines remain visible as JSON
 artifacts/trends. `QPX_PERF_ASSESSMENT=shared` is the documented default and is
-explicit in these CI jobs; competitive misses are `REPORT_ONLY`. A separately
+explicit in these CI jobs; competitive objective misses are `REPORT_ONLY`, and
+incomplete competitive lanes remain `INCONCLUSIVE` without blocking the job.
+Candidate functional or measurement-invalid errors still block. A separately
 configured **controlled-hardware** assessment may set
 `QPX_PERF_ASSESSMENT=controlled` to gate the unchanged competitive targets and
 historical thresholds, without noise allowances or retries of valid misses.
 Do not enable that mode on an ordinary shared runner. Scheduler queue-delay
 ratios are diagnostics only in **both** modes and never affect the exit decision.
-The standalone shell checkers inspect competitive JSONL and return exit 75 for
-invalid spread; they do not assert that the paired regression gate ran. Existing
-streaming and netem checks are separate assessments, unchanged by this policy.
+The standalone checkers inspect competitive JSONL and preserve missing or
+invalid reference lanes as `INCONCLUSIVE` in their JSON output; shared assessment
+returns success for these non-findings. They do not assert that the paired
+regression gate ran. Exit 75 is an internal sampler signal for retryable
+competitive-reference invalidity. Existing streaming and netem checks are
+separate assessments, unchanged by this policy.
 
 Run the synthetic policy and sampler fixtures (no full benches or network).
 They exercise real shell sampler functions with deterministic tool output,

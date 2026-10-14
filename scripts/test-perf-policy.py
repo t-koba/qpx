@@ -115,7 +115,7 @@ class PolicyTests(unittest.TestCase):
                 source.write_text(payload)
             else:
                 write_jsonl(source, payload)
-            return load_jsonl(source)
+            return load_jsonl(source, validate_records=False)
         result = bounded_measure(lane, paired, fixture_measure, self.directory / name, mode="shared")
         write_json(self.directory / (name + "-summary.json"), summary([result]))
         self.assertEqual(len(calls), result.get("attempt", 0))
@@ -159,7 +159,8 @@ class PolicyTests(unittest.TestCase):
             candidate, count = self.measure(
                 lane, [candidate_invalid, pair(lane)], f"{index}-candidate-inconclusive"
             )
-            self.assertEqual((candidate["status"], count, exit_code([candidate])), ("INCONCLUSIVE", 1, 75))
+            self.assertEqual((candidate["status"], count, exit_code([candidate])), ("INCONCLUSIVE", 1, 0))
+            self.assertEqual(summary([candidate])["status"], "INCONCLUSIVE")
 
             reference_invalid = pair(lane, throughput=.5, spread=2000, invalid_role="previous")
             result = evaluate(reference_invalid, lane, True)
@@ -176,11 +177,13 @@ class PolicyTests(unittest.TestCase):
             exhausted, count = self.measure(
                 lane, [reference_invalid] * 3, f"{index}-reference-exhausted"
             )
-            self.assertEqual((exhausted["status"], count, exit_code([exhausted])), ("INCONCLUSIVE", 3, 75))
+            self.assertEqual((exhausted["status"], count, exit_code([exhausted])), ("INCONCLUSIVE", 3, 0))
+            self.assertEqual(summary([exhausted])["status"], "INCONCLUSIVE")
             self.assertEqual(summary([exhausted])["coverage"]["valid"], 0)
             self.assertTrue(summary([exhausted])["coverage"]["unmeasured"])
 
     def test_regression_survives_another_inconclusive_lane(self):
+        self.assertEqual(exit_code([{"status": "unknown"}]), 1)
         bad, _ = self.measure(self.lanes[0], [pair(self.lanes[0], p99=1.2)], "bad")
         invalid, _ = self.measure(self.lanes[1], [pair(self.lanes[1], spread=2000)] * 3, "invalid")
         report = summary([bad, invalid])
@@ -191,14 +194,17 @@ class PolicyTests(unittest.TestCase):
     def test_missing_corrupt_wrong_response_and_schema_are_errors(self):
         lane = self.lanes[0]
         broken = pair(lane, spread=2000)
-        broken[1]["bad_length_responses"] = 1  # error outranks spread, no retry
+        broken[0]["bad_length_responses"] = 1  # candidate error outranks spread, no retry
         malformed = pair(lane)
         malformed[0]["requests_per_sec"] = "NaN"
         schema = pair(lane)
         schema[0]["benchmark_schema_version"] = 999
-        for index, payload in enumerate(([pair(lane)[0]], "{bad-json\n", broken, malformed, schema, "[]\n", "")):
+        cases = (([pair(lane)[0]], "INCONCLUSIVE", 0), ("{bad-json\n", "ERROR", 1),
+                 (broken, "ERROR", 1), (malformed, "ERROR", 1), (schema, "ERROR", 1),
+                 ("[]\n", "ERROR", 1), ("", "ERROR", 1))
+        for index, (payload, expected, code) in enumerate(cases):
             result, count = self.measure(lane, [payload, pair(lane)], str(index))
-            self.assertEqual((result["status"], count, exit_code([result])), ("ERROR", 1, 1))
+            self.assertEqual((result["status"], count, exit_code([result])), (expected, 1, code))
         for index, payload in enumerate((pair(lane) * 2, pair(lane))):
             if index == 1:
                 payload[1]["source_sha"] = "b" * 40
@@ -213,7 +219,8 @@ class PolicyTests(unittest.TestCase):
             result, count = self.measure(
                 lane, [candidate_invalid, valid], f"{index}-candidate", paired=False
             )
-            self.assertEqual((result["status"], count, exit_code([result])), ("INCONCLUSIVE", 1, 75))
+            self.assertEqual((result["status"], count, exit_code([result])), ("INCONCLUSIVE", 1, 0))
+            self.assertEqual(summary([result])["status"], "INCONCLUSIVE")
 
             reference_invalid = copy.deepcopy(valid)
             reference_invalid[-1]["sample_spread"]["requests_per_sec_ratio"] = 2000
@@ -231,6 +238,17 @@ class PolicyTests(unittest.TestCase):
             process = subprocess.run([str(ROOT / "scripts" / script), str(source)], text=True, capture_output=True)
             self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
             self.assertEqual(json.loads(process.stdout)["status"], "COMPLETE")
+            reference_invalid = copy.deepcopy(records)
+            reference_invalid[1]["non_2xx_responses"] = 1
+            write_jsonl(source, reference_invalid)
+            process = subprocess.run([str(ROOT / "scripts" / script), str(source)], text=True, capture_output=True)
+            self.assertEqual(process.returncode, 0, process.stderr + process.stdout)
+            self.assertEqual(json.loads(process.stdout)["status"], "INCONCLUSIVE")
+            candidate_invalid = copy.deepcopy(records)
+            candidate_invalid[0]["non_2xx_responses"] = 1
+            write_jsonl(source, candidate_invalid)
+            process = subprocess.run([str(ROOT / "scripts" / script), str(source)], text=True, capture_output=True)
+            self.assertEqual(process.returncode, 1, process.stderr + process.stdout)
             source.write_text("{bad-json\n")
             self.assertEqual(subprocess.run([str(ROOT / "scripts" / script), str(source)], capture_output=True).returncode, 1)
         # An absent file is an error, never a spread event.
@@ -324,7 +342,7 @@ class PolicyTests(unittest.TestCase):
                 with patch.object(DRIVER.subprocess, "run", return_value=SimpleNamespace(returncode=status)) as run:
                     result = bounded_measure(lane, paired, sampler, self.directory / f"{kind}-{status}-{paired}")
                 self.assertEqual((result["status"], run.call_count), (expected, attempts))
-                self.assertEqual(exit_code([result]), 75 if expected == "INCONCLUSIVE" else 1)
+                self.assertEqual(exit_code([result]), 0 if expected == "INCONCLUSIVE" else 1)
             # Neither previous nor current qpx can request a functional retry.
             for role in ("current", "previous"):
                 with patch.object(DRIVER.subprocess, "run", return_value=SimpleNamespace(returncode=75)):
@@ -342,6 +360,59 @@ class PolicyTests(unittest.TestCase):
                 result = bounded_measure(lane, False, sampler, self.directory / f"{kind}-recovered")
             self.assertEqual((result["status"], len(calls), result["attempt"]), ("REPORT_ONLY", 2, 2))
 
+    def test_competitive_sampler_error_with_valid_candidate_is_inconclusive(self):
+        for kind in ("proxy", "http2"):
+            lane = objectives(kind)[1][0]
+            sampler = fixture_sampler(lane)
+
+            def reference_failure(command, **_kwargs):
+                write_jsonl(command[-1], [record(lane, lane["qpx"])])
+                return SimpleNamespace(returncode=1)
+
+            with patch.object(DRIVER.subprocess, "run", side_effect=reference_failure):
+                result = bounded_measure(lane, False, sampler,
+                                         self.directory / f"{kind}-reference-command-failure", mode="shared")
+            self.assertEqual((result["status"], exit_code([result])), ("INCONCLUSIVE", 0))
+            self.assertIn("competitive sampler exited 1", result["reasons"][0])
+            self.assertIn("missing measurement", result["reasons"][0])
+
+            def candidate_failure(command, **_kwargs):
+                invalid = record(lane, lane["qpx"])
+                invalid["non_2xx_responses"] = 1
+                write_jsonl(command[-1], [invalid])
+                return SimpleNamespace(returncode=1)
+
+            with patch.object(DRIVER.subprocess, "run", side_effect=candidate_failure):
+                result = bounded_measure(lane, False, sampler,
+                                         self.directory / f"{kind}-candidate-command-failure", mode="shared")
+            self.assertEqual((result["status"], exit_code([result])), ("ERROR", 1))
+
+    def test_invalid_pinned_reference_is_inconclusive_and_nonblocking(self):
+        for kind in ("proxy", "http2"):
+            lane = objectives(kind)[1][0]
+            sampler = fixture_sampler(lane)
+            with patch.object(DRIVER.subprocess, "run", return_value=SimpleNamespace(returncode=1)):
+                with self.assertRaises(DRIVER.InconclusiveReference):
+                    sampler.sample(lane, "previous", True, self.directory / f"{kind}-reference-process")
+
+            calls = []
+            def candidate_then_reference_fails(command, env, **_kwargs):
+                calls.append(env["QPXD_BIN"])
+                if env["QPXD_BIN"] == str(sampler.binaries["current"]):
+                    write_jsonl(command[-1], [record(lane, lane["qpx"])])
+                    return SimpleNamespace(returncode=0)
+                return SimpleNamespace(returncode=1)
+
+            # A valid candidate sample followed by an invalid pinned reference
+            # leaves the pair inconclusive; it never retries the candidate.
+            with patch.object(DRIVER.subprocess, "run", side_effect=candidate_then_reference_fails):
+                result = bounded_measure(lane, True, sampler,
+                                         self.directory / f"{kind}-reference-no-retry", mode="shared")
+            self.assertEqual((result["status"], result["attempt"], exit_code([result])), ("INCONCLUSIVE", 1, 0))
+            self.assertIn("pinned reference measurement unavailable", result["reasons"][0])
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(summary([result])["coverage"]["unmeasured"], [f'{lane["name"]}:paired'])
+
     def test_both_qpx_roles_functional_failures_never_retry(self):
         for kind in ("proxy", "http2"):
             lane = objectives(kind)[1][0]
@@ -349,7 +420,39 @@ class PolicyTests(unittest.TestCase):
                 invalid = pair(lane)
                 invalid[role]["non_2xx_responses"] = 1
                 result, count = self.measure(lane, [invalid, pair(lane)], f"{kind}-{role}")
-                self.assertEqual((result["status"], count), ("ERROR", 1))
+                expected = "ERROR" if role == 0 else "INCONCLUSIVE"
+                self.assertEqual((result["status"], count), (expected, 1))
+                self.assertEqual(exit_code([result]), 1 if role == 0 else 0)
+
+    def test_incomplete_competitive_lanes_are_reported_without_blocking(self):
+        for lane in self.lanes:
+            records = [record(lane, proxy) for proxy in [lane["qpx"], *lane["references"]]]
+            incomplete = copy.deepcopy(records[:-1])
+            result = evaluate(incomplete, lane, mode="shared")
+            self.assertEqual((result["status"], exit_code([result])), ("INCONCLUSIVE", 0))
+            self.assertTrue(result["reasons"])
+            self.assertEqual(summary([result])["status"], "INCONCLUSIVE")
+            unstable_candidate = copy.deepcopy(incomplete)
+            unstable_candidate[0]["sample_spread"]["latency_p99_ratio"] = 2000
+            result = evaluate(unstable_candidate, lane, mode="shared")
+            self.assertEqual((result["status"], exit_code([result])), ("INCONCLUSIVE", 0))
+            self.assertTrue(any(lane["qpx"] in reason for reason in result["reasons"]))
+            if lane["kind"] == "http2":
+                config, _ = objectives("http2")
+                aggregate = DRIVER.http2_aggregate(config, [result])
+                report = summary([result, aggregate])
+                self.assertEqual((aggregate["status"], report["status"], exit_code([result, aggregate])),
+                                 ("INCONCLUSIVE", "INCONCLUSIVE", 0))
+
+            invalid_reference = copy.deepcopy(records)
+            invalid_reference[1]["non_2xx_responses"] = 1
+            result = evaluate(invalid_reference, lane, mode="shared")
+            self.assertEqual((result["status"], exit_code([result])), ("INCONCLUSIVE", 0))
+
+            invalid_candidate = copy.deepcopy(records)
+            invalid_candidate[0]["non_2xx_responses"] = 1
+            result, _ = self.measure(lane, [invalid_candidate], f"{lane['name']}-bad-candidate", paired=False)
+            self.assertEqual((result["status"], exit_code([result])), ("ERROR", 1))
 
 class SamplerScriptTests(unittest.TestCase):
     """Execute real sampler functions with deterministic tool/proc fixtures."""
