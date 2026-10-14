@@ -24,6 +24,7 @@ pub use lookup_ops::{
     attach_revalidation_headers, build_hot_hit_response, build_only_if_cached_miss_response,
     lookup, maybe_build_stale_if_error_response,
 };
+pub use metrics::register_writeback_admission_rejections;
 pub use store::{CacheStoreContext, CacheStoreTiming, maybe_store, revalidate_not_modified};
 pub use types::{
     CacheBackend, CacheRequestKey, CacheWritebackAdmission, LookupOutcome, RevalidationState,

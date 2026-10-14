@@ -15,12 +15,13 @@ impl AdminTasks {
         runtime: runtime::Runtime,
         tcp_bindings: &tcp_bindings::TcpBindings,
     ) -> Result<Self> {
-        let metrics_task = config
-            .telemetry
-            .metrics
-            .as_ref()
-            .map(|metrics| start_metrics(metrics, tcp_bindings.clone_metrics()?))
-            .transpose()?;
+        let metrics_task = if let Some(metrics) = config.telemetry.metrics.as_ref() {
+            let task = start_metrics(metrics, tcp_bindings.clone_metrics()?)?;
+            qpxd_cache::register_writeback_admission_rejections();
+            Some(task)
+        } else {
+            None
+        };
 
         #[cfg(feature = "acme")]
         let (http01_task, manager_task) =
