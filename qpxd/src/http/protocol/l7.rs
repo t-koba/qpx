@@ -331,7 +331,9 @@ fn parse_max_forwards_value(raw: &str) -> Option<u64> {
         return None;
     }
 
-    // Retain one above the u32 output limit so decrement-then-cap handles MAX + 1 exactly.
+    // RFC 9110 §7.6.2 permits capping at the recipient's maximum supported value.
+    // qpx's supported forwarding limit is u32::MAX; retain one above it so MAX + 1
+    // decrements to the limit exactly.
     let cap = u64::from(u32::MAX) + 1;
     let mut parsed = 0u64;
     for digit in raw.bytes() {

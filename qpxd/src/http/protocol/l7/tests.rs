@@ -282,6 +282,14 @@ async fn max_forwards_caps_large_decimal_values_before_forwarding() {
         "4294967295"
     );
 
+    // The RFC permits the recipient to cap at its maximum supported value.
+    let (response, request) = run_max_forwards(Method::OPTIONS, &["4294967297"]).await;
+    assert!(response.is_none());
+    assert_eq!(
+        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        "4294967295"
+    );
+
     let very_large = "9".repeat(40);
     let (response, request) = run_max_forwards(Method::OPTIONS, &[very_large.as_str()]).await;
     assert!(response.is_none());
