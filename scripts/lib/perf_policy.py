@@ -1,8 +1,7 @@
 """Validity first; independent paired regressions; competitive reports.
 
 Exit 1 is a hard error/regression (or a controlled competitive miss).
-INCONCLUSIVE measurements remain visible but are non-blocking. Only
-RETRYABLE_INVALID permits another measurement.
+INCONCLUSIVE measurements remain visible but are non-blocking. Only RETRYABLE_INVALID permits another measurement.
 """
 import json
 import math

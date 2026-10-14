@@ -339,7 +339,8 @@ At exhaustion, or when a paired reference sample is invalid, the lane is
 `INCONCLUSIVE`/unmeasured with explicit required/valid/unmeasured coverage. The
 summary remains visibly `INCONCLUSIVE`, but the shared-runner job exits **0**:
 there is no measured qpx regression to report. This is neither a measured pass
-nor a qpx regression. A valid paired regression or candidate `ERROR` remains
+nor a qpx regression. In short: lane unmeasured — reported visibly, not failed.
+A valid paired regression or candidate `ERROR` remains
 exit **1**, even when another lane is inconclusive. Controlled competitive
 objective misses remain blocking. `NOT_APPLICABLE` is explicit coverage
 exclusion, not a passing measurement. A report is `COMPLETE` only when every
