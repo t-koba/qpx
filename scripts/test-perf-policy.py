@@ -402,17 +402,29 @@ dump_benchmark_logs() { :; }
         return process, directory
 
     def h2_sample(self, proxy, name, malformed=None, clean=False):
-        requests, success, errors = (3615, 3615 if clean else 3614, 0 if clean else 1)
-        sample = (f"finished in 10s, 361.50 req/s\n"
-                  f"requests: {requests} total, {requests} started, {requests} done, {success} succeeded, 0 failed, {errors} errored, 0 timeout\n"
-                  f"status codes: {success} 2xx, 0 3xx, 0 4xx, 0 5xx\n"
+        if malformed == "status-overrun":
+            requests, started, done, success, failed, errors, status_2xx = (
+                5133, 715, 615, 615, 4518, 4518, 707
+            )
+            duration, rate = "18.97s", "32.42"
+        else:
+            requests = started = done = 3615
+            success, failed, errors = (3615, 0, 0) if clean else (3614, 0, 1)
+            status_2xx = success
+            duration, rate = "10s", "361.50"
+        sample = (f"finished in {duration}, {rate} req/s\n"
+                  f"requests: {requests} total, {started} started, {done} done, {success} succeeded, {failed} failed, {errors} errored, 0 timeout\n"
+                  f"status codes: {status_2xx} 2xx, 0 3xx, 0 4xx, 0 5xx\n"
                   "time for request: 1ms 3ms 2ms\n")
         if malformed == "timing":
             sample = sample.replace("time for request:", "missing:")
         sample_path = self.directory / (name + ".h2load")
         sample_path.write_text(sample)
         latency_path = self.directory / (name + ".tsv")
-        latency_path.write_text("0\t200\t2000\n" * success + ("0\t0\t3000\n" if errors else ""))
+        latency_rows = "0\t200\t2000\n" * (done if malformed == "status-overrun" else success)
+        if errors and malformed != "status-overrun":
+            latency_rows += "0\t0\t3000\n"
+        latency_path.write_text(latency_rows)
         if malformed == "latency":
             latency_path.write_text("not-a-latency-row\n")
         prelude = f'''
@@ -440,6 +452,9 @@ h2load() {{
         for malformed in ("latency", "timing"):
             process = self.h2_sample("nginx", malformed, malformed=malformed)
             self.assertEqual(process.returncode, 1, process.stderr)
+        process = self.h2_sample("qpxd", "status-overrun", malformed="status-overrun")
+        self.assertEqual(process.returncode, 1, process.stderr)
+        self.assertIn("h2load 2xx status count 707 exceeds completed request count 615", process.stderr)
         process = self.h2_sample("nginx", "clean", clean=True)
         self.assertEqual(process.returncode, 0, process.stderr)
 

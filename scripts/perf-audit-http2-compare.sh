@@ -437,8 +437,15 @@ if not latencies_us:
 latency_non_2xx = sum(status < 200 or status >= 300 for status in latency_statuses)
 if any(value < 0 for value in latencies_us):
     raise SystemExit("h2load latency log contains a negative latency")
-if not 0 <= succeeded <= done <= started <= requests or status_2xx > done:
-    raise SystemExit("inconsistent h2load request counters")
+if not 0 <= succeeded <= done <= started <= requests:
+    raise SystemExit(
+        "inconsistent h2load request counters: "
+        f"succeeded={succeeded}, done={done}, started={started}, total={requests}"
+    )
+if status_2xx > done:
+    raise SystemExit(
+        f"h2load 2xx status count {status_2xx} exceeds completed request count {done}"
+    )
 
 latencies_us.sort()
 
