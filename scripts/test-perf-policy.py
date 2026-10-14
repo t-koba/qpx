@@ -499,6 +499,58 @@ class SamplerScriptTests(unittest.TestCase):
         self.directory = ARTIFACTS / self._testMethodName
         self.directory.mkdir(parents=True)
 
+    def test_cache_writeback_log_veto_is_symmetric_and_fail_closed(self):
+        sampler = object.__new__(DRIVER.Sampler)
+        failure = json.dumps({
+            "level": "WARN",
+            "target": "qpxd_cache::store",
+            "message": "cache writeback failed",
+            "error": "File exists (os error 17)",
+        }) + "\n"
+        for role, exception in (("current", ValueError), ("previous", DRIVER.InconclusiveReference)):
+            with self.subTest(role=role):
+                directory = self.directory / role
+                (directory / "logs").mkdir(parents=True)
+                (directory / "logs/qpxd-cache.log").write_text(failure)
+                # A passing one-URL sentinel cannot override a failure in the
+                # sampler's dedicated cache log.
+                (directory / "samples.jsonl").write_text(json.dumps({"cache_writeback_verified": True}) + "\n")
+                with self.assertRaisesRegex(exception, "cache writeback failure"):
+                    sampler._validate_cache_writeback_log(directory, role)
+                validation = json.loads((directory / "cache-writeback-validation.json").read_text())
+                self.assertEqual(validation["status"], "writeback_failure_observed")
+                self.assertEqual(validation["failure_count"], 1)
+
+        clean_dir = self.directory / "clean"
+        (clean_dir / "logs").mkdir(parents=True)
+        (clean_dir / "logs/qpxd-cache.log").write_text("\n".join((
+            json.dumps({"target": "qpxd_cache::store", "message": "response body ended before declared content-length was satisfied"}),
+            json.dumps({"target": "qpxd_cache::store", "message": "origin returned File exists"}),
+        )) + "\n")
+        sampler._validate_cache_writeback_log(clean_dir, "current")
+        validation = json.loads((clean_dir / "cache-writeback-validation.json").read_text())
+        self.assertEqual(validation["status"], "no_writeback_failure_logged")
+        self.assertEqual(validation["failure_count"], 0)
+
+        for role, exception in (("current", ValueError), ("previous", DRIVER.InconclusiveReference)):
+            with self.subTest(role=role, missing=True):
+                directory = self.directory / f"missing-{role}"
+                directory.mkdir()
+                with self.assertRaisesRegex(exception, "validity unestablished"):
+                    sampler._validate_cache_writeback_log(directory, role)
+                validation = json.loads((directory / "cache-writeback-validation.json").read_text())
+                self.assertEqual(validation["status"], "unestablished")
+                self.assertIsNone(validation["failure_count"])
+
+        malformed_dir = self.directory / "malformed"
+        (malformed_dir / "logs").mkdir(parents=True)
+        (malformed_dir / "logs/qpxd-cache.log").write_text("not-json\n")
+        with self.assertRaisesRegex(ValueError, "validity unestablished"):
+            sampler._validate_cache_writeback_log(malformed_dir, "current")
+        validation = json.loads((malformed_dir / "cache-writeback-validation.json").read_text())
+        self.assertEqual(validation["status"], "unestablished")
+        self.assertIn("line 1", validation["detail"])
+
     def shell(self, script, functions, command, name, prelude=""):
         directory = self.directory / name
         directory.mkdir()

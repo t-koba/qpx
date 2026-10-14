@@ -42,9 +42,10 @@ run_group \
   "1 2 4"
 run_group origin "1024" "qpxd-local,nginx-static" ""
 run_group webdav "1024 1048576" "qpxd-webdav,apache-webdav" ""
-# The unique-URL miss workload pays for origin fetches plus disk writeback on
-# every request, so its per-sample spread is much wider than the hit path;
-# five samples keep the majority-median stable across runs.
+# This workload intends to exercise unique-URL misses and cache writeback.
+# MISS headers plus one post-sample sentinel hit do not prove every asynchronous
+# write completed (or that admission never rejected one); keep that limitation
+# explicit while taking five samples because the miss path is noisier than hits.
 QPX_PROXY_COMPARE_MISS_SAMPLE_ATTEMPTS=5 \
   run_group cache "1024 1048576" "qpxd-cache,nginx-cache" ""
 run_group feature-rich "1024 1048576" "qpxd-feature-rich,nginx-feature-rich" ""

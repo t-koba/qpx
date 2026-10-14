@@ -53,6 +53,34 @@ def aggregate(samples, lane):
     return record
 
 
+def cache_writeback_log_status(log_path):
+    """Count explicit cache-store writeback failures in one qpxd-cache log."""
+    try:
+        if not log_path.is_file():
+            raise ValueError("required qpxd-cache log is missing")
+        failure_count = 0
+        with log_path.open(encoding="utf-8") as log:
+            for line_number, line in enumerate(log, 1):
+                if not line.strip():
+                    continue
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise ValueError(f"malformed qpxd-cache JSON log at line {line_number}") from error
+                if not isinstance(event, dict):
+                    raise ValueError(f"qpxd-cache log entry at line {line_number} is not an object")
+                message = event.get("message")
+                if isinstance(message, str) and message.startswith("cache writeback failed"):
+                    failure_count += 1
+    except (OSError, ValueError) as error:
+        return {"status": "unestablished", "failure_count": None, "detail": str(error)}
+    return {
+        "status": "writeback_failure_observed" if failure_count else "no_writeback_failure_logged",
+        "failure_count": failure_count,
+        "detail": None,
+    }
+
+
 class Sampler:
     def __init__(self, previous_bin, previous_sha):
         self.binaries = {"current": Path(os.environ.get("QPXD_BIN", ROOT / "target/release/qpxd")).resolve(),
@@ -66,6 +94,26 @@ class Sampler:
             self.identities[role] = {"source_sha": previous_sha if role == "previous" else subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                                      "binary_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                      "toolchain": toolchain, "runner": runner}
+
+    def _validate_cache_writeback_log(self, directory, role):
+        log_relative_path = Path("logs/qpxd-cache.log")
+        validation = cache_writeback_log_status(directory / log_relative_path)
+        validation.update({
+            "log": str(log_relative_path),
+            "scope": "full qpxd-cache log for this sampler invocation, including setup and verification",
+            "limitation": "no logged failure does not prove every asynchronous write completed or admission rejections were zero",
+        })
+        write_json(directory / "cache-writeback-validation.json", validation)
+        if validation["status"] == "no_writeback_failure_logged":
+            return
+        if validation["status"] == "writeback_failure_observed":
+            reason = f"cache writeback failure observed ({validation['failure_count']} event(s))"
+        else:
+            reason = f"cache writeback validity unestablished ({validation['detail']})"
+        reason += "; see logs/qpxd-cache.log and cache-writeback-validation.json"
+        if role == "previous":
+            raise InconclusiveReference(f"pinned reference {reason}")
+        fail(reason)
 
     def sample(self, lane, role, paired, directory):
         directory.mkdir(parents=True, exist_ok=False)
@@ -88,6 +136,11 @@ class Sampler:
         script = ROOT / "scripts" / ("perf-audit-http2-compare.sh" if lane["kind"] == "http2" else "perf-audit-proxy-compare.sh")
         with (directory / "command.log").open("w") as log:
             process = subprocess.run([str(script), str(out)], env=env, stdout=log, stderr=subprocess.STDOUT)
+        if lane.get("kind") == "proxy" and lane.get("bench") == "proxy_cache_miss_http1" and lane.get("qpx") == "qpxd-cache":
+            # Validate the collected log after the sampler has shut down so
+            # late background-write failures are not hidden by MISS headers or
+            # the single post-sample sentinel.
+            self._validate_cache_writeback_log(directory, role)
         if process.returncode == 75 and not paired and role == "current":
             raise RetryableInvalid(f"reference sample invalid; see {directory.name}/command.log (sampler exit 75)")
         if process.returncode and role == "previous":
