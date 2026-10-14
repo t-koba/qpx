@@ -252,6 +252,19 @@ async fn serve_http1_with_interim_parse_errors_send_connection_close() {
     let text = String::from_utf8(raw).expect("utf8");
     assert!(text.starts_with("HTTP/1.1 431"));
     assert!(text.contains("Connection: close"));
+
+    tokio::time::timeout(Duration::from_secs(1), async {
+        loop {
+            match stream.read(&mut chunk).await {
+                Ok(0) => break,
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
+                Err(error) => panic!("read after 431 response: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("connection remained open after 431 response");
     server.await.expect("server task");
 }
 
