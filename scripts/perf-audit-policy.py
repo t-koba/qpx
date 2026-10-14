@@ -118,13 +118,34 @@ class Sampler:
                                      "binary_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                                      "toolchain": toolchain, "runner": runner}
 
+    def _validate_cache_writeback_admission_metric(self, directory, records):
+        """Require the candidate's scrape to establish zero admission rejects."""
+        validation = {"status": "unestablished", "rejections": None}
+        if len(records) != 1:
+            validation["detail"] = "paired cache-miss sampler did not return exactly one record"
+        else:
+            value = records[0].get("cache_writeback_admission_rejections")
+            if type(value) is not int or value < 0:
+                validation["detail"] = "cache writeback admission rejection metric is missing or malformed"
+            elif value != 0:
+                validation.update(status="rejection_observed", rejections=value)
+                validation["detail"] = "cache writeback admission rejection metric is nonzero"
+            else:
+                validation.update(status="zero_rejections_observed", rejections=0, detail=None)
+        write_json(directory / "cache-writeback-admission-validation.json", validation)
+        if validation["status"] != "zero_rejections_observed":
+            fail(
+                "cache writeback admission validity unestablished "
+                f"({validation['detail']}); see cache-writeback-admission-validation.json"
+            )
+
     def _validate_cache_writeback_log(self, directory, role):
         log_relative_path = Path("logs/qpxd-cache.log")
         validation = cache_writeback_log_status(directory / log_relative_path)
         validation.update({
             "log": str(log_relative_path),
             "scope": "full qpxd-cache log for this sampler invocation, including setup and verification",
-            "limitation": "absence of logged errors does not prove every asynchronous write completed, admission rejections were zero, or no unlogged body-length mismatch occurred",
+            "limitation": "absence of logged errors does not prove every asynchronous write completed or no unlogged body-length mismatch occurred; candidate admission rejections are validated separately, while the pinned reference does not export that counter",
         })
         write_json(directory / "cache-writeback-validation.json", validation)
         if validation["status"] == "no_cache_miss_response_failure_logged":
@@ -160,11 +181,18 @@ class Sampler:
         else:
             env[prefix + "BENCH_FILTER"] = lane["bench"]
             env[prefix + "MISS_SAMPLE_ATTEMPTS"] = "1" if paired else "3"
+            if (
+                paired
+                and role == "current"
+                and lane.get("bench") == "proxy_cache_miss_http1"
+                and lane.get("qpx") == "qpxd-cache"
+            ):
+                env[prefix + "CACHE_ADMISSION_METRICS_PORT"] = "19093"
         out = directory / "samples.jsonl"
         script = ROOT / "scripts" / ("perf-audit-http2-compare.sh" if lane["kind"] == "http2" else "perf-audit-proxy-compare.sh")
         with (directory / "command.log").open("w") as log:
             process = subprocess.run([str(script), str(out)], env=env, stdout=log, stderr=subprocess.STDOUT)
-        if lane.get("kind") == "proxy" and lane.get("bench") == "proxy_cache_miss_http1" and lane.get("qpx") == "qpxd-cache":
+        if lane.get("bench") == "proxy_cache_miss_http1" and lane.get("qpx") == "qpxd-cache":
             # Validate the collected log after the sampler has shut down so
             # late background-write failures are not hidden by MISS headers or
             # the single post-sample sentinel.
@@ -204,6 +232,13 @@ class Sampler:
             if role == "previous":
                 raise InconclusiveReference(f"pinned reference measurement invalid: {error}") from error
             raise
+        if (
+            paired
+            and role == "current"
+            and lane.get("bench") == "proxy_cache_miss_http1"
+            and lane.get("qpx") == "qpxd-cache"
+        ):
+            self._validate_cache_writeback_admission_metric(directory, records)
         return records
 
     def __call__(self, lane, paired, directory):

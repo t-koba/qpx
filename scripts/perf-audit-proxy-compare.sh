@@ -37,6 +37,7 @@ BACKEND_PORT="${QPX_PROXY_COMPARE_BACKEND_PORT:-18080}"
 BACKEND_WORKERS="${QPX_PROXY_COMPARE_BACKEND_WORKERS:-3}"
 LOCAL_ORIGIN_WORKERS="${QPX_PROXY_COMPARE_LOCAL_ORIGIN_WORKERS:-3}"
 CACHE_WORKERS="${QPX_PROXY_COMPARE_CACHE_WORKERS:-4}"
+CACHE_ADMISSION_METRICS_PORT="${QPX_PROXY_COMPARE_CACHE_ADMISSION_METRICS_PORT:-}"
 FEATURE_RICH_WORKERS="${QPX_PROXY_COMPARE_FEATURE_RICH_WORKERS:-4}"
 WEBDAV_WORKERS="${QPX_PROXY_COMPARE_WEBDAV_WORKERS:-2}"
 WEBDAV_BLOCKING_THREADS="${QPX_PROXY_COMPARE_WEBDAV_BLOCKING_THREADS:-128}"
@@ -192,6 +193,7 @@ collect_artifacts() {
   cp "$TMP_DIR"/*.warmup "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.valid-samples.tsv "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.sample.txt "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR"/*.prom "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$LOG_DIR"/*.sample.log "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.jsonl "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
@@ -576,6 +578,7 @@ start_qpxd_cache() {
   local headers=""
   local http_policy=""
   local http_modules=""
+  local admission_metrics=""
   local workers="$CACHE_WORKERS"
   if [ "$rich" = true ]; then
     workers="$FEATURE_RICH_WORKERS"
@@ -654,12 +657,17 @@ http:
               zstd: true"
     route_features="${headers}${rate_limit}${guard_route}${http_policy}${http_modules}"
   fi
+  if [ "$name" = qpxd-cache ] && [ -n "$CACHE_ADMISSION_METRICS_PORT" ]; then
+    admission_metrics="
+  metrics:
+    listen: 127.0.0.1:${CACHE_ADMISSION_METRICS_PORT}"
+  fi
   cat >"$config" <<YAML
 state_dir: "$STATE_DIR"
 telemetry:
   system_log:
     level: warn
-    format: json${access_log}${guard}
+    format: json${admission_metrics}${access_log}${guard}
 caches:
   - name: ${name}-disk
     kind: disk
@@ -703,6 +711,9 @@ YAML
   LAST_STARTED_PID="$pid"
   register_pid "$pid"
   wait_http "$name" "$port" "$pid" "$LOG_DIR/${name}.log"
+  if [ "$name" = qpxd-cache ] && [ -n "$CACHE_ADMISSION_METRICS_PORT" ]; then
+    wait_cache_admission_metric_zero "startup"
+  fi
 }
 
 start_qpxd_forward() {
@@ -975,6 +986,56 @@ extract_metric() {
   local file="$1"
   local key="$2"
   awk -v key="$key" '$1 == key { print $2; exit }' "$file"
+}
+
+parse_cache_admission_metric() {
+  local file="$1"
+  awk '
+    $1 == "qpx_cache_writeback_admission_rejections_total" {
+      count++
+      if (NF != 2 || $2 !~ /^[0-9]+$/) malformed = 1
+      else value = $2
+    }
+    END {
+      if (count != 1 || malformed) exit 1
+      print value
+    }
+  ' "$file"
+}
+
+require_cache_admission_metric_zero() {
+  local file="$1"
+  local value
+  if ! value="$(parse_cache_admission_metric "$file")"; then
+    echo "cache writeback admission rejection metric is missing or malformed" >&2
+    return 1
+  fi
+  if [[ ! "$value" =~ ^0+$ ]]; then
+    echo "cache writeback admission rejection metric is nonzero: ${value}" >&2
+    return 1
+  fi
+  echo 0
+}
+
+scrape_cache_admission_metric_zero() {
+  local phase="$1"
+  local output="$TMP_DIR/cache-writeback-admission-${phase}.prom"
+  local tries=0
+  while [ "$tries" -lt 40 ]; do
+    if curl -fsS --max-time 5 \
+      "http://127.0.0.1:${CACHE_ADMISSION_METRICS_PORT}/metrics" -o "$output"; then
+      require_cache_admission_metric_zero "$output"
+      return $?
+    fi
+    tries=$((tries + 1))
+    sleep 0.1
+  done
+  echo "qpxd-cache metrics endpoint unavailable during ${phase}" >&2
+  return 1
+}
+
+wait_cache_admission_metric_zero() {
+  scrape_cache_admission_metric_zero "$1" >/dev/null
 }
 
 probe_status() {
@@ -1317,8 +1378,9 @@ LUA
     status_before="$(safe_probe_status "$port" "$probe_path")"
   fi
   local metric_value
-  local complete summary_requests failed fatal_errors non_2xx bad_length cache_result_errors cache_writeback_verified write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
+  local complete summary_requests failed fatal_errors non_2xx bad_length cache_result_errors cache_writeback_verified cache_writeback_admission_rejections write_errors read_errors connect_errors timeout_errors rps mean_ms transfer_kbps commit valid
   local latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms requests_per_cpu_second
+  cache_writeback_admission_rejections=null
   samples_file="$TMP_DIR/${artifact_name}.valid-samples.tsv"
   : >"$samples_file"
   attempt=1
@@ -1497,9 +1559,15 @@ LUA
         "${request_target}?qpx_cache_writeback_verify=${artifact_name}-${attempt}"
       cache_writeback_verified=true
     fi
+    if [ "$valid" = true ] && [ "$proxy" = qpxd-cache ] && [ "$bench" = proxy_cache_miss_http1 ] && [ -n "$CACHE_ADMISSION_METRICS_PORT" ]; then
+      # Metrics rendering is cached for 250ms; wait for expiry so the scrape
+      # cannot return a pre-sample zero after an admission rejection.
+      sleep 0.3
+      cache_writeback_admission_rejections="$(scrape_cache_admission_metric_zero "sample-${attempt}")"
+    fi
     if [ "$valid" = true ]; then
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-        "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_baseline_kb" "$rss_peak_kb" "$rss_growth_kb" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$status_before" "$status_after" >>"$samples_file"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+        "$rps" "$complete" "$summary_requests" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$cache_writeback_admission_rejections" "$mean_ms" "$transfer_kbps" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$cpu_ms" "$rss_kb" "$rss_baseline_kb" "$rss_peak_kb" "$rss_growth_kb" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$status_before" "$status_after" >>"$samples_file"
       if [ "${STOP_AFTER_FIRST_VALID_SAMPLE:-false}" = true ]; then
         break
       fi
@@ -1545,11 +1613,11 @@ LUA
     record_invalid_sample "$bench" "$proxy" "$body_kind" "$body_bytes" "${status_before:-200}" "${status_after:-200}" "sample_aggregation_failed"
     return 0
   fi
-  IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length cache_result_errors cache_writeback_verified mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb requests_per_cpu_second fd_baseline fd_peak fd_growth scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics status_before status_after <<<"$selected_sample"
+  IFS=$'\t' read -r rps complete summary_requests failed connect_errors read_errors write_errors timeout_errors non_2xx bad_length cache_result_errors cache_writeback_verified cache_writeback_admission_rejections mean_ms transfer_kbps latency_p50_ms latency_p90_ms latency_p95_ms latency_p99_ms latency_p999_ms cpu_ms rss_kb rss_baseline_kb rss_peak_kb rss_growth_kb requests_per_cpu_second fd_baseline fd_peak fd_growth scheduler_run_delay_ns scheduler_queue_delay_us_per_request kernel_resource_metrics status_before status_after <<<"$selected_sample"
   commit="${GITHUB_SHA:-unknown}"
   valid=true
-  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_baseline_kb":%s,"rss_peak_kb":%s,"rss_growth_kb":%s,"requests_per_cpu_second":%s,"fd_baseline":%s,"fd_peak":%s,"fd_growth":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
-    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_baseline_kb")" "$(json_number_or_null "$rss_peak_kb")" "$(json_number_or_null "$rss_growth_kb")" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
+  printf '{"bench":"%s","proxy":"%s","body_profile":"%s","duration_seconds":%s,"threads":%s,"concurrency":%s,"body_bytes":%s,"sample_attempts":%s,"valid_samples":%s,"aggregation":"single_sample","requests":%s,"complete_requests":%s,"failed_requests":%s,"connect_errors":%s,"read_errors":%s,"write_errors":%s,"timeout_errors":%s,"max_read_error_rate_ppm":%s,"non_2xx_responses":%s,"bad_length_responses":%s,"cache_result_errors":%s,"cache_writeback_verified":%s,"cache_writeback_admission_rejections":%s,"status_before":"%s","status_after":"%s","requests_per_sec":%s,"mean_time_per_request_ms":%s,"latency_p50_ms":%s,"latency_p90_ms":%s,"latency_p95_ms":%s,"latency_p99_ms":%s,"latency_p999_ms":%s,"transfer_kbytes_per_sec":%s,"cpu_ms":%s,"rss_kb":%s,"rss_baseline_kb":%s,"rss_peak_kb":%s,"rss_growth_kb":%s,"requests_per_cpu_second":%s,"fd_baseline":%s,"fd_peak":%s,"fd_growth":%s,"scheduler_run_delay_ns":%s,"scheduler_queue_delay_us_per_request":%s,"kernel_resource_metrics":%s,"valid":%s,"commit":"%s"}\n' \
+    "$bench" "$proxy" "$body_kind" "$DURATION_SECONDS" "$THREADS" "$CONCURRENCY" "$body_bytes" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$summary_requests" "$complete" "$failed" "$connect_errors" "$read_errors" "$write_errors" "$timeout_errors" "$MAX_READ_ERROR_RATE_PPM" "$non_2xx" "$bad_length" "$cache_result_errors" "$cache_writeback_verified" "$cache_writeback_admission_rejections" "$status_before" "$status_after" "$rps" "$mean_ms" "$latency_p50_ms" "$latency_p90_ms" "$latency_p95_ms" "$latency_p99_ms" "$latency_p999_ms" "$transfer_kbps" "$(json_number_or_null "$cpu_ms")" "$(json_number_or_null "$rss_kb")" "$(json_number_or_null "$rss_baseline_kb")" "$(json_number_or_null "$rss_peak_kb")" "$(json_number_or_null "$rss_growth_kb")" "$requests_per_cpu_second" "$fd_baseline" "$fd_peak" "$fd_growth" "$scheduler_run_delay_ns" "$scheduler_queue_delay_us_per_request" "$kernel_resource_metrics" "$valid" "$commit" >>"$OUT_JSON"
 }
 
 require_cmd curl
@@ -1568,6 +1636,18 @@ esac
 if [ "$BACKEND_WORKERS" -eq 0 ]; then
   echo "QPX_PROXY_COMPARE_BACKEND_WORKERS must be a positive integer" >&2
   exit 1
+fi
+if [ -n "$CACHE_ADMISSION_METRICS_PORT" ]; then
+  case "$CACHE_ADMISSION_METRICS_PORT" in
+    *[!0-9]*)
+      echo "QPX_PROXY_COMPARE_CACHE_ADMISSION_METRICS_PORT must be an integer from 1 to 65535" >&2
+      exit 1
+      ;;
+  esac
+  if [ "$CACHE_ADMISSION_METRICS_PORT" -eq 0 ] || [ "$CACHE_ADMISSION_METRICS_PORT" -gt 65535 ]; then
+    echo "QPX_PROXY_COMPARE_CACHE_ADMISSION_METRICS_PORT must be an integer from 1 to 65535" >&2
+    exit 1
+  fi
 fi
 
 for worker_spec in \
