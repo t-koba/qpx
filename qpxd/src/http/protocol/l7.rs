@@ -325,6 +325,27 @@ pub(crate) fn apply_request_header_control_in_place(
     apply_request_headers(request.headers_mut(), header_control);
 }
 
+fn parse_max_forwards_value(raw: &str) -> Option<u64> {
+    let raw = raw.trim_matches(|character| character == ' ' || character == '\t');
+    if raw.is_empty() {
+        return None;
+    }
+
+    // Retain one above the u32 output limit so decrement-then-cap handles MAX + 1 exactly.
+    let cap = u64::from(u32::MAX) + 1;
+    let mut parsed = 0u64;
+    for digit in raw.bytes() {
+        if !digit.is_ascii_digit() {
+            return None;
+        }
+        parsed = parsed
+            .saturating_mul(10)
+            .saturating_add(u64::from(digit - b'0'))
+            .min(cap);
+    }
+    Some(parsed)
+}
+
 pub(crate) async fn handle_max_forwards_in_place(
     request: &mut Request<Body>,
     proxy_name: &str,
@@ -368,8 +389,7 @@ pub(crate) async fn handle_max_forwards_in_place(
             false,
         ));
     };
-    let raw = raw.trim();
-    let Ok(parsed) = raw.parse::<u32>() else {
+    let Some(parsed) = parse_max_forwards_value(raw) else {
         return Some(finalize_response_for_request(
             request.method(),
             request.version(),
@@ -431,7 +451,7 @@ pub(crate) async fn handle_max_forwards_in_place(
         ));
     }
 
-    let next = (parsed - 1).to_string();
+    let next = (parsed - 1).min(u64::from(u32::MAX)).to_string();
     if let Ok(value) = http::HeaderValue::from_str(next.as_str()) {
         request
             .headers_mut()

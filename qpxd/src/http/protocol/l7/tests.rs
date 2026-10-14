@@ -198,3 +198,105 @@ async fn trace_loopback_rejects_body_above_hard_cap() {
         .expect_err("trace body above cap");
     assert!(err.to_string().contains("TRACE request body exceeds"));
 }
+
+async fn run_max_forwards(
+    method: Method,
+    values: &[&str],
+) -> (Option<Response<Body>>, Request<Body>) {
+    let mut request = Request::builder()
+        .method(method)
+        .uri("/")
+        .body(Body::empty())
+        .expect("request");
+    for value in values {
+        request.headers_mut().append(
+            http::header::MAX_FORWARDS,
+            http::HeaderValue::from_str(value).expect("header value"),
+        );
+    }
+
+    let response =
+        handle_max_forwards_in_place(&mut request, "qpx", false, 1024, Duration::from_secs(1))
+            .await;
+    (response, request)
+}
+
+#[tokio::test]
+async fn max_forwards_accepts_only_ows_wrapped_decimal_and_decrements() {
+    for (value, expected) in [("1", "0"), ("001", "0"), (" \t2\t ", "1")] {
+        let (response, request) = run_max_forwards(Method::OPTIONS, &[value]).await;
+        assert!(response.is_none(), "{value:?} should be forwarded");
+        assert_eq!(
+            request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+            expected
+        );
+    }
+
+    for (method, expected) in [
+        (Method::OPTIONS, StatusCode::NO_CONTENT),
+        (Method::TRACE, StatusCode::OK),
+    ] {
+        let (response, _) = run_max_forwards(method, &["0"]).await;
+        assert_eq!(
+            response
+                .expect("zero Max-Forwards is handled locally")
+                .status(),
+            expected
+        );
+    }
+}
+
+#[tokio::test]
+async fn max_forwards_rejects_signed_and_non_decimal_values() {
+    for value in ["+0", "+1", "-1", "", "1, 2"] {
+        let (response, _) = run_max_forwards(Method::OPTIONS, &[value]).await;
+        assert_eq!(
+            response.expect("invalid Max-Forwards is rejected").status(),
+            StatusCode::BAD_REQUEST,
+            "accepted invalid value {value:?}"
+        );
+    }
+
+    let (response, _) = run_max_forwards(Method::OPTIONS, &["1", "2"]).await;
+    assert_eq!(
+        response
+            .expect("duplicate Max-Forwards is rejected")
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+}
+
+#[tokio::test]
+async fn max_forwards_caps_large_decimal_values_before_forwarding() {
+    let (response, request) = run_max_forwards(Method::OPTIONS, &["4294967295"]).await;
+    assert!(response.is_none());
+    assert_eq!(
+        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        "4294967294"
+    );
+
+    let (response, request) = run_max_forwards(Method::OPTIONS, &["4294967296"]).await;
+    assert!(response.is_none());
+    assert_eq!(
+        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        "4294967295"
+    );
+
+    let very_large = "9".repeat(40);
+    let (response, request) = run_max_forwards(Method::OPTIONS, &[very_large.as_str()]).await;
+    assert!(response.is_none());
+    assert_eq!(
+        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        "4294967295"
+    );
+}
+
+#[tokio::test]
+async fn max_forwards_is_ignored_for_other_methods() {
+    let (response, request) = run_max_forwards(Method::POST, &["+1"]).await;
+    assert!(response.is_none());
+    assert_eq!(
+        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        "+1"
+    );
+}
