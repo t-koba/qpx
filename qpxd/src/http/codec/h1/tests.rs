@@ -236,8 +236,19 @@ async fn serve_http1_with_interim_parse_errors_send_connection_close() {
         .write_all(&request_head_with_total_bytes(MAX_HEADER_BYTES + 1))
         .await
         .expect("write oversized request");
+    // An oversized request can leave bytes unread in the socket receive queue.
+    // Closing with unread data may produce a TCP reset after the response, so
+    // read through the response head instead of requiring a clean EOF.
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).await.expect("read response");
+    let mut chunk = [0; 1024];
+    loop {
+        let read = stream.read(&mut chunk).await.expect("read response head");
+        assert_ne!(read, 0, "response ended before its header terminator");
+        raw.extend_from_slice(&chunk[..read]);
+        if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
     let text = String::from_utf8(raw).expect("utf8");
     assert!(text.starts_with("HTTP/1.1 431"));
     assert!(text.contains("Connection: close"));
