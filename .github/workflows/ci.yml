@@ -561,8 +561,10 @@ jobs:
       - name: external proxy comparison bench
         id: external_proxy_comparison_bench
         continue-on-error: true
+        env:
+          QPX_PROXY_POLICY_OUT: ${{ runner.temp }}/qpx-perf-policy/proxy
         run: |
-          python3 scripts/perf-audit-policy.py run proxy target/perf/proxy-policy \
+          python3 scripts/perf-audit-policy.py run proxy "$QPX_PROXY_POLICY_OUT" \
             --previous-bin "$QPX_PREVIOUS_BIN" --previous-sha "$QPX_PREVIOUS_SOURCE_SHA"
       - name: external long streaming comparison bench
         id: external_long_streaming_comparison_bench
@@ -602,7 +604,7 @@ jobs:
           path: |
             target/perf/*.jsonl
             target/perf/*.json
-            target/perf/proxy-policy/**
+            ${{ runner.temp }}/qpx-perf-policy/proxy/**
             target/perf/proxy-compare-logs/**
             target/perf/streaming-compare-logs/**
           if-no-files-found: ignore
@@ -649,8 +651,10 @@ jobs:
       - name: external http2 comparison bench
         id: external_http2_comparison_bench
         continue-on-error: true
+        env:
+          QPX_HTTP2_POLICY_OUT: ${{ runner.temp }}/qpx-perf-policy/http2
         run: |
-          python3 scripts/perf-audit-policy.py run http2 target/perf/http2-policy \
+          python3 scripts/perf-audit-policy.py run http2 "$QPX_HTTP2_POLICY_OUT" \
             --previous-bin "$QPX_PREVIOUS_BIN" --previous-sha "$QPX_PREVIOUS_SOURCE_SHA"
       - name: netem proxy comparison bench
         id: netem_proxy_comparison_bench
@@ -685,7 +689,7 @@ jobs:
           path: |
             target/perf/*.jsonl
             target/perf/*.json
-            target/perf/http2-policy/**
+            ${{ runner.temp }}/qpx-perf-policy/http2/**
             target/perf/http2-compare-logs/**
             target/perf/netem-proxy-compare-logs/**
           if-no-files-found: ignore

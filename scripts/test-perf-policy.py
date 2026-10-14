@@ -124,6 +124,25 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue((directory / "fixture.jsonl").is_file())
         return result, len(calls)
 
+    def test_run_refuses_existing_output_root_without_modifying_it(self):
+        config, _ = objectives("proxy")
+        output = self.directory / "existing-policy-output"
+        output.mkdir()
+        sentinel = output / "stale-measurement.jsonl"
+        sentinel.write_text("stale measurement must remain untouched\n")
+        args = SimpleNamespace(
+            suite="proxy",
+            out=str(output),
+            previous_bin="unused-fixture-binary",
+            previous_sha=config["ci_policy"]["previous_release"]["sha"],
+        )
+        with patch.object(DRIVER, "Sampler") as sampler:
+            with self.assertRaises(FileExistsError):
+                DRIVER.run(args)
+        sampler.assert_called_once_with(args.previous_bin, args.previous_sha)
+        self.assertEqual(sentinel.read_text(), "stale measurement must remain untouched\n")
+        self.assertEqual(list(output.iterdir()), [sentinel])
+
     def test_equal_pairs_and_competitive_misses_are_reports(self):
         for index, lane in enumerate(self.lanes):
             with self.subTest(lane=lane["name"]):
