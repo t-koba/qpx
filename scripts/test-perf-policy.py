@@ -499,7 +499,7 @@ class SamplerScriptTests(unittest.TestCase):
         self.directory = ARTIFACTS / self._testMethodName
         self.directory.mkdir(parents=True)
 
-    def test_cache_writeback_log_veto_is_symmetric_and_fail_closed(self):
+    def test_cache_miss_response_errors_are_symmetric_and_fail_closed(self):
         sampler = object.__new__(DRIVER.Sampler)
         failure = json.dumps({
             "level": "WARN",
@@ -507,32 +507,57 @@ class SamplerScriptTests(unittest.TestCase):
             "message": "cache writeback failed",
             "error": "File exists (os error 17)",
         }) + "\n"
-        for role, exception in (("current", ValueError), ("previous", DRIVER.InconclusiveReference)):
-            with self.subTest(role=role):
+        roles = (("current", ValueError), ("previous", DRIVER.InconclusiveReference))
+        for role, exception in roles:
+            with self.subTest(role=role, writeback_failure=True):
                 directory = self.directory / role
                 (directory / "logs").mkdir(parents=True)
                 (directory / "logs/qpxd-cache.log").write_text(failure)
-                # A passing one-URL sentinel cannot override a failure in the
-                # sampler's dedicated cache log.
+                # A passing one-URL sentinel cannot override a failed write
+                # recorded in the sampler's dedicated cache log.
                 (directory / "samples.jsonl").write_text(json.dumps({"cache_writeback_verified": True}) + "\n")
                 with self.assertRaisesRegex(exception, "cache writeback failure"):
                     sampler._validate_cache_writeback_log(directory, role)
                 validation = json.loads((directory / "cache-writeback-validation.json").read_text())
                 self.assertEqual(validation["status"], "writeback_failure_observed")
                 self.assertEqual(validation["failure_count"], 1)
+                self.assertEqual(validation["response_body_length_failure_count"], 0)
+
+        body_length_errors = (
+            ("response body ended before declared content-length was satisfied", "message"),
+            ("response body exceeded declared content-length", "error"),
+        )
+        for role, exception in roles:
+            for error, field in body_length_errors:
+                with self.subTest(role=role, body_length_error=error):
+                    directory = self.directory / f"{role}-{field}"
+                    (directory / "logs").mkdir(parents=True)
+                    event = {
+                        "level": "WARN",
+                        "target": "qpxd::http::codec::h1::response",
+                        field: error,
+                    }
+                    (directory / "logs/qpxd-cache.log").write_text(json.dumps(event) + "\n")
+                    with self.assertRaisesRegex(exception, "response body length failure"):
+                        sampler._validate_cache_writeback_log(directory, role)
+                    validation = json.loads((directory / "cache-writeback-validation.json").read_text())
+                    self.assertEqual(validation["status"], "response_body_length_failure_observed")
+                    self.assertEqual(validation["failure_count"], 0)
+                    self.assertEqual(validation["response_body_length_failure_count"], 1)
 
         clean_dir = self.directory / "clean"
         (clean_dir / "logs").mkdir(parents=True)
-        (clean_dir / "logs/qpxd-cache.log").write_text("\n".join((
-            json.dumps({"target": "qpxd_cache::store", "message": "response body ended before declared content-length was satisfied"}),
-            json.dumps({"target": "qpxd_cache::store", "message": "origin returned File exists"}),
-        )) + "\n")
+        (clean_dir / "logs/qpxd-cache.log").write_text(json.dumps({
+            "target": "qpxd_cache::store",
+            "message": "origin returned File exists",
+        }) + "\n")
         sampler._validate_cache_writeback_log(clean_dir, "current")
         validation = json.loads((clean_dir / "cache-writeback-validation.json").read_text())
-        self.assertEqual(validation["status"], "no_writeback_failure_logged")
+        self.assertEqual(validation["status"], "no_cache_miss_response_failure_logged")
         self.assertEqual(validation["failure_count"], 0)
+        self.assertEqual(validation["response_body_length_failure_count"], 0)
 
-        for role, exception in (("current", ValueError), ("previous", DRIVER.InconclusiveReference)):
+        for role, exception in roles:
             with self.subTest(role=role, missing=True):
                 directory = self.directory / f"missing-{role}"
                 directory.mkdir()
@@ -541,6 +566,7 @@ class SamplerScriptTests(unittest.TestCase):
                 validation = json.loads((directory / "cache-writeback-validation.json").read_text())
                 self.assertEqual(validation["status"], "unestablished")
                 self.assertIsNone(validation["failure_count"])
+                self.assertIsNone(validation["response_body_length_failure_count"])
 
         malformed_dir = self.directory / "malformed"
         (malformed_dir / "logs").mkdir(parents=True)

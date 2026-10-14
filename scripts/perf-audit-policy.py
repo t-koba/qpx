@@ -54,11 +54,16 @@ def aggregate(samples, lane):
 
 
 def cache_writeback_log_status(log_path):
-    """Count explicit cache-store writeback failures in one qpxd-cache log."""
+    """Detect failed cache writes and response body length errors in one log."""
     try:
         if not log_path.is_file():
             raise ValueError("required qpxd-cache log is missing")
         failure_count = 0
+        response_body_length_failure_count = 0
+        body_length_errors = (
+            "response body ended before declared content-length was satisfied",
+            "response body exceeded declared content-length",
+        )
         with log_path.open(encoding="utf-8") as log:
             for line_number, line in enumerate(log, 1):
                 if not line.strip():
@@ -72,11 +77,29 @@ def cache_writeback_log_status(log_path):
                 message = event.get("message")
                 if isinstance(message, str) and message.startswith("cache writeback failed"):
                     failure_count += 1
+                error_text = event.get("error")
+                if any(
+                    isinstance(value, str) and any(error in value for error in body_length_errors)
+                    for value in (message, error_text)
+                ):
+                    response_body_length_failure_count += 1
     except (OSError, ValueError) as error:
-        return {"status": "unestablished", "failure_count": None, "detail": str(error)}
+        return {
+            "status": "unestablished",
+            "failure_count": None,
+            "response_body_length_failure_count": None,
+            "detail": str(error),
+        }
+    if failure_count:
+        status = "writeback_failure_observed"
+    elif response_body_length_failure_count:
+        status = "response_body_length_failure_observed"
+    else:
+        status = "no_cache_miss_response_failure_logged"
     return {
-        "status": "writeback_failure_observed" if failure_count else "no_writeback_failure_logged",
+        "status": status,
         "failure_count": failure_count,
+        "response_body_length_failure_count": response_body_length_failure_count,
         "detail": None,
     }
 
@@ -101,13 +124,18 @@ class Sampler:
         validation.update({
             "log": str(log_relative_path),
             "scope": "full qpxd-cache log for this sampler invocation, including setup and verification",
-            "limitation": "no logged failure does not prove every asynchronous write completed or admission rejections were zero",
+            "limitation": "absence of logged errors does not prove every asynchronous write completed, admission rejections were zero, or no unlogged body-length mismatch occurred",
         })
         write_json(directory / "cache-writeback-validation.json", validation)
-        if validation["status"] == "no_writeback_failure_logged":
+        if validation["status"] == "no_cache_miss_response_failure_logged":
             return
         if validation["status"] == "writeback_failure_observed":
             reason = f"cache writeback failure observed ({validation['failure_count']} event(s))"
+        elif validation["status"] == "response_body_length_failure_observed":
+            reason = (
+                "cache-miss response body length failure observed "
+                f"({validation['response_body_length_failure_count']} event(s))"
+            )
         else:
             reason = f"cache writeback validity unestablished ({validation['detail']})"
         reason += "; see logs/qpxd-cache.log and cache-writeback-validation.json"
