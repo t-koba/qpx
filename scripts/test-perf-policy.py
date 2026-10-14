@@ -124,6 +124,21 @@ class PolicyTests(unittest.TestCase):
             self.assertTrue((directory / "fixture.jsonl").is_file())
         return result, len(calls)
 
+    def test_candidate_inconclusive_is_not_retried_or_failed(self):
+        lane = next(lane for lane in self.pair_lanes if lane["bench"] == "proxy_cache_miss_http1")
+        calls = []
+
+        def measure(_lane, _paired, _directory):
+            calls.append(True)
+            raise DRIVER.InconclusiveCandidate("cache writeback admissions were rejected")
+
+        result = bounded_measure(lane, True, measure, self.directory / "inconclusive-candidate", mode="shared")
+        self.assertEqual(result["status"], "INCONCLUSIVE")
+        self.assertEqual(result["reasons"], ["cache writeback admissions were rejected"])
+        self.assertTrue(result["unmeasured"])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(exit_code([result]), 0)
+
     def test_run_refuses_existing_output_root_without_modifying_it(self):
         config, _ = objectives("proxy")
         output = self.directory / "existing-policy-output"
@@ -570,7 +585,7 @@ class SamplerScriptTests(unittest.TestCase):
     def test_cache_admission_metric_record_validation_rejects_bad_candidate_evidence(self):
         sampler = object.__new__(DRIVER.Sampler)
         cases = (({"cache_writeback_admission_rejections": 0}, "zero_rejections_observed"),
-                 ({"cache_writeback_admission_rejections": 1}, "rejection_observed"),
+                 ({"cache_writeback_admission_rejections": 1}, "rejections_observed"),
                  ({"cache_writeback_admission_rejections": None}, "unestablished"),
                  ({}, "unestablished"))
         for index, (record_data, status) in enumerate(cases):
@@ -578,6 +593,9 @@ class SamplerScriptTests(unittest.TestCase):
             directory.mkdir()
             if status == "zero_rejections_observed":
                 sampler._validate_cache_writeback_admission_metric(directory, [record_data])
+            elif status == "rejections_observed":
+                with self.assertRaisesRegex(DRIVER.InconclusiveCandidate, "1 cache writeback admission rejection"):
+                    sampler._validate_cache_writeback_admission_metric(directory, [record_data])
             else:
                 with self.assertRaisesRegex(ValueError, "cache writeback admission validity unestablished"):
                     sampler._validate_cache_writeback_admission_metric(directory, [record_data])
@@ -785,7 +803,7 @@ h2load() {{
                 f"  printf '%s\\n' {shlex.quote(admission_metric)} >\"$output\"\n"
                 "}\n"
             )
-        return self.shell("perf-audit-proxy-compare.sh", ("extract_metric", "parse_cache_admission_metric", "require_cache_admission_metric_zero", "scrape_cache_admission_metric_zero", "read_error_rate_allowed", "json_number_or_null", "run_one"),
+        return self.shell("perf-audit-proxy-compare.sh", ("extract_metric", "parse_cache_admission_metric", "require_cache_admission_metric_zero", "fetch_cache_admission_metrics_file", "scrape_cache_admission_metric", "scrape_cache_admission_metric_zero", "read_error_rate_allowed", "json_number_or_null", "run_one"),
                           f"run_one proxy_cache_miss_http1 {proxy} 1234 reverse /bench-4 bench.local 4 99999 {shlex.quote(cache_header)} {shlex.quote(cache_result)}",
                           name, prelude)
 
@@ -813,11 +831,11 @@ h2load() {{
             self.assertEqual(process.returncode, expected, process.stderr)
 
     def test_proxy_cache_miss_candidate_scrape_is_recorded_and_rejects_bad_metrics(self):
-        for index, (content, expected, detail) in enumerate((
-            ("qpx_cache_writeback_admission_rejections_total 0\n", 0, None),
-            ("qpx_cache_writeback_admission_rejections_total 1\n", 1, "nonzero"),
-            ("other_metric 0\n", 1, "missing or malformed"),
-            ("qpx_cache_writeback_admission_rejections_total broken\n", 1, "missing or malformed"),
+        for index, (content, expected, rejection_count, detail) in enumerate((
+            ("qpx_cache_writeback_admission_rejections_total 0\n", 0, 0, None),
+            ("qpx_cache_writeback_admission_rejections_total 96772\n", 0, 96772, None),
+            ("other_metric 0\n", 1, None, "missing or malformed"),
+            ("qpx_cache_writeback_admission_rejections_total broken\n", 1, None, "missing or malformed"),
         )):
             process, directory = self.proxy_sample(
                 "qpxd-cache", f"admission-{index}", read_errors=0,
@@ -828,7 +846,7 @@ h2load() {{
                 self.assertIn(detail, process.stderr)
             else:
                 record_value = json.loads((directory / "samples.jsonl").read_text())
-                self.assertEqual(record_value["cache_writeback_admission_rejections"], 0)
+                self.assertEqual(record_value["cache_writeback_admission_rejections"], rejection_count)
 
     def test_qpx_cache_hit_probe_accepts_both_header_generations(self):
         for index, (proxy, header, expected) in enumerate((

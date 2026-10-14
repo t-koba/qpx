@@ -1017,21 +1017,41 @@ require_cache_admission_metric_zero() {
   echo 0
 }
 
-scrape_cache_admission_metric_zero() {
+fetch_cache_admission_metrics_file() {
   local phase="$1"
   local output="$TMP_DIR/cache-writeback-admission-${phase}.prom"
   local tries=0
   while [ "$tries" -lt 40 ]; do
     if curl -fsS --max-time 5 \
       "http://127.0.0.1:${CACHE_ADMISSION_METRICS_PORT}/metrics" -o "$output"; then
-      require_cache_admission_metric_zero "$output"
-      return $?
+      echo "$output"
+      return 0
     fi
     tries=$((tries + 1))
     sleep 0.1
   done
   echo "qpxd-cache metrics endpoint unavailable during ${phase}" >&2
   return 1
+}
+
+scrape_cache_admission_metric() {
+  local output value
+  if ! output="$(fetch_cache_admission_metrics_file "$1")"; then
+    return 1
+  fi
+  if ! value="$(parse_cache_admission_metric "$output")"; then
+    echo "cache writeback admission rejection metric is missing or malformed" >&2
+    return 1
+  fi
+  echo "$value"
+}
+
+scrape_cache_admission_metric_zero() {
+  local output
+  if ! output="$(fetch_cache_admission_metrics_file "$1")"; then
+    return 1
+  fi
+  require_cache_admission_metric_zero "$output"
 }
 
 wait_cache_admission_metric_zero() {
@@ -1563,7 +1583,7 @@ LUA
       # Metrics rendering is cached for 250ms; wait for expiry so the scrape
       # cannot return a pre-sample zero after an admission rejection.
       sleep 0.3
-      cache_writeback_admission_rejections="$(scrape_cache_admission_metric_zero "sample-${attempt}")"
+      cache_writeback_admission_rejections="$(scrape_cache_admission_metric "sample-${attempt}")"
     fi
     if [ "$valid" = true ]; then
       printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \

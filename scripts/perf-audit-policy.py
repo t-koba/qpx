@@ -11,6 +11,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
 from perf_policy import (
     ROOT,
+    InconclusiveCandidate,
     InconclusiveReference,
     RetryableInvalid,
     assessment,
@@ -119,7 +120,7 @@ class Sampler:
                                      "toolchain": toolchain, "runner": runner}
 
     def _validate_cache_writeback_admission_metric(self, directory, records):
-        """Require the candidate's scrape to establish zero admission rejects."""
+        """Record admission rejects and make this paired cache-miss lane inconclusive."""
         validation = {"status": "unestablished", "rejections": None}
         if len(records) != 1:
             validation["detail"] = "paired cache-miss sampler did not return exactly one record"
@@ -128,11 +129,17 @@ class Sampler:
             if type(value) is not int or value < 0:
                 validation["detail"] = "cache writeback admission rejection metric is missing or malformed"
             elif value != 0:
-                validation.update(status="rejection_observed", rejections=value)
+                validation.update(status="rejections_observed", rejections=value)
                 validation["detail"] = "cache writeback admission rejection metric is nonzero"
             else:
                 validation.update(status="zero_rejections_observed", rejections=0, detail=None)
         write_json(directory / "cache-writeback-admission-validation.json", validation)
+        if validation["status"] == "rejections_observed":
+            raise InconclusiveCandidate(
+                "candidate cache-miss measurement is inconclusive: "
+                f"{validation['rejections']} cache writeback admission rejection(s); "
+                "see cache-writeback-admission-validation.json"
+            )
         if validation["status"] != "zero_rejections_observed":
             fail(
                 "cache writeback admission validity unestablished "

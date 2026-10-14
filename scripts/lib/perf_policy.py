@@ -295,6 +295,10 @@ class InconclusiveReference(ValueError):
     """A comparison reference supplied no valid measurement for its lane."""
 
 
+class InconclusiveCandidate(ValueError):
+    """A candidate sample cannot support its declared comparison lane."""
+
+
 def evaluate(records, lane, paired=False, mode=None, baseline=None):
     mode = mode or assessment()
     if paired:
@@ -514,6 +518,9 @@ def bounded_measure(lane, paired, measure, artifact_dir, mode=None, baseline=Non
             write_jsonl(directory / "measurements.jsonl", records)
             result = evaluate(records, lane, paired, mode, baseline)
         except InconclusiveReference as error:
+            result = {"lane": lane["name"], "assessment": assessment_name,
+                      "status": "INCONCLUSIVE", "reasons": [str(error)], "unmeasured": True}
+        except InconclusiveCandidate as error:
             result = {"lane": lane["name"], "assessment": assessment_name,
                       "status": "INCONCLUSIVE", "reasons": [str(error)], "unmeasured": True}
         except RetryableInvalid as error:
