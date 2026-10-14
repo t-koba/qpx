@@ -397,33 +397,25 @@ where
     }
 }
 
-async fn read_http1_request_head<R>(
-    reader: &mut R,
+async fn read_http1_request_head(
+    reader: &mut (dyn AsyncRead + Unpin + Send),
     buf: &mut BytesMut,
     header_read_timeout: Duration,
-) -> Result<Option<ParsedRequestHead>>
-where
-    R: AsyncRead + Unpin,
-{
+) -> Result<Option<ParsedRequestHead>> {
     loop {
-        if buf.is_empty() {
-            let n = match timeout_after_pending(header_read_timeout, reader.read_buf(buf)).await {
-                Ok(Ok(n)) => n,
-                Ok(Err(err)) => return Err(err.into()),
-                Err(_) => return Err(anyhow!("HTTP/1 request header read timed out")),
-            };
-            if n == 0 {
-                return Ok(None);
-            }
-        }
         match try_parse_http1_request_head(buf.as_ref())? {
             Some(parsed) => return Ok(Some(parsed)),
             None => {
+                // With a partial parse, every buffered byte still belongs to the head.
                 if buf.len() >= MAX_HEADER_BYTES {
                     return Err(RequestHeaderFieldsTooLarge.into());
                 }
-                let n = match timeout_after_pending(header_read_timeout, reader.read_buf(buf)).await
-                {
+                let remaining = MAX_HEADER_BYTES - buf.len();
+                let read_result = {
+                    let mut limited_reader = (&mut *reader).take(remaining as u64);
+                    timeout_after_pending(header_read_timeout, limited_reader.read_buf(buf)).await
+                };
+                let n = match read_result {
                     Ok(Ok(n)) => n,
                     Ok(Err(err)) => return Err(err.into()),
                     Err(_) => return Err(anyhow!("HTTP/1 request header read timed out")),
@@ -480,6 +472,10 @@ fn finish_parsed_http1_request(
     request: &httparse::Request<'_, '_>,
     consumed: usize,
 ) -> Result<ParsedRequestHead> {
+    // `buf` may also contain a body or pipelined request; cap only the parsed head.
+    if consumed > MAX_HEADER_BYTES {
+        return Err(RequestHeaderFieldsTooLarge.into());
+    }
     let method = request
         .method
         .ok_or_else(|| anyhow!("missing request method"))?

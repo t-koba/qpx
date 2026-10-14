@@ -8,6 +8,18 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::net::{TcpListener, TcpStream};
 
+fn request_head_with_total_bytes(total_bytes: usize) -> Vec<u8> {
+    let prefix = b"GET / HTTP/1.1\r\nHost: example.test\r\nX-Large: ";
+    let suffix = b"\r\n\r\n";
+    assert!(total_bytes >= prefix.len() + suffix.len());
+    let mut request = Vec::with_capacity(total_bytes);
+    request.extend_from_slice(prefix);
+    request.resize(total_bytes - suffix.len(), b'x');
+    request.extend_from_slice(suffix);
+    assert_eq!(request.len(), total_bytes);
+    request
+}
+
 #[test]
 fn request_head_parser_promotes_storage_for_many_headers() {
     let mut raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n".to_vec();
@@ -20,6 +32,19 @@ fn request_head_parser_promotes_storage_for_many_headers() {
         .expect("parse")
         .expect("complete");
     assert_eq!(parsed.headers.len(), 41);
+
+    let exact = request_head_with_total_bytes(MAX_HEADER_BYTES);
+    let parsed = try_parse_http1_request_head(&exact)
+        .expect("parse exact limit")
+        .expect("complete exact limit");
+    assert_eq!(parsed.consumed, MAX_HEADER_BYTES);
+    let oversized = request_head_with_total_bytes(MAX_HEADER_BYTES + 1);
+    let error = try_parse_http1_request_head(&oversized).expect_err("byte limit");
+    assert!(
+        error
+            .downcast_ref::<RequestHeaderFieldsTooLarge>()
+            .is_some()
+    );
 }
 
 #[test]
@@ -184,13 +209,15 @@ async fn tcp_owned_halves_serve_prefetched_http1_request() {
 }
 
 #[tokio::test]
-async fn serve_http1_with_interim_parse_error_sends_connection_close() {
+async fn serve_http1_with_interim_parse_errors_send_connection_close() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.expect("accept");
-        let _ =
-            serve_http1_with_interim(socket, StaticInterimService, Duration::from_secs(1)).await;
+    let server = tokio::spawn(async move {
+        for _ in 0..2 {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let _ = serve_http1_with_interim(socket, StaticInterimService, Duration::from_secs(1))
+                .await;
+        }
     });
 
     let mut stream = TcpStream::connect(addr).await.expect("connect");
@@ -203,10 +230,22 @@ async fn serve_http1_with_interim_parse_error_sends_connection_close() {
     let text = String::from_utf8(raw).expect("utf8");
     assert!(text.starts_with("HTTP/1.1 400"));
     assert!(text.contains("Connection: close"));
+
+    let mut stream = TcpStream::connect(addr).await.expect("reconnect");
+    stream
+        .write_all(&request_head_with_total_bytes(MAX_HEADER_BYTES + 1))
+        .await
+        .expect("write oversized request");
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8(raw).expect("utf8");
+    assert!(text.starts_with("HTTP/1.1 431"));
+    assert!(text.contains("Connection: close"));
+    server.await.expect("server task");
 }
 
 #[tokio::test]
-async fn request_header_count_overflow_is_typed_for_431() {
+async fn request_header_reader_enforces_count_and_byte_limits() {
     let mut request = String::from("GET / HTTP/1.1\r\nHost: example.com\r\n");
     for index in 0..130 {
         request.push_str(&format!("X-Test-{index}: value\r\n"));
@@ -222,6 +261,52 @@ async fn request_header_count_overflow_is_typed_for_431() {
             .downcast_ref::<RequestHeaderFieldsTooLarge>()
             .is_some()
     );
+
+    let exact_request = request_head_with_total_bytes(MAX_HEADER_BYTES);
+    let mut exact_reader =
+        tokio::io::BufReader::with_capacity(4093, std::io::Cursor::new(exact_request));
+    let mut buffer = BytesMut::with_capacity(MAX_HEADER_BYTES * 2);
+    let parsed = read_http1_request_head(&mut exact_reader, &mut buffer, Duration::from_secs(5))
+        .await
+        .expect("read exact-limit head")
+        .expect("complete head");
+    assert_eq!(parsed.consumed, MAX_HEADER_BYTES);
+    assert_eq!(buffer.len(), MAX_HEADER_BYTES);
+
+    let oversized_request = request_head_with_total_bytes(MAX_HEADER_BYTES + 1);
+    let mut oversized_reader =
+        tokio::io::BufReader::with_capacity(4093, std::io::Cursor::new(oversized_request));
+    let mut buffer = BytesMut::with_capacity(MAX_HEADER_BYTES * 2);
+    let error = read_http1_request_head(&mut oversized_reader, &mut buffer, Duration::from_secs(5))
+        .await
+        .expect_err("oversized head");
+    assert!(
+        error
+            .downcast_ref::<RequestHeaderFieldsTooLarge>()
+            .is_some()
+    );
+    assert_eq!(buffer.len(), MAX_HEADER_BYTES);
+
+    let body = vec![b'b'; MAX_HEADER_BYTES + 1];
+    let head = format!(
+        "POST / HTTP/1.1\r\nHost: example.test\r\nContent-Length: {}\r\n\r\n",
+        body.len()
+    );
+    let head_len = head.len();
+    let mut buffer = BytesMut::with_capacity(head_len + body.len());
+    buffer.extend_from_slice(head.as_bytes());
+    buffer.extend_from_slice(&body);
+    let mut reader = tokio::io::empty();
+    let parsed = read_http1_request_head(&mut reader, &mut buffer, Duration::from_secs(1))
+        .await
+        .expect("read head with buffered body")
+        .expect("complete head");
+    assert_eq!(parsed.consumed, head_len);
+    assert_eq!(
+        parsed.body_kind,
+        RequestBodyKind::ContentLength(body.len() as u64)
+    );
+    assert_eq!(&buffer[parsed.consumed..], body.as_slice());
 }
 
 #[tokio::test]
