@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
 use percent_encoding::percent_decode_str;
 use qpx_core::uri_template::UriTemplate;
+#[cfg(feature = "http3")]
+use qpx_http::protocol::semantics::capsule_protocol_enabled;
 
 #[cfg(feature = "http3")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -56,11 +58,7 @@ pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
             // template and MUST be present (non-empty). Unlike CONNECT, :authority is the
             // proxy authority.
             validate_extended_connect_target(req_head, "CONNECT-UDP")?;
-            let capsule_protocol = headers
-                .get("capsule-protocol")
-                .and_then(|v| v.to_str().ok())
-                .map(str::trim);
-            if capsule_protocol != Some("?1") {
+            if !capsule_protocol_enabled(headers) {
                 return Err(anyhow!("CONNECT-UDP requires Capsule-Protocol: ?1"));
             }
         }
@@ -407,6 +405,38 @@ pub(super) fn format_authority(host: &str, port: u16) -> String {
 #[cfg(test)]
 mod tests {
     use crate::forward::h3::connect::parse::*;
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn connect_udp_head_accepts_capsule_parameters_but_rejects_repeated_fields() {
+        let req = ::http::Request::builder()
+            .method(::http::Method::CONNECT)
+            .uri("https://proxy.example/.well-known/masque/udp/example.com/443/")
+            .header("capsule-protocol", "?1;foo=bar")
+            .body(())
+            .expect("request");
+        validate_h3_connect_pseudo_headers(
+            &req,
+            req.headers(),
+            "proxy.example",
+            443,
+            H3ConnectProtocol::ConnectUdp,
+        )
+        .expect("Boolean true with unknown parameter");
+
+        let mut headers = req.headers().clone();
+        headers.append("capsule-protocol", ::http::HeaderValue::from_static("?1"));
+        assert!(
+            validate_h3_connect_pseudo_headers(
+                &req,
+                &headers,
+                "proxy.example",
+                443,
+                H3ConnectProtocol::ConnectUdp,
+            )
+            .is_err()
+        );
+    }
 
     #[test]
     fn connect_udp_path_template_requires_https_scheme() {

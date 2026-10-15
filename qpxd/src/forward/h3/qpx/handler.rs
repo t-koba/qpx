@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::{ConnectIpConfig, ConnectUdpConfig};
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::warn;
@@ -403,12 +404,7 @@ impl ForwardQpxHandler {
         qpx_http::protocol::semantics::validate_expect_header(request.head.headers())
             .map_err(|err| anyhow!("invalid CONNECT-UDP headers: {err}"))?;
 
-        let capsule = request
-            .head
-            .headers()
-            .get("capsule-protocol")
-            .and_then(|value| value.to_str().ok());
-        if capsule != Some("?1") {
+        if !capsule_protocol_enabled(request.head.headers()) {
             return self
                 .static_response(
                     req_stream,

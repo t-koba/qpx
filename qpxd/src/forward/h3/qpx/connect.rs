@@ -25,6 +25,7 @@ use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ActionKind;
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
@@ -621,11 +622,7 @@ async fn finish_qpx_extended_connect_stream(
     }
     if connect_ip_policies.is_some()
         && response.status().is_success()
-        && response
-            .headers()
-            .get("capsule-protocol")
-            .and_then(|value| value.to_str().ok())
-            != Some("?1")
+        && !capsule_protocol_enabled(response.headers())
     {
         return Err(anyhow!(
             "successful upstream CONNECT-IP response requires Capsule-Protocol: ?1"

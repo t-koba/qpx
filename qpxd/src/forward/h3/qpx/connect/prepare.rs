@@ -16,6 +16,7 @@ use anyhow::{Result, anyhow};
 use hyper::StatusCode;
 use qpx_core::config::{ActionConfig, ConnectIpConfig, ConnectUdpConfig};
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -169,13 +170,7 @@ async fn validate_connect_request(
         )
         .await;
     }
-    if is_connect_ip
-        && req_head
-            .headers()
-            .get("capsule-protocol")
-            .and_then(|value| value.to_str().ok())
-            != Some("?1")
-    {
+    if is_connect_ip && !capsule_protocol_enabled(req_head.headers()) {
         return reject_bad_qpx_connect(
             req_stream,
             b"CONNECT-IP requires Capsule-Protocol: ?1",

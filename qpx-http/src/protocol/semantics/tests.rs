@@ -740,3 +740,82 @@ fn validate_accepts_h1_websocket_upgrade_without_body() {
         .expect("request");
     validate_incoming_request(&req).expect("bodiless WS upgrade must pass");
 }
+
+#[test]
+fn capsule_protocol_accepts_boolean_true() {
+    for value in ["?1", " ?1 "] {
+        let mut headers = HeaderMap::new();
+        headers.insert("capsule-protocol", HeaderValue::from_static(value));
+        assert!(capsule_protocol_enabled(&headers), "{value:?}");
+    }
+}
+
+#[test]
+fn capsule_protocol_ignores_valid_unknown_parameters() {
+    for value in [
+        "?1;foo=bar",
+        "?1;flag",
+        "?1;flag=?0;title=\"unknown, value\";count=1",
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("capsule-protocol", HeaderValue::from_static(value));
+        assert!(capsule_protocol_enabled(&headers), "{value:?}");
+    }
+}
+
+#[test]
+fn capsule_protocol_absent_or_boolean_false_is_not_enabled() {
+    assert!(!capsule_protocol_enabled(&HeaderMap::new()));
+    for value in ["?0", "?0;foo=?1"] {
+        let mut headers = HeaderMap::new();
+        headers.insert("capsule-protocol", HeaderValue::from_static(value));
+        assert!(!capsule_protocol_enabled(&headers), "{value:?}");
+    }
+}
+
+#[test]
+fn capsule_protocol_rejects_non_boolean_items() {
+    for value in ["true", "\"?1\"", "1", "1.0", ":AQ==:"] {
+        let mut headers = HeaderMap::new();
+        headers.insert("capsule-protocol", HeaderValue::from_static(value));
+        assert!(!capsule_protocol_enabled(&headers), "{value:?}");
+    }
+}
+
+#[test]
+fn capsule_protocol_rejects_malformed_items_and_parameters() {
+    for value in [
+        "",
+        "?2",
+        "?1junk",
+        "?1;",
+        "?1;foo=",
+        "?1;Foo=bar",
+        "?1;foo=\"unterminated",
+        "?1;foo=bar garbage",
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert("capsule-protocol", HeaderValue::from_static(value));
+        assert!(!capsule_protocol_enabled(&headers), "{value:?}");
+    }
+}
+
+#[test]
+fn capsule_protocol_rejects_comma_lists() {
+    for value in ["?1, ?1", "?1, ?0", "?1;foo=bar, ?1"] {
+        let mut headers = HeaderMap::new();
+        headers.insert("capsule-protocol", HeaderValue::from_static(value));
+        assert!(!capsule_protocol_enabled(&headers), "{value:?}");
+    }
+}
+
+#[test]
+fn capsule_protocol_rejects_repeated_field_lines() {
+    for values in [["?1", "?1"], ["?1", "?0"], ["?0", "?1"], ["", "?1"]] {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append("capsule-protocol", HeaderValue::from_static(value));
+        }
+        assert!(!capsule_protocol_enabled(&headers), "{values:?}");
+    }
+}

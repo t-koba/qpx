@@ -1,3 +1,4 @@
+use crate::structured_fields::{BareItem, parse_item};
 use http::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HOST, TRAILER, TRANSFER_ENCODING, VIA};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use std::cell::RefCell;
@@ -20,6 +21,22 @@ pub fn validate_http_status_class(status: StatusCode, context: &str) -> anyhow::
         return Err(anyhow::anyhow!("{context} status is out of range: {code}"));
     }
     Ok(status)
+}
+
+/// Whether Capsule-Protocol negotiates capsules (RFC 9297 section 3.4).
+///
+/// Exactly one field occurrence must parse as a Boolean true Structured Field
+/// Item. Unknown parameters are ignored; absent, false, non-Boolean, malformed,
+/// and repeated fields are treated as absent.
+pub fn capsule_protocol_enabled(headers: &HeaderMap) -> bool {
+    let mut values = headers.get_all("capsule-protocol").iter();
+    let Some(value) = values.next() else {
+        return false;
+    };
+    if values.next().is_some() {
+        return false;
+    }
+    parse_item(value.as_bytes()).is_ok_and(|item| matches!(item.bare_item, BareItem::Boolean(true)))
 }
 
 pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {

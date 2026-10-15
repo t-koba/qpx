@@ -4,6 +4,7 @@ use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
+use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
@@ -137,12 +138,7 @@ pub(super) async fn open_upstream_connect_udp_stream(
             response.status()
         ));
     }
-    let capsule = response
-        .headers()
-        .get(::http::header::HeaderName::from_static("capsule-protocol"))
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim);
-    if capsule != Some("?1") {
+    if !capsule_protocol_enabled(response.headers()) {
         datagram_task.abort();
         let _ = datagram_task.await;
         return Err(anyhow!(

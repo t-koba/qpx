@@ -11,6 +11,7 @@ use crate::http3::codec::http_headers_to_h1;
 use anyhow::{Result, anyhow};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use tokio::time::Duration;
 
 pub(super) struct OpenUpstreamQpxExtendedConnectInput<'a> {
@@ -171,13 +172,7 @@ pub(super) async fn open_upstream_qpx_connect_udp_stream(
             stream.response.status()
         ));
     }
-    let capsule = stream
-        .response
-        .headers()
-        .get(http::header::HeaderName::from_static("capsule-protocol"))
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim);
-    if capsule != Some("?1") {
+    if !capsule_protocol_enabled(stream.response.headers()) {
         return Err(anyhow!(
             "upstream CONNECT-UDP missing required response header: Capsule-Protocol: ?1"
         ));
