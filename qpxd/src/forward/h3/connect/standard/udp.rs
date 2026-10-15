@@ -422,7 +422,14 @@ async fn relay_h3_connect_udp_stream(
                             .as_mut()
                             .reset(crate::runtime::tokio_deadline_after(idle_timeout));
                     }
-                    None => break,
+                    None => {
+                        if let Err(err) = capsule_buf.ensure_complete() {
+                            req_send.stop_stream(::h3::error::Code::H3_MESSAGE_ERROR);
+                            req_recv.stop_sending(::h3::error::Code::H3_MESSAGE_ERROR);
+                            return Err(err);
+                        }
+                        break;
+                    }
                 }
             }
             payload = async {

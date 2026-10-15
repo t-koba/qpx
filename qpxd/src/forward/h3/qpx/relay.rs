@@ -126,7 +126,16 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
         tokio::select! {
             _ = &mut deadline => break,
             chunk = downstream_recv.recv_data() => {
-                let Some(chunk) = chunk? else { break };
+                let Some(chunk) = chunk? else {
+                    if let Err(err) = downstream_capsules.ensure_complete() {
+                        // Reset the malformed leg and cancel reading the peer response.
+                        downstream_send.abort_message_stream();
+                        downstream_recv.abort_message_stream();
+                        upstream_recv.stop_receiving_request_body();
+                        return Err(err);
+                    }
+                    break;
+                };
                 downstream_capsules.push(chunk, max_capsule_buffer_bytes)?;
                 while let Some((capsule_type, payload)) = downstream_capsules.take_next()? {
                     validate_connect_ip_capsule(capsule_type, &payload, &downstream_policy)?;
@@ -138,7 +147,16 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
             chunk = upstream_recv.recv_data() => {
-                let Some(chunk) = chunk? else { break };
+                let Some(chunk) = chunk? else {
+                    if let Err(err) = upstream_capsules.ensure_complete() {
+                        // Reset the malformed leg and cancel reading the peer request.
+                        upstream_send.abort_message_stream();
+                        upstream_recv.abort_message_stream();
+                        downstream_recv.stop_receiving_request_body();
+                        return Err(err);
+                    }
+                    break;
+                };
                 upstream_capsules.push(chunk, max_capsule_buffer_bytes)?;
                 while let Some((capsule_type, payload)) = upstream_capsules.take_next()? {
                     validate_connect_ip_capsule(capsule_type, &payload, &upstream_policy)?;
@@ -212,7 +230,14 @@ pub(super) async fn relay_qpx_connect_ip_device(
         tokio::select! {
             _ = &mut deadline => break,
             chunk = req_recv.recv_data() => {
-                let Some(chunk) = chunk? else { break };
+                let Some(chunk) = chunk? else {
+                    if let Err(err) = capsules.ensure_complete() {
+                        req_send.abort_message_stream();
+                        req_recv.abort_message_stream();
+                        return Err(err);
+                    }
+                    break;
+                };
                 capsules.push(chunk, max_capsule_buffer_bytes)?;
                 while let Some((capsule_type, payload)) = capsules.take_next()? {
                     validate_connect_ip_capsule(capsule_type, &payload, &downstream_policy)?;
@@ -381,7 +406,14 @@ pub(super) async fn relay_qpx_connect_udp_stream(
                             .as_mut()
                             .reset(crate::runtime::tokio_deadline_after(idle_timeout));
                     }
-                    None => break,
+                    None => {
+                        if let Err(err) = capsule_buf.ensure_complete() {
+                            req_send.abort_message_stream();
+                            req_recv.abort_message_stream();
+                            return Err(err);
+                        }
+                        break;
+                    }
                 }
             }
             payload = async {

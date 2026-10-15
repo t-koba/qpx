@@ -63,6 +63,18 @@ impl CapsuleBuffer {
         Ok(Some((capsule_type, self.take_bytes(capsule_len))))
     }
 
+    /// Checks for a truncated capsule at clean stream EOF (RFC 9297).
+    /// Call only after draining all complete capsules with `take_next`.
+    pub(crate) fn ensure_complete(&self) -> Result<()> {
+        if self.len != 0 {
+            return Err(anyhow!(
+                "capsule stream ended with an incomplete capsule ({} buffered bytes)",
+                self.len
+            ));
+        }
+        Ok(())
+    }
+
     fn peek_varint(&self, offset: usize) -> Option<(u64, usize)> {
         let first = self.peek_byte(offset)?;
         let prefix = first >> 6;
@@ -245,6 +257,106 @@ mod tests {
         buf.push(Bytes::from_static(&[1, 2, 3]), 4)
             .expect("within cap");
         assert!(buf.push(Bytes::from_static(&[4, 5]), 4).is_err());
+    }
+
+    #[test]
+    fn capsule_completion_accepts_empty_stream() {
+        let buf = CapsuleBuffer::new();
+        assert!(buf.ensure_complete().is_ok());
+    }
+
+    #[test]
+    fn capsule_completion_accepts_drained_complete_capsules() {
+        let mut buf = CapsuleBuffer::new();
+        // An unknown, empty capsule followed by a DATAGRAM capsule.
+        buf.push(Bytes::from_static(&[37, 0, 0, 2, 0, 42]), 1024)
+            .unwrap();
+        assert_eq!(buf.take_next().unwrap(), Some((37, Bytes::new())));
+        assert_eq!(
+            buf.take_next().unwrap(),
+            Some((0, Bytes::from_static(&[0, 42])))
+        );
+        assert!(buf.take_next().unwrap().is_none());
+        assert!(buf.ensure_complete().is_ok());
+    }
+
+    #[test]
+    fn capsule_completion_rejects_truncated_type() {
+        for encoded_type in [
+            &[0x40, 0][..],
+            &[0x80, 0, 0, 0],
+            &[0xc0, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            for end in 1..encoded_type.len() {
+                let mut buf = CapsuleBuffer::new();
+                buf.push(Bytes::copy_from_slice(&encoded_type[..end]), 1024)
+                    .unwrap();
+                assert!(buf.take_next().unwrap().is_none());
+                assert!(buf.ensure_complete().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn capsule_completion_rejects_truncated_length() {
+        for encoded_len in [
+            &[0][..],
+            &[0x40, 0],
+            &[0x80, 0, 0, 0],
+            &[0xc0, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            for end in 0..encoded_len.len() {
+                let mut buf = CapsuleBuffer::new();
+                buf.push(Bytes::from_static(&[0]), 1024).unwrap();
+                buf.push(Bytes::copy_from_slice(&encoded_len[..end]), 1024)
+                    .unwrap();
+                assert!(buf.take_next().unwrap().is_none());
+                assert!(buf.ensure_complete().is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn capsule_completion_rejects_truncated_value() {
+        for end in 2..4 {
+            let mut buf = CapsuleBuffer::new();
+            buf.push(Bytes::from_static(&[0, 2, 0, 42]).slice(..end), 1024)
+                .unwrap();
+            assert!(buf.take_next().unwrap().is_none());
+            assert!(buf.ensure_complete().is_err());
+        }
+    }
+
+    #[test]
+    fn capsule_completion_accepts_fragmented_arrival() {
+        // Both header varints and the value arrive a byte at a time.
+        let capsule = [0x40, 37, 0x40, 3, 1, 2, 3];
+        let mut buf = CapsuleBuffer::new();
+        for (idx, byte) in capsule.into_iter().enumerate() {
+            buf.push(Bytes::copy_from_slice(&[byte]), 1024).unwrap();
+            let next = buf.take_next().unwrap();
+            if idx + 1 < capsule.len() {
+                assert!(next.is_none());
+                assert!(buf.ensure_complete().is_err());
+            } else {
+                assert_eq!(next, Some((37, Bytes::from_static(&[1, 2, 3]))));
+                assert!(buf.take_next().unwrap().is_none());
+                assert!(buf.ensure_complete().is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn capsule_completion_rejects_residue_after_complete_capsule() {
+        for residue in [&[0x40][..], &[0], &[0, 0x40], &[0, 2, 0]] {
+            let mut buf = CapsuleBuffer::new();
+            let mut bytes = vec![37, 0];
+            bytes.extend_from_slice(residue);
+            buf.push(Bytes::from(bytes), 1024).unwrap();
+            assert_eq!(buf.take_next().unwrap(), Some((37, Bytes::new())));
+            assert!(buf.take_next().unwrap().is_none());
+            assert!(buf.ensure_complete().is_err());
+        }
     }
 
     #[test]
