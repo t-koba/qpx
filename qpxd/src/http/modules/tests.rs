@@ -51,7 +51,7 @@ fn module_test_runtime() -> Runtime {
     .expect("runtime")
 }
 
-fn module_test_context() -> HttpModuleContext {
+pub(super) fn module_test_context() -> HttpModuleContext {
     HttpModuleContext::new(
         module_test_runtime().state(),
         HttpModuleSessionInit {

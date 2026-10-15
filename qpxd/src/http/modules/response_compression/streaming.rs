@@ -17,7 +17,7 @@ use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 use super::metrics;
-use super::strip_stale_content_digest;
+use super::strip_stale_digests;
 
 const COMPRESSION_PIPELINE_DEPTH: usize = 4;
 const COMPRESSION_WORKER_QUEUE_FACTOR: usize = 2;
@@ -421,7 +421,7 @@ async fn send_compression_result(
             }
             if let Some(mut trailers) = trailers {
                 // Trailers travel with the transformed bytes too.
-                strip_stale_content_digest(&mut trailers);
+                strip_stale_digests(&mut trailers);
                 sender
                     .send_trailers(trailers)
                     .await
@@ -522,4 +522,48 @@ pub(super) fn stream_compressed_body(
         }
     });
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::HeaderValue;
+    use qpx_http::digest_fields::{CONTENT_DIGEST, REPR_DIGEST};
+
+    #[tokio::test]
+    async fn forwarded_compression_trailers_drop_both_digest_fields() {
+        let mut trailers = HeaderMap::new();
+        trailers.insert(
+            CONTENT_DIGEST.clone(),
+            HeaderValue::from_static("sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"),
+        );
+        trailers.insert(
+            REPR_DIGEST.clone(),
+            HeaderValue::from_static("sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"),
+        );
+        trailers.insert("x-trace", HeaderValue::from_static("kept"));
+        let (mut sender, mut body) = Body::channel_with_capacity(1);
+
+        send_compression_result(
+            &mut sender,
+            CompressionJobResult::Finish {
+                chunk: None,
+                trailers: Some(trailers),
+            },
+        )
+        .await
+        .expect("forward trailers");
+
+        let forwarded = body
+            .trailers()
+            .await
+            .expect("read trailers")
+            .expect("trailers");
+        assert!(!forwarded.contains_key(CONTENT_DIGEST.clone()));
+        assert!(!forwarded.contains_key(REPR_DIGEST.clone()));
+        assert_eq!(
+            forwarded.get("x-trace"),
+            Some(&HeaderValue::from_static("kept"))
+        );
+    }
 }

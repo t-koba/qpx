@@ -368,24 +368,154 @@ fn higher_encoding_quality_beats_identity() {
     }
 }
 
-#[test]
-fn compression_drops_content_digest_but_keeps_repr_digest() {
-    use qpx_http::digest_fields::{CONTENT_DIGEST, REPR_DIGEST};
+fn response_with_digests(
+    body: &'static str,
+    cache_control: Option<&'static str>,
+) -> Response<Body> {
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, body.len().to_string())
+        .header(
+            CONTENT_DIGEST.clone(),
+            "sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:",
+        )
+        .header(
+            REPR_DIGEST.clone(),
+            "sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:",
+        );
+    if let Some(cache_control) = cache_control {
+        builder = builder.header(http::header::CACHE_CONTROL, cache_control);
+    }
+    builder.body(Body::from(body)).expect("response")
+}
+
+fn assert_digest_fields_present(headers: &HeaderMap) {
+    assert!(headers.contains_key(CONTENT_DIGEST.clone()));
+    assert!(headers.contains_key(REPR_DIGEST.clone()));
+}
+
+fn assert_digest_fields_absent(headers: &HeaderMap) {
+    assert!(!headers.contains_key(CONTENT_DIGEST.clone()));
+    assert!(!headers.contains_key(REPR_DIGEST.clone()));
+}
+
+fn compression_context(accept_encoding: &str) -> HttpModuleContext {
+    let mut ctx = super::super::tests::module_test_context();
     let mut headers = HeaderMap::new();
     headers.insert(
-        CONTENT_DIGEST.clone(),
-        http::HeaderValue::from_static("sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"),
+        ACCEPT_ENCODING,
+        HeaderValue::from_str(accept_encoding).expect("encoding"),
     );
-    headers.insert(
-        REPR_DIGEST.clone(),
-        http::HeaderValue::from_static("sha-256=:X48E9qOokqqrvdts8nOJRJN3OWDUoyWxBf7kbu9DBPE=:"),
+    ctx.extensions_mut().insert(CompressionRequest {
+        method: Method::GET,
+        headers,
+    });
+    ctx
+}
+
+#[tokio::test]
+async fn ordinary_compression_drops_both_digest_fields_from_transformed_headers() {
+    let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
+    let ctx = compression_context("gzip");
+    let response = response_with_digests("hello world!", None);
+
+    let compressed = module.compress(&ctx, response).await.expect("compression");
+    assert_eq!(
+        compressed.headers().get(CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("gzip"))
     );
-    headers.insert(CONTENT_TYPE, http::HeaderValue::from_static("text/plain"));
-    strip_stale_content_digest(&mut headers);
-    assert!(!headers.contains_key(CONTENT_DIGEST.clone()));
-    assert!(
-        headers.contains_key(REPR_DIGEST.clone()),
-        "repr-digest survives content coding"
+    assert_digest_fields_absent(compressed.headers());
+    let compressed_body = to_bytes(compressed.into_body())
+        .await
+        .expect("compressed body");
+    assert!(!compressed_body.is_empty());
+}
+
+#[tokio::test]
+async fn dictionary_compression_drops_both_digest_fields_and_no_transform_preserves_them() {
+    use base64::Engine as _;
+
+    let dictionary = b"frequent words from an example response";
+    let temp_dir = tempfile::tempdir().expect("temporary directory");
+    let dictionary_path = temp_dir.path().join("dictionary");
+    std::fs::write(&dictionary_path, dictionary).expect("write dictionary");
+    let config = ResponseCompressionModuleConfig {
+        dictionary: Some(qpx_core::config::ResponseCompressionDictionaryConfig {
+            path: dictionary_path.to_string_lossy().into_owned(),
+            id: Some("example".to_string()),
+            encoding: "dcb".to_string(),
+        }),
+        ..identity_test_config()
+    };
+    let module = ResponseCompressionModule::new(config).expect("module");
+    let ctx = super::super::tests::module_test_context();
+    let dictionary_hash: [u8; 32] = Sha256::digest(dictionary).into();
+    let mut request_headers = HeaderMap::new();
+    request_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("dcb"));
+    request_headers.insert(
+        "available-dictionary",
+        HeaderValue::from_str(&format!(
+            ":{}:",
+            base64::engine::general_purpose::STANDARD.encode(dictionary_hash)
+        ))
+        .expect("available dictionary"),
     );
-    assert!(headers.contains_key(CONTENT_TYPE));
+    request_headers.insert("dictionary-id", HeaderValue::from_static("\"example\""));
+
+    let compressed = module
+        .compress_with_dictionary(
+            &ctx,
+            &Method::GET,
+            &request_headers,
+            response_with_digests("frequent words from a response", None),
+        )
+        .await
+        .expect("dictionary compression");
+    let DictionaryCompressionOutcome::Compressed(compressed) = compressed else {
+        panic!("dictionary should be selected");
+    };
+    assert_eq!(
+        compressed.headers().get(CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("dcb"))
+    );
+    assert_digest_fields_absent(compressed.headers());
+
+    let unchanged = module
+        .compress_with_dictionary(
+            &ctx,
+            &Method::GET,
+            &request_headers,
+            response_with_digests(
+                "frequent words from a response",
+                Some("public, no-transform"),
+            ),
+        )
+        .await
+        .expect("no-transform response");
+    let DictionaryCompressionOutcome::Unchanged(unchanged) = unchanged else {
+        panic!("no-transform response must not be compressed");
+    };
+    assert_digest_fields_present(unchanged.headers());
+}
+
+#[tokio::test]
+async fn identity_and_no_transform_responses_preserve_both_digest_fields() {
+    let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
+    for (accept_encoding, cache_control) in
+        [("gzip", Some("public, no-transform")), ("gzip;q=0", None)]
+    {
+        let ctx = compression_context(accept_encoding);
+        let response = response_with_digests("hello world!", cache_control);
+        let unchanged = module
+            .compress(&ctx, response)
+            .await
+            .expect("unchanged response");
+        assert!(!unchanged.headers().contains_key(CONTENT_ENCODING));
+        assert_digest_fields_present(unchanged.headers());
+        let body = to_bytes(unchanged.into_body())
+            .await
+            .expect("identity body");
+        assert_eq!(body, "hello world!");
+    }
 }

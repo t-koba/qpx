@@ -15,7 +15,7 @@ use qpx_http::body::{Body, to_bytes};
 use qpx_http::compression_dictionary::{
     encode_dcb, encode_dcz, parse_available_dictionary, parse_dictionary_id,
 };
-use qpx_http::digest_fields::CONTENT_DIGEST;
+use qpx_http::digest_fields::{CONTENT_DIGEST, REPR_DIGEST};
 use qpxd_cache::parse_cache_control_response_directives;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -139,7 +139,7 @@ impl ResponseCompressionModule {
         let (mut parts, body) = response.into_parts();
         parts.headers.remove(CONTENT_LENGTH);
         parts.headers.remove(ETAG);
-        strip_stale_content_digest(&mut parts.headers);
+        strip_stale_digests(&mut parts.headers);
         parts.headers.insert(
             CONTENT_ENCODING,
             HeaderValue::from_static(encoding.http_name()),
@@ -224,7 +224,7 @@ impl ResponseCompressionModule {
             _ => return Err(anyhow!("unsupported dictionary compression encoding")),
         };
         parts.headers.remove(ETAG);
-        strip_stale_content_digest(&mut parts.headers);
+        strip_stale_digests(&mut parts.headers);
         parts
             .headers
             .insert(CONTENT_ENCODING, HeaderValue::from_str(&profile.encoding)?);
@@ -437,12 +437,13 @@ fn mark_identity_variant(
     Ok(())
 }
 
-/// Drops a stale `Content-Digest` after this module transforms the content
-/// bytes. RFC 9530: `Content-Digest` covers the (encoded) content, so origin
-/// values are invalid once compressed; `Repr-Digest` covers the pre-coding
-/// representation and stays valid, so it is preserved.
-fn strip_stale_content_digest(headers: &mut HeaderMap) {
+/// Drops origin digests after compression changes the response's content coding.
+/// RFC 9530 §3 defines `Content-Digest` over the message content and `Repr-Digest`
+/// over the selected representation, including its content coding (see also
+/// Appendix B.4). Neither origin value remains valid after compression.
+fn strip_stale_digests(headers: &mut HeaderMap) {
     headers.remove(CONTENT_DIGEST.clone());
+    headers.remove(REPR_DIGEST.clone());
 }
 
 fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
