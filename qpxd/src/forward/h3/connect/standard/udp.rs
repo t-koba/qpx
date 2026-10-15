@@ -460,19 +460,9 @@ async fn relay_h3_connect_udp_stream(
                     .as_mut()
                     .reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            recv = udp.recv_buf(&mut udp_buf) => {
-                let read_len = recv?;
-                if read_len == 0 {
-                    udp_buf.truncate(1);
-                    continue;
-                }
-                let datagram_payload = udp_buf.split_to(read_len + 1).freeze();
-                let payload_len = datagram_payload.len().saturating_sub(1);
-                let stream_payload = datagram_payload.slice(1..);
-                if udp_buf.capacity() < 65_536 {
-                    udp_buf.reserve(65_536 - udp_buf.capacity());
-                }
-                udp_buf.extend_from_slice(&[0]);
+            recv = recv_connect_udp_response(&udp, &mut udp_buf) => {
+                let (datagram_payload, stream_payload) = recv?;
+                let payload_len = stream_payload.len();
                 apply_connect_udp_bandwidth_controls(&rate_limit_ctx, &request_limits, payload_len).await?;
                 let mut sent = false;
                 if let Some(datagrams) = datagrams.as_mut()
@@ -503,4 +493,67 @@ async fn relay_h3_connect_udp_stream(
         .await
         .map_err(|_| anyhow!("CONNECT-UDP stream finish timed out"))??;
     Ok(())
+}
+
+// A zero-byte UDP receive still carries a response: preserve its context ID
+// and restore the receive buffer exactly as for a nonempty datagram.
+async fn recv_connect_udp_response(
+    udp: &UdpSocket,
+    udp_buf: &mut BytesMut,
+) -> std::io::Result<(Bytes, Bytes)> {
+    let read_len = udp.recv_buf(udp_buf).await?;
+    let datagram_payload = udp_buf.split_to(read_len + 1).freeze();
+    let stream_payload = datagram_payload.slice(1..);
+    if udp_buf.capacity() < 65_536 {
+        udp_buf.reserve(65_536 - udp_buf.capacity());
+    }
+    udp_buf.extend_from_slice(&[0]);
+    Ok((datagram_payload, stream_payload))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn connect_udp_empty_response_then_nonempty() {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        udp.connect(upstream.local_addr().unwrap()).await.unwrap();
+        upstream.connect(udp.local_addr().unwrap()).await.unwrap();
+
+        let mut udp_buf = BytesMut::with_capacity(65_536);
+        udp_buf.extend_from_slice(&[0]);
+        let mut responses = Vec::new();
+        let mut capsules = CapsuleBuffer::new();
+        for payload in [b"".as_slice(), b"next response"] {
+            upstream.send(payload).await.unwrap();
+            let response = timeout(
+                Duration::from_secs(2),
+                recv_connect_udp_response(&udp, &mut udp_buf),
+            )
+            .await
+            .expect("UDP response should not be skipped")
+            .unwrap();
+            assert_eq!(udp_buf.as_ref(), &[0]);
+            let header = encode_datagram_capsule_context_header(response.1.len()).unwrap();
+            capsules.push(header, 65_536).unwrap();
+            capsules.push(response.1.clone(), 65_536).unwrap();
+            responses.push(response);
+        }
+
+        for ((datagram, stream_payload), expected) in
+            responses.iter().zip([b"".as_slice(), b"next response"])
+        {
+            let mut expected_datagram = vec![0];
+            expected_datagram.extend_from_slice(expected);
+            assert_eq!(datagram.as_ref(), expected_datagram);
+            assert_eq!(stream_payload.as_ref(), expected);
+            let (capsule_type, capsule_payload) = capsules.take_next().unwrap().unwrap();
+            assert_eq!(capsule_type, 0);
+            assert_eq!(capsule_payload, *datagram);
+        }
+        assert!(capsules.take_next().unwrap().is_none());
+        capsules.ensure_complete().unwrap();
+    }
 }

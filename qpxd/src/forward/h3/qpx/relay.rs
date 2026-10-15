@@ -444,24 +444,9 @@ pub(super) async fn relay_qpx_connect_udp_stream(
                     .as_mut()
                     .reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            recv = udp.recv_buf(&mut udp_buf) => {
-                let read_len = recv?;
-                if read_len == 0 {
-                    udp_buf.truncate(1);
-                    continue;
-                }
-                let datagram_payload = udp_buf.split_to(datagram_prefix_len + read_len + 1).freeze();
-                let payload_len = datagram_payload
-                    .len()
-                    .saturating_sub(datagram_prefix_len + 1);
-                let stream_payload = datagram_payload.slice(datagram_prefix_len + 1..);
-                if udp_buf.capacity() < 65_536 + datagram_prefix_len + 1 {
-                    udp_buf.reserve(65_536 + datagram_prefix_len + 1 - udp_buf.capacity());
-                }
-                if let Some(prefix) = datagram_prefix.as_ref() {
-                    udp_buf.extend_from_slice(prefix.as_ref());
-                }
-                udp_buf.extend_from_slice(&[0]);
+            recv = recv_connect_udp_response(&udp, &mut udp_buf, datagram_prefix.as_ref()) => {
+                let (datagram_payload, stream_payload) = recv?;
+                let payload_len = stream_payload.len();
                 apply_connect_udp_bandwidth_controls(&rate_limit_ctx, &request_limits, payload_len).await?;
                 let mut sent = false;
                 if let Some(datagrams) = datagrams.as_mut()
@@ -495,6 +480,28 @@ pub(super) async fn relay_qpx_connect_udp_stream(
         .await
         .map_err(|_| anyhow!("qpx-h3 CONNECT-UDP finish timed out"))??;
     Ok(())
+}
+
+// recv_buf appends to the stream prefix and context ID already in the buffer.
+// A zero-byte receive is a UDP datagram, not EOF: emit its framing and restore
+// the entire prefix for the next response just as for a nonempty datagram.
+async fn recv_connect_udp_response(
+    udp: &UdpSocket,
+    udp_buf: &mut BytesMut,
+    datagram_prefix: Option<&Bytes>,
+) -> std::io::Result<(Bytes, Bytes)> {
+    let read_len = udp.recv_buf(udp_buf).await?;
+    let prefix_len = datagram_prefix.map_or(0, Bytes::len);
+    let datagram_payload = udp_buf.split_to(prefix_len + read_len + 1).freeze();
+    let stream_payload = datagram_payload.slice(prefix_len + 1..);
+    if udp_buf.capacity() < 65_536 + prefix_len + 1 {
+        udp_buf.reserve(65_536 + prefix_len + 1 - udp_buf.capacity());
+    }
+    if let Some(prefix) = datagram_prefix {
+        udp_buf.extend_from_slice(prefix);
+    }
+    udp_buf.extend_from_slice(&[0]);
+    Ok((datagram_payload, stream_payload))
 }
 
 pub(super) async fn relay_qpx_connect_udp_stream_chained(
@@ -730,5 +737,72 @@ mod connect_ip_tests {
         assert!(
             validate_connect_ip_capsule(ROUTE_ADVERTISEMENT_CAPSULE, &crossing, &policy()).is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod connect_udp_tests {
+    use super::*;
+
+    async fn empty_then_nonempty_response(prefix: Option<Bytes>) {
+        let udp = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        let upstream = UdpSocket::bind("127.0.0.1:0").await.unwrap();
+        udp.connect(upstream.local_addr().unwrap()).await.unwrap();
+        upstream.connect(udp.local_addr().unwrap()).await.unwrap();
+
+        let mut framing = prefix.clone().unwrap_or_default().to_vec();
+        framing.push(0); // CONNECT-UDP context ID
+        let mut udp_buf = BytesMut::with_capacity(65_536 + framing.len());
+        udp_buf.extend_from_slice(&framing);
+        let mut responses = Vec::new();
+        let mut capsules = CapsuleBuffer::new();
+        for payload in [b"".as_slice(), b"next response"] {
+            upstream.send(payload).await.unwrap();
+            let response = timeout(
+                Duration::from_secs(2),
+                recv_connect_udp_response(&udp, &mut udp_buf, prefix.as_ref()),
+            )
+            .await
+            .expect("UDP response should not be skipped")
+            .unwrap();
+            assert_eq!(udp_buf.as_ref(), framing);
+            // Exercise the same Capsule fallback encoder and payload used by
+            // the relay, including fallback after a prefixed DATAGRAM fails.
+            let header = encode_datagram_capsule_context_header(response.1.len()).unwrap();
+            capsules.push(header, 65_536).unwrap();
+            capsules.push(response.1.clone(), 65_536).unwrap();
+            responses.push(response);
+        }
+
+        for ((datagram, stream_payload), expected) in
+            responses.iter().zip([b"".as_slice(), b"next response"])
+        {
+            let mut expected_datagram = framing.clone();
+            expected_datagram.extend_from_slice(expected);
+            assert_eq!(datagram.as_ref(), expected_datagram);
+            assert_eq!(stream_payload.as_ref(), expected);
+            let (capsule_type, capsule_payload) = capsules.take_next().unwrap().unwrap();
+            assert_eq!(capsule_type, 0);
+            let mut expected_capsule = vec![0];
+            expected_capsule.extend_from_slice(expected);
+            assert_eq!(capsule_payload.as_ref(), expected_capsule);
+        }
+        assert!(capsules.take_next().unwrap().is_none());
+        capsules.ensure_complete().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connect_udp_empty_response_one_byte_prefix() {
+        empty_then_nonempty_response(Some(Bytes::from_static(&[0x01]))).await;
+    }
+
+    #[tokio::test]
+    async fn connect_udp_empty_response_two_byte_prefix() {
+        empty_then_nonempty_response(Some(Bytes::from_static(&[0x40, 0x40]))).await;
+    }
+
+    #[tokio::test]
+    async fn connect_udp_empty_response_capsule_only() {
+        empty_then_nonempty_response(None).await;
     }
 }
