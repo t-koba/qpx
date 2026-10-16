@@ -159,6 +159,33 @@ fn http_request_path_must_not_be_empty() {
 }
 
 #[test]
+fn request_path_requires_origin_form_or_options_asterisk() {
+    for (method, path) in [("GET", "relative"), ("GET", "*"), ("POST", "*")] {
+        let fields = [
+            (":method", method),
+            (":scheme", "https"),
+            (":authority", "example.com"),
+            (":path", path),
+        ];
+        for decoded in decode_request_heads(&fields) {
+            let err = decoded.expect_err("invalid HTTP request path form must fail");
+            assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+        }
+    }
+
+    let fields = [
+        (":method", "OPTIONS"),
+        (":scheme", "https"),
+        (":authority", "example.com"),
+        (":path", "*"),
+    ];
+    for decoded in decode_request_heads(&fields) {
+        let request = decoded.expect("OPTIONS * is valid").request;
+        assert_eq!(request.uri().path_and_query().unwrap().as_str(), "*");
+    }
+}
+
+#[test]
 fn request_authority_preserves_expect_for_application_preflight() {
     let mut fields = request_authority_fields("https", Some("example.com"), None);
     fields.push(("expect", "application-specific"));

@@ -180,6 +180,7 @@ impl FieldSink for RequestHeadSink {
         }
         let uri = build_request_uri(
             &self.headers,
+            &method,
             self.scheme.as_deref(),
             self.authority.as_deref(),
             self.path.as_deref(),
@@ -291,6 +292,7 @@ fn pseudo_value_to_string(
 
 pub(super) fn build_request_uri(
     headers: &HeaderMap,
+    method: &Method,
     scheme: Option<&str>,
     authority: Option<&str>,
     path: Option<&str>,
@@ -298,6 +300,9 @@ pub(super) fn build_request_uri(
 ) -> Result<Uri> {
     if matches!(scheme, Some("http" | "https")) && path == Some("") {
         return Err(anyhow!("HTTP(S) request :path must not be empty"));
+    }
+    if path == Some("*") && method != http::Method::OPTIONS {
+        return Err(anyhow!("HTTP request :path '*' is only valid for OPTIONS"));
     }
     let authority = authority
         .map(str::parse::<http::uri::Authority>)

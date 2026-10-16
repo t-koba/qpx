@@ -112,6 +112,7 @@ pub(crate) fn decode_request_head_from_fields(
     }
     let uri = build_request_uri(
         &headers,
+        &method,
         scheme.as_deref(),
         authority.as_deref(),
         path.as_deref(),
