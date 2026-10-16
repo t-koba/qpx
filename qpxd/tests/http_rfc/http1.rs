@@ -32,14 +32,6 @@ pub(crate) async fn http11_validation_cases(forward_port: u16) -> Result<()> {
     )
     .await?;
 
-    // Host/authority mismatch is rejected.
-    assert_status(
-        addr,
-        format!("GET http://127.0.0.1:{backend_port}/ HTTP/1.1\r\nHost: other.invalid\r\n\r\n"),
-        400,
-    )
-    .await?;
-
     // Transfer-Encoding + Content-Length is rejected.
     assert_status(
         addr,
@@ -96,5 +88,34 @@ pub(crate) async fn http11_validation_cases(forward_port: u16) -> Result<()> {
     )
     .await?;
 
+    Ok(())
+}
+
+pub(crate) async fn http11_absolute_form_target_authority_wins(forward_port: u16) -> Result<()> {
+    let (backend_addr, captured_rx) = serve_http1_capture_once(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+    )
+    .await?;
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{forward_port}").parse()?;
+    let request = format!(
+        "GET http://{backend_addr}/absolute-form HTTP/1.1\r\nHost: other.invalid\r\nConnection: close\r\n\r\n"
+    );
+    let (status, _, _) = send_http1_and_read_head(proxy_addr, request.as_bytes()).await?;
+    if status != 200 {
+        return Err(anyhow!(
+            "absolute-form request should route using target authority, got status {status}"
+        ));
+    }
+
+    let captured = timeout(Duration::from_secs(5), captured_rx)
+        .await
+        .context("timed out waiting for absolute-form request at target")??;
+    let captured = String::from_utf8_lossy(&captured).to_ascii_lowercase();
+    let expected_host = format!("\r\nhost: {}\r\n", backend_addr).to_ascii_lowercase();
+    if !captured.contains(&expected_host) || captured.contains("\r\nhost: other.invalid\r\n") {
+        return Err(anyhow!(
+            "proxy did not replace ignored Host with request-target authority:\n{captured}"
+        ));
+    }
     Ok(())
 }

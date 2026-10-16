@@ -175,9 +175,29 @@ fn validate_rejects_missing_host_for_http11() {
 }
 
 #[test]
-fn validate_rejects_host_authority_mismatch() {
+fn absolute_form_uses_target_authority_over_host() {
+    for version in [Version::HTTP_10, Version::HTTP_11] {
+        let req = http::Request::builder()
+            .version(version)
+            .method(Method::GET)
+            .uri("http://target.example/path")
+            .header(HOST, "stale.example")
+            .body(())
+            .expect("request");
+
+        let validated = validate_incoming_request_with_metadata(&req)
+            .expect("absolute-form target authority takes precedence");
+        assert_eq!(
+            validated.authority().map(http::uri::Authority::as_str),
+            Some("target.example")
+        );
+    }
+}
+
+#[test]
+fn validate_rejects_http2_host_authority_mismatch() {
     let mut req = http::Request::builder()
-        .version(Version::HTTP_11)
+        .version(Version::HTTP_2)
         .method(Method::GET)
         .uri("http://example.com/path")
         .body(())

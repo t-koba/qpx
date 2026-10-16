@@ -408,7 +408,14 @@ pub fn validate_incoming_request_with_metadata<B>(
         return Err(RequestValidationError::MissingHost);
     }
 
-    if let (Some(host), Some(authority)) = (host.as_ref(), parsed_uri_authority.as_ref())
+    // RFC 9112 Section 3.2.2: for HTTP/1 absolute-form, the target URI
+    // authority replaces Host; do not reject a request based on the ignored Host value.
+    let http1_absolute_form = matches!(req.version(), Version::HTTP_10 | Version::HTTP_11)
+        && req.method() != Method::CONNECT
+        && req.uri().scheme().is_some()
+        && uri_authority.is_some();
+    if !http1_absolute_form
+        && let (Some(host), Some(authority)) = (host.as_ref(), parsed_uri_authority.as_ref())
         && !authority_parts_equivalent(host, authority, req.uri().scheme_str())
     {
         return Err(RequestValidationError::HostAuthorityMismatch);
