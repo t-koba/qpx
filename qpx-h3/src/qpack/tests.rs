@@ -143,6 +143,22 @@ fn request_authority_rejects_missing_empty_and_malformed_values() {
 }
 
 #[test]
+fn http_request_path_must_not_be_empty() {
+    for scheme in ["http", "https"] {
+        let fields = [
+            (":method", "GET"),
+            (":scheme", scheme),
+            (":authority", "example.com"),
+            (":path", ""),
+        ];
+        for decoded in decode_request_heads(&fields) {
+            let err = decoded.expect_err("HTTP(S) :path must not be empty");
+            assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+        }
+    }
+}
+
+#[test]
 fn request_authority_preserves_expect_for_application_preflight() {
     let mut fields = request_authority_fields("https", Some("example.com"), None);
     fields.push(("expect", "application-specific"));

@@ -296,6 +296,9 @@ pub(super) fn build_request_uri(
     path: Option<&str>,
     authority_only: bool,
 ) -> Result<Uri> {
+    if matches!(scheme, Some("http" | "https")) && path == Some("") {
+        return Err(anyhow!("HTTP(S) request :path must not be empty"));
+    }
     let authority = authority
         .map(str::parse::<http::uri::Authority>)
         .transpose()?;
