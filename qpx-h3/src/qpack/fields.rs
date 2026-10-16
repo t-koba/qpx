@@ -304,17 +304,26 @@ pub(super) fn build_request_uri(
     if path == Some("*") && method != http::Method::OPTIONS {
         return Err(anyhow!("HTTP request :path '*' is only valid for OPTIONS"));
     }
-    let authority = authority
+    let pseudo_authority = authority;
+    let parsed_authority = pseudo_authority
         .map(str::parse::<http::uri::Authority>)
         .transpose()?;
     // RFC 9114 section 4.3.1: validate both sources before dispatch, and use
     // Host as the URI authority when :authority is absent.
     let authority = qpx_http::protocol::semantics::resolve_request_authority(
         headers,
-        authority.as_ref(),
+        parsed_authority.as_ref(),
         scheme,
     )
     .map_err(|err| anyhow!("{err}"))?;
+    // HTTP/3 requires the two field values themselves to match, not merely
+    // identify equivalent authorities (for example, host case/default port).
+    if let (Some(pseudo_authority), Some(host)) =
+        (pseudo_authority, headers.get(http::header::HOST))
+        && host.as_bytes() != pseudo_authority.as_bytes()
+    {
+        return Err(anyhow!("Host field does not match :authority value"));
+    }
     if authority_only {
         let authority = authority.ok_or_else(|| anyhow!("CONNECT requires :authority"))?;
         return Uri::builder()

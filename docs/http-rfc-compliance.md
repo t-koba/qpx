@@ -79,7 +79,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | 9111 | native | cache keying, freshness, validation, invalidation, Vary, Age, and warning behavior | `qpxd-cache` unit/scenario tests and RFC cache contracts |
 | 9112 | native | strict HTTP/1.1 framing, connection lifecycle, trailers, Upgrade, and CONNECT handling | H1 codec tests, smuggling regressions, and forward/reverse E2E |
 | 9113 | transport-library-with-contract | pinned h2 transport with non-poisoning low-contention stream locks; HTTP/2 framing, stream lifecycle, extended CONNECT, limits, and forward/reverse/transparent paths | qpxd HTTP/2 codec lifecycle tests; HTTP/2 contract, E2E, and comparative performance suites |
-| 9114 | transport-library-with-contract | HTTP semantics over QUIC, control streams, settings, QPACK integration, H3 errors, and backend parity | qpx-h3 unit/E2E and external H3 matrix |
+| 9114 | transport-library-with-contract | HTTP semantics over QUIC, control streams, settings, QPACK, request pseudo-header validation (:authority/Host same-value and :path form), H3 errors, and backend parity | qpx-h3 unit/E2E and external H3 matrix |
 
 ## Methods, status codes, and fields
 

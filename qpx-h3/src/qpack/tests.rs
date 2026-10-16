@@ -59,8 +59,8 @@ fn request_authority_accepts_matching_values() {
     for (scheme, authority, host) in [
         ("http", "example.com", "example.com"),
         ("https", "example.com", "example.com"),
-        ("https", "EXAMPLE.com:443", "example.COM"),
-        ("http", "example.com", "EXAMPLE.COM:80"),
+        ("https", "EXAMPLE.com:443", "EXAMPLE.com:443"),
+        ("http", "example.com:80", "example.com:80"),
         ("https", "[2001:db8::1]:8443", "[2001:db8::1]:8443"),
     ] {
         let fields = request_authority_fields(scheme, Some(authority), Some(host));
@@ -79,6 +79,9 @@ fn request_authority_rejects_mismatches() {
         ("https", "example.com:443", "example.com:8443"),
         ("http", "example.com", "example.com:443"),
         ("https", "[2001:db8::1]", "[2001:db8::2]"),
+        ("https", "EXAMPLE.com:443", "example.COM"),
+        ("https", "example.com:443", "example.com"),
+        ("http", "example.com", "EXAMPLE.COM:80"),
     ] {
         let fields = request_authority_fields(scheme, Some(authority), Some(host));
         for decoded in decode_request_heads(&fields) {

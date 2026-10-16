@@ -13,11 +13,12 @@ async fn mismatched_request_authority_is_reset_before_dispatch() -> Result<()> {
     open_client_qpack_streams(&connection).await?;
 
     // Send raw QPACK: a conforming client may refuse to encode this request.
-    let mut headers = build_head_request_headers(&format!("localhost:{}", addr.port()));
-    for (name, value) in [
-        ("host", "attacker.invalid"),
-        ("x-dynamic", "must-not-dispatch"),
-    ] {
+    // The Host value is semantically equivalent by DNS case folding, but RFC
+    // 9114 requires the two field values themselves to be the same.
+    let authority = format!("localhost:{}", addr.port());
+    let host = format!("LOCALHOST:{}", addr.port());
+    let mut headers = build_head_request_headers(&authority);
+    for (name, value) in [("host", host.as_str()), ("x-dynamic", "must-not-dispatch")] {
         encode_string(&mut headers, 4, 0b0010, name.as_bytes());
         encode_string(&mut headers, 8, 0, value.as_bytes());
     }
