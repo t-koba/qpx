@@ -188,6 +188,23 @@ fn request_path_requires_origin_form_or_options_asterisk() {
     }
 }
 
+// A scheme may allow authority to be absent without forbidding it; Host
+// supplies an authority-bearing target in this case.
+#[test]
+fn optional_authority_scheme_host_supplies_target_authority() {
+    let fields = [
+        (":method", "GET"),
+        (":scheme", "file"),
+        (":path", "/resource"),
+        ("host", "example.test"),
+    ];
+    for decoded in decode_request_heads(&fields) {
+        let request = decoded.expect("Host supplies the target authority").request;
+        assert_eq!(request.uri().scheme_str(), Some("file"));
+        assert_eq!(request.uri().authority().unwrap(), "example.test");
+    }
+}
+
 #[test]
 fn request_authority_preserves_expect_for_application_preflight() {
     let mut fields = request_authority_fields("https", Some("example.com"), None);
