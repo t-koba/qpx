@@ -16,7 +16,11 @@ and buffering reasons.
 
 - `response_compression`: downstream response compression for `gzip`, `br`, and
   `zstd`. Compression runs after cache writeback, so cached objects remain
-  identity-encoded while clients can receive compressed responses.
+  identity-encoded while clients can receive compressed responses. Eligible
+  identity responses also carry `Vary: Accept-Encoding`, including when the
+  request omits that field, so downstream caches do not mask a later compressed
+  variant. Ineligible and `no-transform` responses are not modified by the
+  compression module.
 - `subrequest`: internal absolute-URL subrequest at `request_headers` or
   `response_headers`. Subrequests must declare `allowed_schemes`,
   `allowed_hosts`, and `max_response_bytes`. Redirects are denied by default and

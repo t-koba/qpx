@@ -128,6 +128,9 @@ fn request_inactive_modules_skip_session_allocation_without_skipping_applicable_
 - type: response_compression
   settings:
     content_types: [application/octet-stream]
+    gzip: false
+    brotli: false
+    zstd: false
 "#,
     )
     .expect("module configs");
@@ -164,7 +167,7 @@ fn request_inactive_modules_skip_session_allocation_without_skipping_applicable_
         .body(Body::empty())
         .expect("compression request");
     assert!(
-        chain
+        !chain
             .start_for_request(&state, &compressed, init)
             .has_context()
     );
@@ -175,6 +178,121 @@ fn request_inactive_modules_skip_session_allocation_without_skipping_applicable_
         .body(Body::empty())
         .expect("purge request");
     assert!(chain.start_for_request(&state, &purge, init).has_context());
+}
+
+#[tokio::test]
+async fn response_compression_marks_absent_identity_before_gzip_variant() {
+    let configs: Vec<HttpModuleConfig> = serde_yaml::from_str(
+        r#"
+- type: response_compression
+  settings:
+    min_body_bytes: 1
+    max_body_bytes: 4096
+    content_types: [text/plain]
+    gzip: true
+    brotli: false
+    zstd: false
+"#,
+    )
+    .expect("module configs");
+    let chain = compile_http_modules(&configs, &default_http_module_registry()).expect("chain");
+    let runtime = module_test_runtime();
+    let state = runtime.state();
+    let init = || HttpModuleSessionInit {
+        proxy_kind: crate::http::dispatch::ProxyKind::Reverse,
+        proxy_name: "test-proxy",
+        scope_name: "test-scope",
+        route_name: Some("test-route"),
+        remote_ip: "127.0.0.1".parse::<IpAddr>().expect("ip"),
+        sni: None,
+        identity_user: None,
+        cache_policy: None,
+        cache_default_scheme: Some("http"),
+    };
+    let body = "x".repeat(2048);
+    let response = || {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(http::header::CONTENT_TYPE, "text/plain")
+            .header(http::header::CONTENT_LENGTH, body.len().to_string())
+            .header(http::header::CACHE_CONTROL, "public, max-age=60")
+            .body(Body::from(body.clone()))
+            .expect("origin response")
+    };
+
+    let mut identity_request = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com/resource")
+        .body(Body::empty())
+        .expect("request without Accept-Encoding");
+    let mut identity_execution = chain.start_for_request(&state, &identity_request, init);
+    assert!(identity_execution.has_context());
+    assert!(matches!(
+        identity_execution
+            .on_request_headers(&mut identity_request)
+            .await
+            .expect("identity request headers"),
+        RequestHeadersOutcome::Continue
+    ));
+    let identity = identity_execution
+        .prepare_downstream_response(response())
+        .await
+        .expect("identity downstream response");
+    assert!(
+        !identity
+            .headers()
+            .contains_key(http::header::CONTENT_ENCODING)
+    );
+    assert!(
+        identity
+            .headers()
+            .get_all(http::header::VARY)
+            .iter()
+            .any(|value| value.as_bytes().eq_ignore_ascii_case(b"Accept-Encoding")),
+        "the first identity response must vary so a downstream cache misses for gzip"
+    );
+    assert_eq!(
+        qpx_http::body::to_bytes(identity.into_body())
+            .await
+            .expect("identity body"),
+        body.as_str()
+    );
+
+    let mut gzip_request = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com/resource")
+        .header(http::header::ACCEPT_ENCODING, "gzip")
+        .body(Body::empty())
+        .expect("gzip request");
+    let mut gzip_execution = chain.start_for_request(&state, &gzip_request, init);
+    assert!(matches!(
+        gzip_execution
+            .on_request_headers(&mut gzip_request)
+            .await
+            .expect("gzip request headers"),
+        RequestHeadersOutcome::Continue
+    ));
+    let compressed = gzip_execution
+        .prepare_downstream_response(response())
+        .await
+        .expect("gzip downstream response");
+    assert_eq!(
+        compressed.headers().get(http::header::CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("gzip"))
+    );
+    assert!(
+        compressed
+            .headers()
+            .get_all(http::header::VARY)
+            .iter()
+            .any(|value| value.as_bytes().eq_ignore_ascii_case(b"Accept-Encoding"))
+    );
+    assert!(
+        !qpx_http::body::to_bytes(compressed.into_body())
+            .await
+            .expect("compressed body")
+            .is_empty()
+    );
 }
 
 #[test]

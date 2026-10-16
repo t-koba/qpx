@@ -259,6 +259,68 @@ fn identity_response_carries_vary_when_compression_negotiable() {
     );
 }
 
+#[tokio::test]
+async fn absent_accept_encoding_identity_response_marks_downstream_cache_variant() {
+    let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
+    let ctx = super::super::tests::module_test_context();
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12")
+        .header(http::header::CACHE_CONTROL, "public, max-age=60")
+        .body(Body::from("hello world!"))
+        .expect("response");
+
+    let identity = module
+        .compress(&ctx, response)
+        .await
+        .expect("identity response");
+    assert!(!identity.headers().contains_key(CONTENT_ENCODING));
+    assert!(
+        vary_values(&identity).contains("accept-encoding"),
+        "identity response must prevent a downstream cache from masking a later compressed variant"
+    );
+    assert_eq!(
+        to_bytes(identity.into_body()).await.expect("identity body"),
+        "hello world!"
+    );
+}
+
+#[tokio::test]
+async fn absent_accept_encoding_does_not_mark_ineligible_or_no_transform_identity() {
+    let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
+    let ctx = super::super::tests::module_test_context();
+    let controls = [
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "image/png")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::from("hello world!"))
+            .expect("ineligible response"),
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .header(
+                http::header::CACHE_CONTROL,
+                "public, no-transform, max-age=60",
+            )
+            .body(Body::from("hello world!"))
+            .expect("no-transform response"),
+    ];
+
+    for response in controls {
+        let identity = module
+            .compress(&ctx, response)
+            .await
+            .expect("identity response");
+        assert!(
+            !identity.headers().contains_key(VARY),
+            "ineligible identity response should preserve its original Vary behavior"
+        );
+    }
+}
+
 #[test]
 fn identity_response_keeps_fast_path_when_nothing_negotiable() {
     let config = identity_test_config();

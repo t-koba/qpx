@@ -98,15 +98,23 @@ impl ResponseCompressionModule {
         })
     }
 
+    fn has_compression_variants(&self) -> bool {
+        self.config.gzip
+            || self.config.brotli
+            || self.config.zstd
+            || self.config.dictionary.is_some()
+    }
+
     async fn compress(
         &self,
         ctx: &HttpModuleContext,
         response: Response<Body>,
     ) -> Result<Response<Body>> {
         let Some(compression_request) = ctx.extensions().get::<CompressionRequest>() else {
-            // No Accept-Encoding on the request: the module never runs
-            // downstream for such requests (chain and applies_to gates), so
-            // this response intentionally keeps its origin Vary behavior.
+            // Keep the identity representation when Accept-Encoding is absent,
+            // but advertise that another request variant may be compressed.
+            let mut response = response;
+            mark_identity_variant(&self.config, &mut response)?;
             return Ok(response);
         };
         let response = if self.config.dictionary.is_some() {
@@ -262,19 +270,19 @@ impl HttpModule for ResponseCompressionModule {
     }
 
     fn applies_to_request_headers(&self, request: &hyper::Request<Body>) -> bool {
-        request.headers().contains_key(ACCEPT_ENCODING)
+        self.has_compression_variants() && request.headers().contains_key(ACCEPT_ENCODING)
     }
 
-    fn is_inactive_for_request(&self, request: &hyper::Request<Body>) -> bool {
-        !request.headers().contains_key(ACCEPT_ENCODING)
+    fn is_inactive_for_request(&self, _request: &hyper::Request<Body>) -> bool {
+        !self.has_compression_variants()
     }
 
     fn applies_to_downstream_response(
         &self,
-        ctx: &HttpModuleContext,
+        _ctx: &HttpModuleContext,
         _response: &Response<Body>,
     ) -> bool {
-        ctx.extensions().get::<CompressionRequest>().is_some()
+        self.has_compression_variants()
     }
 
     async fn call<'a>(
