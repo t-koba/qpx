@@ -228,6 +228,15 @@ fn request_authority_preserves_expect_for_application_preflight() {
 }
 
 #[test]
+fn traditional_connect_authority_requires_a_port() {
+    let fields = [(":method", "CONNECT"), (":authority", "example.test")];
+    for decoded in decode_request_heads(&fields) {
+        let err = decoded.expect_err("CONNECT :authority must include a port");
+        assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+    }
+}
+
+#[test]
 fn connect_request_authority_is_validated() {
     for extended in [false, true] {
         for host in ["example.com:443", "attacker.invalid:443"] {

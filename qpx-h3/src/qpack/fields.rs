@@ -326,6 +326,9 @@ pub(super) fn build_request_uri(
     }
     if authority_only {
         let authority = authority.ok_or_else(|| anyhow!("CONNECT requires :authority"))?;
+        if authority.port_u16().is_none() {
+            return Err(anyhow!("CONNECT :authority must include a port"));
+        }
         return Uri::builder()
             .authority(authority)
             .build()
