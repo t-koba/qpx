@@ -2,6 +2,46 @@ use super::*;
 use anyhow::anyhow;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn mismatched_request_authority_is_reset_before_dispatch() -> Result<()> {
+    let (seen_tx, mut seen_rx) = oneshot::channel();
+    let handler = DynamicHeaderHandler {
+        seen: Arc::new(Mutex::new(Some(seen_tx))),
+    };
+    let (addr, client_config, server_task) = start_server(handler).await?;
+    let (_client_endpoint, connection) = connect_client(addr, client_config).await?;
+    open_client_control_stream(&connection).await?;
+    open_client_qpack_streams(&connection).await?;
+
+    // Send raw QPACK: a conforming client may refuse to encode this request.
+    let mut headers = build_head_request_headers(&format!("localhost:{}", addr.port()));
+    for (name, value) in [
+        ("host", "attacker.invalid"),
+        ("x-dynamic", "must-not-dispatch"),
+    ] {
+        encode_string(&mut headers, 4, 0b0010, name.as_bytes());
+        encode_string(&mut headers, 8, 0, value.as_bytes());
+    }
+    let (mut send, mut recv) = connection.open_bi().await?;
+    write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
+    send.finish()?;
+
+    match timeout(TEST_TIMEOUT, recv.read_chunk(usize::MAX, true)).await? {
+        Err(quinn::ReadError::Reset(code)) => {
+            assert_eq!(u64::from(code), H3_MESSAGE_ERROR);
+        }
+        other => return Err(anyhow!("expected H3_MESSAGE_ERROR reset, got {other:?}")),
+    }
+    assert!(matches!(
+        seen_rx.try_recv(),
+        Err(oneshot::error::TryRecvError::Empty)
+    ));
+
+    server_task.abort();
+    let _ = server_task.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn idle_critical_streams_survive_request_read_timeout() -> Result<()> {
     let (addr, client_config, server_task) = start_server(IdleCriticalStreamsHandler).await?;
     let (_client_endpoint, connection) = connect_client(addr, client_config).await?;

@@ -1,8 +1,7 @@
+use super::fields::build_request_uri;
 use super::{DecodedRequestHead, errors::HeaderDecodeError};
-use crate::H3Result as Result;
 use crate::qpack_fields::{append_header, validate_h3_regular_field};
-use anyhow::anyhow;
-use http::{HeaderMap, Method, Uri};
+use http::{HeaderMap, Method};
 
 pub(crate) fn decode_request_head_from_fields(
     fields: Vec<(String, Vec<u8>)>,
@@ -111,7 +110,8 @@ pub(crate) fn decode_request_head_from_fields(
             return Err(HeaderDecodeError::message("missing :path"));
         }
     }
-    let uri = build_uri(
+    let uri = build_request_uri(
+        &headers,
         scheme.as_deref(),
         authority.as_deref(),
         path.as_deref(),
@@ -125,33 +125,6 @@ pub(crate) fn decode_request_head_from_fields(
         .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
     *request.headers_mut() = headers;
     Ok(DecodedRequestHead { request, protocol })
-}
-
-fn build_uri(
-    scheme: Option<&str>,
-    authority: Option<&str>,
-    path: Option<&str>,
-    authority_only: bool,
-) -> Result<Uri> {
-    if authority_only {
-        let authority = authority.ok_or_else(|| anyhow!("CONNECT requires :authority"))?;
-        return Uri::builder()
-            .authority(authority)
-            .build()
-            .map_err(Into::into);
-    }
-
-    let mut builder = Uri::builder();
-    if let Some(scheme) = scheme {
-        builder = builder.scheme(scheme);
-    }
-    if let Some(authority) = authority {
-        builder = builder.authority(authority);
-    }
-    if let Some(path) = path {
-        builder = builder.path_and_query(path);
-    }
-    builder.build().map_err(Into::into)
 }
 
 pub(super) fn pseudo_value_to_string(

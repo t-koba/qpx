@@ -289,6 +289,60 @@ pub fn is_intrinsically_valid_common_h2_request<B>(req: &http::Request<B>) -> bo
         && req.uri().path().starts_with('/')
 }
 
+/// Validate and resolve request authority without applying application policy (for
+/// example, Expect handling). Host names are compared case-insensitively and
+/// omitted ports use the scheme default, as in full request validation.
+///
+/// HTTP(S) requires an authority or Host. Every supplied value must be nonempty
+/// and valid, and Host must agree with the URI authority when both are present.
+/// The URI authority takes precedence; otherwise the validated Host is returned.
+pub fn resolve_request_authority(
+    headers: &HeaderMap,
+    authority: Option<&http::uri::Authority>,
+    scheme: Option<&str>,
+) -> Result<Option<http::uri::Authority>, RequestValidationError> {
+    let host = parse_host_header(headers)?;
+    let authority = authority
+        .map(|authority| {
+            authority_parts_from_uri(authority).ok_or(RequestValidationError::InvalidRequestTarget)
+        })
+        .transpose()?;
+    if let (Some(host), Some(authority)) = (host.as_ref(), authority.as_ref())
+        && !authority_parts_equivalent(host, authority, scheme)
+    {
+        return Err(RequestValidationError::HostAuthorityMismatch);
+    }
+    let resolved = authority.or(host).map(|parts| parts.authority);
+    if resolved.is_none() && matches!(scheme, Some("http" | "https")) {
+        return Err(RequestValidationError::MissingHost);
+    }
+    Ok(resolved)
+}
+
+fn parse_host_header(
+    headers: &HeaderMap,
+) -> Result<Option<AuthorityParts>, RequestValidationError> {
+    let mut host_values = headers.get_all(HOST).iter();
+    let host_value = host_values.next();
+    if host_values.next().is_some() {
+        return Err(RequestValidationError::MultipleHostHeaders);
+    }
+    if let Some(value) = host_value {
+        let raw = value
+            .to_str()
+            .map_err(|_| RequestValidationError::InvalidHostHeader)?
+            .trim();
+        if raw.is_empty() {
+            return Err(RequestValidationError::EmptyHostHeader);
+        }
+        Ok(Some(
+            parse_authority_parts(raw).ok_or(RequestValidationError::InvalidHostHeader)?,
+        ))
+    } else {
+        Ok(None)
+    }
+}
+
 pub fn validate_incoming_request_with_metadata<B>(
     req: &http::Request<B>,
 ) -> Result<ValidatedIncomingRequest, RequestValidationError> {
@@ -299,23 +353,7 @@ pub fn validate_incoming_request_with_metadata<B>(
         && req.method() == Method::CONNECT
         && req.extensions().get::<h2::ext::Protocol>().is_some();
 
-    let mut host_values = req.headers().get_all(HOST).iter();
-    let host_value = host_values.next();
-    if host_values.next().is_some() {
-        return Err(RequestValidationError::MultipleHostHeaders);
-    }
-    let host = if let Some(value) = host_value {
-        let raw = value
-            .to_str()
-            .map_err(|_| RequestValidationError::InvalidHostHeader)?
-            .trim();
-        if raw.is_empty() {
-            return Err(RequestValidationError::EmptyHostHeader);
-        }
-        Some(parse_authority_parts(raw).ok_or(RequestValidationError::InvalidHostHeader)?)
-    } else {
-        None
-    };
+    let host = parse_host_header(req.headers())?;
 
     let uri_authority = req.uri().authority();
     let mut parsed_uri_authority = None;

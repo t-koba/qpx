@@ -8,6 +8,178 @@ use super::{
 };
 use http::HeaderValue;
 
+// Exercise both the Vec-fields decoder and the production streaming sink. These
+// fields deliberately bypass client encoders, which can reject malformed heads
+// before they ever reach the server.
+fn decode_request_heads(
+    fields: &[(&str, &str)],
+) -> [Result<super::DecodedRequestHead, super::HeaderDecodeError>; 2] {
+    use super::fields::{DecodedField, FieldSink, RequestHeadSink};
+
+    let buffered = decode_request_head_from_fields(
+        fields
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.as_bytes().to_vec()))
+            .collect(),
+    );
+    let streaming = (|| {
+        let mut sink = RequestHeadSink::default();
+        for (name, value) in fields {
+            sink.push(DecodedField::owned(
+                name.to_string(),
+                bytes::Bytes::copy_from_slice(value.as_bytes()),
+            ))?;
+        }
+        sink.finish()
+    })();
+    [buffered, streaming]
+}
+
+fn request_authority_fields<'a>(
+    scheme: &'a str,
+    authority: Option<&'a str>,
+    host: Option<&'a str>,
+) -> Vec<(&'a str, &'a str)> {
+    let mut fields = vec![
+        (":method", "GET"),
+        (":scheme", scheme),
+        (":path", "/test?q=1"),
+    ];
+    if let Some(authority) = authority {
+        fields.push((":authority", authority));
+    }
+    if let Some(host) = host {
+        fields.push(("host", host));
+    }
+    fields
+}
+
+#[test]
+fn request_authority_accepts_matching_values() {
+    for (scheme, authority, host) in [
+        ("http", "example.com", "example.com"),
+        ("https", "example.com", "example.com"),
+        ("https", "EXAMPLE.com:443", "example.COM"),
+        ("http", "example.com", "EXAMPLE.COM:80"),
+        ("https", "[2001:db8::1]:8443", "[2001:db8::1]:8443"),
+    ] {
+        let fields = request_authority_fields(scheme, Some(authority), Some(host));
+        for decoded in decode_request_heads(&fields) {
+            let request = decoded.expect("matching authorities").request;
+            assert_eq!(request.uri().authority().unwrap().as_str(), authority);
+            assert_eq!(request.headers()["host"], host);
+        }
+    }
+}
+
+#[test]
+fn request_authority_rejects_mismatches() {
+    for (scheme, authority, host) in [
+        ("https", "example.com", "attacker.invalid"),
+        ("https", "example.com:443", "example.com:8443"),
+        ("http", "example.com", "example.com:443"),
+        ("https", "[2001:db8::1]", "[2001:db8::2]"),
+    ] {
+        let fields = request_authority_fields(scheme, Some(authority), Some(host));
+        for decoded in decode_request_heads(&fields) {
+            let err = decoded.expect_err("mismatched authorities must not be dispatched");
+            assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+            assert!(err.to_string().contains("does not match"));
+        }
+    }
+}
+
+#[test]
+fn request_authority_uses_host_only_for_http_and_https() {
+    for scheme in ["http", "https"] {
+        for host in ["example.com", "example.com:8443", "[2001:db8::1]:8443"] {
+            let fields = request_authority_fields(scheme, None, Some(host));
+            for decoded in decode_request_heads(&fields) {
+                let request = decoded.expect("Host supplies authority").request;
+                assert_eq!(request.uri().authority().unwrap().as_str(), host);
+                assert_eq!(request.uri().scheme_str(), Some(scheme));
+                assert_eq!(request.uri().path_and_query().unwrap(), "/test?q=1");
+                assert_eq!(request.headers()["host"], host);
+            }
+        }
+        // :authority alone is also sufficient.
+        for decoded in
+            decode_request_heads(&request_authority_fields(scheme, Some("example.com"), None))
+        {
+            assert!(decoded.is_ok());
+        }
+    }
+}
+
+#[test]
+fn request_authority_rejects_missing_empty_and_malformed_values() {
+    for scheme in ["http", "https"] {
+        for (authority, host) in [
+            (None, None),
+            (Some(""), None),
+            (Some(""), Some("example.com")),
+            (None, Some("")),
+            (Some("example.com"), Some("")),
+            (Some("user@example.com"), None),
+            (None, Some("user@example.com")),
+            (Some("user@example.com"), Some("user@example.com")),
+            (Some("example.com:bad"), None),
+            (None, Some("example.com:65536")),
+        ] {
+            let fields = request_authority_fields(scheme, authority, host);
+            for decoded in decode_request_heads(&fields) {
+                let err = decoded.expect_err("invalid authority must not be dispatched");
+                assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+            }
+        }
+    }
+    let mut fields = request_authority_fields("https", Some("example.com"), Some("example.com"));
+    fields.push(("host", "example.com"));
+    for decoded in decode_request_heads(&fields) {
+        let err = decoded.expect_err("duplicate Host must fail");
+        assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+        assert!(err.to_string().contains("multiple Host"));
+    }
+}
+
+#[test]
+fn request_authority_preserves_expect_for_application_preflight() {
+    let mut fields = request_authority_fields("https", Some("example.com"), None);
+    fields.push(("expect", "application-specific"));
+    for decoded in decode_request_heads(&fields) {
+        let request = decoded
+            .expect("Expect policy belongs to the application")
+            .request;
+        assert_eq!(request.headers()["expect"], "application-specific");
+    }
+}
+
+#[test]
+fn connect_request_authority_is_validated() {
+    for extended in [false, true] {
+        for host in ["example.com:443", "attacker.invalid:443"] {
+            let mut fields = vec![(":method", "CONNECT"), (":authority", "example.com:443")];
+            if extended {
+                fields.extend([
+                    (":scheme", "https"),
+                    (":path", "/tunnel"),
+                    (":protocol", "webtransport"),
+                ]);
+            }
+            fields.push(("host", host));
+            for decoded in decode_request_heads(&fields) {
+                if host == "example.com:443" {
+                    let request = decoded.expect("matching CONNECT authorities").request;
+                    assert_eq!(request.uri().authority().unwrap(), "example.com:443");
+                } else {
+                    let err = decoded.expect_err("CONNECT authorities must agree");
+                    assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+                }
+            }
+        }
+    }
+}
+
 #[test]
 fn decodes_literal_trailers() {
     let trailers = {

@@ -1,10 +1,9 @@
 use super::errors::HeaderDecodeError;
 use super::{DecodedRequestHead, DecodedResponseHead, HEADER_ENTRY_OVERHEAD};
-use crate::H3Result as Result;
 use crate::qpack_fields::{
     append_header, validate_h3_regular_field, validate_h3_response_field, validate_h3_trailer_field,
 };
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::{HeaderMap, Method, Uri};
 use std::sync::Arc;
@@ -179,7 +178,8 @@ impl FieldSink for RequestHeadSink {
                 return Err(HeaderDecodeError::message("missing :path"));
             }
         }
-        let uri = build_uri(
+        let uri = build_request_uri(
+            &self.headers,
             self.scheme.as_deref(),
             self.authority.as_deref(),
             self.path.as_deref(),
@@ -289,12 +289,24 @@ fn pseudo_value_to_string(
         .map_err(|err| HeaderDecodeError::message(format!("invalid UTF-8 {name} value: {err}")))
 }
 
-fn build_uri(
+pub(super) fn build_request_uri(
+    headers: &HeaderMap,
     scheme: Option<&str>,
     authority: Option<&str>,
     path: Option<&str>,
     authority_only: bool,
 ) -> Result<Uri> {
+    let authority = authority
+        .map(str::parse::<http::uri::Authority>)
+        .transpose()?;
+    // RFC 9114 section 4.3.1: validate both sources before dispatch, and use
+    // Host as the URI authority when :authority is absent.
+    let authority = qpx_http::protocol::semantics::resolve_request_authority(
+        headers,
+        authority.as_ref(),
+        scheme,
+    )
+    .map_err(|err| anyhow!("{err}"))?;
     if authority_only {
         let authority = authority.ok_or_else(|| anyhow!("CONNECT requires :authority"))?;
         return Uri::builder()
