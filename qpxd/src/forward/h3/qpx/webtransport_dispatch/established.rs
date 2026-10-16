@@ -261,11 +261,38 @@ fn emit_allow_audit(
 
 async fn abort_webtransport_driver(
     datagram_task: Option<tokio::task::JoinHandle<()>>,
-    driver: tokio::task::JoinHandle<()>,
+    driver: Option<tokio::task::JoinHandle<()>>,
 ) {
     if let Some(task) = datagram_task {
         task.abort();
         let _ = task.await;
     }
-    let _ = driver.await;
+    if let Some(driver) = driver {
+        driver.abort();
+        let _ = driver.await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[tokio::test]
+    async fn cleanup_skips_session_driver_and_aborts_owned_tasks() {
+        super::abort_webtransport_driver(None, None).await;
+
+        let (driver_tx, driver_rx) = tokio::sync::oneshot::channel::<()>();
+        let driver = tokio::spawn(async move {
+            let _ = driver_rx.await;
+        });
+        let driver_abort = driver.abort_handle();
+        let (datagram_tx, datagram_rx) = tokio::sync::oneshot::channel::<()>();
+        let datagram_task = tokio::spawn(async move {
+            let _ = datagram_rx.await;
+        });
+        let datagram_abort = datagram_task.abort_handle();
+        super::abort_webtransport_driver(Some(datagram_task), Some(driver)).await;
+        assert!(driver_abort.is_finished());
+        assert!(datagram_abort.is_finished());
+        assert!(driver_tx.is_closed());
+        assert!(datagram_tx.is_closed());
+    }
 }

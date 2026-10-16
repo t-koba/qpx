@@ -572,8 +572,10 @@ async fn shutdown_extended_stream(mut stream: qpx_h3::ExtendedConnectStream) -> 
         task.abort();
         let _ = task.await;
     }
-    stream.driver.abort();
-    let _ = stream.driver.await;
+    if let Some(driver) = stream.driver.take() {
+        driver.abort();
+        let _ = driver.await;
+    }
     Ok(())
 }
 

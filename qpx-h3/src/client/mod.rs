@@ -42,8 +42,9 @@ pub struct ExtendedConnectStream {
     pub _critical_streams: Option<(quinn::SendStream, quinn::SendStream)>,
     /// Endpoint kept alive by this stream.
     pub _endpoint: quinn::Endpoint,
-    /// Background connection driver task.
-    pub driver: JoinHandle<()>,
+    /// Background connection driver task, owned only by fresh connections.
+    /// Reusable sessions own their driver and return `None` here.
+    pub driver: Option<JoinHandle<()>>,
     /// Background datagram dispatcher task.
     pub datagram_task: Option<JoinHandle<()>>,
     #[doc(hidden)]
@@ -440,7 +441,7 @@ pub async fn open_extended_connect_stream(
         associated_uni,
         _critical_streams: Some((control, encoder)),
         _endpoint: endpoint,
-        driver,
+        driver: Some(driver),
         datagram_task,
         _connection_use: Some(connection_use),
         _session: None,
@@ -553,7 +554,6 @@ async fn open_extended_connect_on_session(
         None
     };
 
-    let driver = tokio::spawn(std::future::pending());
     Ok(ExtendedConnectStream {
         interim,
         response,
@@ -564,7 +564,7 @@ async fn open_extended_connect_on_session(
         associated_uni,
         _critical_streams: None,
         _endpoint: inner.endpoint.clone(),
-        driver,
+        driver: None,
         datagram_task: None,
         _connection_use: None,
         _session: Some(session),

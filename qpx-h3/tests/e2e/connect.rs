@@ -32,6 +32,8 @@ async fn client_session_survives_idle_critical_streams() -> Result<()> {
         )
         .await?;
     assert_eq!(stream.response.status(), http::StatusCode::OK);
+    assert!(stream.driver.is_none());
+    assert_eq!(session.inflight_streams(), 1);
     stream
         .request_stream
         .send_data(Bytes::from_static(b"ping"))
@@ -61,6 +63,8 @@ async fn client_session_survives_idle_critical_streams() -> Result<()> {
     assert_eq!(echoed_datagram, Bytes::from_static(b"dg"));
 
     shutdown_extended_stream(stream).await?;
+    assert_eq!(session.inflight_streams(), 0);
+    assert!(!session.is_closed());
     server_task.abort();
     let _ = server_task.await;
     Ok(())
@@ -89,6 +93,7 @@ async fn extended_connect_relays_bytes_and_datagrams() -> Result<()> {
     )
     .await?;
     assert_eq!(stream.response.status(), http::StatusCode::OK);
+    assert!(stream.driver.is_some());
 
     stream
         .request_stream
@@ -119,7 +124,14 @@ async fn extended_connect_relays_bytes_and_datagrams() -> Result<()> {
     .ok_or_else(|| anyhow!("missing extended CONNECT datagram echo"))?;
     assert_eq!(echoed_datagram, Bytes::from_static(b"dg"));
 
+    let driver = stream
+        .driver
+        .as_ref()
+        .expect("fresh connection owns its driver")
+        .abort_handle();
+    assert!(!driver.is_finished());
     shutdown_extended_stream(stream).await?;
+    assert!(driver.is_finished());
     server_task.abort();
     let _ = server_task.await;
     Ok(())
@@ -195,6 +207,47 @@ async fn connect_udp_relays_capsules_and_datagrams() -> Result<()> {
     );
 
     shutdown_extended_stream(stream).await?;
+    server_task.abort();
+    let _ = server_task.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn client_session_rejected_response_drop_releases_stream() -> Result<()> {
+    let (addr, client_config, server_task) = start_server(WebTransportRejectHandler).await?;
+    let (client_endpoint, connection) = connect_client(addr, client_config).await?;
+    let session = qpx_h3::ClientSession::new(
+        client_endpoint,
+        connection,
+        Settings {
+            enable_extended_connect: true,
+            enable_datagram: true,
+            enable_webtransport: true,
+            max_webtransport_sessions: 4,
+            read_timeout: TEST_TIMEOUT,
+            ..Default::default()
+        },
+        TEST_TIMEOUT,
+    )
+    .await?;
+    let request = http::Request::builder()
+        .method(http::Method::CONNECT)
+        .uri("https://localhost/webtransport")
+        .body(())?;
+    let stream = session
+        .open_extended_connect_stream(request, Some(Protocol::WebTransport), TEST_TIMEOUT)
+        .await?;
+    assert_eq!(stream.response.status(), http::StatusCode::FORBIDDEN);
+    assert!(stream.driver.is_none());
+    assert!(stream.datagram_task.is_none());
+    assert!(stream.datagrams.is_none());
+    assert!(stream.opener.is_none());
+    assert!(stream.associated_bidi.is_none());
+    assert!(stream.associated_uni.is_none());
+    assert_eq!(session.inflight_streams(), 1);
+    drop(stream);
+    assert_eq!(session.inflight_streams(), 0);
+    assert!(!session.is_closed());
     server_task.abort();
     let _ = server_task.await;
     Ok(())
