@@ -188,20 +188,30 @@ fn request_path_requires_origin_form_or_options_asterisk() {
     }
 }
 
-// A scheme may allow authority to be absent without forbidding it; Host
-// supplies an authority-bearing target in this case.
+// FTP-over-HTTP is a supported non-HTTP scheme; Host can supply its required
+// target authority when :authority is absent.
 #[test]
-fn optional_authority_scheme_host_supplies_target_authority() {
+fn ftp_scheme_host_supplies_required_target_authority() {
     let fields = [
         (":method", "GET"),
-        (":scheme", "file"),
+        (":scheme", "ftp"),
         (":path", "/resource"),
         ("host", "example.test"),
     ];
     for decoded in decode_request_heads(&fields) {
         let request = decoded.expect("Host supplies the target authority").request;
-        assert_eq!(request.uri().scheme_str(), Some("file"));
+        assert_eq!(request.uri().scheme_str(), Some("ftp"));
         assert_eq!(request.uri().authority().unwrap(), "example.test");
+    }
+
+    let fields = [
+        (":method", "GET"),
+        (":scheme", "ftp"),
+        (":path", "/resource"),
+    ];
+    for decoded in decode_request_heads(&fields) {
+        let err = decoded.expect_err("FTP requires an authority");
+        assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
     }
 }
 
