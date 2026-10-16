@@ -690,7 +690,6 @@ async fn request_h3_inner(
 ) -> Result<H3ReadResult> {
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(ca_cert)?);
-    let started = Instant::now();
     let conn = timeout(
         Duration::from_secs(5),
         endpoint.connect(SocketAddr::from(([127, 0, 0, 1], port)), H3_HOST)?,
@@ -717,6 +716,8 @@ async fn request_h3_inner(
     let request = request.body(())?;
     let mut stream = sender.send_request(request).await?;
     stream.finish().await?;
+    // TTFB starts when the request is sent, not before QUIC connection setup.
+    let started = Instant::now();
     let response = timeout(Duration::from_secs(30), stream.recv_response())
         .await
         .map_err(|_| anyhow!("H3 response head timed out after 30s"))??;
