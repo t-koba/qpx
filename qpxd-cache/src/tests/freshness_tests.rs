@@ -372,7 +372,7 @@ fn ordinary_swr_serves_at_age_11() {
 }
 
 #[tokio::test]
-async fn ordinary_sie_serves_at_age_11() {
+async fn ordinary_stale_if_error_serves_at_age_11() {
     // Ordinary control: without no-cache the same age-11 entry is rescuable
     // via stale-if-error, proving the ban above comes from unqualified
     // no-cache.
@@ -381,7 +381,7 @@ async fn ordinary_sie_serves_at_age_11() {
     backend
         .put(
             "ns",
-            cache_body_storage_key("obj:ordinary:sie").as_str(),
+            cache_body_storage_key("obj:ordinary:stale-if-error").as_str(),
             b"hello",
             60,
         )
@@ -390,7 +390,7 @@ async fn ordinary_sie_serves_at_age_11() {
     let state = RevalidationState {
         backend,
         namespace: "ns".to_string(),
-        variant_key: "obj:ordinary:sie".to_string(),
+        variant_key: "obj:ordinary:stale-if-error".to_string(),
         request_method: Method::GET,
         request_directives: RequestDirectives::default(),
         stale_if_error_secs: Some(60),
@@ -427,7 +427,7 @@ async fn no_cache_blocks_stale_if_error_fallback() {
         revalidations: test_revalidations(),
     };
     let mut state = state;
-    // Age 11s, freshness 10s, SIE window 60s: must revalidate, not serve stale.
+    // Age 11s, freshness 10s, stale-if-error window 60s: must revalidate, not serve stale.
     state.envelope.stored_at_ms = now.saturating_sub(11_000);
     state.envelope.body_len = 5;
     assert!(maybe_build_stale_if_error_response(&state).await.is_none());
