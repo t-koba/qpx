@@ -81,9 +81,9 @@ pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) 
         // Extended CONNECT carries a path in :path; even a leading `//` is
         // still path data here, not a network-path authority.
         redact_query_fragment_keys(target, query_keys)
-    } else if method == "CONNECT" && !target.contains(['/', '?', '#']) && !target.contains("://") {
-        // Traditional CONNECT uses authority-form. Paths and absolute URIs
-        // above retain their own URI-reference semantics.
+    } else if method == "CONNECT" && !target.contains('/') && !target.contains("://") {
+        // Traditional CONNECT uses authority-form. A malformed query/fragment
+        // suffix does not turn its authority userinfo into ordinary URI data.
         redact_query_fragment_keys(&redact_authority_userinfo(target), query_keys)
     } else {
         redact_uri_query_keys(target, query_keys)
@@ -284,6 +284,14 @@ mod userinfo_tests {
                 &[]
             ),
             "https://host/chat/@alice?room=general"
+        );
+        assert_eq!(
+            redact_request_target(
+                "CONNECT",
+                "synthetic-user:synthetic-pass@host:443?token=secret",
+                &keys,
+            ),
+            "host:443?token=<redacted>"
         );
     }
 

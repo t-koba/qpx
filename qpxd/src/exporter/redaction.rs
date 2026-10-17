@@ -115,12 +115,14 @@ impl CaptureRedaction {
         // A preview may end inside userinfo, before the '@'. Do not expose an
         // unfinished authority when the request line itself is incomplete.
         let version = parts.next();
+        let version_complete = version
+            .is_some_and(|version| is_http_version_token(version.trim_end_matches(['\r', '\n'])));
         let redacted_target =
-            if version.is_none() && method == "CONNECT" && target.starts_with("//") {
+            if !version_complete && method == "CONNECT" && target.starts_with("//") {
                 // Before the request line is complete, `//` may be either an
                 // extended-CONNECT path or a network-path authority preview.
                 "<redacted>".to_string()
-            } else if version.is_none() && is_http_method_token(method) {
+            } else if !version_complete && is_http_method_token(method) {
                 let authority = target
                     .split_once("://")
                     .filter(|(prefix, _)| !prefix.contains('/'))
@@ -215,6 +217,19 @@ fn looks_like_http_message_prefix(text: &str) -> bool {
         || first_line
             .split_once(' ')
             .is_some_and(|(method, rest)| is_http_method_token(method) && rest.contains("HTTP/"))
+}
+
+fn is_http_version_token(version: &str) -> bool {
+    let Some(version) = version.strip_prefix("HTTP/") else {
+        return false;
+    };
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    !major.is_empty()
+        && !minor.is_empty()
+        && major.bytes().all(|byte| byte.is_ascii_digit())
+        && minor.bytes().all(|byte| byte.is_ascii_digit())
 }
 
 fn is_http_method_token(method: &str) -> bool {
