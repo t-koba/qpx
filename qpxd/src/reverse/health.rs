@@ -407,8 +407,15 @@ impl UpstreamEndpoint {
         let Some(timeout) = lifecycle.drain_timeout else {
             return false;
         };
-        let until = now_millis().saturating_add(timeout.as_millis() as u64);
-        self.drain_deadline_ms.fetch_max(until, Ordering::Relaxed);
+        let until = now_millis()
+            .saturating_add(timeout.as_millis() as u64)
+            .max(1);
+        // Set the deadline only on the transition into draining. Renewing it
+        // on every discovery refresh would keep removed endpoints past their
+        // drain timeout whenever refreshes outpace it.
+        let _ =
+            self.drain_deadline_ms
+                .compare_exchange(0, until, Ordering::Relaxed, Ordering::Relaxed);
         self.admission_state_active.store(true, Ordering::Release);
         true
     }
@@ -778,6 +785,32 @@ mod tests {
 
         assert!(endpoint.is_healthy(now_millis()));
         assert_eq!(endpoint.failures.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn mark_draining_sets_deadline_only_on_transition() {
+        // The drain deadline must be fixed at the removal transition: a later
+        // refresh must not renew it, or removed endpoints would never retire
+        // while refreshes outpace the timeout.
+        let lifecycle = EndpointLifecycleRuntime {
+            slow_start: None,
+            warmup: None,
+            drain_timeout: Some(Duration::from_secs(10)),
+        };
+        let endpoint = UpstreamEndpoint::new("http://example".to_string());
+        assert!(endpoint.mark_draining(&lifecycle));
+        let first = endpoint.drain_deadline_ms.load(Ordering::Relaxed);
+        assert_ne!(first, 0);
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(endpoint.mark_draining(&lifecycle));
+        let second = endpoint.drain_deadline_ms.load(Ordering::Relaxed);
+        assert_eq!(
+            first, second,
+            "second mark_draining must not renew the drain deadline"
+        );
+        assert!(endpoint.should_retain_draining(first.saturating_sub(1)));
+        assert!(!endpoint.should_retain_draining(first));
+        assert!(!endpoint.should_retain_draining(first.saturating_add(1)));
     }
 }
 

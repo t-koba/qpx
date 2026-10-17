@@ -904,3 +904,53 @@ fn removed_dynamic_endpoint_retires_after_drain_timeout() {
         "removed endpoint must retire after its drain timeout"
     );
 }
+
+#[test]
+fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
+    // Repeated discovery refreshes must not renew the drain deadline: the
+    // removed endpoint retires once the original timeout elapses even though
+    // refreshes outpace it. Scales the bounded experiment (10s drain timeout
+    // with 5s refresh) down to 500ms/100ms to keep the test fast while
+    // preserving refresh < timeout. No in-flight requests, so retention
+    // depends only on the deadline.
+    let lifecycle = EndpointLifecycleRuntime {
+        slow_start: None,
+        warmup: None,
+        drain_timeout: Some(Duration::from_millis(500)),
+    };
+    let first = Arc::new(UpstreamEndpoint::new("http://a".to_string()));
+    let pool = UpstreamEndpointSet::new(vec![], vec![first.clone()], vec![], lifecycle.clone());
+
+    let combined =
+        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    let draining = combined
+        .iter()
+        .find(|endpoint| endpoint.target == "http://a")
+        .expect("draining removed endpoint")
+        .clone();
+    assert!(draining.is_draining());
+    assert_eq!(draining.inflight.load(Ordering::Relaxed), 0);
+    pool.endpoints.store(Arc::new(combined));
+
+    for _ in 0..3 {
+        std::thread::sleep(Duration::from_millis(100));
+        let combined =
+            pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+        let draining = combined
+            .iter()
+            .find(|endpoint| endpoint.target == "http://a")
+            .expect("removed endpoint stays while its drain timeout holds");
+        assert_eq!(draining.inflight.load(Ordering::Relaxed), 0);
+        pool.endpoints.store(Arc::new(combined));
+    }
+
+    std::thread::sleep(Duration::from_millis(300));
+    let combined =
+        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    assert!(
+        !combined
+            .iter()
+            .any(|endpoint| endpoint.target == "http://a"),
+        "removed endpoint must retire after its drain timeout despite refreshes"
+    );
+}
