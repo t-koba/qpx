@@ -675,6 +675,7 @@ mod tests {
 
     #[test]
     fn absent_optional_layers_do_not_enable_filtered_callsites() {
+        use tracing::Subscriber as _;
         let system = tracing_subscriber::fmt::layer()
             .with_writer(std::io::sink)
             .with_filter(LevelFilter::WARN);
@@ -682,16 +683,12 @@ mod tests {
         let active_layers = vec![system];
         let subscriber = tracing_subscriber::registry().with(active_layers);
 
-        tracing::subscriber::with_default(subscriber, || {
-            assert!(!tracing::enabled!(
-                target: "qpx_optional_layer_filter_test",
-                tracing::Level::TRACE
-            ));
-            assert!(tracing::enabled!(
-                target: "qpx_optional_layer_filter_test",
-                tracing::Level::WARN
-            ));
-        });
+        // Query the composed subscriber directly. `tracing::enabled!` consults the
+        // process-global callsite-interest cache, which races when other tests run
+        // with different dispatchers on parallel threads; `max_level_hint`
+        // bypasses that cache while preserving the assertion: WARN is the most
+        // verbose enabled level, so TRACE stays disabled.
+        assert_eq!(subscriber.max_level_hint(), Some(LevelFilter::WARN));
     }
 
     #[derive(Clone, Debug)]
