@@ -77,19 +77,8 @@ pub(crate) fn h3_request_to_hyper(req: Http1Request<()>, body: Body) -> Result<R
         .as_str()
         .parse::<http::Method>()
         .map_err(|_| anyhow!("invalid HTTP/3 method"))?;
-    let uri = parts
-        .uri
-        .to_string()
-        .parse::<Uri>()
-        .or_else(|_| {
-            let path = parts
-                .uri
-                .path_and_query()
-                .map(|pq| pq.as_str())
-                .unwrap_or("/");
-            Uri::builder().path_and_query(path).build()
-        })
-        .map_err(|e| anyhow!("invalid HTTP/3 URI: {e}"))?;
+    let uri =
+        Uri::from_parts(parts.uri.into_parts()).map_err(|e| anyhow!("invalid HTTP/3 URI: {e}"))?;
 
     let mut out = Request::builder().method(method).uri(uri).body(body)?;
     *out.headers_mut() = h1_headers_to_http(&parts.headers)?;
@@ -174,6 +163,34 @@ mod tests {
     use super::{
         H3_MAX_HEADER_COUNT, h1_headers_to_http, h3_request_to_hyper, prepare_h3_response_head,
     };
+
+    #[test]
+    fn h3_options_asterisk_uri_preserves_scheme_and_authority() {
+        let uri = ::http::Uri::builder()
+            .scheme("https")
+            .authority("origin.example.test:443")
+            .path_and_query("*")
+            .build()
+            .expect("asterisk URI");
+        let request = ::http::Request::builder()
+            .method(::http::Method::OPTIONS)
+            .uri(uri)
+            .body(())
+            .expect("request");
+
+        let converted = h3_request_to_hyper(request, qpx_http::body::Body::empty())
+            .expect("convert H3 request");
+        assert_eq!(converted.method(), ::http::Method::OPTIONS);
+        assert_eq!(converted.uri().scheme_str(), Some("https"));
+        assert_eq!(
+            converted
+                .uri()
+                .authority()
+                .map(|authority| authority.as_str()),
+            Some("origin.example.test:443")
+        );
+        assert_eq!(converted.uri().path_and_query().unwrap().as_str(), "*");
+    }
 
     #[test]
     fn h3_cookie_fields_are_merged_for_generic_context() {
