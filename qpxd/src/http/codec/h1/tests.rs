@@ -21,6 +21,26 @@ fn request_head_with_total_bytes(total_bytes: usize) -> Vec<u8> {
 }
 
 #[test]
+fn request_head_parser_marks_empty_path_absolute_form_options() {
+    for (request_line, expected) in [
+        ("OPTIONS http://example.test HTTP/1.1", true),
+        ("OPTIONS http://example.test?view=all HTTP/1.1", false),
+        ("OPTIONS http://example.test/ HTTP/1.1", false),
+        ("GET http://example.test HTTP/1.1", false),
+        ("OPTIONS * HTTP/1.1", false),
+    ] {
+        let raw = format!("{request_line}\r\nHost: example.test\r\n\r\n");
+        let parsed = try_parse_http1_request_head(raw.as_bytes())
+            .expect("parse")
+            .expect("complete");
+        assert_eq!(
+            parsed.empty_path_absolute_options, expected,
+            "{request_line}"
+        );
+    }
+}
+
+#[test]
 fn request_head_parser_promotes_storage_for_many_headers() {
     let mut raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n".to_vec();
     for index in 0..40 {

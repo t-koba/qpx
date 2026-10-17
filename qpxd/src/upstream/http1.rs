@@ -117,11 +117,34 @@ pub(crate) fn ensure_origin_form_uri(req: &mut Request<Body>) -> Result<()> {
     if req.uri().scheme().is_none() && req.uri().authority().is_none() {
         return Ok(());
     }
-    let origin_form = req
+    let raw_empty_path_options_target = req
+        .extensions_mut()
+        .remove::<crate::http::protocol::EmptyPathAbsoluteOptions>()
+        .is_some();
+    let absolute_form = req.uri().scheme().is_some() && req.uri().authority().is_some();
+    let absolute_path_is_empty = req
         .uri()
         .path_and_query()
-        .cloned()
-        .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"));
+        .is_none_or(|value| value.as_str().starts_with('?'));
+    // RFC 9112 Sections 3.2.1 and 3.2.4: an empty absolute-URI path becomes
+    // "/" in origin-form, except empty-path, no-query OPTIONS, which becomes "*".
+    let origin_form = if raw_empty_path_options_target
+        && req.method() == http::Method::OPTIONS
+        && absolute_form
+        && req.uri().query().is_none()
+    {
+        http::uri::PathAndQuery::from_static("*")
+    } else if absolute_form && absolute_path_is_empty {
+        match req.uri().query() {
+            Some(query) => format!("/?{query}").parse()?,
+            None => http::uri::PathAndQuery::from_static("/"),
+        }
+    } else {
+        req.uri()
+            .path_and_query()
+            .cloned()
+            .unwrap_or_else(|| http::uri::PathAndQuery::from_static("/"))
+    };
     *req.uri_mut() = Uri::builder().path_and_query(origin_form).build()?;
     Ok(())
 }
@@ -415,6 +438,38 @@ mod tests {
     use crate::upstream::http1::*;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn ensure_origin_form_uri_normalizes_empty_absolute_path() {
+        for (method, uri, expected, raw_empty_path_options_target) in [
+            ("GET", "http://example.test", "/", false),
+            ("GET", "http://example.test?view=all", "/?view=all", false),
+            ("OPTIONS", "http://example.test", "*", true),
+            (
+                "OPTIONS",
+                "http://example.test?view=all",
+                "/?view=all",
+                false,
+            ),
+            ("OPTIONS", "http://example.test/", "/", false),
+        ] {
+            let mut req = http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request");
+            if raw_empty_path_options_target {
+                req.extensions_mut()
+                    .insert(crate::http::protocol::EmptyPathAbsoluteOptions);
+            }
+            ensure_origin_form_uri(&mut req).expect("valid origin-form target");
+            assert_eq!(
+                req.uri().path_and_query().map(|value| value.as_str()),
+                Some(expected),
+                "method={method} uri={uri}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn direct_interim_exchange_times_out_after_connect() {

@@ -79,6 +79,7 @@ struct ParsedRequestHead {
     keep_alive: bool,
     upgrade: bool,
     send_continue: bool,
+    empty_path_absolute_options: bool,
 }
 
 type BodyReadResult<R> = Result<(R, BytesMut)>;
@@ -241,6 +242,11 @@ where
         *request.uri_mut() = parsed.uri;
         *request.version_mut() = parsed.version;
         *request.headers_mut() = parsed.headers;
+        if parsed.empty_path_absolute_options {
+            request
+                .extensions_mut()
+                .insert(crate::http::protocol::EmptyPathAbsoluteOptions);
+        }
         if parsed.upgrade || parsed.method == Method::CONNECT {
             if parsed.body_kind != RequestBodyKind::Empty {
                 write_status_and_headers(
@@ -488,6 +494,7 @@ fn finish_parsed_http1_request(
         .parse::<Uri>()
         .or_else(|_| Uri::builder().path_and_query(target).build())
         .map_err(|err| anyhow!("invalid request target: {err}"))?;
+    let empty_path_absolute_options = is_empty_path_absolute_options_target(&method, target, &uri);
     let version = parse_version(request.version, "missing HTTP version")?;
     let headers = parse_header_map_recycled(request.headers)?;
     let body_kind = determine_request_body_kind(&headers)?;
@@ -507,7 +514,21 @@ fn finish_parsed_http1_request(
         keep_alive,
         upgrade,
         send_continue,
+        empty_path_absolute_options,
     })
+}
+
+fn is_empty_path_absolute_options_target(method: &Method, target: &str, uri: &Uri) -> bool {
+    if method != Method::OPTIONS || uri.scheme().is_none() || uri.authority().is_none() {
+        return false;
+    }
+    let Some((_, after_scheme)) = target.split_once(':') else {
+        return false;
+    };
+    let Some(authority_and_suffix) = after_scheme.strip_prefix("//") else {
+        return false;
+    };
+    !authority_and_suffix.contains(['/', '?', '#'])
 }
 
 #[derive(Debug, thiserror::Error)]

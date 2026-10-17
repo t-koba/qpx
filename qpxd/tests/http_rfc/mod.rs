@@ -79,7 +79,10 @@ mod http3;
 mod tunnel_websocket;
 use cache::cache_contract;
 use hop_via::hop_by_hop_and_via_contract;
-use http1::{http11_absolute_form_target_authority_wins, http11_validation_cases};
+use http1::{
+    http11_absolute_form_empty_options_uses_asterisk, http11_absolute_form_target_authority_wins,
+    http11_validation_cases,
+};
 use http2::{http2_h2c_contract, http2_tls_alpn_contract};
 use http3::http3_reverse_terminate_smoke;
 use tunnel_websocket::{connect_tunnel_contract, websocket_upgrade_contract};
@@ -122,6 +125,8 @@ runtime:
         http11_validation_cases(forward_port).await?;
         // Absolute-form routing and outgoing Host use the request-target authority, not the received Host.
         http11_absolute_form_target_authority_wins(forward_port).await?;
+        // Empty-path absolute-form OPTIONS is forwarded as asterisk-form by the final proxy.
+        http11_absolute_form_empty_options_uses_asterisk(forward_port).await?;
 
         // RFC 9110: hop-by-hop header stripping + Via, and RFC 9110 section 11.7 proxy creds not forwarded.
         hop_by_hop_and_via_contract(forward_port).await?;

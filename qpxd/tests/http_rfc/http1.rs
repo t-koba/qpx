@@ -119,3 +119,33 @@ pub(crate) async fn http11_absolute_form_target_authority_wins(forward_port: u16
     }
     Ok(())
 }
+
+pub(crate) async fn http11_absolute_form_empty_options_uses_asterisk(
+    forward_port: u16,
+) -> Result<()> {
+    let (backend_addr, captured_rx) = serve_http1_capture_once(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await?;
+    let proxy_addr: SocketAddr = format!("127.0.0.1:{forward_port}").parse()?;
+    let request = format!(
+        "OPTIONS http://{backend_addr} HTTP/1.1\r\nHost: {backend_addr}\r\nConnection: close\r\n\r\n"
+    );
+    let (status, _, _) = send_http1_and_read_head(proxy_addr, request.as_bytes()).await?;
+    if status != 200 {
+        return Err(anyhow!(
+            "absolute-form OPTIONS should route to target, got status {status}"
+        ));
+    }
+
+    let captured = timeout(Duration::from_secs(5), captured_rx)
+        .await
+        .context("timed out waiting for absolute-form OPTIONS at target")??;
+    let captured = String::from_utf8_lossy(&captured);
+    if !captured.starts_with("OPTIONS * HTTP/1.1\r\n") {
+        return Err(anyhow!(
+            "proxy did not normalize empty-path absolute-form OPTIONS to asterisk-form:\n{captured}"
+        ));
+    }
+    Ok(())
+}
