@@ -273,11 +273,22 @@ async fn serve_http1_with_interim_parse_errors_send_connection_close() {
     assert!(text.starts_with("HTTP/1.1 431"));
     assert!(text.contains("Connection: close"));
 
+    // Bounded post-header read: accept a clean EOF or the TCP reset observed
+    // on macOS when closing with unread request bytes queued. The timeout
+    // fails a still-open connection instead of passing immediately, and the
+    // byte cap bounds the drain if the peer keeps sending.
     tokio::time::timeout(Duration::from_secs(1), async {
+        let mut drained: usize = 0;
         loop {
             match stream.read(&mut chunk).await {
                 Ok(0) => break,
-                Ok(_) => {}
+                Ok(read) => {
+                    drained += read;
+                    assert!(
+                        drained <= 8 * 1024,
+                        "peer sent {drained} bytes after 431 header without closing"
+                    );
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => break,
                 Err(error) => panic!("read after 431 response: {error}"),
             }
