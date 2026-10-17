@@ -672,9 +672,12 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     let proxied = proxied.into_http_response()?;
     let mut response = proxied.response;
     crate::http::capture::stream::limit_response_body_for_plan_in_place(&mut response, &route.plan);
+    // RFC 9110 §7.6.3: Via received-protocol is the parsed upstream version,
+    // not the downstream request version.
+    let upstream_version = response.version();
     crate::http::protocol::l7::finalize_response_with_headers_in_place(
         &prepared.method,
-        Version::HTTP_11,
+        upstream_version,
         prepared.state.plan.identity.proxy_name.as_ref(),
         &mut response,
         None,
@@ -781,9 +784,12 @@ async fn serve_raw_cache_miss(
     let proxied = proxied.into_http_response()?;
     let mut response = proxied.response;
     limit_response_body_for_max_bytes(&mut response, miss.max_response_body_bytes);
+    // RFC 9110 §7.6.3: Via received-protocol is the parsed upstream version,
+    // not the downstream request version.
+    let upstream_version = response.version();
     crate::http::protocol::l7::finalize_response_with_headers_in_place(
         &prepared.method,
-        Version::HTTP_11,
+        upstream_version,
         prepared.state.plan.identity.proxy_name.as_ref(),
         &mut response,
         None,
@@ -989,6 +995,81 @@ fn append_header_line(out: &mut BytesMut, name: &[u8], value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_response_via_uses_upstream_version_and_matches_full_dispatch() {
+        // Raw downstream is always HTTP/1.1; the received-protocol must still
+        // reflect the parsed upstream version (H1.1 vs H1.0 fixtures).
+        for (upstream_version, expected_via) in
+            [(Version::HTTP_11, "1.1 qpx"), (Version::HTTP_10, "1.0 qpx")]
+        {
+            let parsed = [
+                httparse::Header {
+                    name: "Content-Length",
+                    value: b"0",
+                },
+                httparse::Header {
+                    name: "Via",
+                    value: b"1.0 first",
+                },
+                httparse::Header {
+                    name: "Via",
+                    value: b"1.1 second",
+                },
+            ];
+            let mut raw = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+                &parsed,
+                &Method::GET,
+                StatusCode::OK,
+                upstream_version,
+            )
+            .expect("upstream raw head");
+            raw.finalize("qpx");
+            let materialized = raw.materialized_headers().expect("materialized head");
+            let fast_via: Vec<_> = materialized
+                .get_all("via")
+                .iter()
+                .map(|value| value.to_str().expect("Via value").to_owned())
+                .collect();
+            assert_eq!(
+                fast_via,
+                [
+                    "1.0 first".to_owned(),
+                    "1.1 second".to_owned(),
+                    expected_via.to_owned()
+                ],
+                "raw fast path must use upstream {upstream_version:?}"
+            );
+
+            // Full dispatch reference finalizes with the parsed upstream
+            // version, matching the fixed raw fast-path fallback.
+            let mut full = Response::builder()
+                .version(upstream_version)
+                .header(http::header::VIA, "1.0 first")
+                .header(http::header::VIA, "1.1 second")
+                .body(Body::from("ok"))
+                .expect("upstream response");
+            let full_version = full.version();
+            crate::http::protocol::l7::finalize_response_with_headers_in_place(
+                &Method::GET,
+                full_version,
+                "qpx",
+                &mut full,
+                None,
+                false,
+            );
+            let full_via: Vec<_> = full
+                .headers()
+                .get_all(http::header::VIA)
+                .iter()
+                .map(|value| value.to_str().expect("Via value").to_owned())
+                .collect();
+            assert_eq!(
+                fast_via, full_via,
+                "raw fast and full dispatch must agree for upstream {upstream_version:?}"
+            );
+        }
+    }
 
     #[test]
     fn serialized_raw_request_rewrites_host_and_strips_connection_fields() {

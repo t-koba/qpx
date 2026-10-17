@@ -945,3 +945,54 @@ async fn raw_direct_relay_finalization_preserves_upstream_via_protocol() {
     assert!(wire.find("Via: 1.1 earlier\r\n").unwrap() < wire.find("Via: 1.0 qpx\r\n").unwrap());
     assert_eq!(wire.matches("Via: 1.0 qpx\r\n").count(), 1);
 }
+
+#[tokio::test]
+async fn finalized_raw_head_cache_key_coheres_across_versions() {
+    // The wire head carries the upstream protocol, so H1.0 and H1.1 wires
+    // must never share a cache entry, while the downstream version
+    // partition must not change the received-protocol.
+    async fn via_for(wire: &[u8], downstream: Version) -> Vec<String> {
+        let mut stream = wire;
+        let (_, parsed, _) = read_finalized_raw_response_head_with_interim(
+            &mut stream,
+            BytesMut::new(),
+            &Method::GET,
+            downstream,
+            "via-coherence",
+        )
+        .await
+        .expect("read finalized head");
+        parsed
+            .raw
+            .materialized_headers()
+            .expect("headers")
+            .get_all("via")
+            .iter()
+            .map(|value| value.to_str().expect("Via value").to_owned())
+            .collect()
+    }
+
+    let http10_wire = &b"HTTP/1.0 200 OK\r\nContent-Length: 0\r\n\r\n"[..];
+    let http11_wire = &b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"[..];
+
+    // Same downstream, different upstream versions: cache key must
+    // distinguish the wire head.
+    assert_eq!(
+        via_for(http10_wire, Version::HTTP_11).await,
+        vec!["1.0 via-coherence".to_owned()]
+    );
+    assert_eq!(
+        via_for(http11_wire, Version::HTTP_11).await,
+        vec!["1.1 via-coherence".to_owned()]
+    );
+    // Same upstream wire across downstream versions: received-protocol stays
+    // upstream-derived regardless of cache hit or re-parse.
+    assert_eq!(
+        via_for(http10_wire, Version::HTTP_11).await,
+        via_for(http10_wire, Version::HTTP_2).await
+    );
+    assert_eq!(
+        via_for(http11_wire, Version::HTTP_11).await,
+        via_for(http11_wire, Version::HTTP_2).await
+    );
+}

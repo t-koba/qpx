@@ -170,6 +170,32 @@ fn finalize_plain_reverse_response(
 mod tests {
     use super::*;
 
+    fn via_values(response: &Response<Body>) -> Vec<String> {
+        response
+            .headers()
+            .get_all(http::header::VIA)
+            .iter()
+            .map(|value| value.to_str().expect("Via value").to_owned())
+            .collect()
+    }
+
+    fn finalize_full_dispatch_reference(
+        request_method: &http::Method,
+        response: &mut Response<Body>,
+    ) {
+        // Full dispatch finalizes with the parsed upstream version
+        // (`resp.version()` in `dispatch_http.rs`).
+        let upstream_version = response.version();
+        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            request_method,
+            upstream_version,
+            "qpx",
+            response,
+            None,
+            false,
+        );
+    }
+
     #[test]
     fn plain_response_via_uses_upstream_version_for_http2_downstream() {
         let request = Request::builder()
@@ -185,14 +211,73 @@ mod tests {
 
         finalize_plain_reverse_response(request.method(), "qpx", &mut response);
 
-        let via: Vec<_> = response
-            .headers()
-            .get_all(http::header::VIA)
-            .iter()
-            .map(|value| value.to_str().expect("Via value"))
-            .collect();
-        assert_eq!(via, ["1.0 first", "1.1 second", "1.1 qpx"]);
+        assert_eq!(
+            via_values(&response),
+            ["1.0 first", "1.1 second", "1.1 qpx"]
+        );
         assert_eq!(response.version(), http::Version::HTTP_11);
         assert_eq!(request.version(), http::Version::HTTP_2);
+    }
+
+    #[test]
+    fn plain_response_via_uses_upstream_version_for_http10_upstream() {
+        let request = Request::builder()
+            .version(http::Version::HTTP_11)
+            .body(Body::empty())
+            .expect("downstream request");
+        let mut response = Response::builder()
+            .version(http::Version::HTTP_10)
+            .header(http::header::VIA, "1.0 first")
+            .header(http::header::VIA, "1.1 second")
+            .body(Body::from("ok"))
+            .expect("upstream response");
+
+        finalize_plain_reverse_response(request.method(), "qpx", &mut response);
+
+        assert_eq!(
+            via_values(&response),
+            ["1.0 first", "1.1 second", "1.0 qpx"]
+        );
+        assert_eq!(response.version(), http::Version::HTTP_10);
+        assert_eq!(request.version(), http::Version::HTTP_11);
+    }
+
+    #[test]
+    fn plain_fast_path_matches_full_dispatch_for_received_protocol() {
+        for (downstream, upstream, expected) in [
+            (http::Version::HTTP_2, http::Version::HTTP_11, "1.1 qpx"),
+            (http::Version::HTTP_11, http::Version::HTTP_10, "1.0 qpx"),
+        ] {
+            let build_upstream = || {
+                Response::builder()
+                    .version(upstream)
+                    .header(http::header::VIA, "1.0 first")
+                    .header(http::header::VIA, "1.1 second")
+                    .body(Body::from("ok"))
+                    .expect("upstream response")
+            };
+            let mut fast = build_upstream();
+            finalize_plain_reverse_response(&http::Method::GET, "qpx", &mut fast);
+            let mut full = build_upstream();
+            finalize_full_dispatch_reference(&http::Method::GET, &mut full);
+            assert_eq!(fast.version(), upstream);
+            assert_eq!(full.version(), upstream);
+            assert_eq!(via_values(&fast).last().map(String::as_str), Some(expected));
+            assert_eq!(
+                via_values(&fast),
+                via_values(&full),
+                "fast and full dispatch must agree for downstream {downstream:?}/upstream {upstream:?}"
+            );
+            // The downstream version must not leak into the received-protocol.
+            let downstream_via = qpx_http::protocol::semantics::via_header_value(downstream, "qpx")
+                .and_then(|value| value.to_str().ok().map(str::to_owned));
+            if downstream_via.as_deref() != Some(expected) {
+                assert_ne!(
+                    via_values(&fast).last().map(String::as_str),
+                    downstream_via.as_deref(),
+                    "downstream {downstream:?} must not supply Via for upstream {upstream:?}"
+                );
+            }
+        }
     }
 }
