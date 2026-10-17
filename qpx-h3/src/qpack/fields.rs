@@ -301,17 +301,18 @@ pub(super) fn build_request_uri(
     // RFC 9114 section 4.3.1 requires path-absolute (or OPTIONS *).
     // Validate before Uri construction, which normalizes query-only values.
     if let Some(path) = path {
-        // `http::Uri` silently drops fragments, so reject the raw delimiter
-        // before constructing the URI. Percent-encoded `%23` remains valid.
-        if path.contains('#') {
-            return Err(anyhow!("HTTP request :path must not contain a fragment"));
-        }
         let path_absolute = path.starts_with('/') && !path.starts_with("//");
         let options_asterisk = path == "*" && method == Method::OPTIONS;
         if !path_absolute && !options_asterisk {
             return Err(anyhow!(
                 "HTTP request :path must be path-absolute or '*' for OPTIONS"
             ));
+        }
+        if !options_asterisk {
+            let (path_component, query) = path.split_once('?').unwrap_or((path, ""));
+            if !valid_uri_component(path_component, false) || !valid_uri_component(query, true) {
+                return Err(anyhow!("HTTP request :path contains invalid URI syntax"));
+            }
         }
     }
     let pseudo_authority = authority;
@@ -356,6 +357,53 @@ pub(super) fn build_request_uri(
         builder = builder.path_and_query(path);
     }
     builder.build().map_err(Into::into)
+}
+
+// RFC 3986 pchar is unreserved / pct-encoded / sub-delims / ":" / "@".
+// Query additionally permits "/" and "?"; path additionally permits "/".
+fn valid_uri_component(value: &str, query: bool) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if byte == b'%' {
+            if index + 2 >= bytes.len()
+                || !bytes[index + 1].is_ascii_hexdigit()
+                || !bytes[index + 2].is_ascii_hexdigit()
+            {
+                return false;
+            }
+            index += 3;
+        } else if is_pchar(byte) || byte == b'/' || (query && byte == b'?') {
+            index += 1;
+        } else {
+            return false;
+        }
+    }
+    true
+}
+
+fn is_pchar(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b':'
+                | b'@'
+        )
 }
 
 pub(super) fn push_decoded_field<S: FieldSink>(

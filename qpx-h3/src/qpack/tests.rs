@@ -162,6 +162,20 @@ fn http_request_path_must_not_be_empty() {
 }
 
 #[test]
+fn non_http_request_path_must_still_be_path_absolute() {
+    let fields = [
+        (":method", "GET"),
+        (":scheme", "ftp"),
+        (":authority", "example.com"),
+        (":path", ""),
+    ];
+    for decoded in decode_request_heads(&fields) {
+        let err = decoded.expect_err("non-HTTP :path must still be path-absolute");
+        assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+    }
+}
+
+#[test]
 fn request_path_rejects_raw_fragments_and_preserves_encoded_hashes() {
     for path in ["/private#fragment", "/private?x=1#fragment"] {
         let fields = [
@@ -188,6 +202,46 @@ fn request_path_rejects_raw_fragments_and_preserves_encoded_hashes() {
             request.uri().path_and_query().unwrap().as_str(),
             "/private%23fragment?x=1"
         );
+    }
+}
+
+#[test]
+fn request_path_rejects_invalid_uri_component_syntax() {
+    for path in [
+        "/bad%GG",
+        "/bad%",
+        "/a|b",
+        r"/a\b",
+        "/a#fragment",
+        "/a?x=%",
+        "/a?x=|",
+    ] {
+        let fields = [
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "example.com"),
+            (":path", path),
+        ];
+        for decoded in decode_request_heads(&fields) {
+            let err = decoded.expect_err("invalid URI component syntax must fail");
+            assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+        }
+    }
+}
+
+#[test]
+fn request_path_accepts_and_preserves_uri_component_syntax() {
+    for path in ["/a%2Fb?x=%23", "/a?x?y", "/a//b", "/"] {
+        let fields = [
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "example.com"),
+            (":path", path),
+        ];
+        for decoded in decode_request_heads(&fields) {
+            let request = decoded.expect("valid URI path and query").request;
+            assert_eq!(request.uri().path_and_query().unwrap().as_str(), path);
+        }
     }
 }
 
