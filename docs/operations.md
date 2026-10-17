@@ -136,8 +136,10 @@ reload for compatible config edits.
   export size caps and chunking. Recognized URI-bearing headers include Host,
   Referer, Location, Content-Location, Content-Base, Destination, URI, Origin,
   Access-Control-Allow-Origin, Refresh and Link. Host values and CONNECT
-  authority-form targets use authority-specific redaction. Opaque URI payloads
-  (such as `mailto:alice@example.com` and `urn:example:person@domain`) and
+  authority-form targets use authority-specific redaction; path-only extended
+  CONNECT targets preserve `@` path data while still applying query-key policy.
+  Opaque URI payloads (such as `mailto:alice@example.com` and
+  `urn:example:person@domain`) and
   relative paths are preserved by generic URI userinfo redaction. Non-UTF-8
   plaintext samples fail closed as `<redacted>`, including binary body samples
   when all configurable redaction lists are empty. FTP error

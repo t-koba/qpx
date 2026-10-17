@@ -567,7 +567,10 @@ fn ambiguous_uri_headers_and_truncated_authorities_are_safe_before_export_caps()
     ] {
         let raw = format!("CONNECT {target}");
         let safe = redaction.redact_plaintext(raw.as_bytes());
-        assert!(!String::from_utf8_lossy(&safe).contains("synthetic-"));
+        assert!(
+            !String::from_utf8_lossy(&safe).contains("synthetic-"),
+            "{target}"
+        );
         for cap in 0..=raw.len() {
             assert_eq!(
                 redaction
@@ -649,6 +652,11 @@ fn opaque_and_relative_uri_headers_are_preserved_but_authorities_are_redacted() 
     assert_eq!(
         safe.as_ref(),
         b"CONNECT host:443 HTTP/1.1\r\nHost: host:443\r\n\r\n"
+    );
+    let extended_path = b"CONNECT /chat/@alice?room=general HTTP/1.1\r\n\r\n";
+    assert_eq!(
+        redaction.redact_plaintext(extended_path).as_ref(),
+        extended_path
     );
     for cap in 0..=raw.len() {
         assert_eq!(

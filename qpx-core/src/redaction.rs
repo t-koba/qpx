@@ -77,8 +77,14 @@ pub fn redact_host_userinfo(host: &str) -> String {
 /// Redacts a request target using its HTTP method to distinguish CONNECT's
 /// authority form from generic URI references, then applies configured keys.
 pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) -> String {
-    if method == "CONNECT" {
-        redact_uri_query_keys(&redact_authority_userinfo(target), query_keys)
+    if method == "CONNECT" && target.starts_with('/') {
+        // Extended CONNECT carries a path in :path; even a leading `//` is
+        // still path data here, not a network-path authority.
+        redact_query_fragment_keys(target, query_keys)
+    } else if method == "CONNECT" && !target.contains(['/', '?', '#']) && !target.contains("://") {
+        // Traditional CONNECT uses authority-form. Paths and absolute URIs
+        // above retain their own URI-reference semantics.
+        redact_query_fragment_keys(&redact_authority_userinfo(target), query_keys)
     } else {
         redact_uri_query_keys(target, query_keys)
     }
@@ -87,7 +93,10 @@ pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) 
 /// Redacts URI userinfo unconditionally, and configured query/fragment keys.
 pub fn redact_uri_query_keys(uri: &str, query_keys: &[String]) -> String {
     let uri = redact_uri_userinfo(uri);
-    let uri = uri.as_str();
+    redact_query_fragment_keys(&uri, query_keys)
+}
+
+fn redact_query_fragment_keys(uri: &str, query_keys: &[String]) -> String {
     let (before_fragment, fragment) = uri
         .split_once('#')
         .map(|(head, fragment)| (head, Some(fragment)))
@@ -255,6 +264,27 @@ mod userinfo_tests {
             assert_eq!(redact_uri_query_keys(uri, &[]), uri);
             assert_eq!(redact_request_target("GET", uri, &[]), uri);
         }
+    }
+
+    #[test]
+    fn extended_connect_paths_preserve_at_data_and_redact_query_keys() {
+        let keys = vec!["token".to_string()];
+        assert_eq!(
+            redact_request_target("CONNECT", "/chat/@alice?room=general&token=secret", &keys),
+            "/chat/@alice?room=general&token=<redacted>"
+        );
+        assert_eq!(
+            redact_request_target("CONNECT", "//chat/@alice?room=general", &[]),
+            "//chat/@alice?room=general"
+        );
+        assert_eq!(
+            redact_request_target(
+                "CONNECT",
+                "https://user:pass@host/chat/@alice?room=general",
+                &[]
+            ),
+            "https://host/chat/@alice?room=general"
+        );
     }
 
     #[test]

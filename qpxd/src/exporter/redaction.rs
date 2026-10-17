@@ -115,23 +115,28 @@ impl CaptureRedaction {
         // A preview may end inside userinfo, before the '@'. Do not expose an
         // unfinished authority when the request line itself is incomplete.
         let version = parts.next();
-        let redacted_target = if version.is_none() && is_http_method_token(method) {
-            let authority = target
-                .split_once("://")
-                .filter(|(prefix, _)| !prefix.contains('/'))
-                .map(|(_, rest)| rest)
-                .or_else(|| target.strip_prefix("//"))
-                .unwrap_or(target);
-            if !authority.contains(['/', '?', '#']) {
-                // Includes network-path and authority form previews. Without
-                // a delimiter even a prefix lacking '@' can be userinfo.
+        let redacted_target =
+            if version.is_none() && method == "CONNECT" && target.starts_with("//") {
+                // Before the request line is complete, `//` may be either an
+                // extended-CONNECT path or a network-path authority preview.
                 "<redacted>".to_string()
+            } else if version.is_none() && is_http_method_token(method) {
+                let authority = target
+                    .split_once("://")
+                    .filter(|(prefix, _)| !prefix.contains('/'))
+                    .map(|(_, rest)| rest)
+                    .or_else(|| target.strip_prefix("//"))
+                    .unwrap_or(target);
+                if !authority.contains(['/', '?', '#']) {
+                    // Includes network-path and authority form previews. Without
+                    // a delimiter even a prefix lacking '@' can be userinfo.
+                    "<redacted>".to_string()
+                } else {
+                    redact_request_target(method, target, &self.query_keys)
+                }
             } else {
                 redact_request_target(method, target, &self.query_keys)
-            }
-        } else {
-            redact_request_target(method, target, &self.query_keys)
-        };
+            };
         match version {
             Some(version) => format!("{method} {redacted_target} {version}"),
             None => format!("{method} {redacted_target}"),
