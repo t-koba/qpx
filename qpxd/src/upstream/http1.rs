@@ -88,6 +88,30 @@ pub(crate) fn ensure_absolute_uri(
     scheme: &str,
     authority: &str,
 ) -> Result<()> {
+    let asterisk_options_target = req.method() == http::Method::OPTIONS
+        && req
+            .uri()
+            .path_and_query()
+            .is_some_and(|value| value.as_str() == "*");
+    if asterisk_options_target {
+        // RFC 9112 §§3.2.4 and 3.3: reconstruct the server-wide OPTIONS target
+        // from its authority and empty path so the final proxy can forward "*".
+        let scheme = req.uri().scheme_str().unwrap_or(scheme);
+        let authority = req
+            .uri()
+            .authority()
+            .map(|value| value.as_str())
+            .unwrap_or(authority);
+        let absolute = Uri::builder()
+            .scheme(scheme)
+            .authority(authority)
+            .path_and_query("/")
+            .build()?;
+        req.extensions_mut()
+            .insert(crate::http::protocol::EmptyPathAbsoluteOptions);
+        *req.uri_mut() = absolute;
+        return Ok(());
+    }
     if req.uri().scheme().is_none() || req.uri().authority().is_none() {
         set_absolute_uri(req, scheme, authority)?;
     }
@@ -440,6 +464,57 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
+    fn ensure_absolute_uri_reconstructs_server_wide_options_target() {
+        let mut req = http::Request::builder()
+            .method(http::Method::OPTIONS)
+            .uri("*")
+            .body(Body::empty())
+            .expect("request");
+        ensure_absolute_uri(&mut req, "http", "example.test").expect("absolute URI");
+        assert_eq!(req.uri().scheme_str(), Some("http"));
+        assert_eq!(
+            req.uri().authority().map(|value| value.as_str()),
+            Some("example.test")
+        );
+        assert_eq!(
+            req.uri().path_and_query().map(|value| value.as_str()),
+            Some("/")
+        );
+        assert!(
+            req.extensions()
+                .get::<crate::http::protocol::EmptyPathAbsoluteOptions>()
+                .is_some()
+        );
+
+        let absolute_asterisk = Uri::builder()
+            .scheme("http")
+            .authority("example.test")
+            .path_and_query("*")
+            .build()
+            .expect("absolute asterisk target");
+        let mut req = http::Request::builder()
+            .method(http::Method::OPTIONS)
+            .uri(absolute_asterisk)
+            .body(Body::empty())
+            .expect("request");
+        ensure_absolute_uri(&mut req, "https", "ignored.example").expect("normalize absolute URI");
+        assert_eq!(req.uri().scheme_str(), Some("http"));
+        assert_eq!(
+            req.uri().authority().map(|value| value.as_str()),
+            Some("example.test")
+        );
+        assert_eq!(
+            req.uri().path_and_query().map(|value| value.as_str()),
+            Some("/")
+        );
+        assert!(
+            req.extensions()
+                .get::<crate::http::protocol::EmptyPathAbsoluteOptions>()
+                .is_some()
+        );
+    }
+
+    #[test]
     fn ensure_origin_form_uri_normalizes_empty_absolute_path() {
         for (method, uri, expected, raw_empty_path_options_target) in [
             ("GET", "http://example.test", "/", false),
@@ -452,6 +527,7 @@ mod tests {
                 false,
             ),
             ("OPTIONS", "http://example.test/", "/", false),
+            ("OPTIONS", "*", "*", false),
         ] {
             let mut req = http::Request::builder()
                 .method(method)

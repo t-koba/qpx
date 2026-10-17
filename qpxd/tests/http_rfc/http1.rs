@@ -150,7 +150,10 @@ pub(crate) async fn http11_absolute_form_empty_options_uses_asterisk(
     Ok(())
 }
 
-pub(crate) async fn http11_upstream_proxy_receives_absolute_form() -> Result<()> {
+async fn assert_http11_upstream_proxy_target(
+    request_line: &str,
+    expected_request_line: &str,
+) -> Result<()> {
     let (proxy_addr, captured_rx) = serve_http1_capture_once(
         b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
     )
@@ -185,9 +188,9 @@ runtime:
         })?;
 
     let request =
-        "OPTIONS http://127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\nConnection: close\r\n\r\n";
-    let proxy_listener_addr: SocketAddr = format!("127.0.0.1:{forward_port}").parse()?;
-    let (status, _, _) = send_http1_and_read_head(proxy_listener_addr, request.as_bytes()).await?;
+        format!("{request_line} HTTP/1.1\r\nHost: 127.0.0.1:9\r\nConnection: close\r\n\r\n");
+    let listener_addr: SocketAddr = format!("127.0.0.1:{forward_port}").parse()?;
+    let (status, _, _) = send_http1_and_read_head(listener_addr, request.as_bytes()).await?;
     if status != 200 {
         return Err(anyhow!(
             "expected 200 from configured upstream proxy, got {status}"
@@ -198,10 +201,20 @@ runtime:
         .await
         .context("timed out waiting for configured upstream proxy request")??;
     let captured = String::from_utf8_lossy(&captured);
-    if !captured.starts_with("OPTIONS http://127.0.0.1:9 HTTP/1.1\r\n") {
+    let expected_start = format!("{expected_request_line} HTTP/1.1\r\n");
+    if !captured.starts_with(&expected_start) {
         return Err(anyhow!(
-            "configured upstream proxy did not receive absolute-form with the original empty path:\n{captured}"
+            "configured upstream proxy received the wrong request-target; expected {expected_start:?}:\n{captured}"
         ));
     }
     Ok(())
+}
+
+pub(crate) async fn http11_upstream_proxy_receives_absolute_form() -> Result<()> {
+    assert_http11_upstream_proxy_target("OPTIONS http://127.0.0.1:9", "OPTIONS http://127.0.0.1:9")
+        .await
+}
+
+pub(crate) async fn http11_asterisk_options_reconstructs_target_for_upstream_proxy() -> Result<()> {
+    assert_http11_upstream_proxy_target("OPTIONS *", "OPTIONS http://127.0.0.1:9").await
 }

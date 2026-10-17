@@ -138,9 +138,10 @@ runtime:
         websocket_upgrade_contract(forward_port).await?;
     }
 
-    // RFC 9112: an intermediary forwarding to an upstream proxy retains absolute-form,
-    // including an empty-path OPTIONS target for the final proxy in the chain.
+    // RFC 9112: preserve/reconstruct empty-path OPTIONS as absolute-form across proxy
+    // hops so the final proxy can forward the required asterisk-form target.
     http1::http11_upstream_proxy_receives_absolute_form().await?;
+    http1::http11_asterisk_options_reconstructs_target_for_upstream_proxy().await?;
 
     // --- Scenario 2: RFC 9111 caching (forward listener, HTTP cache backend) ---
     cache_contract().await?;
