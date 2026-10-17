@@ -2,7 +2,9 @@ use super::io::{determine_response_body_kind, response_body_allows_reuse};
 use super::response::{
     ParsedResponseHead, RawParsedResponseHead, ResponseBodyKind, build_raw_response,
     build_response, forward_chunked_body, forward_close_delimited_body,
-    read_finalized_raw_response_head_with_interim, read_response_head_with_interim,
+    read_finalized_raw_response_head_with_interim,
+    read_finalized_raw_response_head_with_interim_under_external_deadline,
+    read_response_head_with_interim,
 };
 use super::{
     Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_HEADER_BYTES,
@@ -230,6 +232,125 @@ async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
         "partial input must yield to the outer deadline"
     );
     assert!(stalled_reader.read_polls >= 2);
+}
+
+#[tokio::test]
+async fn raw_upstream_response_head_yields_on_stall_and_fails_closed() {
+    let partial = Bytes::from_static(b"HTTP/1.1 200 OK\r\nX-Partial:");
+
+    let mut eof_reader = RecordingStream::segmented(partial.clone(), usize::MAX, false);
+    let error = match read_finalized_raw_response_head_with_interim(
+        &mut eof_reader,
+        BytesMut::new(),
+        &Method::GET,
+        Version::HTTP_11,
+        "spin-raw-eof-test",
+    )
+    .await
+    {
+        Ok(_) => panic!("EOF after partial raw response head must fail"),
+        Err(error) => error,
+    };
+    assert!(error.downcast_ref::<UpstreamConnectionClosed>().is_some());
+    assert_eq!(eof_reader.read_polls, 2);
+
+    let mut stalled_reader = RecordingStream::segmented(partial, usize::MAX, true);
+    let result = tokio::time::timeout(
+        Duration::from_millis(50),
+        read_finalized_raw_response_head_with_interim(
+            &mut stalled_reader,
+            BytesMut::new(),
+            &Method::GET,
+            Version::HTTP_11,
+            "spin-raw-stall-test",
+        ),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "partial raw input must yield to the outer deadline"
+    );
+    assert!(stalled_reader.read_polls >= 2);
+}
+
+#[tokio::test]
+async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
+    let response_bytes = Bytes::from_static(
+        b"HTTP/1.1 200 OK\r\nX-Partial: segmented\r\nContent-Length: 4\r\n\r\nBODY",
+    );
+    let mut segmented_reader = RecordingStream::segmented(response_bytes, 11, false);
+    let (interim, parsed, remainder) =
+        read_finalized_raw_response_head_with_interim_under_external_deadline(
+            &mut segmented_reader,
+            BytesMut::new(),
+            &Method::GET,
+            Version::HTTP_11,
+            "spin-ext-segmented-test",
+        )
+        .await
+        .expect("read fragmented raw response head under external deadline");
+    assert!(interim.is_empty());
+    assert_eq!(parsed.status, StatusCode::OK);
+    assert_eq!(remainder.as_ref(), b"BODY");
+    assert!(segmented_reader.read_polls > 1);
+
+    let partial = Bytes::from_static(b"HTTP/1.1 200 OK\r\nX-Partial:");
+    let mut stalled_reader = RecordingStream::segmented(partial.clone(), usize::MAX, true);
+    let result = tokio::time::timeout(
+        Duration::from_millis(50),
+        read_finalized_raw_response_head_with_interim_under_external_deadline(
+            &mut stalled_reader,
+            BytesMut::new(),
+            &Method::GET,
+            Version::HTTP_11,
+            "spin-ext-stall-test",
+        ),
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "partial raw input must yield to the external deadline"
+    );
+    assert!(stalled_reader.read_polls >= 2);
+
+    let mut incomplete_head = b"HTTP/1.1 200 OK\r\nX-Large: ".to_vec();
+    incomplete_head.resize(MAX_HEADER_BYTES, b'x');
+    let mut limited_reader =
+        RecordingStream::segmented(Bytes::from(incomplete_head), usize::MAX, false);
+    let error = match read_finalized_raw_response_head_with_interim_under_external_deadline(
+        &mut limited_reader,
+        BytesMut::with_capacity(MAX_HEADER_BYTES * 2),
+        &Method::GET,
+        Version::HTTP_11,
+        "spin-ext-cap-test",
+    )
+    .await
+    {
+        Ok(_) => panic!("partial raw head at the byte cap must fail"),
+        Err(error) => error,
+    };
+    assert!(
+        error
+            .to_string()
+            .contains("HTTP/1 header block exceeded configured limit")
+    );
+    assert_eq!(limited_reader.read_polls, 1);
+
+    let mut eof_reader = RecordingStream::segmented(partial, usize::MAX, false);
+    let error = match read_finalized_raw_response_head_with_interim_under_external_deadline(
+        &mut eof_reader,
+        BytesMut::new(),
+        &Method::GET,
+        Version::HTTP_11,
+        "spin-ext-eof-test",
+    )
+    .await
+    {
+        Ok(_) => panic!("EOF after partial raw response head must fail"),
+        Err(error) => error,
+    };
+    assert!(error.downcast_ref::<UpstreamConnectionClosed>().is_some());
+    assert_eq!(eof_reader.read_polls, 2);
 }
 
 #[tokio::test]
