@@ -59,7 +59,11 @@ pub(crate) fn emit_audit_log(
         host = qpx_core::redaction::redact_host_userinfo(record.host.unwrap_or("")),
         sni = record.sni.unwrap_or(""),
         method = record.method.unwrap_or(""),
-        path = qpx_core::redaction::redact_uri_userinfo(record.path.unwrap_or("")),
+        path = qpx_core::redaction::redact_request_target(
+            record.method.unwrap_or(""),
+            record.path.unwrap_or(""),
+            &[],
+        ),
         outcome = record.outcome.as_str(),
         status = record.status.unwrap_or(0),
         subject = if include(AuditIncludeField::Subject) {

@@ -1,6 +1,6 @@
 use qpx_core::config::CaptureRedactionConfig;
 use qpx_core::redaction::{
-    compile_json_redaction_path, redact_host_userinfo, redact_uri_query_keys,
+    compile_json_redaction_path, redact_host_userinfo, redact_request_target, redact_uri_query_keys,
 };
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -127,10 +127,10 @@ impl CaptureRedaction {
                 // a delimiter even a prefix lacking '@' can be userinfo.
                 "<redacted>".to_string()
             } else {
-                redact_uri_query_keys(target, &self.query_keys)
+                redact_request_target(method, target, &self.query_keys)
             }
         } else {
-            redact_uri_query_keys(target, &self.query_keys)
+            redact_request_target(method, target, &self.query_keys)
         };
         match version {
             Some(version) => format!("{method} {redacted_target} {version}"),

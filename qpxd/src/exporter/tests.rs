@@ -621,3 +621,52 @@ fn uri_body_text_is_not_subject_to_userinfo_dlp() {
         b"POST /upload HTTP/1.1\r\nHost: host\r\n\r\nftp://synthetic-user:synthetic-pass@host/file";
     assert_eq!(redaction.redact_plaintext(raw).as_ref(), raw);
 }
+
+#[test]
+fn opaque_and_relative_uri_headers_are_preserved_but_authorities_are_redacted() {
+    let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+        headers: vec![],
+        query_keys: vec![],
+        json_paths: vec![],
+    });
+    for uri in [
+        "mailto:alice@example.com",
+        "urn:example:person@domain",
+        "urn:example:ftp://user@host",
+        "relative/alice@example.com",
+        "alice@example.com",
+    ] {
+        let raw = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {uri}\r\nLink: <{uri}>; rel=next\r\nOrigin: {uri}\r\n\r\n"
+        );
+        assert_eq!(
+            redaction.redact_plaintext(raw.as_bytes()).as_ref(),
+            raw.as_bytes()
+        );
+    }
+    let raw = b"CONNECT synthetic-user:synthetic-pass@host:443 HTTP/1.1\r\nHost: synthetic-user:synthetic-pass@host:443\r\n\r\n";
+    let safe = redaction.redact_plaintext(raw);
+    assert_eq!(
+        safe.as_ref(),
+        b"CONNECT host:443 HTTP/1.1\r\nHost: host:443\r\n\r\n"
+    );
+    for cap in 0..=raw.len() {
+        assert_eq!(
+            redaction
+                .redact_plaintext_for_export(raw, Some(cap))
+                .as_ref(),
+            &safe[..safe.len().min(cap)]
+        );
+    }
+    for scheme in ["ftp", "http"] {
+        let raw = format!(
+            "HTTP/1.1 302 Found\r\nLocation: {scheme}://synthetic-user:synthetic-pass@host/file\r\nLink: <{scheme}://synthetic-user:synthetic-pass@host/file>; rel=next\r\nOrigin: {scheme}://synthetic-user:synthetic-pass@host\r\n\r\n"
+        );
+        let safe = redaction.redact_plaintext(raw.as_bytes());
+        let safe = String::from_utf8_lossy(&safe);
+        assert!(!safe.contains("synthetic-"));
+        assert!(safe.contains(&format!("Location: {scheme}://host/file")));
+        assert!(safe.contains(&format!("Link: <{scheme}://host/file>")));
+        assert!(safe.contains(&format!("Origin: {scheme}://host\r\n")));
+    }
+}

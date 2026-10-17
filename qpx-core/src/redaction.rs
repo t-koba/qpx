@@ -23,7 +23,8 @@ pub fn compile_json_redaction_path(path: &str) -> Result<Vec<String>, String> {
 }
 
 /// Removes URI userinfo without parsing or normalizing an untrusted URI.
-/// Applies to every scheme and network-path references, including invalid URIs.
+/// Applies only to hierarchical `scheme://` and network-path `//` URIs.
+/// Opaque scheme payloads and relative paths are not authorities.
 pub fn redact_uri_userinfo(uri: &str) -> String {
     // Header values may wrap a URI in quotes/whitespace. Preserve the wrapper,
     // but do not let it hide the authority. Scheme validation belongs to the
@@ -33,15 +34,19 @@ pub fn redact_uri_userinfo(uri: &str) -> String {
     let start = if value.starts_with("//") {
         offset + 2
     } else if let Some((prefix, _)) = value.split_once("://") {
-        if prefix.contains('/') {
-            // An origin path such as /foo://user@host is not an authority.
-            offset
+        if prefix.contains(['/', ':', '?', '#']) {
+            // A path, query, fragment or opaque payload can contain ://.
+            return uri.to_string();
         } else {
             offset + prefix.len() + 3
         }
     } else {
-        offset // Also cover authority-form request targets and Host values.
+        return uri.to_string();
     };
+    strip_authority_userinfo(uri, start)
+}
+
+fn strip_authority_userinfo(uri: &str, start: usize) -> String {
     let end = uri[start..]
         .find(['/', '?', '#'])
         .map_or(uri.len(), |end| start + end);
@@ -51,14 +56,31 @@ pub fn redact_uri_userinfo(uri: &str) -> String {
     }
 }
 
-/// Sanitizes a Host/authority diagnostic, not an origin path. If malformed
-/// syntax leaves an ambiguous '@' outside the authority, redact the whole value.
-pub fn redact_host_userinfo(host: &str) -> String {
-    let redacted = redact_uri_userinfo(host);
+/// Sanitizes a value known to be an authority (Host or CONNECT target).
+/// Malformed syntax with an ambiguous '@' outside the authority fails closed.
+pub fn redact_authority_userinfo(authority: &str) -> String {
+    let redacted = redact_uri_userinfo(authority);
+    let value = redacted.trim_start_matches(|c: char| c.is_whitespace() || c == '\'' || c == '"');
+    let redacted = strip_authority_userinfo(&redacted, redacted.len() - value.len());
     if redacted.contains('@') {
         "<redacted>".to_string()
     } else {
         redacted
+    }
+}
+
+/// Sanitizes a Host diagnostic, not an ordinary URI or origin path.
+pub fn redact_host_userinfo(host: &str) -> String {
+    redact_authority_userinfo(host)
+}
+
+/// Redacts a request target using its HTTP method to distinguish CONNECT's
+/// authority form from generic URI references, then applies configured keys.
+pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) -> String {
+    if method == "CONNECT" {
+        redact_uri_query_keys(&redact_authority_userinfo(target), query_keys)
+    } else {
+        redact_uri_query_keys(target, query_keys)
     }
 }
 
@@ -165,11 +187,17 @@ mod userinfo_tests {
         for (input, expected) in [
             ("1bad://synthetic-secret@host/a", "1bad://host/a"),
             ("bad scheme://synthetic-secret@host", "bad scheme://host"),
-            ("ht?tp://synthetic-secret@host", "ht?tp://host"),
+            (
+                "ht?tp://synthetic-secret@host",
+                "ht?tp://synthetic-secret@host",
+            ),
             ("'ftp://synthetic-secret@host/a'", "'ftp://host/a'"),
             (" \"//synthetic-secret@host\" ", " \"//host\" "),
             (" \tftp://synthetic-secret@host/a ", " \tftp://host/a "),
-            ("  synthetic-secret@host:21  ", "  host:21  "),
+            (
+                "  synthetic-secret@host:21  ",
+                "  synthetic-secret@host:21  ",
+            ),
             ("/foo://user@host", "/foo://user@host"),
             (" '/foo://user@host' ", " '/foo://user@host' "),
             ("/foo?next=ftp://user@host", "/foo?next=ftp://user@host"),
@@ -193,7 +221,7 @@ mod userinfo_tests {
 
     #[test]
     fn userinfo_redaction_is_scheme_independent_and_preserves_target() {
-        for prefix in ["ftp://", "http://", "https://", "custom+v1://", "//", ""] {
+        for prefix in ["ftp://", "http://", "https://", "custom+v1://", "//"] {
             for userinfo in [
                 "synthetic-user:synthetic-pass@",
                 "synthetic-user@",
@@ -210,5 +238,37 @@ mod userinfo_tests {
             redact_uri_userinfo("/path/user@host?email=a@b"),
             "/path/user@host?email=a@b"
         );
+    }
+    #[test]
+    fn opaque_schemes_and_relative_references_are_not_authorities() {
+        for uri in [
+            "mailto:alice@example.com",
+            "urn:example:person@domain",
+            "mailto:alice@example.com?next=ftp://user@host",
+            "urn:example:ftp://user@host",
+            "alice@example.com/path",
+            "/path/user@host?email=a@b",
+            "path?next=ftp://user@host",
+            "path#ftp://user@host",
+        ] {
+            assert_eq!(redact_uri_userinfo(uri), uri);
+            assert_eq!(redact_uri_query_keys(uri, &[]), uri);
+            assert_eq!(redact_request_target("GET", uri, &[]), uri);
+        }
+    }
+
+    #[test]
+    fn bare_authorities_require_authority_context() {
+        for authority in [
+            "synthetic-user:synthetic-pass@host:443",
+            "synthetic-user@host:443",
+            "first@synthetic-pass@host:443",
+        ] {
+            assert_eq!(redact_uri_userinfo(authority), authority);
+            assert_eq!(redact_authority_userinfo(authority), "host:443");
+            assert_eq!(redact_host_userinfo(authority), "host:443");
+            assert_eq!(redact_request_target("CONNECT", authority, &[]), "host:443");
+        }
+        assert_eq!(redact_authority_userinfo("[::1]:443"), "[::1]:443");
     }
 }

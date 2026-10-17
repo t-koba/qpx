@@ -128,15 +128,19 @@ reload for compatible config edits.
   once at forward ingress (malformed percent escapes, control characters and invalid UTF-8 are rejected),
   then removed from the URI before validation, routing, policy, caching and
   upstream metadata. HTTP/HTTPS userinfo remains invalid. Capture/export URI
-  fields, access logs and tracing remove userinfo for every scheme even on
+  fields, access logs and tracing remove authority userinfo from hierarchical
+  (`scheme://`) and network-path (`//`) URI references for every scheme, even on
   rejected requests and when configurable redaction lists are empty. Sanitizers
   also handle quoted and malformed URI-shaped values; ambiguous or incomplete
   URI-bearing capture headers/authority previews may be redacted in full before
   export size caps and chunking. Recognized URI-bearing headers include Host,
   Referer, Location, Content-Location, Content-Base, Destination, URI, Origin,
-  Access-Control-Allow-Origin, Refresh and Link. Ordinary origin paths are not
-  authorities. Non-UTF-8 plaintext samples fail closed as `<redacted>`, including
-  binary body samples when all configurable redaction lists are empty. FTP error
+  Access-Control-Allow-Origin, Refresh and Link. Host values and CONNECT
+  authority-form targets use authority-specific redaction. Opaque URI payloads
+  (such as `mailto:alice@example.com` and `urn:example:person@domain`) and
+  relative paths are preserved by generic URI userinfo redaction. Non-UTF-8
+  plaintext samples fail closed as `<redacted>`, including binary body samples
+  when all configurable redaction lists are empty. FTP error
   diagnostics retain status codes, not upstream reply text that could echo
   credentials. This is URI-field redaction, not a content/DLP filter for arbitrary
   bodies or opaque encrypted traffic.

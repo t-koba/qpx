@@ -2,7 +2,7 @@ use crate::handler::RequestHandler;
 use arc_swap::ArcSwapOption;
 use http::{Request, Response, StatusCode};
 use qpx_core::config::AccessLogConfig;
-use qpx_core::redaction::{redact_host_userinfo, redact_uri_query_keys, redact_uri_userinfo};
+use qpx_core::redaction::{redact_host_userinfo, redact_request_target, redact_uri_query_keys};
 use std::borrow::Cow;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -153,13 +153,22 @@ impl<S> AccessLogService<S> {
                 .capture_header_value("user-agent", req.headers().get(http::header::USER_AGENT));
         }
 
-        let redacted_uri = (should_trace || (should_log && !direct_combined))
-            .then(|| redact_uri_query_keys(&req.uri().to_string(), &self.redact_query_keys));
+        let redacted_uri = (should_trace || (should_log && !direct_combined)).then(|| {
+            redact_request_target(
+                req.method().as_str(),
+                &req.uri().to_string(),
+                &self.redact_query_keys,
+            )
+        });
 
         let span = if should_trace {
             use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-            let path = redact_uri_query_keys(req.uri().path(), &self.redact_query_keys);
+            let path = redact_request_target(
+                req.method().as_str(),
+                req.uri().path(),
+                &self.redact_query_keys,
+            );
             let span_name = format!("{} {} {}", self.context.kind, req.method().as_str(), path);
             let span = tracing::info_span!(
                 target: "otel",
@@ -392,9 +401,11 @@ impl CombinedRequestTemplate {
         request_suffix.extend_from_slice(request.method().as_str().as_bytes());
         request_suffix.push(b' ');
         let raw_uri = request.uri().to_string();
-        let redacted = redact_uri_query_keys(&raw_uri, redact_query_keys);
+        let redacted =
+            redact_request_target(request.method().as_str(), &raw_uri, redact_query_keys);
         append_escaped(&mut request_suffix, redacted.as_bytes());
-        let uri = (redact_uri_userinfo(&raw_uri) == raw_uri).then(|| request.uri().clone());
+        let uri = (redact_request_target(request.method().as_str(), &raw_uri, &[]) == raw_uri)
+            .then(|| request.uri().clone());
         request_suffix.push(b' ');
         request_suffix.extend_from_slice(http_version_label(request.version()).as_bytes());
         request_suffix.extend_from_slice(b"\" ");
@@ -1497,5 +1508,95 @@ mod userinfo_output_tests {
         assert!(output.contains("//host:bad/file"));
         assert!(output.contains("400"));
         assert!(output.contains("1bad://host/ref"));
+    }
+    #[tokio::test(flavor = "current_thread")]
+    async fn connect_authority_userinfo_is_absent_from_logs_cache_and_otel_fields() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::prelude::*;
+        let spans = Spans::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(spans.clone())
+            .build();
+        let output = Output::default();
+        let writer = output.clone();
+        let _guard = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(move || writer.clone()),
+            )
+            .set_default();
+        for format in ["combined", "json"] {
+            let mut config = AccessLogConfig::default();
+            config.output.enabled = true;
+            config.output.format = format.into();
+            config.redact.headers.clear();
+            config.redact.query_keys.clear();
+            let inner = crate::handler_fn(|req: Request<()>| async move {
+                // Sanitization must not change the protocol/routing input.
+                assert_eq!(
+                    req.uri().to_string(),
+                    "synthetic-user:synthetic-pass@host:443"
+                );
+                Ok::<_, ()>(
+                    Response::builder()
+                        .status(StatusCode::BAD_REQUEST)
+                        .body(())
+                        .unwrap(),
+                )
+            });
+            let service = AccessLogService::new(
+                inner,
+                "127.0.0.1:12345".parse().unwrap(),
+                AccessLogContext {
+                    kind: "forward",
+                    name: Arc::from("test"),
+                },
+                &config,
+            );
+            let req = Request::builder()
+                .method("CONNECT")
+                .uri(
+                    http::Uri::builder()
+                        .authority("synthetic-user:synthetic-pass@host:443")
+                        .build()
+                        .unwrap(),
+                )
+                .header("host", "synthetic-user:synthetic-pass@host:443")
+                .header("referer", "mailto:alice@example.com")
+                .body(())
+                .unwrap();
+            let template = service.combined_request_template(&req);
+            assert!(template.uri.is_none());
+            assert!(!format!("{template:?}").contains("synthetic-"));
+            assert!(String::from_utf8_lossy(&template.request_suffix).contains("CONNECT host:443"));
+            assert!(
+                String::from_utf8_lossy(&template.metadata_suffix)
+                    .contains("mailto:alice@example.com")
+            );
+            service.call_with_otel_enabled(req, true).await.unwrap();
+        }
+        provider.force_flush().unwrap();
+        let spans = spans.0.lock().unwrap();
+        assert_eq!(spans.len(), 2);
+        for span in spans.iter() {
+            assert!(!format!("{span:?}").contains("synthetic-"));
+            assert!(
+                span.attributes.iter().any(
+                    |attr| attr.key.as_str() == "url.full" && attr.value.as_str() == "host:443"
+                )
+            );
+            assert!(
+                span.attributes
+                    .iter()
+                    .any(|attr| attr.key.as_str() == "http.request.header.host"
+                        && attr.value.as_str() == "host:443")
+            );
+        }
+        let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains("synthetic-"));
+        assert!(output.contains("host:443"));
+        assert!(output.contains("mailto:alice@example.com"));
     }
 }
