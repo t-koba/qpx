@@ -178,6 +178,7 @@ async fn handle_request_inner_with_origin_pool(
                 body: state.messages.reverse_error.as_str(),
             },
         },
+        None,
     ) {
         PreflightOutcome::Continue(validated) => validated,
         PreflightOutcome::Reject(response) => return Ok(empty_interim_response(*response)),

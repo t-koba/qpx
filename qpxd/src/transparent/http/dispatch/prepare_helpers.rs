@@ -99,6 +99,7 @@ pub(super) fn preflight_result(
             StatusCode::METHOD_NOT_ALLOWED,
             "transparent HTTP forward_edges do not support CONNECT",
         ),
+        None,
     ) {
         PreflightOutcome::Reject(response) => Err(response),
         PreflightOutcome::Continue(validated) => Ok(validated),

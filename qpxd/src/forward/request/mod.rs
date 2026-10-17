@@ -23,18 +23,12 @@ pub(crate) async fn handle_request_inner(
 ) -> Result<Response<Body>> {
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
-    let ftp_credentials = match crate::ftp::extract_forward_credentials(&mut req) {
-        Ok(credentials) => credentials,
-        Err(_) => {
-            return Ok(crate::http::protocol::l7::finalize_response_for_request(
-                req.method(),
-                req.version(),
-                proxy_name,
-                crate::http::protocol::common::bad_request_response("invalid FTP request"),
-                false,
-            ));
-        }
-    };
+    let ftp_credentials = crate::ftp::extract_forward_credentials(&mut req);
+    let ftp_rejection = ftp_credentials
+        .as_ref()
+        .err()
+        .map(|_| crate::http::protocol::common::bad_request_response("invalid FTP request"));
+    let ftp_credentials = ftp_credentials.unwrap_or_default();
     let validated_request = match preflight_validate(
         &mut req,
         proxy_name,
@@ -42,6 +36,7 @@ pub(crate) async fn handle_request_inner(
             state.plan.limits.general.trace_enabled,
             state.messages.trace_disabled.as_str(),
         ),
+        ftp_rejection,
     ) {
         PreflightOutcome::Continue(validated) => validated,
         PreflightOutcome::Reject(response) => return Ok(*response),

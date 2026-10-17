@@ -39,6 +39,7 @@ pub(crate) async fn proxy_mitm_request(
             state.plan.limits.general.trace_enabled,
             state.messages.trace_disabled.as_str(),
         ),
+        None,
     ) {
         PreflightOutcome::Continue(validated) => validated,
         PreflightOutcome::Reject(response) => return Ok(*response),

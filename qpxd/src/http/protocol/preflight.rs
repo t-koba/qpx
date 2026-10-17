@@ -47,7 +47,18 @@ pub(crate) fn preflight_validate<B>(
     req: &mut Request<B>,
     proxy_name: &str,
     options: PreflightOptions<'_>,
+    rejection: Option<Response<Body>>,
 ) -> PreflightOutcome {
+    if let Some(response) = rejection {
+        return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
+            req.method(),
+            req.version(),
+            proxy_name,
+            response,
+            false,
+        )));
+    }
+
     let validated = match validate_incoming_request_with_metadata(req) {
         Ok(validated) => validated,
         Err(err) => {
