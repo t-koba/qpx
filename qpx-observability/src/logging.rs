@@ -676,6 +676,28 @@ mod tests {
     #[test]
     fn absent_optional_layers_do_not_enable_filtered_callsites() {
         use tracing::Subscriber as _;
+        struct FilterProbe;
+        impl tracing::callsite::Callsite for FilterProbe {
+            fn set_interest(&self, _: tracing::subscriber::Interest) {}
+            fn metadata(&self) -> &tracing::Metadata<'_> {
+                unreachable!("probe provides only an identifier")
+            }
+        }
+        static PROBE: FilterProbe = FilterProbe;
+        static FIELDS: &[&str] = &[];
+        fn probe_metadata(level: tracing::Level) -> tracing::Metadata<'static> {
+            tracing::Metadata::new(
+                "qpx_optional_layer_filter_test",
+                "qpx_optional_layer_filter_test",
+                level,
+                Some(file!()),
+                Some(line!()),
+                Some(module_path!()),
+                tracing::field::FieldSet::new(FIELDS, tracing::callsite::Identifier(&PROBE)),
+                tracing::metadata::Kind::EVENT,
+            )
+        }
+
         let system = tracing_subscriber::fmt::layer()
             .with_writer(std::io::sink)
             .with_filter(LevelFilter::WARN);
@@ -685,10 +707,15 @@ mod tests {
 
         // Query the composed subscriber directly. `tracing::enabled!` consults the
         // process-global callsite-interest cache, which races when other tests run
-        // with different dispatchers on parallel threads; `max_level_hint`
-        // bypasses that cache while preserving the assertion: WARN is the most
-        // verbose enabled level, so TRACE stays disabled.
-        assert_eq!(subscriber.max_level_hint(), Some(LevelFilter::WARN));
+        // with different dispatchers on parallel threads; `register_callsite`
+        // bypasses that cache while still exercising the static filter decision
+        // for both levels.
+        let trace_interest = subscriber
+            .register_callsite(Box::leak(Box::new(probe_metadata(tracing::Level::TRACE))));
+        assert!(trace_interest.is_never());
+        let warn_interest =
+            subscriber.register_callsite(Box::leak(Box::new(probe_metadata(tracing::Level::WARN))));
+        assert!(warn_interest.is_always());
     }
 
     #[derive(Clone, Debug)]
