@@ -23,11 +23,6 @@ where
     S: AsyncWrite + Unpin,
 {
     let (parts, mut body) = req.into_parts();
-    let target = parts
-        .uri
-        .path_and_query()
-        .map(|pq| pq.as_str())
-        .unwrap_or("/");
     let mut headers = parts.headers;
     let declared_length = parse_declared_content_length(&headers)?;
     let body_is_end_stream = http_body::Body::is_end_stream(&body);
@@ -74,7 +69,7 @@ where
     };
     head.extend_from_slice(parts.method.as_str().as_bytes());
     head.extend_from_slice(b" ");
-    head.extend_from_slice(target.as_bytes());
+    append_http1_request_target(head, &parts.method, &parts.uri, &parts.extensions);
     head.extend_from_slice(b" ");
     head.extend_from_slice(version.as_bytes());
     head.extend_from_slice(b"\r\n");
@@ -143,21 +138,49 @@ pub(crate) fn serialize_bodyless_http1_request(
 
     let (parts, _body) = req.into_parts();
     let method = parts.method;
-    let target = parts
-        .uri
-        .path_and_query()
-        .map(|path_and_query| path_and_query.as_str())
-        .unwrap_or("/");
     head.clear();
     head.reserve(512);
     head.extend_from_slice(method.as_str().as_bytes());
     head.extend_from_slice(b" ");
-    head.extend_from_slice(target.as_bytes());
+    append_http1_request_target(head, &method, &parts.uri, &parts.extensions);
     head.extend_from_slice(b" HTTP/1.1\r\n");
     serialize_headers(&parts.headers, head)?;
     head.extend_from_slice(b"\r\n");
     crate::http::codec::header_pool::recycle(parts.headers);
     Ok(method)
+}
+
+fn append_http1_request_target(
+    head: &mut BytesMut,
+    method: &Method,
+    uri: &http::Uri,
+    extensions: &http::Extensions,
+) {
+    if let (Some(scheme), Some(authority)) = (uri.scheme(), uri.authority()) {
+        let raw_empty_path_options_target = extensions
+            .get::<crate::http::protocol::EmptyPathAbsoluteOptions>()
+            .is_some()
+            && *method == Method::OPTIONS
+            && uri.query().is_none()
+            && uri
+                .path_and_query()
+                .is_none_or(|value| value.as_str() == "/");
+        head.extend_from_slice(scheme.as_str().as_bytes());
+        head.extend_from_slice(b"://");
+        head.extend_from_slice(authority.as_str().as_bytes());
+        if raw_empty_path_options_target {
+            return;
+        }
+        if let Some(path_and_query) = uri.path_and_query() {
+            head.extend_from_slice(path_and_query.as_str().as_bytes());
+        } else {
+            head.extend_from_slice(b"/");
+        }
+    } else if let Some(path_and_query) = uri.path_and_query() {
+        head.extend_from_slice(path_and_query.as_str().as_bytes());
+    } else {
+        head.extend_from_slice(b"/");
+    }
 }
 
 async fn poll_body_data_now(body: &mut Body) -> Result<Option<Bytes>> {

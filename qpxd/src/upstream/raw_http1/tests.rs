@@ -25,6 +25,53 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::time::Duration;
 
 #[tokio::test]
+async fn send_http1_request_with_interim_preserves_absolute_form_target() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr = listener.local_addr().expect("local addr");
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        loop {
+            let n = stream.read(&mut buf).await.expect("read request");
+            if n == 0 {
+                break;
+            }
+            raw.extend_from_slice(&buf[..n]);
+            if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                break;
+            }
+        }
+        stream
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write response");
+        raw
+    });
+
+    let stream = TcpStream::connect(addr).await.expect("connect");
+    let response = send_http1_request_with_interim(
+        stream,
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://origin.example.test/path?view=all")
+            .header("host", "origin.example.test")
+            .body(Body::empty())
+            .expect("request"),
+    )
+    .await
+    .expect("proxy response");
+    assert_eq!(response.response.status(), StatusCode::NO_CONTENT);
+    let raw = server.await.expect("server");
+    assert!(
+        String::from_utf8_lossy(&raw)
+            .starts_with("GET http://origin.example.test/path?view=all HTTP/1.1\r\n"),
+        "request was not serialized with absolute-form:\n{}",
+        String::from_utf8_lossy(&raw)
+    );
+}
+
+#[tokio::test]
 async fn send_http1_request_with_interim_parses_early_hints() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("local addr");

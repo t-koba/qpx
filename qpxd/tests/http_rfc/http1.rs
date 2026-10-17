@@ -149,3 +149,59 @@ pub(crate) async fn http11_absolute_form_empty_options_uses_asterisk(
     }
     Ok(())
 }
+
+pub(crate) async fn http11_upstream_proxy_receives_absolute_form() -> Result<()> {
+    let (proxy_addr, captured_rx) = serve_http1_capture_once(
+        b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+    )
+    .await?;
+    let dir = temp_dir("qpxd-http1-upstream-proxy")?;
+    let state_dir = dir.join("state");
+    fs::create_dir_all(&state_dir).context("create state dir")?;
+    let cfg_path = dir.join("qpxd-forward.yaml");
+    let upstream_url = format!("http://{proxy_addr}");
+    let state_dir_yaml = yaml_quote_path(&state_dir);
+    let (forward_port, _qpxd) =
+        spawn_qpxd_on_random_port(&cfg_path, dir.join("qpxd-forward.log"), |port| {
+            format!(
+                r#"upstreams:
+- name: test-egress
+  url: {upstream_url}
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:{port}
+  default_action:
+    type: proxy
+    upstream: test-egress
+  rules: []
+state_dir: {state_dir_yaml}
+runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false"#,
+                upstream_url = upstream_url,
+                state_dir_yaml = state_dir_yaml
+            )
+        })?;
+
+    let request =
+        "OPTIONS http://127.0.0.1:9 HTTP/1.1\r\nHost: 127.0.0.1:9\r\nConnection: close\r\n\r\n";
+    let proxy_listener_addr: SocketAddr = format!("127.0.0.1:{forward_port}").parse()?;
+    let (status, _, _) = send_http1_and_read_head(proxy_listener_addr, request.as_bytes()).await?;
+    if status != 200 {
+        return Err(anyhow!(
+            "expected 200 from configured upstream proxy, got {status}"
+        ));
+    }
+
+    let captured = timeout(Duration::from_secs(5), captured_rx)
+        .await
+        .context("timed out waiting for configured upstream proxy request")??;
+    let captured = String::from_utf8_lossy(&captured);
+    if !captured.starts_with("OPTIONS http://127.0.0.1:9 HTTP/1.1\r\n") {
+        return Err(anyhow!(
+            "configured upstream proxy did not receive absolute-form with the original empty path:\n{captured}"
+        ));
+    }
+    Ok(())
+}
