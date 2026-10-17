@@ -484,6 +484,11 @@ runtime:
             )
         },
     )?;
+    // qpxd startup waits for the TCP listener, but this test uses its separate
+    // HTTP/3 UDP listener; allow that listener to finish startup before the
+    // first request (as the other H3 end-to-end tests do).
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
     let ca_cert = state_dir.join("ca.crt");
     wait_for_file(&ca_cert).await?;
 
