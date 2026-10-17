@@ -162,6 +162,36 @@ fn http_request_path_must_not_be_empty() {
 }
 
 #[test]
+fn request_path_rejects_raw_fragments_and_preserves_encoded_hashes() {
+    for path in ["/private#fragment", "/private?x=1#fragment"] {
+        let fields = [
+            (":method", "GET"),
+            (":scheme", "https"),
+            (":authority", "example.com"),
+            (":path", path),
+        ];
+        for decoded in decode_request_heads(&fields) {
+            let err = decoded.expect_err("raw fragment delimiter must be rejected");
+            assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+        }
+    }
+
+    let fields = [
+        (":method", "GET"),
+        (":scheme", "https"),
+        (":authority", "example.com"),
+        (":path", "/private%23fragment?x=1"),
+    ];
+    for decoded in decode_request_heads(&fields) {
+        let request = decoded.expect("percent-encoded hash is valid").request;
+        assert_eq!(
+            request.uri().path_and_query().unwrap().as_str(),
+            "/private%23fragment?x=1"
+        );
+    }
+}
+
+#[test]
 fn request_path_requires_path_absolute_or_options_asterisk() {
     for (method, path) in [
         ("GET", "?x"),

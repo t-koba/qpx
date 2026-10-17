@@ -301,6 +301,11 @@ pub(super) fn build_request_uri(
     // RFC 9114 section 4.3.1 requires path-absolute (or OPTIONS *).
     // Validate before Uri construction, which normalizes query-only values.
     if let Some(path) = path {
+        // `http::Uri` silently drops fragments, so reject the raw delimiter
+        // before constructing the URI. Percent-encoded `%23` remains valid.
+        if path.contains('#') {
+            return Err(anyhow!("HTTP request :path must not contain a fragment"));
+        }
         let path_absolute = path.starts_with('/') && !path.starts_with("//");
         let options_asterisk = path == "*" && method == Method::OPTIONS;
         if !path_absolute && !options_asterisk {
