@@ -49,7 +49,7 @@ pub(super) async fn dispatch_forward_request(
         let span = tracing::info_span!(
             "dispatch_forward_request",
             kind = "forward",
-            host = %qpx_core::redaction::redact_host_userinfo(base.host().unwrap_or("")),
+            host = %qpx_core::redaction::redact_authority_userinfo(base.host().unwrap_or("")),
             method = %base.method,
         );
         execute_forward_request(

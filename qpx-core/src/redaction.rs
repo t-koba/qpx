@@ -25,7 +25,7 @@ pub fn compile_json_redaction_path(path: &str) -> Result<Vec<String>, String> {
 /// Removes URI userinfo without parsing or normalizing an untrusted URI.
 /// Applies only to hierarchical `scheme://` and network-path `//` URIs.
 /// Opaque scheme payloads and relative paths are not authorities.
-pub fn redact_uri_userinfo(uri: &str) -> String {
+fn redact_uri_userinfo(uri: &str) -> String {
     // Header values may wrap a URI in quotes/whitespace. Preserve the wrapper,
     // but do not let it hide the authority. Scheme validation belongs to the
     // protocol parser, not this best-effort sanitizer of even rejected inputs.
@@ -67,11 +67,6 @@ pub fn redact_authority_userinfo(authority: &str) -> String {
     } else {
         redacted
     }
-}
-
-/// Sanitizes a Host diagnostic, not an ordinary URI or origin path.
-pub fn redact_host_userinfo(host: &str) -> String {
-    redact_authority_userinfo(host)
 }
 
 /// Redacts a request target using its HTTP method to distinguish CONNECT's
@@ -235,14 +230,14 @@ mod userinfo_tests {
     #[test]
     fn malformed_host_is_not_treated_as_an_ordinary_origin_path() {
         assert_eq!(
-            redact_host_userinfo("/foo://synthetic-secret@host"),
+            redact_authority_userinfo("/foo://synthetic-secret@host"),
             "<redacted>"
         );
         assert_eq!(
-            redact_host_userinfo("'1bad://synthetic-secret@host'"),
+            redact_authority_userinfo("'1bad://synthetic-secret@host'"),
             "'1bad://host'"
         );
-        assert_eq!(redact_host_userinfo("[::1]:21"), "[::1]:21");
+        assert_eq!(redact_authority_userinfo("[::1]:21"), "[::1]:21");
     }
 
     #[test]
@@ -354,7 +349,6 @@ mod userinfo_tests {
         ] {
             assert_eq!(redact_uri_userinfo(authority), authority);
             assert_eq!(redact_authority_userinfo(authority), "host:443");
-            assert_eq!(redact_host_userinfo(authority), "host:443");
             assert_eq!(redact_request_target("CONNECT", authority, &[]), "host:443");
         }
         assert_eq!(redact_authority_userinfo("[::1]:443"), "[::1]:443");

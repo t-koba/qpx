@@ -1,6 +1,7 @@
 use qpx_core::config::CaptureRedactionConfig;
 use qpx_core::redaction::{
-    compile_json_redaction_path, redact_host_userinfo, redact_request_target, redact_uri_query_keys,
+    compile_json_redaction_path, redact_authority_userinfo, redact_request_target,
+    redact_uri_query_keys,
 };
 use std::borrow::Cow;
 use std::collections::HashSet;
@@ -294,7 +295,7 @@ fn header_value_may_contain_uri(name: &str) -> bool {
 
 fn redact_uri_header_value(name: &str, value: &str, query_keys: &[String]) -> String {
     match name.to_ascii_lowercase().as_str() {
-        "host" => redact_host_userinfo(&redact_uri_query_keys(value, query_keys)),
+        "host" => redact_authority_userinfo(&redact_uri_query_keys(value, query_keys)),
         "location"
         | "content-location"
         | "content-base"

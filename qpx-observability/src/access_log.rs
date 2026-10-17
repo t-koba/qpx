@@ -2,7 +2,9 @@ use crate::handler::RequestHandler;
 use arc_swap::ArcSwapOption;
 use http::{Request, Response, StatusCode};
 use qpx_core::config::AccessLogConfig;
-use qpx_core::redaction::{redact_host_userinfo, redact_request_target, redact_uri_query_keys};
+use qpx_core::redaction::{
+    redact_authority_userinfo, redact_request_target, redact_uri_query_keys,
+};
 use std::borrow::Cow;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -304,7 +306,7 @@ impl<S> AccessLogService<S> {
                     .and_then(|value| {
                         let redacted = redact_uri_query_keys(value, &self.redact_query_keys);
                         let redacted = if name == "host" {
-                            redact_host_userinfo(&redacted)
+                            redact_authority_userinfo(&redacted)
                         } else {
                             redacted
                         };

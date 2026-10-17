@@ -56,7 +56,7 @@ pub(crate) fn emit_audit_log(
         kind = record.kind.as_str(),
         name = record.name,
         remote = %record.remote_ip,
-        host = qpx_core::redaction::redact_host_userinfo(record.host.unwrap_or("")),
+        host = qpx_core::redaction::redact_authority_userinfo(record.host.unwrap_or("")),
         sni = record.sni.unwrap_or(""),
         method = record.method.unwrap_or(""),
         path = qpx_core::redaction::redact_request_target(
