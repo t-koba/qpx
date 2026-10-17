@@ -437,6 +437,115 @@ runtime:
 
 #[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+pub(super) async fn forward_h3_asterisk_options_direct_origin_preserves_asterisk_form() -> Result<()>
+{
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let origin_addr = listener.local_addr()?;
+    let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+    let origin_task = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await?;
+        let request =
+            common::read_until(&mut stream, b"\r\n\r\n", 128 * 1024, Duration::from_secs(5))
+                .await?;
+        let _ = captured_tx.send(request);
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await?;
+        Ok::<_, anyhow::Error>(())
+    });
+
+    let dir = temp_dir("qpxd-forward-h3-asterisk-direct")?;
+    let state_dir = dir.join("state");
+    fs::create_dir_all(&state_dir)?;
+    let cfg = dir.join("forward-h3-asterisk-direct.yaml");
+    let (_tcp_port, udp_port, qpxd) = spawn_qpxd_on_random_tcp_udp_ports(
+        &cfg,
+        dir.join("forward-h3-asterisk-direct.log"),
+        |tcp_port, udp_port| {
+            format!(
+                r#"edges:
+- kind: forward
+  name: forward-h3
+  listen: 127.0.0.1:{tcp_port}
+  default_action:
+    type: direct
+  tls_inspection:
+    enabled: true
+    verify_upstream: false
+  rules: []
+  http3:
+    enabled: true
+    listen: 127.0.0.1:{udp_port}
+state_dir: {state_dir}
+runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false"#,
+                state_dir = yaml_quote_path(&state_dir)
+            )
+        },
+    )?;
+    let ca_cert = state_dir.join("ca.crt");
+    wait_for_file(&ca_cert).await?;
+
+    let mut endpoint = build_quinn_client_endpoint()?;
+    endpoint.set_default_client_config(build_h3_test_client_config(&ca_cert)?);
+    let connection = timeout(
+        Duration::from_secs(5),
+        endpoint.connect(SocketAddr::from(([127, 0, 0, 1], udp_port)), "localhost")?,
+    )
+    .await??;
+    let mut builder = ::h3::client::builder();
+    let (mut h3_conn, mut sender) = builder
+        .build::<_, _, Bytes>(h3_quinn::Connection::new(connection))
+        .await?;
+    let driver = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
+    });
+
+    let target_authority = origin_addr.to_string();
+    let uri = http::Uri::builder()
+        .scheme("http")
+        .authority(target_authority.as_str())
+        .path_and_query("*")
+        .build()?;
+    let request = http::Request::builder()
+        .method(http::Method::OPTIONS)
+        .uri(uri)
+        .header(http::header::HOST, target_authority.as_str())
+        .body(())?;
+    let mut stream = sender.send_request(request).await?;
+    stream.finish().await?;
+    let response = timeout(Duration::from_secs(5), stream.recv_response()).await??;
+    let status = response.status();
+    while let Some(mut chunk) = timeout(Duration::from_secs(5), stream.recv_data()).await?? {
+        let len = chunk.remaining();
+        let _ = chunk.copy_to_bytes(len);
+    }
+    assert_eq!(
+        status,
+        http::StatusCode::OK,
+        "qpxd log: {}",
+        qpxd.log_tail()
+    );
+    driver.abort();
+    let _ = driver.await;
+
+    let captured = timeout(Duration::from_secs(5), captured_rx)
+        .await
+        .context("timed out waiting for direct origin request")??;
+    let captured = String::from_utf8_lossy(&captured);
+    let request_line = captured.split_once("\r\n").map(|(line, _)| line);
+    assert_eq!(
+        request_line,
+        Some("OPTIONS * HTTP/1.1"),
+        "direct origin did not receive the asterisk-form request line:\n{captured}"
+    );
+    origin_task.await??;
+    Ok(())
+}
+
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 pub(super) async fn forward_h3_asterisk_options_reconstructs_upstream_proxy_target() -> Result<()> {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let proxy_addr = listener.local_addr()?;
