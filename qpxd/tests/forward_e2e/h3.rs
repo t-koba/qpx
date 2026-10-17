@@ -660,3 +660,108 @@ runtime:
     proxy_task.await??;
     Ok(())
 }
+
+// Runs against the selected backend: stock h3 by default, qpx-h3 with
+// --features http3-backend-qpx. A response reset, not merely a relay log or
+// connection failure, is the observable result of malformed capsule EOF.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn forward_h3_connect_udp_capsule_eof() -> Result<()> {
+    let dir = temp_dir("qpxd-connect-udp-capsule-eof")?;
+    let state_dir = dir.join("state");
+    fs::create_dir_all(&state_dir)?;
+    let cfg = dir.join("proxy.yaml");
+    let target = tokio::net::UdpSocket::bind("127.0.0.1:0").await?;
+    let target_port = target.local_addr()?.port();
+    let (_, udp_port, _qpxd) =
+        spawn_qpxd_on_random_tcp_udp_ports(&cfg, dir.join("proxy.log"), |tcp_port, udp_port| {
+            format!(
+                r#"edges:
+- kind: forward
+  name: capsule-eof
+  listen: 127.0.0.1:{tcp_port}
+  default_action:
+    type: direct
+  tls_inspection:
+    enabled: true
+    verify_upstream: false
+  rules: []
+  http3:
+    enabled: true
+    listen: 127.0.0.1:{udp_port}
+    connect_udp:
+      enabled: true
+state_dir: {}
+runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false"#,
+                yaml_quote_path(&state_dir)
+            )
+        })?;
+    let ca_cert = state_dir.join("ca.crt");
+    wait_for_file(&ca_cert).await?;
+    let mut endpoint = build_quinn_client_endpoint()?;
+    endpoint.set_default_client_config(build_h3_test_client_config(&ca_cert)?);
+    let conn = timeout(
+        Duration::from_secs(5),
+        endpoint.connect(SocketAddr::from(([127, 0, 0, 1], udp_port)), "localhost")?,
+    )
+    .await??;
+    let mut builder = ::h3::client::builder();
+    builder.enable_extended_connect(true).enable_datagram(true);
+    let (mut connection, mut sender) = builder
+        .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
+        .await?;
+    let driver = tokio::spawn(async move {
+        let _ = std::future::poll_fn(|cx| connection.poll_close(cx)).await;
+    });
+    let uri =
+        format!("https://localhost:{udp_port}/.well-known/masque/udp/127.0.0.1/{target_port}/");
+    for residue in [&[][..], &[0x40], &[0, 0x40], &[0, 3, 0, 42]] {
+        for complete_prefix in [false, true] {
+            let mut request = http::Request::builder()
+                .method(http::Method::CONNECT)
+                .uri(&uri)
+                .header("capsule-protocol", "?1")
+                .body(())?;
+            request
+                .extensions_mut()
+                .insert(::h3::ext::Protocol::CONNECT_UDP);
+            let mut stream = sender.send_request(request).await?;
+            assert_eq!(
+                timeout(Duration::from_secs(5), stream.recv_response())
+                    .await??
+                    .status(),
+                http::StatusCode::OK
+            );
+            if complete_prefix {
+                // Unknown capsule must be skipped; the complete DATAGRAM must
+                // still reach the UDP target before the trailing EOF check.
+                stream
+                    .send_data(Bytes::from_static(&[37, 1, 99, 0, 2, 0, 42]))
+                    .await?;
+                let mut packet = [0; 16];
+                let n = timeout(Duration::from_secs(5), target.recv(&mut packet)).await??;
+                assert_eq!(&packet[..n], &[42]);
+            }
+            // Separate DATA writes exercise fragmented arrival as well as a
+            // complete capsule followed by partial type, length or value.
+            for byte in residue {
+                stream.send_data(Bytes::copy_from_slice(&[*byte])).await?;
+            }
+            stream.finish().await?;
+            let result = timeout(Duration::from_secs(5), stream.recv_data()).await?;
+            if residue.is_empty() {
+                assert!(result?.is_none(), "complete stream should finish cleanly");
+            } else {
+                assert!(
+                    matches!(result, Err(::h3::error::StreamError::RemoteTerminate { code })
+                    if code == ::h3::error::Code::H3_MESSAGE_ERROR),
+                    "expected H3_MESSAGE_ERROR for {residue:?}"
+                );
+            }
+        }
+    }
+    driver.abort();
+    let _ = driver.await;
+    Ok(())
+}

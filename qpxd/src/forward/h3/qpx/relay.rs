@@ -806,3 +806,6 @@ mod connect_udp_tests {
         empty_then_nonempty_response(None).await;
     }
 }
+
+#[cfg(test)]
+mod capsule_eof_tests;

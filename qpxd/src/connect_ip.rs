@@ -39,6 +39,24 @@ enum DeviceFraming {
 
 #[cfg(unix)]
 impl SystemIpDevice {
+    // A socket pair exercises the local-device relay without a privileged TUN.
+    #[cfg(all(test, feature = "http3-backend-qpx"))]
+    pub(crate) fn test_pair() -> Result<(Self, std::os::unix::net::UnixStream)> {
+        use std::os::fd::OwnedFd;
+        let (socket, peer) = std::os::unix::net::UnixStream::pair()?;
+        let reader = File::from(OwnedFd::from(socket));
+        let writer = reader.try_clone()?;
+        Ok((
+            Self {
+                name: "capsule-test".to_owned(),
+                reader: tokio::fs::File::from_std(reader),
+                writer: tokio::fs::File::from_std(writer),
+                framing: DeviceFraming::Raw,
+            },
+            peer,
+        ))
+    }
+
     pub(crate) fn open(requested_name: Option<&str>, _wintun_dll: Option<&str>) -> Result<Self> {
         let (file, name, framing) = open_platform_device(requested_name)?;
         file.set_nonblocking(true)?;

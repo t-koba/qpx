@@ -64,7 +64,8 @@ impl CapsuleBuffer {
     }
 
     /// Checks for a truncated capsule at clean stream EOF (RFC 9297).
-    /// Call only after draining all complete capsules with `take_next`.
+    /// Call only after draining all complete capsules with `take_next` and
+    /// observing clean receive EOF, not on idle timeout or cancellation.
     pub(crate) fn ensure_complete(&self) -> Result<()> {
         if self.len != 0 {
             return Err(anyhow!(
@@ -348,14 +349,22 @@ mod tests {
 
     #[test]
     fn capsule_completion_rejects_residue_after_complete_capsule() {
-        for residue in [&[0x40][..], &[0], &[0, 0x40], &[0, 2, 0]] {
-            let mut buf = CapsuleBuffer::new();
-            let mut bytes = vec![37, 0];
-            bytes.extend_from_slice(residue);
-            buf.push(Bytes::from(bytes), 1024).unwrap();
-            assert_eq!(buf.take_next().unwrap(), Some((37, Bytes::new())));
-            assert!(buf.take_next().unwrap().is_none());
-            assert!(buf.ensure_complete().is_err());
+        for residue in [&[0x40][..], &[0], &[0, 0x40], &[0, 2, 0], &[0, 3, 0, 42]] {
+            for fragmented in [false, true] {
+                let mut buf = CapsuleBuffer::new();
+                let mut bytes = vec![37, 0];
+                bytes.extend_from_slice(residue);
+                if fragmented {
+                    for byte in bytes {
+                        buf.push(Bytes::copy_from_slice(&[byte]), 1024).unwrap();
+                    }
+                } else {
+                    buf.push(Bytes::from(bytes), 1024).unwrap();
+                }
+                assert_eq!(buf.take_next().unwrap(), Some((37, Bytes::new())));
+                assert!(buf.take_next().unwrap().is_none());
+                assert!(buf.ensure_complete().is_err());
+            }
         }
     }
 
