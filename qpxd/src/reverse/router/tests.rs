@@ -1,5 +1,8 @@
 use super::compile::select_weighted_backend_idx;
-use super::selection::{EndpointLifecycleState, endpoint_lifecycle_state, select_upstream_inner};
+use super::selection::{
+    EndpointLifecycleState, count_candidates, endpoint_lifecycle_state, nth_candidate, scope_len,
+    select_upstream_inner, selection_scope,
+};
 use super::*;
 use crate::upstream::origin::OriginEndpoint;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -808,6 +811,66 @@ fn selection_never_returns_rejected_endpoint_when_peer_flaps() {
         stop.store(true, Ordering::Relaxed);
         hammer.join().expect("hammer thread");
     }
+}
+
+#[test]
+fn stale_count_scan_never_falls_back_to_rejected_endpoint() {
+    // Deterministic scan-transition regression: the count scan runs while the
+    // flapping endpoint is eligible, then admission flips (inflight hits the
+    // concurrency cap) before the selection scan replays with the stale
+    // counts. A stale index must resolve to None so the caller takes the
+    // no-upstream path; the old `unwrap_or_else(|| upstreams[0].clone())`
+    // fallback returned the draining endpoint, rejected in both scans.
+    let policy = RoutePolicy {
+        retry_attempts: 1,
+        retry_backoff: Duration::ZERO,
+        retry_body_replay: false,
+        retry_body_threshold_bytes: 64 * 1024,
+        retry_budget: RetryBudgetRuntime::new(1),
+        timeout: Duration::from_secs(30),
+        health: HealthCheckRuntime::from_config(None),
+        passive_health: None,
+        lifecycle: EndpointLifecycleRuntime {
+            slow_start: None,
+            warmup: None,
+            drain_timeout: Some(Duration::from_secs(30)),
+        },
+        max_upstream_concurrency: Some(1),
+        lb: LoadBalanceStrategy::RoundRobin,
+    };
+    let rejected = Arc::new(UpstreamEndpoint::new("http://rejected".to_string()));
+    assert!(rejected.mark_draining(&policy.lifecycle));
+    let flapping = Arc::new(UpstreamEndpoint::new("http://flapping".to_string()));
+    let upstreams = vec![rejected.clone(), flapping.clone()];
+
+    // Steady state while the peer is eligible: the flapping endpoint serves.
+    let selected = select_upstream_inner(&upstreams, &policy, &AtomicUsize::new(0), 7, 7)
+        .expect("flapping endpoint is eligible");
+    assert_eq!(selected.target, flapping.target);
+
+    // Count scan: exactly one candidate (the flapping peer; the draining
+    // endpoint is rejected).
+    let now_ms = now_millis();
+    let gate_seed = 7u64 ^ 7u64;
+    let counts = count_candidates(&upstreams, &policy, now_ms, gate_seed);
+    let scope = selection_scope(counts);
+    let effective_len = scope_len(counts, scope);
+    assert_eq!(effective_len, 1);
+
+    // Admission flips between the scans: the peer hits its concurrency cap.
+    flapping.inflight.store(1, Ordering::Relaxed);
+
+    // Selection scan with the stale counts: every stale index must miss (None),
+    // never fall back to the draining endpoint at upstreams[0].
+    for idx in 0..effective_len {
+        assert!(
+            nth_candidate(&upstreams, &policy, now_ms, gate_seed, scope, counts, idx).is_none(),
+            "stale index {idx} must miss after admission flipped"
+        );
+    }
+    // Steady state once both endpoints are rejected: no upstream selected.
+    assert!(select_upstream_inner(&upstreams, &policy, &AtomicUsize::new(0), 7, 7).is_none());
+    flapping.inflight.store(0, Ordering::Relaxed);
 }
 
 #[test]

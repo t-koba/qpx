@@ -95,7 +95,7 @@ pub(super) fn select_upstream_inner(
 }
 
 #[derive(Clone, Copy, Debug)]
-struct EndpointSelectionCounts {
+pub(super) struct EndpointSelectionCounts {
     eligible: usize,
     ready: usize,
     admitted_ramping: usize,
@@ -109,13 +109,13 @@ enum EndpointCandidateClass {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum EndpointSelectionScope {
+pub(super) enum EndpointSelectionScope {
     Eligible,
     AdmittedOnly,
     ReadyThenAdmitted,
 }
 
-fn count_candidates(
+pub(super) fn count_candidates(
     upstreams: &[Arc<UpstreamEndpoint>],
     policy: &RoutePolicy,
     now_ms: u64,
@@ -171,7 +171,7 @@ fn classify_endpoint(
     )
 }
 
-fn selection_scope(counts: EndpointSelectionCounts) -> EndpointSelectionScope {
+pub(super) fn selection_scope(counts: EndpointSelectionCounts) -> EndpointSelectionScope {
     if counts.ready > 0 {
         EndpointSelectionScope::ReadyThenAdmitted
     } else if counts.admitted_ramping > 0 {
@@ -181,7 +181,7 @@ fn selection_scope(counts: EndpointSelectionCounts) -> EndpointSelectionScope {
     }
 }
 
-fn scope_len(counts: EndpointSelectionCounts, scope: EndpointSelectionScope) -> usize {
+pub(super) fn scope_len(counts: EndpointSelectionCounts, scope: EndpointSelectionScope) -> usize {
     match scope {
         EndpointSelectionScope::Eligible => counts.eligible,
         EndpointSelectionScope::AdmittedOnly => counts.admitted_ramping,
@@ -202,7 +202,7 @@ fn candidate_in_scope(class: EndpointCandidateClass, scope: EndpointSelectionSco
     }
 }
 
-fn nth_candidate(
+pub(super) fn nth_candidate(
     upstreams: &[Arc<UpstreamEndpoint>],
     policy: &RoutePolicy,
     now_ms: u64,
