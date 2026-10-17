@@ -315,11 +315,11 @@ async fn s_maxage_blocks_stale_if_error_fallback() {
 #[test]
 fn no_cache_blocks_stale_while_revalidate() {
     // RFC 9111 §5.2.2.4: unqualified response no-cache MUST NOT satisfy a
-    // request without successful validation, even for stale reuse. Age 40s,
+    // request without successful validation, even for stale reuse. Age 11s,
     // freshness 10s, SWR window 60s: must revalidate, not serve stale.
     let req = RequestDirectives::default();
     let envelope = s_maxage_envelope("no-cache, max-age=10, stale-while-revalidate=60", 10);
-    let disposition = classify_for_request(&req, &envelope, 40_000);
+    let disposition = classify_for_request(&req, &envelope, 11_000);
     assert!(matches!(
         disposition,
         CacheEntryDisposition::RequiresRevalidation
@@ -329,13 +329,13 @@ fn no_cache_blocks_stale_while_revalidate() {
 #[test]
 fn no_cache_blocks_only_if_cached_swr_stale() {
     // Without the prohibition the SWR branch would return ServeStale for
-    // only-if-cached; with it the stale entry must 504 instead.
+    // only-if-cached; with it the age-11 stale entry must 504 instead.
     let req = RequestDirectives {
         only_if_cached: true,
         ..RequestDirectives::default()
     };
     let envelope = s_maxage_envelope("no-cache, max-age=10, stale-while-revalidate=60", 10);
-    let disposition = classify_for_request(&req, &envelope, 40_000);
+    let disposition = classify_for_request(&req, &envelope, 11_000);
     assert!(matches!(
         disposition,
         CacheEntryDisposition::RequiresRevalidation
@@ -344,17 +344,63 @@ fn no_cache_blocks_only_if_cached_swr_stale() {
 
 #[test]
 fn qualified_no_cache_fields_still_allow_swr() {
-    // Control: qualified no-cache names fields to strip, not a reuse ban.
+    // Control: qualified no-cache names fields to strip, not a reuse ban,
+    // so the same age-11 entry stays reusable via SWR.
     let req = RequestDirectives::default();
     let envelope = s_maxage_envelope(
         "no-cache=\"authorization\", max-age=10, stale-while-revalidate=60",
         10,
     );
-    let disposition = classify_for_request(&req, &envelope, 40_000);
+    let disposition = classify_for_request(&req, &envelope, 11_000);
     assert!(matches!(
         disposition,
         CacheEntryDisposition::ServeStaleWhileRevalidate
     ));
+}
+
+#[test]
+fn ordinary_swr_serves_at_age_11() {
+    // Ordinary control: without no-cache the same age-11 entry is reusable
+    // via SWR, proving the ban above comes from unqualified no-cache.
+    let req = RequestDirectives::default();
+    let envelope = s_maxage_envelope("max-age=10, stale-while-revalidate=60", 10);
+    let disposition = classify_for_request(&req, &envelope, 11_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::ServeStaleWhileRevalidate
+    ));
+}
+
+#[tokio::test]
+async fn ordinary_sie_serves_at_age_11() {
+    // Ordinary control: without no-cache the same age-11 entry is rescuable
+    // via stale-if-error, proving the ban above comes from unqualified
+    // no-cache.
+    let now = super::util::now_millis();
+    let backend = Arc::new(MockBackend::new());
+    backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:ordinary:sie").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    let state = RevalidationState {
+        backend,
+        namespace: "ns".to_string(),
+        variant_key: "obj:ordinary:sie".to_string(),
+        request_method: Method::GET,
+        request_directives: RequestDirectives::default(),
+        stale_if_error_secs: Some(60),
+        envelope: s_maxage_envelope("max-age=10, stale-if-error=60", 10),
+        revalidations: test_revalidations(),
+    };
+    let mut state = state;
+    state.envelope.stored_at_ms = now.saturating_sub(11_000);
+    state.envelope.body_len = 5;
+    assert!(maybe_build_stale_if_error_response(&state).await.is_some());
 }
 
 #[tokio::test]
@@ -381,7 +427,8 @@ async fn no_cache_blocks_stale_if_error_fallback() {
         revalidations: test_revalidations(),
     };
     let mut state = state;
-    state.envelope.stored_at_ms = now.saturating_sub(40_000);
+    // Age 11s, freshness 10s, SIE window 60s: must revalidate, not serve stale.
+    state.envelope.stored_at_ms = now.saturating_sub(11_000);
     state.envelope.body_len = 5;
     assert!(maybe_build_stale_if_error_response(&state).await.is_none());
 }
@@ -400,7 +447,8 @@ async fn no_cache_blocks_head_stale_if_error_fallback() {
         revalidations: test_revalidations(),
     };
     let mut state = state;
-    state.envelope.stored_at_ms = now.saturating_sub(40_000);
+    // HEAD at age 11s must likewise revalidate instead of serving stale.
+    state.envelope.stored_at_ms = now.saturating_sub(11_000);
     assert!(maybe_build_stale_if_error_response(&state).await.is_none());
 }
 
