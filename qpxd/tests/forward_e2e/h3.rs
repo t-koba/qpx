@@ -664,6 +664,7 @@ runtime:
 // Runs against the selected backend: stock h3 by default, qpx-h3 with
 // --features http3-backend-qpx. A response reset, not merely a relay log or
 // connection failure, is the observable result of malformed capsule EOF.
+#[cfg(all(feature = "http3", feature = "tls-rustls", feature = "mitm"))]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn forward_h3_connect_udp_capsule_eof() -> Result<()> {
     let dir = temp_dir("qpxd-connect-udp-capsule-eof")?;
