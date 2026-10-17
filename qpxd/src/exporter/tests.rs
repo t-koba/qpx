@@ -32,6 +32,19 @@ fn redacts_plaintext_headers_and_query_keys() {
 }
 
 #[test]
+fn redacts_userinfo_in_malformed_connect_target_request_line() {
+    let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+        headers: Vec::new(),
+        query_keys: Vec::new(),
+        json_paths: Vec::new(),
+    });
+    let out = redaction.redact_plaintext(b"CONNECT synthetic-user@host://suffix HTTP/1.1\r\n\r\n");
+    let text = String::from_utf8(out.into_owned()).expect("utf8");
+    assert_eq!(text, "CONNECT host://suffix HTTP/1.1\r\n\r\n");
+    assert!(!text.contains("synthetic-user"));
+}
+
+#[test]
 fn redacts_percent_encoded_query_keys_without_rewriting_key_spelling() {
     let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
         headers: Vec::new(),

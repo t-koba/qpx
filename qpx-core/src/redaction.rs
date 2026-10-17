@@ -89,7 +89,7 @@ pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) 
     let target_before_suffix = target.split(['?', '#']).next().unwrap_or(target);
     let has_hierarchical_scheme = target_before_suffix
         .split_once("://")
-        .is_some_and(|(prefix, _)| !prefix.contains(['/', ':', '?', '#']));
+        .is_some_and(|(prefix, _)| is_valid_uri_scheme(prefix));
     if has_hierarchical_scheme {
         redact_uri_query_keys(target, query_keys)
     } else {
@@ -97,6 +97,14 @@ pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) 
         // turn its authority userinfo into ordinary URI data.
         redact_query_fragment_keys(&redact_authority_userinfo(target), query_keys)
     }
+}
+
+fn is_valid_uri_scheme(scheme: &str) -> bool {
+    let mut bytes = scheme.bytes();
+    bytes
+        .next()
+        .is_some_and(|first| first.is_ascii_alphabetic())
+        && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
 /// Redacts URI userinfo unconditionally, and configured query/fragment keys.
@@ -317,6 +325,23 @@ mod userinfo_tests {
                 &keys,
             ),
             "host:443/path?token=<redacted>"
+        );
+    }
+
+    #[test]
+    fn malformed_connect_scheme_like_prefix_is_redacted_as_authority() {
+        assert_eq!(
+            redact_request_target("CONNECT", "synthetic-user@host://suffix", &[]),
+            "host://suffix"
+        );
+        let keys = vec!["token".to_string()];
+        assert_eq!(
+            redact_request_target(
+                "CONNECT",
+                "synthetic-user:synthetic-pass@host://suffix?token=synthetic-token",
+                &keys,
+            ),
+            "host://suffix?token=<redacted>"
         );
     }
 
