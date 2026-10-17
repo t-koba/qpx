@@ -282,7 +282,7 @@ async fn route_uni_stream(
                     "WebTransport associated stream used invalid session id",
                 ));
             }
-            let tx = registry.uni_sender(session_id).await;
+            let tx = registry.uni_sender(session_id);
             if let Some(tx) = tx {
                 match tx.try_send(UniRecvStream::new(recv)) {
                     Ok(()) => {}
@@ -475,7 +475,7 @@ async fn route_bidi_stream(
             "WebTransport associated stream used invalid session id",
         ));
     }
-    let tx = registry.bidi_sender(session_id).await;
+    let tx = registry.bidi_sender(session_id);
     if let Some(tx) = tx {
         match tx.try_send(BidiStream::new(send, recv)) {
             Ok(()) => {}

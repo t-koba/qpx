@@ -1,11 +1,16 @@
 mod driver;
 mod registry;
 
+#[cfg(test)]
+mod tests;
+
 use self::driver::{
     fail_client_setup, open_critical_streams, recv_response_with_interim, spawn_client_driver,
     validate_peer_settings_for_protocol,
 };
-use self::registry::{SessionIngress, SessionRegistry, ShardedSessionRegistry};
+use self::registry::{
+    SessionIngress, SessionRegistration, SessionRegistry, ShardedSessionRegistry,
+};
 use crate::H3Result as Result;
 use crate::protocol::{PeerControlState, PeerSettings};
 use crate::qpack::{QpackConnection, encode_request_head};
@@ -23,6 +28,9 @@ use tokio::task::{AbortHandle, JoinHandle};
 use tokio::time::{Duration, timeout};
 
 /// Opened extended CONNECT stream and associated resources.
+///
+/// Keep this value alive while receiving associated WebTransport streams. Its
+/// routing registration is released when the value is dropped.
 pub struct ExtendedConnectStream {
     /// Interim responses received before the final response.
     pub interim: Vec<http::Response<()>>,
@@ -53,6 +61,8 @@ pub struct ExtendedConnectStream {
     pub _session: Option<ClientSession>,
     #[doc(hidden)]
     _session_stream_use: Option<ClientSessionStreamUse>,
+    // Own the routing registration through setup and the returned stream lifetime.
+    _webtransport_registration: Option<SessionRegistration>,
 }
 
 static ACTIVE_CLIENT_CONNECTIONS: OnceLock<StdMutex<HashSet<usize>>> = OnceLock::new();
@@ -384,25 +394,26 @@ pub async fn open_extended_connect_stream(
         client_request_stream_config(&settings, timeout_dur),
         request.method().clone(),
     );
-    if let Err(err) = request_stream.send_headers(&payload).await {
-        return fail_client_setup(&connection, err);
-    }
-
     let webtransport_session_id = match protocol {
         Some(Protocol::WebTransport) => Some(stream_id),
         _ => None,
     };
-    let (mut associated_bidi, mut associated_uni) = if webtransport_session_id.is_some() {
-        let stream_channel_capacity = settings.webtransport_stream_channel_capacity.max(1);
-        let (bidi_tx, bidi_rx) = mpsc::channel(stream_channel_capacity);
-        let (uni_tx, uni_rx) = mpsc::channel(stream_channel_capacity);
-        registry
-            .insert(stream_id, SessionIngress { bidi_tx, uni_tx })
-            .await;
-        (Some(bidi_rx), Some(uni_rx))
-    } else {
-        (None, None)
-    };
+    // Register before sending HEADERS so associated streams can route while
+    // waiting for the response. The guard also covers send/read errors and cancellation.
+    let (mut webtransport_registration, mut associated_bidi, mut associated_uni) =
+        if webtransport_session_id.is_some() {
+            let stream_channel_capacity = settings.webtransport_stream_channel_capacity.max(1);
+            let (bidi_tx, bidi_rx) = mpsc::channel(stream_channel_capacity);
+            let (uni_tx, uni_rx) = mpsc::channel(stream_channel_capacity);
+            let registration = registry.register(stream_id, SessionIngress { bidi_tx, uni_tx });
+            (Some(registration), Some(bidi_rx), Some(uni_rx))
+        } else {
+            (None, None, None)
+        };
+
+    if let Err(err) = request_stream.send_headers(&payload).await {
+        return fail_client_setup(&connection, err);
+    }
 
     let (interim, response) =
         match recv_response_with_interim(&mut request_stream, timeout_dur).await {
@@ -412,9 +423,7 @@ pub async fn open_extended_connect_stream(
     let webtransport_established =
         webtransport_session_id.is_some() && response.status().is_success();
     if !webtransport_established {
-        if let Some(session_id) = webtransport_session_id {
-            registry.remove(session_id).await;
-        }
+        webtransport_registration.take();
         associated_bidi = None;
         associated_uni = None;
     }
@@ -446,6 +455,7 @@ pub async fn open_extended_connect_stream(
         _connection_use: Some(connection_use),
         _session: None,
         _session_stream_use: None,
+        _webtransport_registration: webtransport_registration,
     })
 }
 
@@ -505,27 +515,30 @@ async fn open_extended_connect_on_session(
         client_request_stream_config(&inner.settings, timeout_dur),
         request.method().clone(),
     );
-    if let Err(err) = request_stream.send_headers(&payload).await {
-        drop(session_stream_use);
-        return Err(err);
-    }
-
     let webtransport_session_id = match protocol {
         Some(Protocol::WebTransport) => Some(stream_id),
         _ => None,
     };
-    let (mut associated_bidi, mut associated_uni) = if webtransport_session_id.is_some() {
-        let stream_channel_capacity = inner.settings.webtransport_stream_channel_capacity.max(1);
-        let (bidi_tx, bidi_rx) = mpsc::channel(stream_channel_capacity);
-        let (uni_tx, uni_rx) = mpsc::channel(stream_channel_capacity);
-        inner
-            .registry
-            .insert(stream_id, SessionIngress { bidi_tx, uni_tx })
-            .await;
-        (Some(bidi_rx), Some(uni_rx))
-    } else {
-        (None, None)
-    };
+    // Register before sending HEADERS so associated streams can route while
+    // waiting for the response. The guard also covers send/read errors and cancellation.
+    let (mut webtransport_registration, mut associated_bidi, mut associated_uni) =
+        if webtransport_session_id.is_some() {
+            let stream_channel_capacity =
+                inner.settings.webtransport_stream_channel_capacity.max(1);
+            let (bidi_tx, bidi_rx) = mpsc::channel(stream_channel_capacity);
+            let (uni_tx, uni_rx) = mpsc::channel(stream_channel_capacity);
+            let registration = inner
+                .registry
+                .register(stream_id, SessionIngress { bidi_tx, uni_tx });
+            (Some(registration), Some(bidi_rx), Some(uni_rx))
+        } else {
+            (None, None, None)
+        };
+
+    if let Err(err) = request_stream.send_headers(&payload).await {
+        drop(session_stream_use);
+        return Err(err);
+    }
 
     let (interim, response) =
         match recv_response_with_interim(&mut request_stream, timeout_dur).await {
@@ -535,9 +548,7 @@ async fn open_extended_connect_on_session(
     let webtransport_established =
         webtransport_session_id.is_some() && response.status().is_success();
     if !webtransport_established {
-        if let Some(session_id) = webtransport_session_id {
-            inner.registry.remove(session_id).await;
-        }
+        webtransport_registration.take();
         associated_bidi = None;
         associated_uni = None;
     }
@@ -569,5 +580,6 @@ async fn open_extended_connect_on_session(
         _connection_use: None,
         _session: Some(session),
         _session_stream_use: Some(session_stream_use),
+        _webtransport_registration: webtransport_registration,
     })
 }
