@@ -298,11 +298,16 @@ pub(super) fn build_request_uri(
     path: Option<&str>,
     authority_only: bool,
 ) -> Result<Uri> {
-    if matches!(scheme, Some("http" | "https")) && path == Some("") {
-        return Err(anyhow!("HTTP(S) request :path must not be empty"));
-    }
-    if path == Some("*") && method != http::Method::OPTIONS {
-        return Err(anyhow!("HTTP request :path '*' is only valid for OPTIONS"));
+    // RFC 9114 section 4.3.1 requires path-absolute (or OPTIONS *).
+    // Validate before Uri construction, which normalizes query-only values.
+    if let Some(path) = path {
+        let path_absolute = path.starts_with('/') && !path.starts_with("//");
+        let options_asterisk = path == "*" && method == Method::OPTIONS;
+        if !path_absolute && !options_asterisk {
+            return Err(anyhow!(
+                "HTTP request :path must be path-absolute or '*' for OPTIONS"
+            ));
+        }
     }
     let pseudo_authority = authority;
     let parsed_authority = pseudo_authority

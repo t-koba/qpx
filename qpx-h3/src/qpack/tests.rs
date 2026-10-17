@@ -162,6 +162,27 @@ fn http_request_path_must_not_be_empty() {
 }
 
 #[test]
+fn request_path_requires_path_absolute_or_options_asterisk() {
+    for (method, path) in [
+        ("GET", "?x"),
+        ("OPTIONS", "?x"),
+        ("GET", "//example.com"),
+        ("OPTIONS", "//example.com"),
+    ] {
+        let fields = [
+            (":method", method),
+            (":scheme", "https"),
+            (":authority", "example.com"),
+            (":path", path),
+        ];
+        for decoded in decode_request_heads(&fields) {
+            let err = decoded.expect_err("invalid :path form must not be dispatched");
+            assert_eq!(err.code(), crate::protocol::H3_MESSAGE_ERROR);
+        }
+    }
+}
+
+#[test]
 fn request_path_requires_origin_form_or_options_asterisk() {
     for (method, path) in [("GET", "relative"), ("GET", "*"), ("POST", "*")] {
         let fields = [
