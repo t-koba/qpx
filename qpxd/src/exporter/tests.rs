@@ -401,3 +401,223 @@ fn saturated_queue_drops_multi_chunk_suffix_after_first_chunk() {
         "saturated queue drops the chunk suffix"
     );
 }
+
+#[test]
+fn userinfo_redacted_from_captures_and_exports_even_without_configured_redaction() {
+    let empty = CaptureRedactionConfig {
+        headers: vec![],
+        query_keys: vec![],
+        json_paths: vec![],
+    };
+    for scheme in ["ftp", "http", "https", "custom"] {
+        let raw = format!(
+            "GET {scheme}://synthetic-user:synthetic-pass@host/file HTTP/1.1\r\nHost: host\r\nReferer: {scheme}://synthetic-user:synthetic-pass@host/\r\nLocation: {scheme}://synthetic-user:synthetic-pass@host/\r\nContent-Location: {scheme}://synthetic-user@host/\r\nContent-Base: {scheme}://synthetic-user:synthetic-pass@host/base\r\nDestination: {scheme}://synthetic-user:synthetic-pass@host/destination\r\nURI: {scheme}://synthetic-user:synthetic-pass@host/uri\r\nOrigin: {scheme}://synthetic-user:synthetic-pass@host {scheme}://synthetic-user:synthetic-pass@other/\r\nAccess-Control-Allow-Origin: {scheme}://synthetic-user:synthetic-pass@host\r\nRefresh: 0; url={scheme}://synthetic-user:synthetic-pass@host/\r\nLink: <{scheme}://synthetic-user:synthetic-pass@host/>; rel=next\r\n\r\n"
+        );
+        let redaction = CaptureRedaction::from_config(&empty);
+        let captured = redaction.redact_plaintext(raw.as_bytes());
+        let captured = std::str::from_utf8(&captured).unwrap();
+        assert!(captured.contains(&format!("GET {scheme}://host/file HTTP/1.1")));
+        assert!(!captured.contains("synthetic-user"), "{captured:?}");
+        assert!(!captured.contains("synthetic-pass"), "{captured:?}");
+        for cap in [None, Some(24)] {
+            for bytes_api in [false, true] {
+                let (tx, mut rx) = mpsc::channel(32);
+                let session = ExportSession {
+                    tx,
+                    session_id: "test-session".into(),
+                    client: "client".into(),
+                    server: "server".into(),
+                    capture_plaintext: true,
+                    capture_encrypted: false,
+                    max_plaintext_bytes: cap,
+                    max_chunk_bytes: 16,
+                    redaction: Arc::new(CaptureRedaction::from_config(&empty)),
+                };
+                if bytes_api {
+                    session.emit_plaintext_bytes(true, Bytes::from(raw.clone()));
+                } else {
+                    session.emit_plaintext(true, raw.as_bytes());
+                }
+                let mut exported = Vec::new();
+                while let Ok(event) = rx.try_recv() {
+                    exported.extend_from_slice(&event.payload);
+                }
+                assert!(!exported.is_empty());
+                let text = String::from_utf8(exported).unwrap();
+                assert!(!text.contains("synthetic-user"));
+                assert!(!text.contains("synthetic-pass"));
+                assert!(cap.is_none_or(|max| text.len() <= max));
+            }
+        }
+        let partial = format!("GET {scheme}://synthetic-user:synthetic-pass");
+        assert!(
+            !String::from_utf8(redaction.redact_plaintext(partial.as_bytes()).into_owned())
+                .unwrap()
+                .contains("synthetic-")
+        );
+    }
+}
+
+#[test]
+fn non_utf8_plaintext_bytes_export_uses_redacted_marker_not_input_prefix() {
+    let (tx, mut rx) = mpsc::channel(1);
+    let session = ExportSession {
+        tx,
+        session_id: "test-session".into(),
+        client: "client".into(),
+        server: "server".into(),
+        capture_plaintext: true,
+        capture_encrypted: false,
+        max_plaintext_bytes: None,
+        max_chunk_bytes: 1024,
+        redaction: Arc::new(CaptureRedaction::from_config(&CaptureRedactionConfig {
+            headers: vec![],
+            query_keys: vec![],
+            json_paths: vec![],
+        })),
+    };
+    for payload in [
+        &b"opaque\xffbody"[..],
+        &b"GET http://synthetic-user:synthetic-pass@host/ HTTP/1.1\r\n\r\n\xff"[..],
+    ] {
+        session.emit_plaintext_bytes(true, Bytes::copy_from_slice(payload));
+        assert_eq!(rx.try_recv().unwrap().payload.as_ref(), b"<redacted>");
+    }
+}
+
+#[tokio::test]
+async fn rejected_http_userinfo_request_is_captured_redacted() {
+    let req = Request::builder()
+        .uri("http://synthetic-user@host/file")
+        .header("host", "host")
+        .body(Body::empty())
+        .unwrap();
+    let raw = format!("GET {} HTTP/1.1\r\nHost: host\r\n\r\n", req.uri());
+    let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+        headers: vec![],
+        query_keys: vec![],
+        json_paths: vec![],
+    });
+    assert_eq!(
+        redaction.redact_plaintext(raw.as_bytes()).as_ref(),
+        b"GET http://host/file HTTP/1.1\r\nHost: host\r\n\r\n"
+    );
+    let config = serde_yaml::from_str(
+        r#"
+state_dir: null
+edges:
+- kind: forward
+  name: test
+  listen: 127.0.0.1:0
+  default_action: {type: direct}
+"#,
+    )
+    .unwrap();
+    let response = crate::forward::handle_request_inner(
+        req,
+        crate::runtime::Runtime::new(config).unwrap(),
+        "test",
+        "127.0.0.1:12345".parse().unwrap(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn ambiguous_uri_headers_and_truncated_authorities_are_safe_before_export_caps() {
+    let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+        headers: vec![],
+        query_keys: vec![],
+        json_paths: vec![],
+    });
+    for header in [
+        "Refresh: 0; url='ftp://synthetic-user:synthetic-pass@host/file'",
+        "Refresh: 0; url='//synthetic-user:synthetic-pass",
+        "Refresh: ftp://synthetic-user:synthetic-pass@host/; url=ftp://host/",
+        "Refresh: 0; url=ftp://synthetic-user:synthetic-pass@host/; url=ftp://synthetic-user@host/",
+        "Link: <ftp://synthetic-user:synthetic-pass@host/file",
+        "Link: <//synthetic-user:synthetic-pass",
+        "Link: ftp://synthetic-user:synthetic-pass@host/file",
+        "Host: '1bad://synthetic-user:synthetic-pass@host'",
+        "Host: /foo://synthetic-user:synthetic-pass@host",
+    ] {
+        let raw = format!("HTTP/1.1 302 Found\r\n{header}\r\n\r\n");
+        let safe = redaction.redact_plaintext(raw.as_bytes());
+        assert!(
+            !String::from_utf8_lossy(&safe).contains("synthetic-"),
+            "{header}"
+        );
+        // Check caps on either side of every authority/userinfo boundary.
+        for cap in 0..=raw.len() {
+            assert_eq!(
+                redaction
+                    .redact_plaintext_for_export(raw.as_bytes(), Some(cap))
+                    .as_ref(),
+                &safe[..safe.len().min(cap)]
+            );
+        }
+    }
+    for target in [
+        "ftp://synthetic-user:synthetic-pass",
+        "//synthetic-user:synthetic-pass",
+        "synthetic-user:synthetic-pass",
+        "//synthetic-user:synthetic-pass@host/file",
+        "synthetic-user:synthetic-pass@host:21",
+    ] {
+        let raw = format!("CONNECT {target}");
+        let safe = redaction.redact_plaintext(raw.as_bytes());
+        assert!(!String::from_utf8_lossy(&safe).contains("synthetic-"));
+        for cap in 0..=raw.len() {
+            assert_eq!(
+                redaction
+                    .redact_plaintext_for_export(raw.as_bytes(), Some(cap))
+                    .as_ref(),
+                &safe[..safe.len().min(cap)]
+            );
+        }
+    }
+    let raw = b"HTTP/1.1 200 OK\r\nRefresh: 0; url='ftp://synthetic-user@host/file'\r\n\r\n";
+    assert!(
+        String::from_utf8_lossy(&redaction.redact_plaintext(raw))
+            .contains("Refresh: 0; url='ftp://host/file'")
+    );
+}
+
+#[test]
+fn incomplete_uri_headers_do_not_export_an_authority_prefix() {
+    let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+        headers: vec![],
+        query_keys: vec![],
+        json_paths: vec![],
+    });
+    for name in [
+        "Location",
+        "Content-Location",
+        "Referer",
+        "Host",
+        "Link",
+        "Refresh",
+    ] {
+        let raw = format!("HTTP/1.1 302 Found\r\n{name}: //synthetic-user:synthetic-pass");
+        for cap in 0..=raw.len() {
+            let safe = redaction.redact_plaintext_for_export(raw.as_bytes(), Some(cap));
+            assert!(!String::from_utf8_lossy(&safe).contains("synthetic-"));
+        }
+    }
+    // Ordinary origin paths are not authorities even in request previews.
+    let raw = b"GET /foo://user@host";
+    assert_eq!(redaction.redact_plaintext(raw).as_ref(), raw);
+}
+
+#[test]
+fn uri_body_text_is_not_subject_to_userinfo_dlp() {
+    let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
+        headers: vec![],
+        query_keys: vec![],
+        json_paths: vec![],
+    });
+    let raw =
+        b"POST /upload HTTP/1.1\r\nHost: host\r\n\r\nftp://synthetic-user:synthetic-pass@host/file";
+    assert_eq!(redaction.redact_plaintext(raw).as_ref(), raw);
+}

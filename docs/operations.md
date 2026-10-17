@@ -122,7 +122,24 @@ reload for compatible config edits.
   `runtime.max_blocking_threads`, `runtime.acceptor_tasks_per_listener`,
   `ftp.max_request_body_bytes`, `ftp.max_download_bytes`, and `ftp.timeout_ms`
   together for deployments that proxy many simultaneous directory listings,
-  uploads, or downloads.
+  uploads, or downloads. Forward FTP requests support URI username/password
+  credentials (`ftp://user:password@host/path`); omitted credentials use the
+  anonymous defaults (`anonymous` / `anonymous@`). Userinfo is percent-decoded
+  once at forward ingress (malformed percent escapes, control characters and invalid UTF-8 are rejected),
+  then removed from the URI before validation, routing, policy, caching and
+  upstream metadata. HTTP/HTTPS userinfo remains invalid. Capture/export URI
+  fields, access logs and tracing remove userinfo for every scheme even on
+  rejected requests and when configurable redaction lists are empty. Sanitizers
+  also handle quoted and malformed URI-shaped values; ambiguous or incomplete
+  URI-bearing capture headers/authority previews may be redacted in full before
+  export size caps and chunking. Recognized URI-bearing headers include Host,
+  Referer, Location, Content-Location, Content-Base, Destination, URI, Origin,
+  Access-Control-Allow-Origin, Refresh and Link. Ordinary origin paths are not
+  authorities. Non-UTF-8 plaintext samples fail closed as `<redacted>`, including
+  binary body samples when all configurable redaction lists are empty. FTP error
+  diagnostics retain status codes, not upstream reply text that could echo
+  credentials. This is URI-field redaction, not a content/DLP filter for arbitrary
+  bodies or opaque encrypted traffic.
 - `runtime.max_observed_request_body_bytes` and
   `runtime.max_observed_response_body_bytes` are hard caps for policy, guard,
   RPC, and response-rule body observation.

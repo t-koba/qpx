@@ -71,7 +71,7 @@ pub(super) fn handle_forward_local_action(
 }
 
 pub(super) async fn handle_forward_ftp(
-    req: Request<Body>,
+    (req, credentials): (Request<Body>, ftp::FtpCredentials),
     listener_cfg: &crate::runtime::CompiledListenerSettings,
     state: &crate::runtime::RuntimeState,
     request_method: &Method,
@@ -81,6 +81,7 @@ pub(super) async fn handle_forward_ftp(
 ) -> Result<Response<Body>> {
     let mut response = ftp::handle_ftp(
         req,
+        credentials,
         listener_cfg.ftp.clone(),
         Arc::<str>::from(state.messages.unsupported_ftp_method.as_str()),
         state.ftp_semaphore.clone(),

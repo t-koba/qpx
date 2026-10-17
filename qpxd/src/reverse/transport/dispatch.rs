@@ -96,7 +96,7 @@ pub(super) async fn dispatch_reverse_request(
         let span = tracing::info_span!(
             "dispatch_reverse_request",
             kind = "reverse",
-            host = %base.host().unwrap_or(""),
+            host = %qpx_core::redaction::redact_host_userinfo(base.host().unwrap_or("")),
             method = %base.method,
         );
         return execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool)

@@ -19,6 +19,7 @@ pub(super) type ForwardPreparedRequest = crate::http::pipeline::PreparedRequestP
 pub(super) struct ForwardPreparedMode {
     pub(super) host: HostPort,
     pub(super) is_ftp_request: bool,
+    pub(super) ftp_credentials: crate::ftp::FtpCredentials,
 }
 
 pub(super) type ForwardPolicyOutcome = crate::http::pipeline::PolicyStage<ForwardAllowedPolicy>;

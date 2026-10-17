@@ -2,7 +2,7 @@ use crate::handler::RequestHandler;
 use arc_swap::ArcSwapOption;
 use http::{Request, Response, StatusCode};
 use qpx_core::config::AccessLogConfig;
-use qpx_core::redaction::redact_uri_query_keys;
+use qpx_core::redaction::{redact_host_userinfo, redact_uri_query_keys, redact_uri_userinfo};
 use std::borrow::Cow;
 use std::future::Future;
 use std::net::SocketAddr;
@@ -129,6 +129,116 @@ pub struct AccessLogService<S> {
 }
 
 impl<S> AccessLogService<S> {
+    fn call_with_otel_enabled<ReqBody, ResBody>(
+        &self,
+        req: Request<ReqBody>,
+        should_trace: bool,
+    ) -> impl Future<Output = Result<Response<ResBody>, S::Error>> + Send
+    where
+        S: RequestHandler<Request<ReqBody>, Response = Response<ResBody>>,
+    {
+        let direct_combined = self.combined && crate::logging::direct_combined_access_log_enabled();
+        let should_log = self.enabled
+            && (direct_combined || tracing::enabled!(target: "access_log", Level::INFO));
+        let path = req.uri().path();
+        let should_log = should_log && !self.is_excluded(path);
+
+        let mut host = None;
+        let mut user_agent = None;
+        if should_trace || (should_log && !self.combined) {
+            host = self.capture_header_value("host", req.headers().get(http::header::HOST));
+        }
+        if should_trace || (should_log && !direct_combined) {
+            user_agent = self
+                .capture_header_value("user-agent", req.headers().get(http::header::USER_AGENT));
+        }
+
+        let redacted_uri = (should_trace || (should_log && !direct_combined))
+            .then(|| redact_uri_query_keys(&req.uri().to_string(), &self.redact_query_keys));
+
+        let span = if should_trace {
+            use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+            let path = redact_uri_query_keys(req.uri().path(), &self.redact_query_keys);
+            let span_name = format!("{} {} {}", self.context.kind, req.method().as_str(), path);
+            let span = tracing::info_span!(
+                target: "otel",
+                "http",
+                "otel.name" = span_name,
+                "otel.kind" = "server",
+                "http.request.method" = %req.method(),
+                "url.full" = redacted_uri.as_deref().unwrap_or(""),
+                "url.path" = %path,
+                "client.address" = %self.remote_addr.ip(),
+                "client.port" = self.remote_addr.port(),
+                "proxy.kind" = self.context.kind,
+                "proxy.name" = %self.context.name,
+                "http.request.header.host" = host.as_ref().and_then(|value| value.to_str().ok()).unwrap_or(""),
+                "user_agent.original" = user_agent.as_ref().and_then(|value| value.to_str().ok()).unwrap_or(""),
+                "enduser.id" = tracing::field::Empty,
+                "qpx.device_id" = tracing::field::Empty,
+                "qpx.matched_rule" = tracing::field::Empty,
+                "qpx.matched_route" = tracing::field::Empty,
+                "qpx.policy_tags" = tracing::field::Empty,
+                "qpx.decision_service_policy_id" = tracing::field::Empty,
+                "http.response.status_code" = tracing::field::Empty,
+            );
+            let parent = crate::extract_trace_context(req.headers());
+            let _ = span.set_parent(parent);
+            Some(span)
+        } else {
+            None
+        };
+
+        let start = should_log.then(Instant::now);
+        let direct_snapshot =
+            (should_log && direct_combined).then(|| self.combined_request_template(&req));
+        let snapshot = if should_log && !direct_combined {
+            let referer = req
+                .headers()
+                .get(http::header::REFERER)
+                .and_then(|v| v.to_str().ok())
+                .map(|s| {
+                    if self.header_is_redacted("referer") {
+                        "<redacted>".to_string()
+                    } else {
+                        redact_uri_query_keys(s, &self.redact_query_keys)
+                    }
+                });
+            Some(AccessLogSnapshot {
+                remote_addr: self.remote_addr,
+                kind: self.context.kind,
+                name: self.context.name.clone(),
+                method: req.method().clone(),
+                uri: redacted_uri.unwrap_or_default(),
+                version: req.version(),
+                host: host.clone(),
+                referer,
+                user_agent: user_agent.clone(),
+            })
+        } else {
+            None
+        };
+
+        let inner = if let Some(span) = span.as_ref() {
+            let _enter = span.enter();
+            self.inner.call(req)
+        } else {
+            self.inner.call(req)
+        };
+
+        AccessLogFuture {
+            inner,
+            active: should_log || should_trace,
+            start,
+            snapshot,
+            direct_snapshot,
+            span,
+            combined: self.combined,
+            direct_combined,
+        }
+    }
+
     /// Creates an access-log wrapper around an inner handler.
     pub fn new(
         inner: S,
@@ -179,6 +289,19 @@ impl<S> AccessLogService<S> {
         value.map(|raw| {
             if self.header_is_redacted(name) {
                 http::HeaderValue::from_static("<redacted>")
+            } else if name == "host" || name == "referer" {
+                raw.to_str()
+                    .ok()
+                    .and_then(|value| {
+                        let redacted = redact_uri_query_keys(value, &self.redact_query_keys);
+                        let redacted = if name == "host" {
+                            redact_host_userinfo(&redacted)
+                        } else {
+                            redacted
+                        };
+                        http::HeaderValue::from_str(&redacted).ok()
+                    })
+                    .unwrap_or_else(|| http::HeaderValue::from_static("<redacted>"))
             } else {
                 raw.clone()
             }
@@ -233,7 +356,9 @@ pub struct AccessLogFuture<F> {
 struct CombinedRequestTemplate {
     remote_prefix: Arc<[u8]>,
     method: http::Method,
-    uri: http::Uri,
+    // Retain only the sanitized URI in the cross-request template cache.
+    // Userinfo-bearing requests miss the cache rather than persisting credentials.
+    uri: Option<http::Uri>,
     version: http::Version,
     referer: Option<http::HeaderValue>,
     user_agent: Option<http::HeaderValue>,
@@ -249,7 +374,7 @@ impl CombinedRequestTemplate {
         user_agent: Option<&http::HeaderValue>,
     ) -> bool {
         self.method == *request.method()
-            && self.uri == *request.uri()
+            && self.uri.as_ref().is_some_and(|uri| uri == request.uri())
             && self.version == request.version()
             && self.referer.as_ref() == referer
             && self.user_agent.as_ref() == user_agent
@@ -266,25 +391,10 @@ impl CombinedRequestTemplate {
         request_suffix.extend_from_slice(b"] \"");
         request_suffix.extend_from_slice(request.method().as_str().as_bytes());
         request_suffix.push(b' ');
-        if request.uri().query().is_some() {
-            let redacted = redact_uri_query_keys(&request.uri().to_string(), redact_query_keys);
-            append_escaped(&mut request_suffix, redacted.as_bytes());
-        } else if request.uri().scheme().is_none() && request.uri().authority().is_none() {
-            // Query-free origin form: no redaction applies, but delimiters must
-            // still be escaped to preserve combined-field boundaries.
-            append_escaped(
-                &mut request_suffix,
-                request
-                    .uri()
-                    .path_and_query()
-                    .map(http::uri::PathAndQuery::as_str)
-                    .unwrap_or("/")
-                    .as_bytes(),
-            );
-        } else {
-            // Query-free absolute form: same escaping contract as above.
-            append_escaped(&mut request_suffix, request.uri().to_string().as_bytes());
-        }
+        let raw_uri = request.uri().to_string();
+        let redacted = redact_uri_query_keys(&raw_uri, redact_query_keys);
+        append_escaped(&mut request_suffix, redacted.as_bytes());
+        let uri = (redact_uri_userinfo(&raw_uri) == raw_uri).then(|| request.uri().clone());
         request_suffix.push(b' ');
         request_suffix.extend_from_slice(http_version_label(request.version()).as_bytes());
         request_suffix.extend_from_slice(b"\" ");
@@ -320,7 +430,7 @@ impl CombinedRequestTemplate {
         Self {
             remote_prefix,
             method: request.method().clone(),
-            uri: request.uri().clone(),
+            uri,
             version: request.version(),
             referer: referer.cloned(),
             user_agent: user_agent.cloned(),
@@ -336,26 +446,11 @@ struct AccessLogSnapshot {
     kind: &'static str,
     name: Arc<str>,
     method: http::Method,
-    uri: AccessLogUri,
+    uri: String,
     version: http::Version,
     host: Option<http::HeaderValue>,
     referer: Option<String>,
     user_agent: Option<http::HeaderValue>,
-}
-
-#[derive(Debug)]
-enum AccessLogUri {
-    Raw(http::Uri),
-    Redacted(String),
-}
-
-impl std::fmt::Display for AccessLogUri {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Raw(uri) => std::fmt::Display::fmt(uri, formatter),
-            Self::Redacted(uri) => formatter.write_str(uri),
-        }
-    }
 }
 
 fn append_escaped(line: &mut Vec<u8>, value: &[u8]) {
@@ -844,116 +939,7 @@ where
         &self,
         req: Request<ReqBody>,
     ) -> impl Future<Output = Result<Response<ResBody>, S::Error>> + Send {
-        let direct_combined = self.combined && crate::logging::direct_combined_access_log_enabled();
-        let should_log = self.enabled
-            && (direct_combined || tracing::enabled!(target: "access_log", Level::INFO));
-        let path = req.uri().path();
-        let should_log = should_log && !self.is_excluded(path);
-        let should_trace = crate::otel_enabled();
-
-        let mut host = None;
-        let mut user_agent = None;
-        if should_trace || (should_log && !self.combined) {
-            host = self.capture_header_value("host", req.headers().get(http::header::HOST));
-        }
-        if should_trace || (should_log && !direct_combined) {
-            user_agent = self
-                .capture_header_value("user-agent", req.headers().get(http::header::USER_AGENT));
-        }
-
-        let redacted_uri =
-            if should_trace || (should_log && !direct_combined && req.uri().query().is_some()) {
-                Some(redact_uri_query_keys(
-                    req.uri().to_string().as_str(),
-                    &self.redact_query_keys,
-                ))
-            } else {
-                None
-            };
-
-        let span = if should_trace {
-            use tracing_opentelemetry::OpenTelemetrySpanExt;
-
-            let path = req.uri().path();
-            let span_name = format!("{} {} {}", self.context.kind, req.method().as_str(), path);
-            let span = tracing::info_span!(
-                target: "otel",
-                "http",
-                "otel.name" = span_name,
-                "otel.kind" = "server",
-                "http.request.method" = %req.method(),
-                "url.full" = redacted_uri.as_deref().unwrap_or(""),
-                "url.path" = %req.uri().path(),
-                "client.address" = %self.remote_addr.ip(),
-                "client.port" = self.remote_addr.port(),
-                "proxy.kind" = self.context.kind,
-                "proxy.name" = %self.context.name,
-                "http.request.header.host" = host.as_ref().and_then(|value| value.to_str().ok()).unwrap_or(""),
-                "user_agent.original" = user_agent.as_ref().and_then(|value| value.to_str().ok()).unwrap_or(""),
-                "enduser.id" = tracing::field::Empty,
-                "qpx.device_id" = tracing::field::Empty,
-                "qpx.matched_rule" = tracing::field::Empty,
-                "qpx.matched_route" = tracing::field::Empty,
-                "qpx.policy_tags" = tracing::field::Empty,
-                "qpx.decision_service_policy_id" = tracing::field::Empty,
-                "http.response.status_code" = tracing::field::Empty,
-            );
-            let parent = crate::extract_trace_context(req.headers());
-            let _ = span.set_parent(parent);
-            Some(span)
-        } else {
-            None
-        };
-
-        let start = should_log.then(Instant::now);
-        let direct_snapshot =
-            (should_log && direct_combined).then(|| self.combined_request_template(&req));
-        let snapshot = if should_log && !direct_combined {
-            let referer = req
-                .headers()
-                .get(http::header::REFERER)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| {
-                    if self.header_is_redacted("referer") {
-                        "<redacted>".to_string()
-                    } else {
-                        redact_uri_query_keys(s, &self.redact_query_keys)
-                    }
-                });
-            Some(AccessLogSnapshot {
-                remote_addr: self.remote_addr,
-                kind: self.context.kind,
-                name: self.context.name.clone(),
-                method: req.method().clone(),
-                uri: redacted_uri
-                    .map(AccessLogUri::Redacted)
-                    .unwrap_or_else(|| AccessLogUri::Raw(req.uri().clone())),
-                version: req.version(),
-                host: host.clone(),
-                referer,
-                user_agent: user_agent.clone(),
-            })
-        } else {
-            None
-        };
-
-        let inner = if let Some(span) = span.as_ref() {
-            let _enter = span.enter();
-            self.inner.call(req)
-        } else {
-            self.inner.call(req)
-        };
-
-        AccessLogFuture {
-            inner,
-            active: should_log || should_trace,
-            start,
-            snapshot,
-            direct_snapshot,
-            span,
-            combined: self.combined,
-            direct_combined,
-        }
+        self.call_with_otel_enabled(req, crate::otel_enabled())
     }
 }
 
@@ -1282,5 +1268,234 @@ mod access_log_header_redaction_tests {
                 .capture_header_value("x-custom-secret", None)
                 .is_none()
         );
+    }
+}
+
+#[cfg(test)]
+mod userinfo_output_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::Mutex;
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[derive(Clone, Default)]
+    struct Output(Arc<Mutex<Vec<u8>>>);
+    impl Write for Output {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn userinfo_absent_from_combined_structured_logs_and_trace_uri_fields() {
+        let output = Output::default();
+        let writer = output.clone();
+        let _guard = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(Level::TRACE)
+            .with_writer(move || writer.clone())
+            .set_default();
+        for scheme in ["ftp", "http", "https", "custom"] {
+            for format in ["combined", "json"] {
+                for query in ["", "?ok=1"] {
+                    let mut config = AccessLogConfig::default();
+                    config.output.enabled = true;
+                    config.output.format = format.into();
+                    config.redact.headers.clear();
+                    config.redact.query_keys.clear();
+                    let inner = crate::handler_fn(|_: Request<()>| async {
+                        Ok::<_, ()>(
+                            Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(())
+                                .unwrap(),
+                        )
+                    });
+                    let service = AccessLogService::new(
+                        inner,
+                        "127.0.0.1:12345".parse().unwrap(),
+                        AccessLogContext {
+                            kind: "forward",
+                            name: Arc::from("test"),
+                        },
+                        &config,
+                    );
+                    let req = Request::builder()
+                        .uri(format!(
+                            "{scheme}://synthetic-user:synthetic-pass@host/file{query}"
+                        ))
+                        .header("host", "synthetic-user:synthetic-pass@host")
+                        .header(
+                            "referer",
+                            format!("{scheme}://synthetic-user:synthetic-pass@host/ref"),
+                        )
+                        .body(())
+                        .unwrap();
+                    // Both direct combined templates and structured snapshots must be safe.
+                    let template = service.combined_request_template(&req);
+                    assert!(template.uri.is_none(), "credential URI retained in cache");
+                    let template_debug = format!("{template:?}");
+                    assert!(!template_debug.contains("synthetic-user"));
+                    assert!(!template_debug.contains("synthetic-pass"));
+                    let template_text = format!(
+                        "{}{}",
+                        String::from_utf8_lossy(&template.request_suffix),
+                        String::from_utf8_lossy(&template.metadata_suffix)
+                    );
+                    assert!(!template_text.contains("synthetic-user"));
+                    assert!(!template_text.contains("synthetic-pass"));
+                    assert!(template_text.contains(&format!("{scheme}://host/file{query}")));
+                    service.call(req).await.unwrap();
+                    // The same redacted URI is used as url.full for tracing.
+                    let trace_uri = redact_uri_query_keys(
+                        &format!("{scheme}://synthetic-user:synthetic-pass@host/file{query}"),
+                        &[],
+                    );
+                    assert_eq!(trace_uri, format!("{scheme}://host/file{query}"));
+                }
+            }
+        }
+        let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(output.contains("http://host/file"));
+        assert!(output.contains("400"));
+        assert!(!output.contains("synthetic-user"));
+        assert!(!output.contains("synthetic-pass"));
+    }
+    #[test]
+    fn locked_http_rejects_absolute_uris_as_path_and_query() {
+        // http 1.5 rejects the old codec fallback representation before the
+        // logging service can see it. Exercise the reachable network-path
+        // representation below, without weakening the protocol parser.
+        let target = "http://synthetic-user:synthetic-pass@host:bad/file";
+        assert!(http::Uri::builder().path_and_query(target).build().is_err());
+        assert!(target.parse::<http::uri::PathAndQuery>().is_err());
+    }
+
+    #[derive(Debug, Clone, Default)]
+    struct Spans(Arc<Mutex<Vec<opentelemetry_sdk::trace::SpanData>>>);
+
+    impl opentelemetry_sdk::trace::SpanExporter for Spans {
+        async fn export(
+            &self,
+            batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0.lock().unwrap().extend(batch);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rejected_network_target_in_path_is_safe_in_all_log_and_otel_fields() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::prelude::*;
+        let spans = Spans::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(spans.clone())
+            .build();
+        let output = Output::default();
+        let writer = output.clone();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_writer(move || writer.clone()),
+            );
+        let _guard = subscriber.set_default();
+        for format in ["combined", "json"] {
+            for query in ["", "?ok=1"] {
+                for host in [
+                    "synthetic-user:synthetic-pass@host",
+                    "'1bad://synthetic-user:synthetic-pass@host'",
+                    "/foo://synthetic-user:synthetic-pass@host",
+                    " \"//synthetic-user:synthetic-pass@host\" ",
+                ] {
+                    let mut config = AccessLogConfig::default();
+                    config.output.enabled = true;
+                    config.output.format = format.into();
+                    config.redact.headers.clear();
+                    config.redact.query_keys.clear();
+                    let inner = crate::handler_fn(|req: Request<()>| async move {
+                        // The logging sanitizer must not change routing inputs.
+                        assert!(req.uri().path().contains("synthetic-user"));
+                        Ok::<_, ()>(
+                            Response::builder()
+                                .status(StatusCode::BAD_REQUEST)
+                                .body(())
+                                .unwrap(),
+                        )
+                    });
+                    let service = AccessLogService::new(
+                        inner,
+                        "127.0.0.1:12345".parse().unwrap(),
+                        AccessLogContext {
+                            kind: "forward",
+                            name: Arc::from("test"),
+                        },
+                        &config,
+                    );
+                    let target: http::uri::PathAndQuery =
+                        format!("//synthetic-user:synthetic-pass@host:bad/file{query}")
+                            .parse()
+                            .unwrap();
+                    let uri = http::Uri::from(target);
+                    assert!(uri.scheme().is_none());
+                    assert!(uri.authority().is_none());
+                    let req = Request::builder()
+                        .uri(uri)
+                        .header("host", host)
+                        .header(
+                            "referer",
+                            " '1bad://synthetic-user:synthetic-pass@host/ref' ",
+                        )
+                        .body(())
+                        .unwrap();
+                    // Also cover the direct combined writer's cached template.
+                    let template = service.combined_request_template(&req);
+                    assert!(
+                        !String::from_utf8_lossy(&template.request_suffix).contains("synthetic-")
+                    );
+                    assert!(
+                        !String::from_utf8_lossy(&template.metadata_suffix).contains("synthetic-")
+                    );
+                    assert_eq!(
+                        service
+                            .call_with_otel_enabled(req, true)
+                            .await
+                            .unwrap()
+                            .status(),
+                        StatusCode::BAD_REQUEST
+                    );
+                }
+            }
+        }
+        provider.force_flush().unwrap();
+        let spans = spans.0.lock().unwrap();
+        assert_eq!(spans.len(), 16);
+        for span in spans.iter() {
+            assert!(!format!("{span:?}").contains("synthetic-"));
+            assert!(span.name.contains("//host:bad/file"));
+            for key in [
+                "url.full",
+                "url.path",
+                "http.request.header.host",
+                "http.response.status_code",
+            ] {
+                assert!(
+                    span.attributes.iter().any(|attr| attr.key.as_str() == key),
+                    "missing {key}"
+                );
+            }
+        }
+        let output = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert!(!output.contains("synthetic-"));
+        assert!(output.contains("//host:bad/file"));
+        assert!(output.contains("400"));
+        assert!(output.contains("1bad://host/ref"));
     }
 }

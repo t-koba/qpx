@@ -218,9 +218,8 @@ fn expect_ftp_reply(reply: FtpReply, expected: &[u16], context: &str) -> Result<
         Ok(reply)
     } else {
         Err(anyhow!(
-            "FTP {context} returned unexpected status {}: {}",
-            reply.code,
-            reply.lines.join(" | ")
+            "FTP {context} returned unexpected status {}",
+            reply.code
         ))
     }
 }

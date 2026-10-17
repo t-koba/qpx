@@ -204,16 +204,29 @@ impl ExportSession {
         if self.tx.capacity() == 0 {
             return metrics::increment(metrics::EVENTS_DROPPED);
         }
-        if self.redaction.is_noop()
-            && self
-                .max_plaintext_bytes
-                .is_none_or(|max| payload.len() <= max)
+        let direction = bool_to_direction(client_to_server);
+        match self
+            .redaction
+            .redact_plaintext_for_export(&payload, self.max_plaintext_bytes)
         {
-            let direction = bool_to_direction(client_to_server);
-            self.emit_bytes(CapturePlane::ClientServerPlaintext, direction, payload);
-            return;
+            std::borrow::Cow::Borrowed(bytes) => {
+                let redacted = if bytes.as_ptr() == payload.as_ptr() {
+                    payload.slice(..bytes.len())
+                } else {
+                    // Fail-closed redaction may borrow a static marker, not
+                    // the input. Never substitute input bytes for that marker.
+                    Bytes::copy_from_slice(bytes)
+                };
+                self.emit_bytes(CapturePlane::ClientServerPlaintext, direction, redacted);
+            }
+            std::borrow::Cow::Owned(bytes) => {
+                self.emit_bytes(
+                    CapturePlane::ClientServerPlaintext,
+                    direction,
+                    Bytes::from(bytes),
+                );
+            }
         }
-        self.emit_plaintext(client_to_server, payload.as_ref());
     }
 
     fn emit(&self, plane: CapturePlane, direction: CaptureDirection, payload: &[u8]) {

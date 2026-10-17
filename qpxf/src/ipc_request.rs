@@ -82,7 +82,7 @@ pub(crate) fn plan_ipc_request(
     let uri: Uri = meta
         .uri
         .parse()
-        .map_err(|e| anyhow!("invalid IPC request URI '{}': {e}", meta.uri))?;
+        .map_err(|e| anyhow!("invalid IPC request URI: {e}"))?;
     let request_path = uri.path().to_string();
     let query_string = uri.query().unwrap_or("").to_string();
     let header_host = meta
@@ -306,6 +306,27 @@ mod tests {
     use super::{declared_content_length, split_script_name_path_info, verified_context_env};
     use crate::config::VerifiedContextMode;
     use qpx_core::ipc::meta::VerifiedIdentityContext;
+
+    #[test]
+    fn invalid_uri_diagnostic_omits_userinfo() {
+        let config = serde_json::from_str::<crate::config::QpxfConfig>("{}").unwrap();
+        let router = crate::router::Router::new(&config).unwrap();
+        let meta = serde_json::from_value(serde_json::json!({
+            "method": "GET",
+            "uri": "http://synthetic-user:synthetic-pass@host/invalid target",
+            "server_protocol": "HTTP/1.1",
+            "headers": [], "params": {}
+        }))
+        .unwrap();
+        let err = match super::plan_ipc_request(meta, &router, 1024 * 1024, 1024) {
+            Err(err) => err,
+            Ok(_) => panic!("invalid URI must fail"),
+        };
+        let diagnostic = format!("{err:?}");
+        assert!(diagnostic.contains("invalid IPC request URI"));
+        assert!(!diagnostic.contains("synthetic-user"));
+        assert!(!diagnostic.contains("synthetic-pass"));
+    }
 
     #[test]
     fn declared_content_length_accepts_repeated_equal_values() {

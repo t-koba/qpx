@@ -891,3 +891,15 @@ async fn h2_server_refuses_cookie_split_over_edge_cap() {
         "cookie-split H2 request must be refused at the count ceiling, got server={server_outcome} client={client_outcome}",
     );
 }
+
+#[test]
+fn invalid_content_length_diagnostic_does_not_echo_userinfo() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("http://synthetic-user:synthetic-pass@host/"),
+    );
+    let error = parse_declared_content_length(&headers).unwrap_err();
+    assert_eq!(error.to_string(), "invalid content-length value");
+    assert!(!format!("{error:?}").contains("synthetic-"));
+}

@@ -47,8 +47,89 @@ pub(super) const MAX_FTP_CONTROL_LINE: usize = 8 * 1024;
 pub(super) const FTP_RESPONSE_STREAM_CHANNEL_CAPACITY: usize = 8;
 pub(super) const MAX_FTP_DEADLINE: StdDuration = StdDuration::from_secs(30 * 24 * 60 * 60);
 
+/// FTP-only ingress value. Never include credentials in Debug or request metadata.
+pub(crate) struct FtpCredentials {
+    user: String,
+    pass: String,
+}
+
+impl Default for FtpCredentials {
+    fn default() -> Self {
+        Self {
+            user: "anonymous".into(),
+            pass: "anonymous@".into(),
+        }
+    }
+}
+
+impl std::fmt::Debug for FtpCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("FtpCredentials(<redacted>)")
+    }
+}
+
+/// Only forward ingress calls this, before generic validation or observation.
+/// Other schemes remain untouched so the generic userinfo rejection still applies.
+pub(crate) fn extract_forward_credentials<B>(req: &mut Request<B>) -> Result<FtpCredentials> {
+    let mut credentials = FtpCredentials::default();
+    if !req
+        .uri()
+        .scheme_str()
+        .is_some_and(|s| s.eq_ignore_ascii_case("ftp"))
+        || req.method() == Method::CONNECT
+    {
+        return Ok(credentials);
+    }
+    if let Some(authority) = req.uri().authority()
+        && let Some((userinfo, host)) = authority.as_str().rsplit_once('@')
+    {
+        if userinfo.contains('@') {
+            return Err(anyhow!("invalid FTP credentials"));
+        }
+        let (user, pass) = userinfo.split_once(':').unwrap_or((userinfo, "anonymous@"));
+        let decode = |value: &str| -> Result<String> {
+            let bytes = value.as_bytes();
+            let mut index = 0;
+            while index < bytes.len() {
+                if bytes[index] == b'%' {
+                    if index + 2 >= bytes.len()
+                        || !bytes[index + 1].is_ascii_hexdigit()
+                        || !bytes[index + 2].is_ascii_hexdigit()
+                    {
+                        return Err(anyhow!("invalid FTP credentials"));
+                    }
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+            }
+            let value = percent_encoding::percent_decode_str(value)
+                .decode_utf8()
+                .map_err(|_| anyhow!("invalid FTP credentials"))?;
+            if value.chars().any(char::is_control) {
+                return Err(anyhow!("invalid FTP credentials"));
+            }
+            Ok(value.into_owned())
+        };
+        if !user.is_empty() {
+            credentials.user = decode(user)?;
+        }
+        credentials.pass = decode(pass)?;
+        let clean_authority = host
+            .parse::<http::uri::Authority>()
+            .map_err(|_| anyhow!("invalid FTP authority"))?;
+        let mut parts = req.uri().clone().into_parts();
+        parts.authority = Some(clean_authority);
+        *req.uri_mut() = http::Uri::from_parts(parts).map_err(|_| anyhow!("invalid FTP URI"))?;
+    }
+    // Do not legitimize an invalid Host containing userinfo. Generic preflight
+    // will reject it; it must never be used as an alternate credential source.
+    Ok(credentials)
+}
+
 pub(crate) async fn handle_ftp(
     req: Request<Body>,
+    credentials: FtpCredentials,
     limits: FtpConfig,
     unsupported_method_message: Arc<str>,
     semaphore: Arc<Semaphore>,
@@ -66,12 +147,7 @@ pub(crate) async fn handle_ftp(
         None => return Ok(ftp_error(anyhow!("missing ftp host"))),
     };
     let port = url.port().unwrap_or(21);
-    let user = if url.username().is_empty() {
-        "anonymous".to_string()
-    } else {
-        url.username().to_string()
-    };
-    let pass = url.password().unwrap_or("anonymous@").to_string();
+    let FtpCredentials { user, pass } = credentials;
     let path = url.path().trim_start_matches('/').to_string();
     let is_dir_listing = url.path().ends_with('/');
     let is_list = method.as_str().eq_ignore_ascii_case("LIST");

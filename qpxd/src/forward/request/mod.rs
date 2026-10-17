@@ -23,6 +23,18 @@ pub(crate) async fn handle_request_inner(
 ) -> Result<Response<Body>> {
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let ftp_credentials = match crate::ftp::extract_forward_credentials(&mut req) {
+        Ok(credentials) => credentials,
+        Err(_) => {
+            return Ok(crate::http::protocol::l7::finalize_response_for_request(
+                req.method(),
+                req.version(),
+                proxy_name,
+                crate::http::protocol::common::bad_request_response("invalid FTP request"),
+                false,
+            ));
+        }
+    };
     let validated_request = match preflight_validate(
         &mut req,
         proxy_name,
@@ -47,11 +59,19 @@ pub(crate) async fn handle_request_inner(
         },
     );
     let interim = Vec::new();
-    let mut response =
-        match dispatch_forward_request(req, base, runtime, listener_name, remote_addr).await {
-            Ok(response) => response,
-            Err(err) => err.into_response_result()?,
-        };
+    let mut response = match dispatch_forward_request(
+        req,
+        base,
+        runtime,
+        listener_name,
+        remote_addr,
+        ftp_credentials,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(err) => err.into_response_result()?,
+    };
     attach_interim_response_heads(&mut response, interim);
     Ok(response)
 }

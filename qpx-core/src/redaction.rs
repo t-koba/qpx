@@ -22,8 +22,50 @@ pub fn compile_json_redaction_path(path: &str) -> Result<Vec<String>, String> {
     Ok(parts)
 }
 
-/// Redacts configured query keys in a URI query string and query-like fragment.
+/// Removes URI userinfo without parsing or normalizing an untrusted URI.
+/// Applies to every scheme and network-path references, including invalid URIs.
+pub fn redact_uri_userinfo(uri: &str) -> String {
+    // Header values may wrap a URI in quotes/whitespace. Preserve the wrapper,
+    // but do not let it hide the authority. Scheme validation belongs to the
+    // protocol parser, not this best-effort sanitizer of even rejected inputs.
+    let value = uri.trim_start_matches(|c: char| c.is_whitespace() || c == '\'' || c == '"');
+    let offset = uri.len() - value.len();
+    let start = if value.starts_with("//") {
+        offset + 2
+    } else if let Some((prefix, _)) = value.split_once("://") {
+        if prefix.contains('/') {
+            // An origin path such as /foo://user@host is not an authority.
+            offset
+        } else {
+            offset + prefix.len() + 3
+        }
+    } else {
+        offset // Also cover authority-form request targets and Host values.
+    };
+    let end = uri[start..]
+        .find(['/', '?', '#'])
+        .map_or(uri.len(), |end| start + end);
+    match uri[start..end].rfind('@') {
+        Some(at) => format!("{}{}", &uri[..start], &uri[start + at + 1..]),
+        None => uri.to_string(),
+    }
+}
+
+/// Sanitizes a Host/authority diagnostic, not an origin path. If malformed
+/// syntax leaves an ambiguous '@' outside the authority, redact the whole value.
+pub fn redact_host_userinfo(host: &str) -> String {
+    let redacted = redact_uri_userinfo(host);
+    if redacted.contains('@') {
+        "<redacted>".to_string()
+    } else {
+        redacted
+    }
+}
+
+/// Redacts URI userinfo unconditionally, and configured query/fragment keys.
 pub fn redact_uri_query_keys(uri: &str, query_keys: &[String]) -> String {
+    let uri = redact_uri_userinfo(uri);
+    let uri = uri.as_str();
     let (before_fragment, fragment) = uri
         .split_once('#')
         .map(|(head, fragment)| (head, Some(fragment)))
@@ -111,5 +153,62 @@ mod tests {
                 "{invalid} should be rejected"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod userinfo_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_and_wrapped_uri_userinfo_is_redacted_without_rewriting_paths() {
+        for (input, expected) in [
+            ("1bad://synthetic-secret@host/a", "1bad://host/a"),
+            ("bad scheme://synthetic-secret@host", "bad scheme://host"),
+            ("ht?tp://synthetic-secret@host", "ht?tp://host"),
+            ("'ftp://synthetic-secret@host/a'", "'ftp://host/a'"),
+            (" \"//synthetic-secret@host\" ", " \"//host\" "),
+            (" \tftp://synthetic-secret@host/a ", " \tftp://host/a "),
+            ("  synthetic-secret@host:21  ", "  host:21  "),
+            ("/foo://user@host", "/foo://user@host"),
+            (" '/foo://user@host' ", " '/foo://user@host' "),
+            ("/foo?next=ftp://user@host", "/foo?next=ftp://user@host"),
+        ] {
+            assert_eq!(redact_uri_userinfo(input), expected);
+        }
+    }
+
+    #[test]
+    fn malformed_host_is_not_treated_as_an_ordinary_origin_path() {
+        assert_eq!(
+            redact_host_userinfo("/foo://synthetic-secret@host"),
+            "<redacted>"
+        );
+        assert_eq!(
+            redact_host_userinfo("'1bad://synthetic-secret@host'"),
+            "'1bad://host'"
+        );
+        assert_eq!(redact_host_userinfo("[::1]:21"), "[::1]:21");
+    }
+
+    #[test]
+    fn userinfo_redaction_is_scheme_independent_and_preserves_target() {
+        for prefix in ["ftp://", "http://", "https://", "custom+v1://", "//", ""] {
+            for userinfo in [
+                "synthetic-user:synthetic-pass@",
+                "synthetic-user@",
+                "first@synthetic-pass@",
+            ] {
+                let uri = format!("{prefix}{userinfo}[::1]:21/file?ok=1#ok=2");
+                assert_eq!(
+                    redact_uri_query_keys(&uri, &[]),
+                    format!("{prefix}[::1]:21/file?ok=1#ok=2")
+                );
+            }
+        }
+        assert_eq!(
+            redact_uri_userinfo("/path/user@host?email=a@b"),
+            "/path/user@host?email=a@b"
+        );
     }
 }

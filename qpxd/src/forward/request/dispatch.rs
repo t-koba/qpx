@@ -42,20 +42,36 @@ pub(super) async fn dispatch_forward_request(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
+    ftp_credentials: crate::ftp::FtpCredentials,
 ) -> std::result::Result<Response<Body>, DispatchError> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
         let span = tracing::info_span!(
             "dispatch_forward_request",
             kind = "forward",
-            host = %base.host().unwrap_or(""),
+            host = %qpx_core::redaction::redact_host_userinfo(base.host().unwrap_or("")),
             method = %base.method,
         );
-        execute_forward_request(req, base, runtime, listener_name, remote_addr)
-            .instrument(span)
-            .await
+        execute_forward_request(
+            req,
+            base,
+            runtime,
+            listener_name,
+            remote_addr,
+            ftp_credentials,
+        )
+        .instrument(span)
+        .await
     } else {
-        execute_forward_request(req, base, runtime, listener_name, remote_addr).await
+        execute_forward_request(
+            req,
+            base,
+            runtime,
+            listener_name,
+            remote_addr,
+            ftp_credentials,
+        )
+        .await
     }
 }
 
@@ -65,8 +81,18 @@ async fn execute_forward_request(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
+    ftp_credentials: crate::ftp::FtpCredentials,
 ) -> std::result::Result<Response<Body>, DispatchError> {
-    match prepare_forward_request(req, base, runtime, listener_name, remote_addr).await? {
+    match prepare_forward_request(
+        req,
+        base,
+        runtime,
+        listener_name,
+        remote_addr,
+        ftp_credentials,
+    )
+    .await?
+    {
         ForwardPrepareOutcome::Response(response) => Ok(*response),
         ForwardPrepareOutcome::Prepared(prepared) => {
             let streaming = prepared.policy.selected_plan.streaming;
@@ -126,6 +152,7 @@ async fn prepare_forward_request(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
+    ftp_credentials: crate::ftp::FtpCredentials,
 ) -> std::result::Result<ForwardPrepareOutcome, DispatchError> {
     let state = runtime.state();
     let proxy_name_owned = state.plan.identity.proxy_name.to_string();
@@ -424,6 +451,7 @@ async fn prepare_forward_request(
         mode: ForwardPreparedMode {
             host,
             is_ftp_request,
+            ftp_credentials,
         },
     }))
 }
@@ -562,7 +590,7 @@ async fn complete_forward_request(
 
     if is_ftp_request {
         let response = handle_forward_ftp(
-            req,
+            (req, mode.ftp_credentials),
             &listener_cfg,
             &state,
             &request_method,

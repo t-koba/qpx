@@ -919,3 +919,15 @@ async fn raw_response_via_uses_upstream_version_for_http11_downstream() {
     assert!(wire.find("Via: 1.1 second\r\n").unwrap() < wire.find("Via: 1.0 qpx\r\n").unwrap());
     assert!(wire.ends_with("\r\n\r\nbody"));
 }
+
+#[test]
+fn invalid_content_length_diagnostic_does_not_echo_userinfo() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("http://synthetic-user:synthetic-pass@host/"),
+    );
+    let error = parse_declared_content_length(&headers).unwrap_err();
+    assert_eq!(error.to_string(), "invalid content-length value");
+    assert!(!format!("{error:?}").contains("synthetic-"));
+}

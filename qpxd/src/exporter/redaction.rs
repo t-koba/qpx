@@ -1,5 +1,7 @@
 use qpx_core::config::CaptureRedactionConfig;
-use qpx_core::redaction::{compile_json_redaction_path, redact_uri_query_keys};
+use qpx_core::redaction::{
+    compile_json_redaction_path, redact_host_userinfo, redact_uri_query_keys,
+};
 use std::borrow::Cow;
 use std::collections::HashSet;
 
@@ -26,14 +28,7 @@ impl CaptureRedaction {
         }
     }
 
-    pub(super) fn is_noop(&self) -> bool {
-        self.headers.is_empty() && self.query_keys.is_empty() && self.json_paths.is_empty()
-    }
-
     pub(super) fn redact_plaintext<'a>(&self, payload: &'a [u8]) -> Cow<'a, [u8]> {
-        if self.is_noop() {
-            return Cow::Borrowed(payload);
-        }
         let Ok(text) = std::str::from_utf8(payload) else {
             return Cow::Borrowed(b"<redacted>");
         };
@@ -60,7 +55,11 @@ impl CaptureRedaction {
             }
             out.push_str(line);
         }
-        Cow::Owned(out.into_bytes())
+        if out.as_bytes() == payload {
+            Cow::Borrowed(payload)
+        } else {
+            Cow::Owned(out.into_bytes())
+        }
     }
 
     pub(super) fn redact_plaintext_for_export<'a>(
@@ -68,11 +67,9 @@ impl CaptureRedaction {
         payload: &'a [u8],
         max_plaintext_bytes: Option<usize>,
     ) -> Cow<'a, [u8]> {
-        let capped = match max_plaintext_bytes {
-            Some(max) => &payload[..payload.len().min(max)],
-            None => payload,
-        };
-        let redacted = self.redact_plaintext(capped);
+        // Redact before applying the cap: a cap inside userinfo must not expose
+        // a credential prefix by hiding the terminating '@' from the redactor.
+        let redacted = self.redact_plaintext(payload);
         match (max_plaintext_bytes, redacted) {
             (Some(max), Cow::Borrowed(bytes)) => Cow::Borrowed(&bytes[..bytes.len().min(max)]),
             (Some(max), Cow::Owned(mut bytes)) => {
@@ -98,7 +95,12 @@ impl CaptureRedaction {
         let value = value.trim_end_matches(['\r', '\n']);
         let leading_ws_len = value.len() - value.trim_start().len();
         let (leading_ws, value) = value.split_at(leading_ws_len);
-        let redacted = redact_uri_header_value(name.trim(), value, &self.query_keys);
+        let redacted = if line_ending.is_empty() {
+            // A capture may stop before an authority's terminating '@'.
+            "<redacted>".to_string()
+        } else {
+            redact_uri_header_value(name.trim(), value, &self.query_keys)
+        };
         Some(format!("{name}:{leading_ws}{redacted}{line_ending}"))
     }
 
@@ -110,8 +112,27 @@ impl CaptureRedaction {
         let Some(target) = parts.next() else {
             return line.to_string();
         };
-        let redacted_target = redact_uri_query_keys(target, &self.query_keys);
-        match parts.next() {
+        // A preview may end inside userinfo, before the '@'. Do not expose an
+        // unfinished authority when the request line itself is incomplete.
+        let version = parts.next();
+        let redacted_target = if version.is_none() && is_http_method_token(method) {
+            let authority = target
+                .split_once("://")
+                .filter(|(prefix, _)| !prefix.contains('/'))
+                .map(|(_, rest)| rest)
+                .or_else(|| target.strip_prefix("//"))
+                .unwrap_or(target);
+            if !authority.contains(['/', '?', '#']) {
+                // Includes network-path and authority form previews. Without
+                // a delimiter even a prefix lacking '@' can be userinfo.
+                "<redacted>".to_string()
+            } else {
+                redact_uri_query_keys(target, &self.query_keys)
+            }
+        } else {
+            redact_uri_query_keys(target, &self.query_keys)
+        };
+        match version {
             Some(version) => format!("{method} {redacted_target} {version}"),
             None => format!("{method} {redacted_target}"),
         }
@@ -237,40 +258,88 @@ fn redact_json_value(value: &mut serde_json::Value, path: &[String]) {
 fn header_value_may_contain_uri(name: &str) -> bool {
     matches!(
         name.to_ascii_lowercase().as_str(),
-        "location" | "content-location" | "refresh" | "link"
+        "location"
+            | "content-location"
+            | "content-base"
+            | "destination"
+            | "uri"
+            | "origin"
+            | "access-control-allow-origin"
+            | "referer"
+            | "host"
+            | "refresh"
+            | "link"
     )
 }
 
 fn redact_uri_header_value(name: &str, value: &str, query_keys: &[String]) -> String {
     match name.to_ascii_lowercase().as_str() {
-        "location" | "content-location" => redact_uri_query_keys(value, query_keys),
+        "host" => redact_host_userinfo(&redact_uri_query_keys(value, query_keys)),
+        "location"
+        | "content-location"
+        | "content-base"
+        | "destination"
+        | "uri"
+        | "referer"
+        | "access-control-allow-origin" => redact_uri_query_keys(value, query_keys),
+        "origin" => redact_origin_header_value(value, query_keys),
         "refresh" => redact_refresh_header_value(value, query_keys),
         "link" => redact_link_header_value(value, query_keys),
         _ => value.to_string(),
     }
 }
 
+fn redact_origin_header_value(value: &str, query_keys: &[String]) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut start = 0;
+    for (index, ch) in value.char_indices() {
+        if ch.is_ascii_whitespace() {
+            out.push_str(&redact_uri_query_keys(&value[start..index], query_keys));
+            out.push(ch);
+            start = index + ch.len_utf8();
+        }
+    }
+    out.push_str(&redact_uri_query_keys(&value[start..], query_keys));
+    out
+}
+
 fn redact_refresh_header_value(value: &str, query_keys: &[String]) -> String {
     let Some((url_pos, eq_len)) = find_refresh_url_parameter(value) else {
-        return value.to_string();
+        return if value.contains("://") || value.contains('@') || value.contains("//") {
+            "<redacted>".to_string()
+        } else {
+            value.to_string()
+        };
     };
+    // Only a delay belongs before url=. Do not copy an ambiguous URI-bearing
+    // prefix verbatim while sanitizing just the final parameter.
+    if value[..url_pos].contains("://") || value[..url_pos].contains('@') {
+        return "<redacted>".to_string();
+    }
     let value_start = url_pos + eq_len;
     let (prefix, rest) = value.split_at(value_start);
     let trimmed = rest.trim_start();
     let ws = &rest[..rest.len() - trimmed.len()];
-    let (quote, uri, suffix) = if let Some(inner) = trimmed.strip_prefix('"') {
-        match inner.find('"') {
-            Some(end) => ("\"", &inner[..end], &inner[end..]),
-            None => ("", trimmed, ""),
+    let uri = if let Some(quote) = trimmed.chars().next().filter(|c| matches!(c, '\'' | '"')) {
+        let inner = &trimmed[1..];
+        let Some(end) = inner.find(quote) else {
+            return "<redacted>".to_string();
+        };
+        if !inner[end + 1..].trim().is_empty() {
+            return "<redacted>".to_string();
         }
+        return format!(
+            "{prefix}{ws}{quote}{}{quote}",
+            redact_uri_query_keys(&inner[..end], query_keys)
+        );
     } else {
-        ("", trimmed, "")
+        trimmed
     };
-    format!(
-        "{prefix}{ws}{quote}{}{}",
-        redact_uri_query_keys(uri, query_keys),
-        suffix
-    )
+    // Extra URL parameters/ambiguous unquoted tails are not a single URI.
+    if uri.contains([';', ' ', '\t']) {
+        return "<redacted>".to_string();
+    }
+    format!("{prefix}{ws}{}", redact_uri_query_keys(uri, query_keys))
 }
 
 fn find_refresh_url_parameter(value: &str) -> Option<(usize, usize)> {
@@ -302,14 +371,20 @@ fn redact_link_header_value(value: &str, query_keys: &[String]) -> String {
     let mut rest = value;
     while let Some(start) = rest.find('<') {
         let (before, after_start) = rest.split_at(start + 1);
+        if before.contains("://") || before.contains('@') {
+            return "<redacted>".to_string();
+        }
         out.push_str(before);
         let Some(end) = after_start.find('>') else {
-            out.push_str(after_start);
-            return out;
+            // The authority can be cut before '@'; do not export a prefix.
+            return "<redacted>".to_string();
         };
         let (uri, after_uri) = after_start.split_at(end);
         out.push_str(redact_uri_query_keys(uri, query_keys).as_str());
         rest = after_uri;
+    }
+    if rest.contains("://") || rest.contains('@') {
+        return "<redacted>".to_string();
     }
     out.push_str(rest);
     out
