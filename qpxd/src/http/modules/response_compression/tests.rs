@@ -542,6 +542,27 @@ async fn dictionary_compression_drops_both_digest_fields_and_no_transform_preser
         Some(&HeaderValue::from_static("dcb"))
     );
     assert_digest_fields_absent(compressed.headers());
+    let compressed_length: usize = compressed
+        .headers()
+        .get(CONTENT_LENGTH)
+        .expect("dictionary compression sets length")
+        .to_str()
+        .expect("length value")
+        .parse()
+        .expect("length parses");
+    let compressed_body = to_bytes(compressed.into_body())
+        .await
+        .expect("dictionary body");
+    assert_eq!(
+        compressed_body.len(),
+        compressed_length,
+        "dictionary length must match encoded body"
+    );
+    assert_ne!(
+        compressed_body.as_ref(),
+        b"frequent words from a response",
+        "dictionary path must transform the body when eligible"
+    );
 
     let unchanged = module
         .compress_with_dictionary(
@@ -559,6 +580,28 @@ async fn dictionary_compression_drops_both_digest_fields_and_no_transform_preser
         panic!("no-transform response must not be compressed");
     };
     assert_digest_fields_present(unchanged.headers());
+    assert!(
+        !unchanged.headers().contains_key(CONTENT_ENCODING),
+        "no-transform dictionary response must stay identity"
+    );
+    assert_eq!(
+        unchanged
+            .headers()
+            .get(CONTENT_LENGTH)
+            .expect("no-transform preserves length")
+            .to_str()
+            .expect("length value"),
+        "frequent words from a response".len().to_string(),
+        "no-transform must preserve the origin length"
+    );
+    let unchanged_body = to_bytes(unchanged.into_body())
+        .await
+        .expect("no-transform body");
+    assert_eq!(
+        unchanged_body.as_ref(),
+        b"frequent words from a response",
+        "no-transform must preserve the origin body"
+    );
 }
 
 #[tokio::test]
@@ -580,4 +623,111 @@ async fn identity_and_no_transform_responses_preserve_both_digest_fields() {
             .expect("identity body");
         assert_eq!(body, "hello world!");
     }
+}
+
+#[tokio::test]
+async fn ordinary_compression_strips_length_and_etag_unless_no_transform() {
+    use std::io::Read as _;
+
+    // Synthetic origin representation shared by both cases. The compressible
+    // variant proves the eligible path strips Length/ETag and transforms the
+    // body (the post-cache-writeback downstream transform); the no-transform
+    // variant proves the shared predicate refuses that transform.
+    const BODY: &str = "hello world! hello world! hello world! hello world! ";
+    const ETAG_VALUE: &str = "\"synthetic-etag\"";
+    fn origin_response(cache_control: &'static str) -> Response<Body> {
+        Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, BODY.len().to_string())
+            .header(ETAG, ETAG_VALUE)
+            .header(http::header::CACHE_CONTROL, cache_control)
+            .body(Body::from(BODY))
+            .expect("response")
+    }
+
+    let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
+
+    // Without no-transform: eligible, so full compression applies.
+    let ctx = compression_context("gzip");
+    let compressed = module
+        .compress(&ctx, origin_response("public, max-age=60"))
+        .await
+        .expect("compression");
+    assert_eq!(
+        compressed.headers().get(CONTENT_ENCODING),
+        Some(&HeaderValue::from_static("gzip")),
+        "eligible response must gain content encoding"
+    );
+    assert!(
+        !compressed.headers().contains_key(CONTENT_LENGTH),
+        "ordinary compression must strip content length"
+    );
+    assert!(
+        !compressed.headers().contains_key(ETAG),
+        "ordinary compression must strip etag"
+    );
+    assert!(
+        vary_values(&compressed).contains("accept-encoding"),
+        "compressed variant must carry Vary"
+    );
+    let compressed_body = to_bytes(compressed.into_body())
+        .await
+        .expect("compressed body");
+    assert!(
+        !compressed_body.is_empty(),
+        "compressed body must not be empty"
+    );
+    assert_ne!(
+        compressed_body.as_ref(),
+        BODY.as_bytes(),
+        "eligible body must be transformed"
+    );
+    let mut decoded = Vec::new();
+    flate2::read::GzDecoder::new(compressed_body.as_ref())
+        .read_to_end(&mut decoded)
+        .expect("gzip decodes");
+    assert_eq!(
+        decoded.as_slice(),
+        BODY.as_bytes(),
+        "gzip transform must round-trip the origin body"
+    );
+
+    // With no-transform: the shared predicate refuses, so identity is preserved.
+    let ctx = compression_context("gzip");
+    let unchanged = module
+        .compress(&ctx, origin_response("public, no-transform, max-age=60"))
+        .await
+        .expect("unchanged response");
+    assert!(
+        !unchanged.headers().contains_key(CONTENT_ENCODING),
+        "no-transform response must not gain content encoding"
+    );
+    assert_eq!(
+        unchanged
+            .headers()
+            .get(CONTENT_LENGTH)
+            .expect("no-transform preserves length")
+            .to_str()
+            .expect("length value"),
+        BODY.len().to_string(),
+        "no-transform must preserve the origin length"
+    );
+    assert_eq!(
+        unchanged.headers().get(ETAG),
+        Some(&HeaderValue::from_static(ETAG_VALUE)),
+        "no-transform must preserve the origin etag"
+    );
+    assert!(
+        !unchanged.headers().contains_key(VARY),
+        "no-transform identity must not gain Vary"
+    );
+    let unchanged_body = to_bytes(unchanged.into_body())
+        .await
+        .expect("identity body");
+    assert_eq!(
+        unchanged_body.as_ref(),
+        BODY.as_bytes(),
+        "no-transform must preserve the origin body"
+    );
 }
