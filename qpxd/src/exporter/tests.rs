@@ -565,6 +565,7 @@ fn ambiguous_uri_headers_and_truncated_authorities_are_safe_before_export_caps()
         "//synthetic-user:synthetic-pass@host/file",
         "synthetic-user:synthetic-pass@host:21",
         "synthetic-user:synthetic-pass@host:443?token=secret",
+        "synthetic-user:synthetic-pass@host?return=/foo",
         "//synthetic-user:synthetic-pass@host ",
     ] {
         let raw = format!("CONNECT {target}");

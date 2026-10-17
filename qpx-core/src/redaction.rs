@@ -77,16 +77,25 @@ pub fn redact_host_userinfo(host: &str) -> String {
 /// Redacts a request target using its HTTP method to distinguish CONNECT's
 /// authority form from generic URI references, then applies configured keys.
 pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) -> String {
-    if method == "CONNECT" && target.starts_with('/') {
+    if method != "CONNECT" {
+        return redact_uri_query_keys(target, query_keys);
+    }
+    if target.starts_with('/') {
         // Extended CONNECT carries a path in :path; even a leading `//` is
         // still path data here, not a network-path authority.
-        redact_query_fragment_keys(target, query_keys)
-    } else if method == "CONNECT" && !target.contains('/') && !target.contains("://") {
-        // Traditional CONNECT uses authority-form. A malformed query/fragment
-        // suffix does not turn its authority userinfo into ordinary URI data.
-        redact_query_fragment_keys(&redact_authority_userinfo(target), query_keys)
-    } else {
+        return redact_query_fragment_keys(target, query_keys);
+    }
+
+    let target_before_suffix = target.split(['?', '#']).next().unwrap_or(target);
+    let has_hierarchical_scheme = target_before_suffix
+        .split_once("://")
+        .is_some_and(|(prefix, _)| !prefix.contains(['/', ':', '?', '#']));
+    if has_hierarchical_scheme {
         redact_uri_query_keys(target, query_keys)
+    } else {
+        // Traditional CONNECT uses authority-form. Malformed suffixes do not
+        // turn its authority userinfo into ordinary URI data.
+        redact_query_fragment_keys(&redact_authority_userinfo(target), query_keys)
     }
 }
 
@@ -292,6 +301,22 @@ mod userinfo_tests {
                 &keys,
             ),
             "host:443?token=<redacted>"
+        );
+        assert_eq!(
+            redact_request_target(
+                "CONNECT",
+                "synthetic-user:synthetic-pass@host?return=/foo",
+                &[],
+            ),
+            "host?return=/foo"
+        );
+        assert_eq!(
+            redact_request_target(
+                "CONNECT",
+                "synthetic-user:synthetic-pass@host:443/path?token=secret",
+                &keys,
+            ),
+            "host:443/path?token=<redacted>"
         );
     }
 
