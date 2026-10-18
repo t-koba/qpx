@@ -1,9 +1,8 @@
 use super::ReverseConnInfo;
 use super::request_template::{ReverseRequestHeadTemplate, ReverseRequestTemplate};
-use crate::reverse::health::{
-    EndpointLifecycleRuntime, HealthCheckRuntime, PassiveFailureKind, UpstreamEndpoint,
-};
+use crate::reverse::health::{EndpointLifecycleRuntime, HealthCheckRuntime, UpstreamEndpoint};
 use crate::reverse::router::{RoutePolicy, SelectedMirrorTarget};
+use crate::upstream::health::PassiveFailureKind;
 use crate::upstream::origin::proxy_http;
 use anyhow::Error;
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};

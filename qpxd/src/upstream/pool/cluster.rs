@@ -1,7 +1,9 @@
 use super::ConnectionPool;
 use super::resolved::{EndpointConcurrencyPermit, ResolvedUpstreamProxy};
 use crate::runtime::now_millis;
-use crate::upstream::health::{LATENCY_P95_DEFAULT_MIN_SAMPLES, LatencyWindow};
+use crate::upstream::health::{
+    LATENCY_P95_DEFAULT_MIN_SAMPLES, LatencyWindow, PassiveFailureCounters, PassiveFailureKind,
+};
 use crate::upstream::http1::{UpstreamProxyEndpoint, parse_upstream_proxy_endpoint};
 use crate::upstream::origin::discover_origin_endpoints;
 use anyhow::{Result, anyhow};
@@ -94,10 +96,7 @@ pub(super) struct DynamicDiscovery {
 pub(super) struct ManagedUpstreamEndpoint {
     pub(super) endpoint: UpstreamProxyEndpoint,
     unhealthy_until_ms: AtomicU64,
-    passive_5xx: AtomicU32,
-    passive_timeouts: AtomicU32,
-    passive_connect_errors: AtomicU32,
-    passive_resets: AtomicU32,
+    passive: PassiveFailureCounters,
     adaptive_successes: AtomicU32,
     adaptive_failures: AtomicU32,
     adaptive_latency_total_ms: AtomicU64,
@@ -112,10 +111,7 @@ impl ManagedUpstreamEndpoint {
         Self {
             endpoint,
             unhealthy_until_ms: AtomicU64::new(0),
-            passive_5xx: AtomicU32::new(0),
-            passive_timeouts: AtomicU32::new(0),
-            passive_connect_errors: AtomicU32::new(0),
-            passive_resets: AtomicU32::new(0),
+            passive: PassiveFailureCounters::new(),
             adaptive_successes: AtomicU32::new(0),
             adaptive_failures: AtomicU32::new(0),
             adaptive_latency_total_ms: AtomicU64::new(0),
@@ -137,7 +133,7 @@ impl ManagedUpstreamEndpoint {
 
     pub(super) fn mark_passive_success(&self) {
         let recovered = self.unhealthy_until_ms.swap(0, Ordering::Relaxed) != 0;
-        self.reset_passive_counters();
+        self.passive.reset_all();
         self.note_adaptive_success();
         if recovered {
             super::metrics::probe_success();
@@ -161,21 +157,13 @@ impl ManagedUpstreamEndpoint {
         if threshold == 0 {
             return;
         }
-        self.reset_passive_counters_except(kind);
-        let count = match kind {
-            PassiveFailureKind::Http5xx => self.passive_5xx.fetch_add(1, Ordering::Relaxed),
-            PassiveFailureKind::Timeout => self.passive_timeouts.fetch_add(1, Ordering::Relaxed),
-            PassiveFailureKind::ConnectError => {
-                self.passive_connect_errors.fetch_add(1, Ordering::Relaxed)
-            }
-            PassiveFailureKind::Reset => self.passive_resets.fetch_add(1, Ordering::Relaxed),
-        }
-        .saturating_add(1);
+        self.passive.reset_except(kind);
+        let count = self.passive.increment(kind);
         let reason = passive_failure_reason(kind);
         self.note_adaptive_failure(policy.max_ejection);
         if count >= threshold {
             self.eject(policy.max_ejection, reason);
-            self.reset_passive_counters();
+            self.passive.reset_all();
         }
     }
 
@@ -214,28 +202,6 @@ impl ManagedUpstreamEndpoint {
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
         self.reset_adaptive_stats();
         super::metrics::ejection(reason.as_label());
-    }
-
-    fn reset_passive_counters(&self) {
-        self.passive_5xx.store(0, Ordering::Relaxed);
-        self.passive_timeouts.store(0, Ordering::Relaxed);
-        self.passive_connect_errors.store(0, Ordering::Relaxed);
-        self.passive_resets.store(0, Ordering::Relaxed);
-    }
-
-    fn reset_passive_counters_except(&self, keep: PassiveFailureKind) {
-        if keep != PassiveFailureKind::Http5xx {
-            self.passive_5xx.store(0, Ordering::Relaxed);
-        }
-        if keep != PassiveFailureKind::Timeout {
-            self.passive_timeouts.store(0, Ordering::Relaxed);
-        }
-        if keep != PassiveFailureKind::ConnectError {
-            self.passive_connect_errors.store(0, Ordering::Relaxed);
-        }
-        if keep != PassiveFailureKind::Reset {
-            self.passive_resets.store(0, Ordering::Relaxed);
-        }
     }
 
     fn note_adaptive_success(&self) {
@@ -325,14 +291,6 @@ fn passive_failure_reason(kind: PassiveFailureKind) -> EjectionReason {
         PassiveFailureKind::ConnectError => EjectionReason::ConnectError,
         PassiveFailureKind::Reset => EjectionReason::Reset,
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum PassiveFailureKind {
-    Http5xx,
-    Timeout,
-    ConnectError,
-    Reset,
 }
 
 #[derive(Debug, Clone, Copy)]

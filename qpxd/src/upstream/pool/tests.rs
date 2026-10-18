@@ -1,9 +1,8 @@
-use super::cluster::{
-    ManagedUpstreamEndpoint, PassiveFailureKind, PassiveHealthPolicy, UpstreamProxyCluster,
-};
+use super::cluster::{ManagedUpstreamEndpoint, PassiveHealthPolicy, UpstreamProxyCluster};
 use super::send::upstream_proxy_pool_key;
 use crate::runtime::now_millis;
 use crate::upstream::health::LATENCY_P95_DEFAULT_MIN_SAMPLES;
+use crate::upstream::health::PassiveFailureKind;
 use crate::upstream::http1::parse_upstream_proxy_endpoint;
 use arc_swap::ArcSwap;
 use qpx_core::tls::CompiledUpstreamTlsTrust;

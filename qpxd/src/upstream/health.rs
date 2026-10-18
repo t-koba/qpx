@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use tokio::time::Duration;
 
 /// Trailing per-endpoint latencies kept for the outlier p95. Bounded: one
@@ -9,6 +9,72 @@ pub(crate) const LATENCY_P95_WINDOW: usize = 100;
 /// Default requests observed before the trailing p95 can eject. A percentile
 /// needs a full window; override with `outlier_detection.latency.min_requests`.
 pub(crate) const LATENCY_P95_DEFAULT_MIN_SAMPLES: u64 = LATENCY_P95_WINDOW as u64;
+
+// Passive failure kinds shared by forward-cluster and reverse endpoints.
+// Only the kind discriminant and the consecutive-counter mechanics live here;
+// thresholds, ejection, backoff, recovery, lifecycle, and all policy mapping
+// stay with each endpoint owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PassiveFailureKind {
+    Http5xx,
+    Timeout,
+    ConnectError,
+    Reset,
+}
+
+/// Per-endpoint consecutive passive-failure counters. Each owner keeps one
+/// instance and still decides when to reset or increment; this helper owns
+/// only the four atomics and the reset/increment mechanics.
+#[derive(Debug)]
+pub(crate) struct PassiveFailureCounters {
+    http_5xx: AtomicU32,
+    timeouts: AtomicU32,
+    connect_errors: AtomicU32,
+    resets: AtomicU32,
+}
+
+impl PassiveFailureCounters {
+    pub(crate) fn new() -> Self {
+        Self {
+            http_5xx: AtomicU32::new(0),
+            timeouts: AtomicU32::new(0),
+            connect_errors: AtomicU32::new(0),
+            resets: AtomicU32::new(0),
+        }
+    }
+
+    pub(crate) fn reset_all(&self) {
+        self.http_5xx.store(0, Ordering::Relaxed);
+        self.timeouts.store(0, Ordering::Relaxed);
+        self.connect_errors.store(0, Ordering::Relaxed);
+        self.resets.store(0, Ordering::Relaxed);
+    }
+
+    pub(crate) fn reset_except(&self, keep: PassiveFailureKind) {
+        if keep != PassiveFailureKind::Http5xx {
+            self.http_5xx.store(0, Ordering::Relaxed);
+        }
+        if keep != PassiveFailureKind::Timeout {
+            self.timeouts.store(0, Ordering::Relaxed);
+        }
+        if keep != PassiveFailureKind::ConnectError {
+            self.connect_errors.store(0, Ordering::Relaxed);
+        }
+        if keep != PassiveFailureKind::Reset {
+            self.resets.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub(crate) fn increment(&self, kind: PassiveFailureKind) -> u32 {
+        match kind {
+            PassiveFailureKind::Http5xx => self.http_5xx.fetch_add(1, Ordering::Relaxed),
+            PassiveFailureKind::Timeout => self.timeouts.fetch_add(1, Ordering::Relaxed),
+            PassiveFailureKind::ConnectError => self.connect_errors.fetch_add(1, Ordering::Relaxed),
+            PassiveFailureKind::Reset => self.resets.fetch_add(1, Ordering::Relaxed),
+        }
+        .saturating_add(1)
+    }
+}
 
 /// Bounded trailing latency window shared by forward-cluster and reverse
 /// endpoints. The surrounding health, ejection, and lifecycle policy stays
@@ -100,5 +166,21 @@ mod tests {
         }
         assert_eq!(window.total(), (2 * LATENCY_P95_WINDOW) as u64);
         assert_eq!(window.p95_ms(), 50);
+    }
+
+    #[test]
+    fn passive_counters_track_kinds_independently() {
+        let counters = PassiveFailureCounters::new();
+        assert_eq!(counters.increment(PassiveFailureKind::Http5xx), 1);
+        assert_eq!(counters.increment(PassiveFailureKind::Http5xx), 2);
+        assert_eq!(counters.increment(PassiveFailureKind::Timeout), 1);
+        counters.reset_except(PassiveFailureKind::Timeout);
+        assert_eq!(counters.increment(PassiveFailureKind::Http5xx), 1);
+        assert_eq!(counters.increment(PassiveFailureKind::Timeout), 2);
+        counters.reset_all();
+        assert_eq!(counters.increment(PassiveFailureKind::ConnectError), 1);
+        assert_eq!(counters.increment(PassiveFailureKind::Reset), 1);
+        assert_eq!(counters.increment(PassiveFailureKind::Timeout), 1);
+        assert_eq!(counters.increment(PassiveFailureKind::Http5xx), 1);
     }
 }

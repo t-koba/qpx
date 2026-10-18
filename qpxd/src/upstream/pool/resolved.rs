@@ -1,5 +1,6 @@
 use super::cluster::UpstreamProxyCluster;
-use super::cluster::{ManagedUpstreamEndpoint, PassiveFailureKind, PassiveHealthPolicy};
+use super::cluster::{ManagedUpstreamEndpoint, PassiveHealthPolicy};
+use crate::upstream::health::PassiveFailureKind;
 use crate::upstream::http1::{UpstreamProxyEndpoint, parse_upstream_proxy_endpoint};
 use anyhow::Result;
 use hyper::StatusCode;
