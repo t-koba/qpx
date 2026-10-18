@@ -47,6 +47,9 @@ pub(super) fn poll_injected_packets(
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut count = 0usize;
     loop {
+        if count >= bufs.len() || count >= meta.len() {
+            break;
+        }
         let packet = if count == 0 {
             match Pin::new(&mut *rx).poll_recv(cx) {
                 Poll::Ready(Some(packet)) => Some(packet),
@@ -59,9 +62,6 @@ pub(super) fn poll_injected_packets(
         let Some(packet) = packet else {
             break;
         };
-        if count >= bufs.len() || count >= meta.len() {
-            break;
-        }
         let dst = &mut bufs[count];
         let len = packet.payload.len().min(dst.len());
         dst[..len].copy_from_slice(&packet.payload[..len]);
@@ -75,4 +75,77 @@ pub(super) fn poll_injected_packets(
         count += 1;
     }
     Poll::Ready(Ok(count))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::task::Waker;
+
+    fn packet(value: u8) -> InjectedPacket {
+        InjectedPacket {
+            addr: "127.0.0.1:4433".parse().unwrap(),
+            ecn: None,
+            dst_ip: None,
+            payload: bytes::Bytes::from(vec![value]),
+        }
+    }
+
+    #[test]
+    fn one_slot_batches_preserve_all_queued_datagrams() {
+        let (tx, rx) = mpsc::channel(3);
+        for value in 1..=3 {
+            tx.try_send(packet(value)).unwrap();
+        }
+        let receiver = Mutex::new(rx);
+        let mut cx = TaskContext::from_waker(Waker::noop());
+
+        for expected in 1..=3 {
+            let mut payload = [0u8; 1];
+            let mut bufs = [IoSliceMut::new(&mut payload)];
+            let mut meta = [quinn::udp::RecvMeta::default()];
+            assert!(matches!(
+                poll_injected_packets(&receiver, &mut cx, &mut bufs, &mut meta),
+                Poll::Ready(Ok(1))
+            ));
+            assert_eq!(payload, [expected]);
+            assert_eq!(meta[0].len, 1);
+        }
+        assert_eq!(receiver.lock().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn zero_capacity_does_not_consume_queued_datagram() {
+        let (tx, rx) = mpsc::channel(1);
+        tx.try_send(packet(42)).unwrap();
+        let receiver = Mutex::new(rx);
+        let mut cx = TaskContext::from_waker(Waker::noop());
+
+        for (buf_count, meta_count) in [(0, 0), (0, 1), (1, 0)] {
+            let mut payload = [0u8; 1];
+            let mut bufs = [IoSliceMut::new(&mut payload)];
+            let mut meta = [quinn::udp::RecvMeta::default()];
+            assert!(matches!(
+                poll_injected_packets(
+                    &receiver,
+                    &mut cx,
+                    &mut bufs[..buf_count],
+                    &mut meta[..meta_count],
+                ),
+                Poll::Ready(Ok(0))
+            ));
+            assert_eq!(receiver.lock().unwrap().len(), 1);
+        }
+
+        let mut payload = [0u8; 1];
+        let mut bufs = [IoSliceMut::new(&mut payload)];
+        let mut meta = [quinn::udp::RecvMeta::default()];
+        assert!(matches!(
+            poll_injected_packets(&receiver, &mut cx, &mut bufs, &mut meta),
+            Poll::Ready(Ok(1))
+        ));
+        assert_eq!(payload, [42]);
+        assert_eq!(meta[0].len, 1);
+        assert_eq!(receiver.lock().unwrap().len(), 0);
+    }
 }
