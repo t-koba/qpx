@@ -910,13 +910,14 @@ fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
     // Repeated discovery refreshes must not renew the drain deadline: the
     // removed endpoint retires once the original timeout elapses even though
     // refreshes outpace it. Scales the bounded experiment (10s drain timeout
-    // with 5s refresh) down to 500ms/100ms to keep the test fast while
-    // preserving refresh < timeout. No in-flight requests, so retention
-    // depends only on the deadline.
+    // with 5s refresh) down to 2s/300ms: refreshes stay well under the
+    // timeout (robust presence checks on loaded runners) while a renewal bug
+    // would still push the deadline past the final check. No in-flight
+    // requests, so retention depends only on the deadline.
     let lifecycle = EndpointLifecycleRuntime {
         slow_start: None,
         warmup: None,
-        drain_timeout: Some(Duration::from_millis(500)),
+        drain_timeout: Some(Duration::from_millis(2000)),
     };
     let first = Arc::new(UpstreamEndpoint::new("http://a".to_string()));
     let pool = UpstreamEndpointSet::new(vec![], vec![first.clone()], vec![], lifecycle.clone());
@@ -933,7 +934,7 @@ fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
     pool.endpoints.store(Arc::new(combined));
 
     for _ in 0..3 {
-        std::thread::sleep(Duration::from_millis(100));
+        std::thread::sleep(Duration::from_millis(300));
         let combined =
             pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
         let draining = combined
@@ -944,7 +945,7 @@ fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
         pool.endpoints.store(Arc::new(combined));
     }
 
-    std::thread::sleep(Duration::from_millis(300));
+    std::thread::sleep(Duration::from_millis(1500));
     let combined =
         pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
     assert!(
