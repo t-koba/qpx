@@ -350,6 +350,18 @@ impl WasmResponse {
     }
 }
 
+// The ticker must outlive both the executor and any outstanding Wasmtime work.
+// Its task owns only an Engine clone, never this owner, to avoid a reference cycle.
+struct EpochTicker {
+    abort: tokio::task::AbortHandle,
+}
+
+impl Drop for EpochTicker {
+    fn drop(&mut self) {
+        self.abort.abort();
+    }
+}
+
 /// WASM executor with module cache and optional idle instances.
 pub struct WasmExecutor {
     engine: Engine,
@@ -366,7 +378,7 @@ pub struct WasmExecutor {
     max_stdin_bytes: usize,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
-    _epoch_ticker: tokio::task::JoinHandle<()>,
+    epoch_ticker: Arc<EpochTicker>,
 }
 
 impl WasmExecutor {
@@ -422,12 +434,17 @@ impl WasmExecutor {
             }
         });
 
+        let epoch_ticker = Arc::new(EpochTicker {
+            abort: epoch_ticker.abort_handle(),
+        });
+
         let idle_instances = Arc::new(Mutex::new(Vec::with_capacity(config.idle_instances)));
         if config.precompile && config.idle_instances > 0 {
             schedule_idle_replenish(
                 Arc::clone(&idle_instances),
                 config.idle_instances,
                 engine.clone(),
+                Arc::clone(&epoch_ticker),
                 Arc::clone(&instance_pre),
                 config.max_memory_bytes,
                 config.timeout_ms,
@@ -449,7 +466,7 @@ impl WasmExecutor {
             max_stdin_bytes: config.max_stdin_bytes,
             max_stdout_bytes: config.max_stdout_bytes,
             max_stderr_bytes: config.max_stderr_bytes,
-            _epoch_ticker: epoch_ticker,
+            epoch_ticker,
         })
     }
 
@@ -477,7 +494,11 @@ impl WasmExecutor {
         let env = self.env.clone();
         let max_stdin_bytes = self.max_stdin_bytes;
 
+        let epoch_ticker = Arc::clone(&self.epoch_ticker);
         let done = tokio::spawn(async move {
+            let replenish_ticker = Arc::clone(&epoch_ticker);
+            // Keep ticking even if the executor is dropped while this task is active.
+            let _epoch_ticker = epoch_ticker;
             let mut abort_rx = abort_rx;
             let timeout = tokio::time::Duration::from_millis(timeout_ms.max(1));
             let operation = async move {
@@ -545,6 +566,7 @@ impl WasmExecutor {
                     Arc::clone(&idle_instances),
                     max_idle_instances,
                     engine.clone(),
+                    replenish_ticker,
                     Arc::clone(&instance_pre),
                     max_memory_bytes,
                     timeout_ms,
@@ -585,6 +607,7 @@ fn schedule_idle_replenish(
     idle_instances: Arc<Mutex<Vec<PreparedInstance>>>,
     max_idle_instances: usize,
     engine: Engine,
+    epoch_ticker: Arc<EpochTicker>,
     instance_pre: Arc<OnceCell<InstancePre<WasmStoreData>>>,
     max_memory_bytes: u64,
     timeout_ms: u64,
@@ -593,6 +616,7 @@ fn schedule_idle_replenish(
         return;
     }
     tokio::spawn(async move {
+        let _epoch_ticker = epoch_ticker;
         loop {
             {
                 let idle = idle_instances.lock().await;
@@ -851,6 +875,97 @@ mod tests {
             tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
         panic!("idle WASM instance pool did not reach {expected}");
+    }
+
+    async fn wait_for_ticker_stop(ticker: &tokio::task::AbortHandle) {
+        tokio::time::timeout(tokio::time::Duration::from_secs(1), async {
+            while !ticker.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("epoch ticker did not stop");
+    }
+
+    #[tokio::test]
+    async fn dropping_executor_without_work_stops_epoch_ticker() {
+        let module = temp_file("unused.wat", br#"(module (func (export "_start")))"#);
+        let executor = WasmExecutor::new(test_config(module, false)).expect("create executor");
+        let ticker = executor.epoch_ticker.abort.clone();
+        // Let the ticker start so this also covers cancelling its interval wait.
+        tokio::task::yield_now().await;
+        assert!(!ticker.is_finished());
+
+        drop(executor);
+        wait_for_ticker_stop(&ticker).await;
+    }
+
+    #[tokio::test]
+    async fn active_execution_keeps_epoch_ticker_until_aborted() {
+        let module = temp_file(
+            "pending-stdin.wat",
+            br#"(module
+                (import "wasi_snapshot_preview1" "fd_write"
+                    (func $write (param i32 i32 i32 i32) (result i32)))
+                (import "wasi_snapshot_preview1" "fd_read"
+                    (func $read (param i32 i32 i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (data (i32.const 16) "ready")
+                (func (export "_start")
+                    (i32.store (i32.const 0) (i32.const 16))
+                    (i32.store (i32.const 4) (i32.const 5))
+                    (drop (call $write (i32.const 1) (i32.const 0)
+                        (i32.const 1) (i32.const 8)))
+                    (drop (call $read (i32.const 0) (i32.const 0)
+                        (i32.const 1) (i32.const 8)))))"#,
+        );
+        let mut config = test_config(module, true);
+        config.idle_instances = 0;
+        let executor = WasmExecutor::new(config).expect("create executor");
+        let ticker = executor.epoch_ticker.abort.clone();
+        let mut execution = executor
+            .start(WasmRequest {
+                script_name: "/test".into(),
+                path_info: String::new(),
+                query_string: String::new(),
+                request_method: "GET".into(),
+                content_type: String::new(),
+                content_length: 0,
+                server_protocol: "HTTP/1.1".into(),
+                server_name: "localhost".into(),
+                server_port: 80,
+                remote_addr: None,
+                remote_port: None,
+                http_headers: HashMap::new(),
+                identity_env: HashMap::new(),
+            })
+            .await
+            .expect("start execution");
+        let ready =
+            tokio::time::timeout(tokio::time::Duration::from_secs(1), execution.stdout.recv())
+                .await
+                .expect("guest did not start")
+                .expect("guest stdout closed");
+        assert_eq!(ready, Bytes::from_static(b"ready"));
+
+        // Keep stdin open without supplying bytes, leaving fd_read pending.
+        drop(executor);
+        tokio::time::sleep(tokio::time::Duration::from_millis(30)).await;
+        assert!(!execution.done.is_finished(), "guest must still be waiting");
+        assert!(!ticker.is_finished(), "active guest lost its epoch ticker");
+
+        execution.abort.send(()).expect("signal execution abort");
+        let err = tokio::time::timeout(tokio::time::Duration::from_secs(1), &mut execution.done)
+            .await
+            .expect("execution did not finish after abort")
+            .expect("join aborted execution")
+            .expect_err("execution should report abort");
+        assert!(
+            err.chain()
+                .any(|cause| cause.to_string().contains("WASM request aborted")),
+            "unexpected error chain: {err:?}"
+        );
+        wait_for_ticker_stop(&ticker).await;
     }
 
     #[tokio::test]
