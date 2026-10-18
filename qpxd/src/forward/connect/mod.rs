@@ -7,16 +7,17 @@ use crate::http::dispatch::{
     DispatchConnectRuleContextInput, DispatchOutcome, build_dispatch_connect_rule_context,
 };
 use crate::http::local_response::finalized_local_response;
+#[cfg(feature = "auth-basic")]
+use crate::http::protocol::common::forbidden_response as forbidden;
 use crate::http::protocol::common::{
     blocked_response as blocked, connect_established_response as connect_established,
-    forbidden_response as forbidden, http_version_label,
-    too_many_requests_response as too_many_requests,
+    http_version_label, too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
-    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
-    authentication_response_for_error, enforce_decision_service, prepare_decision_service_allow,
-    resolve_identity_for_request, sanitize_headers_for_policy,
+    DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
+    authentication_response_for_error, enforce_decision_service, resolve_identity_for_request,
+    sanitize_headers_for_policy,
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
@@ -35,6 +36,7 @@ use tracing::warn;
 
 mod audit;
 mod connect_h2;
+mod decision_service;
 mod extended;
 mod inspect;
 mod tunnel;
@@ -43,6 +45,7 @@ pub(in crate::forward) mod udp_upstream;
 
 use self::audit::ConnectAuditContext;
 use self::connect_h2::handle_h2_extended_connect;
+use self::decision_service::apply_connect_decision_service;
 pub(super) use self::inspect::{
     ConnectPolicyInput, decide_connect_action_from_client_hello,
     decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
@@ -261,59 +264,17 @@ pub(super) async fn handle_connect(
         decision_service_policy_id: decision_service_policy_id.as_deref(),
         log_context: &log_context,
     };
-    let (response_headers, timeout_override) = match decision_service {
-        DecisionServiceEnforcement::Continue(allow) => {
-            let allow =
-                prepare_decision_service_allow(allow, DecisionServiceMode::ForwardConnect, None)?;
-            if let Some(retry_after) = request_limits.merge_profile_and_check(
-                &state.policy.rate_limiters,
-                allow.rate_limit_profile.as_deref(),
-                TransportScope::Connect,
-                &request_limit_ctx,
-                1,
-            )? {
-                let mut response = finalize_response_for_request(
-                    &Method::CONNECT,
-                    req_version,
-                    proxy_name,
-                    too_many_requests(Some(retry_after)),
-                    false,
-                );
-                request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
-                return Ok(response);
-            }
-            allow.apply_action_overrides(&mut action);
-            (allow.headers, allow.timeout_override)
-        }
-        DecisionServiceEnforcement::Deny(deny) => {
-            let mut response = if let Some(local) = deny.local_response.as_ref() {
-                finalized_local_response(
-                    &Method::CONNECT,
-                    req_version,
-                    proxy_name,
-                    local,
-                    deny.headers.as_deref(),
-                )?
-            } else {
-                finalize_response_with_headers(
-                    &Method::CONNECT,
-                    req_version,
-                    proxy_name,
-                    forbidden(state.messages.forbidden.as_str()),
-                    deny.headers.as_deref(),
-                    false,
-                )
-            };
-            audit.annotate(
-                &mut response,
-                if deny.local_response.is_some() {
-                    DispatchOutcome::DecisionServiceLocalResponse
-                } else {
-                    DispatchOutcome::DecisionServiceDeny
-                },
-            );
-            return Ok(response);
-        }
+    let (response_headers, timeout_override) = match apply_connect_decision_service(
+        decision_service,
+        req_version,
+        proxy_name,
+        &mut request_limits,
+        &request_limit_ctx,
+        &mut action,
+        &audit,
+    )? {
+        std::ops::ControlFlow::Continue(allow) => (allow.headers, allow.timeout_override),
+        std::ops::ControlFlow::Break(response) => return Ok(response),
     };
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)

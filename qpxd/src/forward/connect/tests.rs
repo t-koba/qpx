@@ -47,24 +47,28 @@ fn connect_runtime() -> Runtime {
             },
             original_dst: None,
             tls_inspection: None,
-            rules: vec![RuleConfig {
-                name: "inspect-ja4".to_string(),
-                r#match: Some(MatchConfig {
-                    tls_fingerprint: Some(TlsFingerprintMatchConfig {
-                        ja3: Vec::new(),
-                        ja4: vec!["t13dh2_03_05_02".to_string()],
+            rules: if cfg!(feature = "mitm") {
+                vec![RuleConfig {
+                    name: "inspect-ja4".to_string(),
+                    r#match: Some(MatchConfig {
+                        tls_fingerprint: Some(TlsFingerprintMatchConfig {
+                            ja3: Vec::new(),
+                            ja4: vec!["t13dh2_03_05_02".to_string()],
+                        }),
+                        ..Default::default()
                     }),
-                    ..Default::default()
-                }),
-                auth: None,
-                action: Some(ActionConfig {
-                    kind: ActionKind::Inspect,
-                    upstream: None,
-                    local_response: None,
-                }),
-                headers: None,
-                rate_limit: None,
-            }],
+                    auth: None,
+                    action: Some(ActionConfig {
+                        kind: ActionKind::Inspect,
+                        upstream: None,
+                        local_response: None,
+                    }),
+                    headers: None,
+                    rate_limit: None,
+                }]
+            } else {
+                Vec::new()
+            },
             connection_filter: Vec::new(),
             streaming: None,
             grpc: None,
@@ -89,6 +93,7 @@ fn connect_runtime() -> Runtime {
     .expect("runtime")
 }
 
+#[cfg(feature = "mitm")]
 #[tokio::test]
 async fn connect_client_hello_policy_can_upgrade_tunnel_to_inspect() {
     let runtime = connect_runtime();
@@ -383,4 +388,72 @@ async fn h2_extended_connect_upload_stalls_without_upstream_window() {
         "peer request stream must terminate when the relay tears down"
     );
     server_task.abort();
+}
+
+#[test]
+fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
+    let runtime = connect_runtime();
+    let state = runtime.state();
+    let identity = crate::policy_context::ResolvedIdentity::default();
+    let log_context = identity.to_log_context(None, None, None);
+    let audit = ConnectAuditContext {
+        state: &state,
+        listener_name: "forward",
+        remote_ip: SocketAddr::from(([127, 0, 0, 1], 12345)).ip(),
+        audit_host: "example.com",
+        path: None,
+        matched_rule: None,
+        decision_service_policy_id: None,
+        log_context: &log_context,
+    };
+    let request_limit_ctx = RateLimitContext::from_identity(audit.remote_ip, &identity, None, None);
+    let mut request_limits = crate::rate_limit::AppliedRateLimits::default();
+    let mut action = ActionConfig {
+        kind: ActionKind::Tunnel,
+        upstream: None,
+        local_response: None,
+    };
+
+    let allow = apply_connect_decision_service(
+        crate::policy_context::DecisionServiceEnforcement::Continue(
+            crate::policy_context::DecisionServiceAllow {
+                force_inspect: true,
+                ..Default::default()
+            },
+        ),
+        http::Version::HTTP_11,
+        "qpx",
+        &mut request_limits,
+        &request_limit_ctx,
+        &mut action,
+        &audit,
+    )
+    .expect("allow result");
+    assert!(matches!(
+        allow,
+        std::ops::ControlFlow::Continue(allow)
+            if allow.headers.is_none() && allow.timeout_override.is_none()
+    ));
+    assert!(matches!(action.kind, ActionKind::Inspect));
+
+    let deny = apply_connect_decision_service(
+        crate::policy_context::DecisionServiceEnforcement::Deny(
+            crate::policy_context::DecisionServiceDeny::default(),
+        ),
+        http::Version::HTTP_11,
+        "qpx",
+        &mut request_limits,
+        &request_limit_ctx,
+        &mut action,
+        &audit,
+    )
+    .expect("deny result");
+    match deny {
+        std::ops::ControlFlow::Break(response) => {
+            assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+        }
+        std::ops::ControlFlow::Continue(_) => {
+            panic!("deny enforcement must return a response")
+        }
+    }
 }
