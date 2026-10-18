@@ -499,7 +499,7 @@ fn resilience_to_passive_health(
         latency_min_samples: latency
             .and_then(|cfg| cfg.min_requests)
             .map(u64::from)
-            .unwrap_or(crate::reverse::health::LATENCY_P95_DEFAULT_MIN_SAMPLES)
+            .unwrap_or(crate::upstream::health::LATENCY_P95_DEFAULT_MIN_SAMPLES)
             .max(1),
     }
 }

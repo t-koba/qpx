@@ -1,4 +1,5 @@
 pub mod connect;
+pub(crate) mod health;
 pub mod http1;
 pub(crate) mod io_copy;
 pub mod origin;

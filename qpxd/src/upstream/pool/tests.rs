@@ -3,6 +3,7 @@ use super::cluster::{
 };
 use super::send::upstream_proxy_pool_key;
 use crate::runtime::now_millis;
+use crate::upstream::health::LATENCY_P95_DEFAULT_MIN_SAMPLES;
 use crate::upstream::http1::parse_upstream_proxy_endpoint;
 use arc_swap::ArcSwap;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
@@ -18,7 +19,7 @@ fn policy() -> PassiveHealthPolicy {
         consecutive_resets: 1,
         max_ejection: Duration::from_secs(30),
         latency_threshold: None,
-        latency_min_samples: super::cluster::LATENCY_P95_DEFAULT_MIN_SAMPLES,
+        latency_min_samples: LATENCY_P95_DEFAULT_MIN_SAMPLES,
     }
 }
 
@@ -160,7 +161,7 @@ fn pooled_endpoint_outlier_does_not_trip_p95() {
         consecutive_resets: 100,
         max_ejection: Duration::from_secs(30),
         latency_threshold: Some(Duration::from_millis(100)),
-        latency_min_samples: super::cluster::LATENCY_P95_DEFAULT_MIN_SAMPLES,
+        latency_min_samples: LATENCY_P95_DEFAULT_MIN_SAMPLES,
     };
     for _ in 0..99 {
         endpoint.mark_passive_latency(Some(&policy), Duration::from_millis(1));
@@ -188,7 +189,7 @@ fn cluster_adaptive_failure_rate_ejects_endpoint() {
         consecutive_resets: 100,
         max_ejection: Duration::from_secs(30),
         latency_threshold: None,
-        latency_min_samples: super::cluster::LATENCY_P95_DEFAULT_MIN_SAMPLES,
+        latency_min_samples: LATENCY_P95_DEFAULT_MIN_SAMPLES,
     };
     for _ in 0..4 {
         endpoint.mark_passive_success();

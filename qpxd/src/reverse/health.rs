@@ -1,7 +1,6 @@
+use crate::upstream::health::LatencyWindow;
 use qpx_core::config::{EndpointLifecycleConfig, HealthCheckConfig, HttpHealthCheckConfig};
-use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use tokio::time::Duration;
 
@@ -18,12 +17,6 @@ const ADAPTIVE_FAILURE_RATE_NUM: u32 = 1;
 const ADAPTIVE_FAILURE_RATE_DEN: u32 = 2;
 const ADAPTIVE_LATENCY_MULTIPLIER: u64 = 2;
 const ADAPTIVE_MAX_BACKOFF_SHIFT: u32 = 5;
-/// Trailing per-endpoint latencies kept for the outlier p95. Bounded: one
-/// slow request must not eject while the empirical p95 stays fast.
-pub(super) const LATENCY_P95_WINDOW: usize = 100;
-/// Default requests observed before the trailing p95 can eject. A percentile
-/// needs a full window; override with `outlier_detection.latency.min_requests`.
-pub(super) const LATENCY_P95_DEFAULT_MIN_SAMPLES: u64 = LATENCY_P95_WINDOW as u64;
 
 #[derive(Debug, Clone)]
 pub(super) struct HealthCheckRuntime {
@@ -182,8 +175,7 @@ pub(super) struct UpstreamEndpoint {
     adaptive_failures: AtomicU32,
     adaptive_latency_total_ms: AtomicU64,
     adaptive_latency_samples: AtomicU32,
-    latency_window_ms: Mutex<VecDeque<u64>>,
-    latency_window_total: AtomicU64,
+    latency_window: LatencyWindow,
     ejection_backoff_shift: AtomicU32,
     recovery_start_ms: AtomicU64,
     warmup_until_ms: AtomicU64,
@@ -211,8 +203,7 @@ impl UpstreamEndpoint {
             adaptive_failures: AtomicU32::new(0),
             adaptive_latency_total_ms: AtomicU64::new(0),
             adaptive_latency_samples: AtomicU32::new(0),
-            latency_window_ms: Mutex::new(VecDeque::new()),
-            latency_window_total: AtomicU64::new(0),
+            latency_window: LatencyWindow::new(),
             ejection_backoff_shift: AtomicU32::new(0),
             recovery_start_ms: AtomicU64::new(0),
             warmup_until_ms: AtomicU64::new(0),
@@ -354,11 +345,11 @@ impl UpstreamEndpoint {
             threshold,
             elapsed,
         );
-        self.observe_latency_sample(elapsed);
+        self.latency_window.observe(elapsed);
         let threshold_ms = threshold.as_millis().min(u128::from(u64::MAX)) as u64;
         if elapsed >= threshold
-            && self.latency_window_total.load(Ordering::Relaxed) >= policy.latency_min_samples
-            && self.latency_window_p95_ms() >= threshold_ms
+            && self.latency_window.total() >= policy.latency_min_samples
+            && self.latency_window.p95_ms() >= threshold_ms
         {
             self.eject(
                 policy.ejection_base,
@@ -491,36 +482,6 @@ impl UpstreamEndpoint {
         self.maybe_trim_adaptive_window();
     }
 
-    fn observe_latency_sample(&self, elapsed: Duration) {
-        let sample = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
-        self.latency_window_total.fetch_add(1, Ordering::Relaxed);
-        let mut window = self
-            .latency_window_ms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        window.push_back(sample);
-        while window.len() > LATENCY_P95_WINDOW {
-            window.pop_front();
-        }
-    }
-
-    fn latency_window_p95_ms(&self) -> u64 {
-        let window = self
-            .latency_window_ms
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let n = window.len();
-        if n == 0 {
-            return 0;
-        }
-        let mut sorted: Vec<u64> = window.iter().copied().collect();
-        drop(window);
-        let rank = (n as u64).saturating_mul(95).saturating_add(99) / 100;
-        let rank = rank.clamp(1, n as u64) as usize;
-        let (_, pivot, _) = sorted.select_nth_unstable(rank - 1);
-        *pivot
-    }
-
     fn note_adaptive_failure(
         &self,
         ejection_base: Duration,
@@ -639,6 +600,7 @@ fn passive_failure_reason(kind: PassiveFailureKind) -> EjectionReason {
 #[cfg(test)]
 mod tests {
     use crate::reverse::health::*;
+    use crate::upstream::health::LATENCY_P95_DEFAULT_MIN_SAMPLES;
 
     fn passive_policy() -> PassiveHealthRuntime {
         PassiveHealthRuntime {
