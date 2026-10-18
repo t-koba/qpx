@@ -42,6 +42,28 @@ impl ResourceId {
         Ok(Self(canonical.into()))
     }
 
+    /// Validate the representation emitted by Serialize, not a URL path.
+    /// Percent sequences are literal here: decoding again would change valid
+    /// identifiers such as `/%2e`, originally parsed from `/%252e`.
+    fn from_canonical(path: String) -> Result<Self> {
+        let relative = path
+            .strip_prefix('/')
+            .ok_or_else(|| anyhow!("WebDAV resource path must be root-relative"))?;
+        if !relative.is_empty()
+            && relative
+                .split('/')
+                .any(|segment| matches!(segment, "" | "." | ".."))
+        {
+            return Err(anyhow!("WebDAV resource path is not canonical"));
+        }
+        if path.contains(['?', '#', '\\']) || path.chars().any(char::is_control) {
+            return Err(anyhow!(
+                "WebDAV resource path contains a forbidden character"
+            ));
+        }
+        Ok(Self(path.into()))
+    }
+
     pub fn root() -> Self {
         Self(Arc::from("/"))
     }
@@ -103,7 +125,8 @@ impl<'de> Deserialize<'de> for ResourceId {
     where
         D: Deserializer<'de>,
     {
-        String::deserialize(deserializer).map(|value| Self(value.into()))
+        let value = String::deserialize(deserializer)?;
+        Self::from_canonical(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -116,6 +139,86 @@ impl fmt::Display for ResourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deserialize_rejects_noncanonical_resource_paths() {
+        for path in [
+            "/../outside.txt",
+            "/a/../../outside.txt",
+            "",
+            "outside.txt",
+            "../outside.txt",
+            "//outside.txt",
+            "/a//b",
+            "/a/",
+            "/.",
+            "/a/./b",
+            "/a/..",
+            "/a?query",
+            "/a#fragment",
+            "/a\\b",
+            "/a\0b",
+            "/a\nb",
+            "/a\u{7f}b",
+            "/a\u{85}b",
+        ] {
+            let json = serde_json::to_string(path).unwrap();
+            assert!(
+                serde_json::from_str::<ResourceId>(&json).is_err(),
+                "accepted noncanonical path {path:?}"
+            );
+        }
+        // JSON escapes must not hide traversal from canonical validation.
+        assert!(serde_json::from_str::<ResourceId>(r#""/\u002e\u002e/outside.txt""#).is_err());
+    }
+
+    #[test]
+    fn serialized_resource_ids_roundtrip_without_percent_decoding() {
+        for input in [
+            "/",
+            "/a//./b/",
+            "/%E6%96%87%E6%9B%B8",
+            "/%252e/%252f/%252e%252e/outside.txt",
+            "/%253f/%2523/%255c/%2500/%250a/%25/not%25hex",
+        ] {
+            let resource = ResourceId::parse(input).unwrap();
+            let json = serde_json::to_string(&resource).unwrap();
+            let restored: ResourceId = serde_json::from_str(&json).unwrap();
+            assert_eq!(restored.as_str(), resource.as_str());
+            assert_eq!(restored, resource);
+        }
+        let resource = ResourceId::parse("/%252e/%252f").unwrap();
+        assert_eq!(resource.as_str(), "/%2e/%2f");
+    }
+
+    #[test]
+    fn deserialized_resource_cannot_overwrite_a_filesystem_sibling() {
+        use crate::{FileSystemDataStore, WebDavDataStore};
+
+        let directory = tempfile::tempdir().unwrap();
+        let store = FileSystemDataStore::open(directory.path().join("root")).unwrap();
+        let sentinel = directory.path().join("outside.txt");
+        std::fs::write(&sentinel, b"sentinel").unwrap();
+
+        let attempt = serde_json::from_str::<ResourceId>(r#""/../outside.txt""#)
+            .map_err(anyhow::Error::from)
+            .and_then(|resource| store.put(&resource, b"overwritten", None));
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"sentinel");
+        assert!(attempt.is_err());
+
+        // Percent sequences in serialized canonical paths are literal filenames,
+        // not another opportunity for URL decoding or traversal.
+        let literal: ResourceId = serde_json::from_str(r#""/%2e%2e/outside.txt""#).unwrap();
+        let parent = literal.parent().unwrap();
+        store.create_collection(&parent).unwrap();
+        store.put(&literal, b"inside", None).unwrap();
+        assert_eq!(store.read(&literal).unwrap(), b"inside".as_slice());
+        assert_eq!(
+            std::fs::read(store.root().join("%2e%2e/outside.txt")).unwrap(),
+            b"inside"
+        );
+        assert_eq!(std::fs::read(&sentinel).unwrap(), b"sentinel");
+    }
 
     #[test]
     fn ancestor_or_same_checks_segment_boundaries() {
