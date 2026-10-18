@@ -513,10 +513,14 @@ runtime:
         .authority(target_authority.as_str())
         .path_and_query("*")
         .build()?;
+    // The mock origin responds immediately after the request head; make the
+    // body explicitly empty so this test isolates target-form forwarding from
+    // HTTP/1 chunked-body completion timing.
     let request = http::Request::builder()
         .method(http::Method::OPTIONS)
         .uri(uri)
         .header(http::header::HOST, target_authority.as_str())
+        .header(http::header::CONTENT_LENGTH, "0")
         .body(())?;
     let mut stream = sender.send_request(request).await?;
     stream.finish().await?;
