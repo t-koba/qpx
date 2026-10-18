@@ -279,12 +279,16 @@ impl UpstreamEndpoint {
     }
 
     pub(super) fn mark_failure(&self, policy: &HealthCheckRuntime) {
+        self.mark_failure_at(policy, now_millis());
+    }
+
+    pub(super) fn mark_failure_at(&self, policy: &HealthCheckRuntime, now_ms: u64) {
         let fails = self
             .failures
             .fetch_add(1, Ordering::Relaxed)
             .saturating_add(1);
         if fails >= policy.fail_threshold {
-            self.eject(policy.cooldown, None, EjectionReason::ActiveFailure);
+            self.eject_at(policy.cooldown, None, EjectionReason::ActiveFailure, now_ms);
         }
     }
 
@@ -367,6 +371,10 @@ impl UpstreamEndpoint {
     }
 
     fn eject(&self, base: Duration, cap: Option<Duration>, reason: EjectionReason) {
+        self.eject_at(base, cap, reason, now_millis());
+    }
+
+    fn eject_at(&self, base: Duration, cap: Option<Duration>, reason: EjectionReason, now_ms: u64) {
         let shift = self
             .ejection_backoff_shift
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
@@ -379,7 +387,7 @@ impl UpstreamEndpoint {
             Some(cap) => scaled_ms.min(cap.as_millis().min(u128::from(u64::MAX)) as u64),
             None => scaled_ms,
         };
-        let until = now_millis().saturating_add(scaled_ms);
+        let until = now_ms.saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
         self.admission_state_active.store(true, Ordering::Release);
         self.reset_adaptive_stats();
@@ -387,7 +395,15 @@ impl UpstreamEndpoint {
     }
 
     pub(super) fn begin_recovery_window(&self, lifecycle: &EndpointLifecycleRuntime) {
-        let now = now_millis();
+        self.begin_recovery_window_at(lifecycle, now_millis());
+    }
+
+    pub(super) fn begin_recovery_window_at(
+        &self,
+        lifecycle: &EndpointLifecycleRuntime,
+        now_ms: u64,
+    ) {
+        let now = now_ms;
         let warmup_until = lifecycle
             .warmup
             .map(|duration| now.saturating_add(duration.as_millis() as u64))
@@ -403,13 +419,15 @@ impl UpstreamEndpoint {
         self.refresh_admission_state();
     }
 
-    pub(super) fn mark_draining(&self, lifecycle: &EndpointLifecycleRuntime) -> bool {
+    pub(super) fn mark_draining_at(
+        &self,
+        lifecycle: &EndpointLifecycleRuntime,
+        now_ms: u64,
+    ) -> bool {
         let Some(timeout) = lifecycle.drain_timeout else {
             return false;
         };
-        let until = now_millis()
-            .saturating_add(timeout.as_millis() as u64)
-            .max(1);
+        let until = now_ms.saturating_add(timeout.as_millis() as u64).max(1);
         // Set the deadline only on the transition into draining. Renewing it
         // on every discovery refresh would keep removed endpoints past their
         // drain timeout whenever refreshes outpace it.
@@ -420,10 +438,10 @@ impl UpstreamEndpoint {
         true
     }
 
-    pub(super) fn reactivate(&self, lifecycle: &EndpointLifecycleRuntime) {
+    pub(super) fn reactivate_at(&self, lifecycle: &EndpointLifecycleRuntime, now_ms: u64) {
         let was_draining = self.drain_deadline_ms.swap(0, Ordering::Relaxed) != 0;
         if was_draining {
-            self.begin_recovery_window(lifecycle);
+            self.begin_recovery_window_at(lifecycle, now_ms);
         }
     }
 
@@ -791,18 +809,19 @@ mod tests {
     fn mark_draining_sets_deadline_only_on_transition() {
         // The drain deadline must be fixed at the removal transition: a later
         // refresh must not renew it, or removed endpoints would never retire
-        // while refreshes outpace the timeout.
+        // while refreshes outpace the timeout. Uses a synthetic clock instead
+        // of sleeping between the two marks.
         let lifecycle = EndpointLifecycleRuntime {
             slow_start: None,
             warmup: None,
             drain_timeout: Some(Duration::from_secs(10)),
         };
         let endpoint = UpstreamEndpoint::new("http://example".to_string());
-        assert!(endpoint.mark_draining(&lifecycle));
+        let marked_at = 1_000_000u64;
+        assert!(endpoint.mark_draining_at(&lifecycle, marked_at));
         let first = endpoint.drain_deadline_ms.load(Ordering::Relaxed);
         assert_ne!(first, 0);
-        std::thread::sleep(Duration::from_millis(50));
-        assert!(endpoint.mark_draining(&lifecycle));
+        assert!(endpoint.mark_draining_at(&lifecycle, marked_at.saturating_add(50)));
         let second = endpoint.drain_deadline_ms.load(Ordering::Relaxed);
         assert_eq!(
             first, second,

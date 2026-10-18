@@ -1,7 +1,7 @@
 use super::compile::select_weighted_backend_idx;
 use super::selection::{
     EndpointLifecycleState, count_candidates, endpoint_lifecycle_state, nth_candidate, scope_len,
-    select_upstream_inner, selection_scope,
+    select_upstream_inner, select_upstream_inner_at, selection_scope,
 };
 use super::*;
 use crate::upstream::origin::OriginEndpoint;
@@ -214,7 +214,7 @@ fn draining_endpoint_is_not_selected_while_healthy_peers_exist() {
     };
     let stable = Arc::new(UpstreamEndpoint::new("http://stable".to_string()));
     let draining = Arc::new(UpstreamEndpoint::new("http://drain".to_string()));
-    assert!(draining.mark_draining(&policy.lifecycle));
+    assert!(draining.mark_draining_at(&policy.lifecycle, now_millis()));
     let selected = select_upstream_inner(
         &[stable.clone(), draining],
         &policy,
@@ -249,27 +249,32 @@ fn half_open_endpoint_requires_zero_inflight() {
     };
     let healthy = Arc::new(UpstreamEndpoint::new("http://healthy".to_string()));
     let half_open = Arc::new(UpstreamEndpoint::new("http://half-open".to_string()));
-    half_open.mark_failure(&policy.health);
-    std::thread::sleep(Duration::from_millis(2));
+    // Synthetic clock: fail at t0, observe at the half-open transition
+    // (t0 + cooldown) instead of sleeping on the wall clock.
+    let failed_at = 1_000_000u64;
+    half_open.mark_failure_at(&policy.health, failed_at);
+    let now_ms = failed_at.saturating_add(policy.health.cooldown.as_millis() as u64);
     half_open.inflight.store(1, Ordering::Relaxed);
 
-    let selected = select_upstream_inner(
+    let selected = select_upstream_inner_at(
         &[healthy.clone(), half_open.clone()],
         &policy,
         &AtomicUsize::new(0),
         7,
         7,
+        now_ms,
     )
     .expect("selected");
     assert_eq!(selected.target, healthy.target);
 
     half_open.inflight.store(0, Ordering::Relaxed);
-    let selected = select_upstream_inner(
+    let selected = select_upstream_inner_at(
         std::slice::from_ref(&half_open),
         &policy,
         &AtomicUsize::new(0),
         11,
         11,
+        now_ms,
     )
     .expect("selected");
     assert_eq!(selected.target, half_open.target);
@@ -782,7 +787,7 @@ fn selection_never_returns_rejected_endpoint_when_peer_flaps() {
     ] {
         let policy = policy_for(lb);
         let rejected = Arc::new(UpstreamEndpoint::new("http://rejected".to_string()));
-        assert!(rejected.mark_draining(&policy.lifecycle));
+        assert!(rejected.mark_draining_at(&policy.lifecycle, now_millis()));
         let flapping = Arc::new(UpstreamEndpoint::new("http://flapping".to_string()));
         let upstreams = vec![rejected.clone(), flapping.clone()];
         let stop = Arc::new(AtomicBool::new(false));
@@ -839,7 +844,7 @@ fn stale_count_scan_never_falls_back_to_rejected_endpoint() {
         lb: LoadBalanceStrategy::RoundRobin,
     };
     let rejected = Arc::new(UpstreamEndpoint::new("http://rejected".to_string()));
-    assert!(rejected.mark_draining(&policy.lifecycle));
+    assert!(rejected.mark_draining_at(&policy.lifecycle, now_millis()));
     let flapping = Arc::new(UpstreamEndpoint::new("http://flapping".to_string()));
     let upstreams = vec![rejected.clone(), flapping.clone()];
 
@@ -876,7 +881,8 @@ fn stale_count_scan_never_falls_back_to_rejected_endpoint() {
 #[test]
 fn removed_dynamic_endpoint_retires_after_drain_timeout() {
     // A removed endpoint drains once and then retires: repeated discovery
-    // refreshes must not renew its drain deadline.
+    // refreshes must not renew its drain deadline. Uses a synthetic clock
+    // instead of sleeping past the 100ms drain timeout.
     let lifecycle = EndpointLifecycleRuntime {
         slow_start: None,
         warmup: None,
@@ -884,9 +890,12 @@ fn removed_dynamic_endpoint_retires_after_drain_timeout() {
     };
     let first = Arc::new(UpstreamEndpoint::new("http://a".to_string()));
     let pool = UpstreamEndpointSet::new(vec![], vec![first.clone()], vec![], lifecycle.clone());
+    let removed_at = 1_000_000u64;
 
-    let combined =
-        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    let combined = pool.reconcile_dynamic_endpoints_at(
+        vec![OriginEndpoint::direct("http://b".to_string())],
+        removed_at,
+    );
     assert!(
         combined
             .iter()
@@ -894,9 +903,10 @@ fn removed_dynamic_endpoint_retires_after_drain_timeout() {
     );
     pool.endpoints.store(Arc::new(combined));
 
-    std::thread::sleep(Duration::from_millis(150));
-    let combined =
-        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    let combined = pool.reconcile_dynamic_endpoints_at(
+        vec![OriginEndpoint::direct("http://b".to_string())],
+        removed_at.saturating_add(150),
+    );
     assert!(
         !combined
             .iter()
@@ -909,11 +919,10 @@ fn removed_dynamic_endpoint_retires_after_drain_timeout() {
 fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
     // Repeated discovery refreshes must not renew the drain deadline: the
     // removed endpoint retires once the original timeout elapses even though
-    // refreshes outpace it. Scales the bounded experiment (10s drain timeout
-    // with 5s refresh) down to 2s/300ms: refreshes stay well under the
-    // timeout (robust presence checks on loaded runners) while a renewal bug
-    // would still push the deadline past the final check. No in-flight
-    // requests, so retention depends only on the deadline.
+    // refreshes outpace it. Uses a synthetic clock (2s drain timeout,
+    // refreshes every 300ms, final check past the deadline) instead of
+    // sleeping on the wall clock. No in-flight requests, so retention
+    // depends only on the deadline.
     let lifecycle = EndpointLifecycleRuntime {
         slow_start: None,
         warmup: None,
@@ -921,9 +930,12 @@ fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
     };
     let first = Arc::new(UpstreamEndpoint::new("http://a".to_string()));
     let pool = UpstreamEndpointSet::new(vec![], vec![first.clone()], vec![], lifecycle.clone());
+    let removed_at = 1_000_000u64;
 
-    let combined =
-        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    let combined = pool.reconcile_dynamic_endpoints_at(
+        vec![OriginEndpoint::direct("http://b".to_string())],
+        removed_at,
+    );
     let draining = combined
         .iter()
         .find(|endpoint| endpoint.target == "http://a")
@@ -933,10 +945,12 @@ fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
     assert_eq!(draining.inflight.load(Ordering::Relaxed), 0);
     pool.endpoints.store(Arc::new(combined));
 
-    for _ in 0..3 {
-        std::thread::sleep(Duration::from_millis(300));
-        let combined =
-            pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    for step in 1..=3u64 {
+        let now_ms = removed_at.saturating_add(step.saturating_mul(300));
+        let combined = pool.reconcile_dynamic_endpoints_at(
+            vec![OriginEndpoint::direct("http://b".to_string())],
+            now_ms,
+        );
         let draining = combined
             .iter()
             .find(|endpoint| endpoint.target == "http://a")
@@ -945,9 +959,10 @@ fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
         pool.endpoints.store(Arc::new(combined));
     }
 
-    std::thread::sleep(Duration::from_millis(1500));
-    let combined =
-        pool.reconcile_dynamic_endpoints(vec![OriginEndpoint::direct("http://b".to_string())]);
+    let combined = pool.reconcile_dynamic_endpoints_at(
+        vec![OriginEndpoint::direct("http://b".to_string())],
+        removed_at.saturating_add(2400),
+    );
     assert!(
         !combined
             .iter()

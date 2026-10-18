@@ -263,7 +263,14 @@ impl UpstreamEndpointSet {
         &self,
         resolved: Vec<OriginEndpoint>,
     ) -> Vec<Arc<UpstreamEndpoint>> {
-        let now_ms = now_millis();
+        self.reconcile_dynamic_endpoints_at(resolved, now_millis())
+    }
+
+    pub(in crate::reverse) fn reconcile_dynamic_endpoints_at(
+        &self,
+        resolved: Vec<OriginEndpoint>,
+        now_ms: u64,
+    ) -> Vec<Arc<UpstreamEndpoint>> {
         let static_labels = self
             .static_endpoints
             .iter()
@@ -279,11 +286,11 @@ impl UpstreamEndpointSet {
         for origin in resolved {
             let label = origin.label();
             if let Some(endpoint) = reusable.remove(label) {
-                endpoint.reactivate(&self.lifecycle);
+                endpoint.reactivate_at(&self.lifecycle, now_ms);
                 combined.push(endpoint);
             } else {
                 let endpoint = Arc::new(UpstreamEndpoint::from_origin(origin));
-                endpoint.begin_recovery_window(&self.lifecycle);
+                endpoint.begin_recovery_window_at(&self.lifecycle, now_ms);
                 combined.push(endpoint);
             }
         }
@@ -295,7 +302,7 @@ impl UpstreamEndpointSet {
             let draining = if endpoint.is_draining() {
                 true
             } else {
-                endpoint.mark_draining(&self.lifecycle)
+                endpoint.mark_draining_at(&self.lifecycle, now_ms)
             };
             if draining && endpoint.should_retain_draining(now_ms) {
                 combined.push(endpoint);

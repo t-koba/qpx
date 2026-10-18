@@ -14,6 +14,24 @@ pub(super) fn select_upstream_inner(
     request_seed: u64,
     sticky_seed: u64,
 ) -> Option<Arc<UpstreamEndpoint>> {
+    select_upstream_inner_at(
+        upstreams,
+        policy,
+        rr_counter,
+        request_seed,
+        sticky_seed,
+        now_millis(),
+    )
+}
+
+pub(super) fn select_upstream_inner_at(
+    upstreams: &[Arc<UpstreamEndpoint>],
+    policy: &RoutePolicy,
+    rr_counter: &AtomicUsize,
+    request_seed: u64,
+    sticky_seed: u64,
+    now_ms: u64,
+) -> Option<Arc<UpstreamEndpoint>> {
     if upstreams.is_empty() {
         return None;
     }
@@ -25,13 +43,11 @@ pub(super) fn select_upstream_inner(
                 .is_none_or(|max| endpoint.inflight.load(Ordering::Relaxed) < max)
                 .then(|| endpoint.clone());
         }
-        let now_ms = now_millis();
         let gate_seed = request_seed ^ sticky_seed;
         return classify_endpoint(endpoint, policy, now_ms, gate_seed)
             .is_some()
             .then(|| endpoint.clone());
     }
-    let now_ms = now_millis();
     let gate_seed = request_seed ^ sticky_seed;
     let counts = count_candidates(upstreams, policy, now_ms, gate_seed);
     if counts.eligible == 0 {
