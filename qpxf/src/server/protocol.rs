@@ -201,13 +201,14 @@ fn find_cgi_header_terminator(prefix: &[u8], chunk: &[u8]) -> Option<(usize, usi
             return Some((idx, 4));
         }
     }
-    if let Some(pos) = memmem::find(chunk, b"\n\n") {
-        return Some((prefix_len + pos, 2));
-    }
-    if let Some(pos) = memmem::find(chunk, b"\r\n\r\n") {
-        return Some((prefix_len + pos, 4));
-    }
-    None
+    // Body bytes may contain the other delimiter, so choose by position, not form.
+    [
+        memmem::find(chunk, b"\n\n").map(|pos| (prefix_len + pos, 2)),
+        memmem::find(chunk, b"\r\n\r\n").map(|pos| (prefix_len + pos, 4)),
+    ]
+    .into_iter()
+    .flatten()
+    .min_by_key(|&(pos, _)| pos)
 }
 
 fn stdin_chunk_exceeds_declared_length(
@@ -757,6 +758,41 @@ mod tests {
         assert!(stdin_chunk_exceeds_declared_length(Some(5), 0, 6));
         assert!(stdin_chunk_exceeds_declared_length(Some(5), 4, 2));
         assert!(!stdin_chunk_exceeds_declared_length(None, usize::MAX, 1));
+    }
+
+    #[test]
+    fn cgi_header_parser_preserves_body_with_mixed_terminators_at_every_split() {
+        for (headers, body) in [
+            (
+                b"Status: 200 OK\r\nContent-Type: text/plain\r\n\r\n".as_slice(),
+                b"alpha\n\nbeta".as_slice(),
+            ),
+            (
+                b"Status: 200 OK\nContent-Type: text/plain\n\n".as_slice(),
+                b"alpha\r\n\r\nbeta".as_slice(),
+            ),
+        ] {
+            let response = [headers, body].concat();
+            for split in 0..=response.len() {
+                let mut header_buf = BytesMut::new();
+                let mut parsed = false;
+                let mut actual_body = Vec::new();
+                for chunk in [&response[..split], &response[split..]] {
+                    if parsed {
+                        actual_body.extend_from_slice(chunk);
+                    } else if let Some(head) =
+                        consume_cgi_stdout_header(&mut header_buf, Bytes::copy_from_slice(chunk))
+                            .expect("valid CGI headers")
+                    {
+                        assert_eq!(head.meta.status, 200);
+                        actual_body.extend_from_slice(&head.body_leftover);
+                        parsed = true;
+                    }
+                }
+                assert!(parsed, "headers not parsed at split {split}");
+                assert_eq!(actual_body, body, "body changed at split {split}");
+            }
+        }
     }
 
     #[test]
