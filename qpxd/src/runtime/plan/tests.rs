@@ -344,6 +344,7 @@ fn streaming_required_rejects_response_rules_that_need_request_body_observation(
     assert!(err.to_string().contains("response_rules"));
 }
 
+#[cfg(feature = "http3")]
 #[test]
 fn request_side_fail_closed_merges_field_by_field() {
     use qpx_core::config::SseFlushPolicy;

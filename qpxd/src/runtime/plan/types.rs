@@ -121,6 +121,7 @@ impl ResolvedStreamingLimits {
     /// unclamped minimum, observation and SSE compression flags are OR-ed,
     /// `sse.flush_policy` is kept from the left operand, and the remaining
     /// SSE limits take the minimum clamped to at least 1.
+    #[cfg(feature = "http3")]
     pub(crate) fn request_side_fail_closed(self, other: Self) -> Self {
         Self {
             body_channel_capacity: self
