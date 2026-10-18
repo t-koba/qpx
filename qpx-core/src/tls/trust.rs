@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use std::collections::HashSet;
+use std::fmt::Write;
 #[cfg(feature = "tls-rustls")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -150,22 +151,36 @@ impl CompiledUpstreamTlsTrust {
     }
 
     /// Stable key used to separate connection pools by trust policy.
+    ///
+    /// Version 1 uses byte-length-prefixed fields in fixed order: pins, issuer,
+    /// SAN DNS, SAN URI, then an explicit client-auth presence flag and both paths.
+    /// Pattern categories and lists are independently framed, so delimiters in
+    /// configured values cannot change field or alternative boundaries.
     pub fn pool_key(&self) -> String {
-        format!(
-            "pin={}|issuer={}|san_dns={}|san_uri={}|client_cert={}|client_key={}",
-            sorted_join(self.pin_sha256.iter().map(String::as_str)),
+        let mut key = String::from("upstream-tls-v1:");
+        for field in [
+            sorted_list_key(self.pin_sha256.iter().map(String::as_str)),
             self.issuer.pool_key(),
             self.san_dns.pool_key(),
             self.san_uri.pool_key(),
-            self.client_auth
-                .as_ref()
-                .map(|auth| auth.cert.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-            self.client_auth
-                .as_ref()
-                .map(|auth| auth.key.to_string_lossy().into_owned())
-                .unwrap_or_default()
-        )
+        ] {
+            push_key_field(&mut key, &field);
+        }
+        match &self.client_auth {
+            None => key.push('0'),
+            Some(auth) => {
+                key.push('1');
+                for path in [&auth.cert, &auth.key] {
+                    // Preserve path bytes rather than using a lossy UTF-8 conversion.
+                    let mut encoded = String::new();
+                    for byte in path.as_os_str().as_encoded_bytes() {
+                        write!(encoded, "{byte:02x}").expect("writing to String");
+                    }
+                    push_key_field(&mut key, &encoded);
+                }
+            }
+        }
+        key
     }
 }
 
@@ -308,20 +323,33 @@ impl PatternSet {
     }
 
     fn pool_key(&self) -> String {
-        format!(
-            "exact={};suffix={};glob={};regex={}",
-            sorted_join(self.exact.iter().map(String::as_str)),
-            sorted_join(self.suffix.iter().map(String::as_str)),
-            sorted_join(self.glob_patterns.iter().map(String::as_str)),
-            sorted_join(self.regex.iter().map(Regex::as_str))
-        )
+        let mut key = String::new();
+        // Fixed category order: exact, suffix, glob, regex.
+        for category in [
+            sorted_list_key(self.exact.iter().map(String::as_str)),
+            sorted_list_key(self.suffix.iter().map(String::as_str)),
+            sorted_list_key(self.glob_patterns.iter().map(String::as_str)),
+            sorted_list_key(self.regex.iter().map(Regex::as_str)),
+        ] {
+            push_key_field(&mut key, &category);
+        }
+        key
     }
 }
 
-fn sorted_join<'a>(values: impl Iterator<Item = &'a str>) -> String {
+fn push_key_field(key: &mut String, value: &str) {
+    write!(key, "{}:", value.len()).expect("writing to String");
+    key.push_str(value);
+}
+
+fn sorted_list_key<'a>(values: impl Iterator<Item = &'a str>) -> String {
     let mut values = values.collect::<Vec<_>>();
     values.sort_unstable();
-    values.join(",")
+    let mut key = format!("{}:", values.len());
+    for value in values {
+        push_key_field(&mut key, value);
+    }
+    key
 }
 
 fn normalize_text(value: &str) -> Option<String> {
@@ -423,5 +451,154 @@ mod tests {
             fingerprint_sha256: None,
         };
         assert!(trust.validate_certificate("example.com", &cert).is_err());
+    }
+
+    fn compile(raw: &UpstreamTlsTrustConfig) -> Arc<CompiledUpstreamTlsTrust> {
+        CompiledUpstreamTlsTrust::from_config(Some(raw))
+            .expect("compile trust")
+            .expect("trust present")
+    }
+
+    #[test]
+    fn pool_key_distinguishes_uri_alternatives_with_different_validation() {
+        let combined = compile(&UpstreamTlsTrustConfig {
+            san_uri: vec!["spiffe://a,spiffe://b".into()],
+            ..Default::default()
+        });
+        let alternatives = compile(&UpstreamTlsTrustConfig {
+            san_uri: vec!["spiffe://a".into(), "spiffe://b".into()],
+            ..Default::default()
+        });
+        let cert = UpstreamCertificateInfo {
+            present: true,
+            san_uri: vec!["spiffe://a".into()],
+            ..Default::default()
+        };
+        assert!(combined.validate_certificate("example.com", &cert).is_err());
+        assert!(
+            alternatives
+                .validate_certificate("example.com", &cert)
+                .is_ok()
+        );
+        assert_ne!(combined.pool_key(), alternatives.pool_key());
+    }
+
+    #[test]
+    fn pool_key_distinguishes_pattern_list_and_category_boundaries() {
+        for (combined, alternatives) in [
+            (vec!["a,b"], vec!["a", "b"]),
+            (vec!["*.a,*.b"], vec!["*.a", "*.b"]),
+            (vec!["a*,b*"], vec!["a*", "b*"]),
+            (vec!["re:a,re:b"], vec!["re:a", "re:b"]),
+            (vec!["a;suffix=b"], vec!["a", "*.b;suffix="]),
+        ] {
+            let combined = PatternSet::compile_domain(
+                &combined.into_iter().map(str::to_owned).collect::<Vec<_>>(),
+            )
+            .unwrap();
+            let alternatives = PatternSet::compile_domain(
+                &alternatives
+                    .into_iter()
+                    .map(str::to_owned)
+                    .collect::<Vec<_>>(),
+            )
+            .unwrap();
+            assert_ne!(combined.pool_key(), alternatives.pool_key());
+        }
+        let combined = compile(&UpstreamTlsTrustConfig {
+            pin_sha256: vec!["a,b".into()],
+            ..Default::default()
+        });
+        let alternatives = compile(&UpstreamTlsTrustConfig {
+            pin_sha256: vec!["a".into(), "b".into()],
+            ..Default::default()
+        });
+        assert_ne!(combined.pool_key(), alternatives.pool_key());
+    }
+
+    #[test]
+    fn pool_key_distinguishes_top_level_and_client_path_boundaries() {
+        let first = compile(&UpstreamTlsTrustConfig {
+            san_uri: vec!["spiffe://a".into()],
+            client_cert: Some("cert|client_key=extra".into()),
+            client_key: Some("key".into()),
+            ..Default::default()
+        });
+        let second = compile(&UpstreamTlsTrustConfig {
+            san_uri: vec!["spiffe://a".into()],
+            client_cert: Some("cert".into()),
+            client_key: Some("extra|client_key=key".into()),
+            ..Default::default()
+        });
+        assert_ne!(first.pool_key(), second.pool_key());
+
+        let first = compile(&UpstreamTlsTrustConfig {
+            issuer: vec!["a;suffix=;glob=;regex=|san_dns=exact=b".into()],
+            ..Default::default()
+        });
+        let second = compile(&UpstreamTlsTrustConfig {
+            issuer: vec!["a".into()],
+            san_dns: vec!["b;suffix=;glob=;regex=|san_dns=exact=".into()],
+            ..Default::default()
+        });
+        assert_ne!(first.pool_key(), second.pool_key());
+
+        let raw = UpstreamTlsTrustConfig {
+            san_uri: vec!["spiffe://a".into()],
+            ..Default::default()
+        };
+        let absent = compile(&raw);
+        let present = compile(&UpstreamTlsTrustConfig {
+            client_cert: Some(String::new()),
+            client_key: Some(String::new()),
+            ..raw
+        });
+        assert_ne!(absent.pool_key(), present.pool_key());
+    }
+
+    #[test]
+    fn pool_key_preserves_normalized_reordering_equivalence() {
+        let mut raw = UpstreamTlsTrustConfig {
+            pin_sha256: vec![" BB ".into(), "aa".into()],
+            issuer: vec![
+                "CN=B".into(),
+                "cn=a".into(),
+                "cn=*".into(),
+                "re:cn=.*".into(),
+            ],
+            san_dns: vec![
+                "B.EXAMPLE.".into(),
+                "a.example".into(),
+                "*.b.example".into(),
+                "*.a.example".into(),
+                "b*.example".into(),
+                "a*.example".into(),
+                "re:b.*".into(),
+                "re:a.*".into(),
+            ],
+            san_uri: vec![
+                "SPIFFE://B".into(),
+                "spiffe://a".into(),
+                "spiffe://b*".into(),
+                "spiffe://a*".into(),
+                "re:spiffe://b.*".into(),
+                "re:spiffe://a.*".into(),
+            ],
+            client_cert: Some("cert".into()),
+            client_key: Some("key".into()),
+        };
+        let first = compile(&raw);
+        for values in [
+            &mut raw.pin_sha256,
+            &mut raw.issuer,
+            &mut raw.san_dns,
+            &mut raw.san_uri,
+        ] {
+            values.reverse();
+            for value in values {
+                *value = value.trim().trim_end_matches('.').to_ascii_lowercase();
+            }
+        }
+        assert_eq!(first.pool_key(), compile(&raw).pool_key());
     }
 }
