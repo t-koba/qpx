@@ -105,7 +105,7 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                         for algorithm in algorithms {
                             if !matches!(
                                 algorithm.as_str(),
-                                "RS256" | "RS384" | "RS512" | "ES256" | "ES384"
+                                "RS256" | "RS384" | "RS512" | "ES256" | "ES384" | "EdDSA"
                             ) {
                                 return Err(anyhow!(
                                     "identity_sources {} bearer JWT algorithm is unsupported: {}",
@@ -1279,4 +1279,51 @@ pub(super) fn default_signed_assertion_algorithms(
         algorithms.push("HS256".to_string());
     }
     algorithms
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::DpopConfig;
+
+    #[test]
+    fn bearer_jwt_validates_supported_algorithms_only() {
+        for alg in [
+            "RS256", "RS384", "RS512", "ES256", "ES384", "EdDSA", "HS256", "ES512", "PS256",
+            "PS384", "PS512", "none",
+        ] {
+            let source: IdentitySourceConfig = serde_json::from_value(serde_json::json!({
+                "name":"test", "type":"bearer", "bearer": {"claims":{"user_from_sub":true}, "source": {
+                    "mode":"jwt", "issuer":"test", "audience":"test", "public_key_env":"TEST_JWT_PUBLIC_KEY", "algorithms":[alg]
+                }}
+            })).unwrap();
+            let expected = matches!(
+                alg,
+                "RS256" | "RS384" | "RS512" | "ES256" | "ES384" | "EdDSA"
+            );
+            let result = validate_identity_sources(&[source]);
+            assert_eq!(result.is_ok(), expected, "{alg}: {result:?}");
+        }
+    }
+
+    #[test]
+    fn dpop_default_and_validation_match_runtime_algorithms() {
+        let default = DpopConfig::default();
+        assert_eq!(
+            default.algorithms,
+            ["ES256", "ES384", "RS256", "RS384", "RS512", "EdDSA"]
+        );
+        validate_dpop_config(&default, "test").unwrap();
+        for alg in &default.algorithms {
+            crate::dpop::DpopAlgorithm::parse(alg).unwrap();
+        }
+        for alg in ["ES512", "PS256", "PS384", "PS512"] {
+            let config = DpopConfig {
+                algorithms: vec![alg.into()],
+                ..default.clone()
+            };
+            assert!(validate_dpop_config(&config, "test").is_err());
+            assert!(crate::dpop::DpopAlgorithm::parse(alg).is_err());
+        }
+    }
 }

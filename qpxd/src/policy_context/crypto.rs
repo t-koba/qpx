@@ -13,6 +13,7 @@ pub(super) enum JwtAlgorithm {
     Rs512,
     Es256,
     Es384,
+    Ed25519,
 }
 
 impl JwtAlgorithm {
@@ -26,6 +27,7 @@ impl JwtAlgorithm {
             "RS512" => Ok(Self::Rs512),
             "ES256" => Ok(Self::Es256),
             "ES384" => Ok(Self::Es384),
+            "EDDSA" => Ok(Self::Ed25519),
             other => Err(anyhow!("unsupported JWT algorithm: {}", other)),
         }
     }
@@ -40,6 +42,7 @@ impl JwtAlgorithm {
             Self::Rs512 => "RS512",
             Self::Es256 => "ES256",
             Self::Es384 => "ES384",
+            Self::Ed25519 => "EdDSA",
         }
     }
 
@@ -78,6 +81,9 @@ impl JwtAlgorithm {
                 data,
                 signature_bytes,
             ),
+            Self::Ed25519 => {
+                verify_public_key_signature(&signature::ED25519, public_key, data, signature_bytes)
+            }
             Self::Es384 => verify_public_key_signature(
                 &signature::ECDSA_P384_SHA384_FIXED,
                 public_key,
@@ -96,7 +102,7 @@ mod tests {
     #[test]
     fn parse_known_algorithms() {
         for raw in [
-            "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "ES256", "ES384",
+            "HS256", "HS384", "HS512", "RS256", "RS384", "RS512", "ES256", "ES384", "EdDSA",
         ] {
             assert!(JwtAlgorithm::parse(raw).is_ok(), "{raw}");
         }
@@ -135,9 +141,69 @@ mod tests {
             JwtAlgorithm::Rs512,
             JwtAlgorithm::Es256,
             JwtAlgorithm::Es384,
+            JwtAlgorithm::Ed25519,
         ] {
             assert_eq!(JwtAlgorithm::parse(alg.header_name()).unwrap(), alg);
         }
+    }
+
+    #[test]
+    fn ed25519_verifies_raw_and_spki_keys_and_fails_closed() {
+        use crate::policy_context::util::parse_public_key_material;
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use ring::signature::KeyPair as _;
+
+        // Deterministic synthetic key used only in tests.
+        let pair = signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap();
+        let public_key = pair.public_key().as_ref();
+        let input = b"eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0In0";
+        let sig = pair.sign(input);
+        let raw = STANDARD.encode(public_key);
+        // RFC 8410 Ed25519 SubjectPublicKeyInfo prefix.
+        let mut spki = vec![
+            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
+        ];
+        spki.extend_from_slice(public_key);
+        let pem = pem::encode(&pem::Pem::new("PUBLIC KEY", spki));
+        for encoded in [raw, pem] {
+            let key = parse_public_key_material(&encoded).unwrap();
+            assert_eq!(key, public_key);
+            JwtAlgorithm::Ed25519
+                .verify(None, Some(&key), input, sig.as_ref())
+                .unwrap();
+        }
+        for key in [None, Some(&public_key[..31]), Some(&[0; 33][..])] {
+            assert!(
+                JwtAlgorithm::Ed25519
+                    .verify(None, key, input, sig.as_ref())
+                    .is_err()
+            );
+        }
+        assert!(
+            JwtAlgorithm::Ed25519
+                .verify(Some(public_key), None, input, sig.as_ref())
+                .is_err()
+        );
+        for bad_sig in [&sig.as_ref()[..63], &[0; 64][..]] {
+            assert!(
+                JwtAlgorithm::Ed25519
+                    .verify(None, Some(public_key), input, bad_sig)
+                    .is_err()
+            );
+        }
+        assert!(
+            JwtAlgorithm::Ed25519
+                .verify(None, Some(public_key), b"changed", sig.as_ref())
+                .is_err()
+        );
+        for wrong_algorithm in [JwtAlgorithm::Es256, JwtAlgorithm::Rs256] {
+            assert!(
+                wrong_algorithm
+                    .verify(None, Some(public_key), input, sig.as_ref())
+                    .is_err()
+            );
+        }
+        assert_eq!(JwtAlgorithm::parse("eddsa").unwrap().header_name(), "EdDSA");
     }
 
     #[test]

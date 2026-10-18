@@ -357,10 +357,6 @@ impl DpopSignatureVerifier for RingDpopSignatureVerifier<'_> {
                 &signature::ED25519,
                 key.x_bytes().ok_or(DpopSignatureError::Invalid)?.to_vec(),
             ),
-            DpopAlgorithm::Es512
-            | DpopAlgorithm::Ps256
-            | DpopAlgorithm::Ps384
-            | DpopAlgorithm::Ps512 => return Err(DpopSignatureError::Unavailable),
         };
         signature::UnparsedPublicKey::new(verification_algorithm, public_key)
             .verify(signing_input, signature_bytes)
@@ -399,7 +395,8 @@ struct CachedJwks {
 #[derive(Debug, Clone)]
 struct JwkVerificationKey {
     kid: Option<String>,
-    algorithm: JwtAlgorithm,
+    // Only RSA keys may omit alg; selection then permits RS256/RS384/RS512 only.
+    algorithm: Option<JwtAlgorithm>,
     key: Arc<[u8]>,
 }
 
@@ -710,7 +707,15 @@ fn select_jwks_key(
         return Ok(None);
     };
     let mut matching = cached.keys.iter().filter(|key| {
-        key.algorithm == algorithm && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
+        key.algorithm.map_or_else(
+            || {
+                matches!(
+                    algorithm,
+                    JwtAlgorithm::Rs256 | JwtAlgorithm::Rs384 | JwtAlgorithm::Rs512
+                )
+            },
+            |key_algorithm| key_algorithm == algorithm,
+        ) && kid.is_none_or(|kid| key.kid.as_deref() == Some(kid))
     });
     let Some(key) = matching.next() else {
         return Ok(None);
@@ -1004,7 +1009,7 @@ impl JwkVerificationKey {
                 }
                 Ok(Some(Self {
                     kid: jwk.kid,
-                    algorithm: JwtAlgorithm::Es256,
+                    algorithm: Some(JwtAlgorithm::Es256),
                     key: Arc::from(key),
                 }))
             }
@@ -1026,7 +1031,25 @@ impl JwkVerificationKey {
                 }
                 Ok(Some(Self {
                     kid: jwk.kid,
-                    algorithm: JwtAlgorithm::Es384,
+                    algorithm: Some(JwtAlgorithm::Es384),
+                    key: Arc::from(key),
+                }))
+            }
+            "OKP"
+                if jwk.crv.as_deref() == Some("Ed25519")
+                    && jwk
+                        .alg
+                        .as_deref()
+                        .is_none_or(|algorithm| algorithm == "EdDSA") =>
+            {
+                let key =
+                    URL_SAFE_NO_PAD.decode(jwk.x.ok_or_else(|| anyhow!("JWK x is missing"))?)?;
+                if key.len() != 32 {
+                    return Err(anyhow!("Ed25519 JWK public key has invalid length"));
+                }
+                Ok(Some(Self {
+                    kid: jwk.kid,
+                    algorithm: Some(JwtAlgorithm::Ed25519),
                     key: Arc::from(key),
                 }))
             }
@@ -1040,7 +1063,7 @@ impl JwkVerificationKey {
                     URL_SAFE_NO_PAD.decode(jwk.n.ok_or_else(|| anyhow!("JWK n is missing"))?)?;
                 let e =
                     URL_SAFE_NO_PAD.decode(jwk.e.ok_or_else(|| anyhow!("JWK e is missing"))?)?;
-                let algorithm = JwtAlgorithm::parse(jwk.alg.as_deref().unwrap_or("RS256"))?;
+                let algorithm = jwk.alg.as_deref().map(JwtAlgorithm::parse).transpose()?;
                 Ok(Some(Self {
                     kid: jwk.kid,
                     algorithm,
@@ -1105,6 +1128,152 @@ mod tests {
     }
 
     #[test]
+    fn rsa_jwks_selection_respects_optional_alg() {
+        for explicit in [None, Some("RS256"), Some("RS384"), Some("RS512")] {
+            let mut jwk = serde_json::json!({"kty":"RSA", "kid":"rsa", "n":"AQ", "e":"AQAB"});
+            if let Some(alg) = explicit {
+                jwk["alg"] = alg.into();
+            }
+            let cached = CachedJwks {
+                keys: verification_keys(parse_jwks(&serde_json::json!({"keys":[jwk]}).to_string()))
+                    .unwrap(),
+                expires_at: Instant::now() + Duration::from_secs(60),
+            };
+            for algorithm in [
+                JwtAlgorithm::Rs256,
+                JwtAlgorithm::Rs384,
+                JwtAlgorithm::Rs512,
+            ] {
+                let expected = explicit.is_none_or(|alg| alg == algorithm.header_name());
+                for kid in [None, Some("rsa")] {
+                    assert_eq!(
+                        select_jwks_key(Some(&cached), kid, algorithm)
+                            .unwrap()
+                            .is_some(),
+                        expected
+                    );
+                }
+                assert!(
+                    select_jwks_key(Some(&cached), Some("other"), algorithm)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+            for algorithm in [
+                JwtAlgorithm::Es256,
+                JwtAlgorithm::Es384,
+                JwtAlgorithm::Ed25519,
+                JwtAlgorithm::Hs256,
+                JwtAlgorithm::Hs384,
+                JwtAlgorithm::Hs512,
+            ] {
+                assert!(
+                    select_jwks_key(Some(&cached), None, algorithm)
+                        .unwrap()
+                        .is_none()
+                );
+            }
+        }
+        for alg in ["ES256", "EdDSA", "HS256"] {
+            let document = parse_jwks(
+                &serde_json::json!({"keys":[{"kty":"RSA", "alg":alg, "n":"AQ", "e":"AQAB"}]})
+                    .to_string(),
+            );
+            assert!(verification_keys(document).unwrap().is_empty());
+        }
+    }
+
+    #[test]
+    fn ed25519_jwks_keys_verify_and_reject_invalid_metadata_or_material() {
+        let pair = signature::Ed25519KeyPair::from_seed_unchecked(&[42; 32]).unwrap();
+        let input = b"eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJ0ZXN0In0";
+        let sig = pair.sign(input);
+        let base = serde_json::json!({"kty":"OKP", "kid":"ed", "crv":"Ed25519", "x":URL_SAFE_NO_PAD.encode(pair.public_key())});
+        for alg in [None, Some("EdDSA")] {
+            let mut jwk = base.clone();
+            if let Some(alg) = alg {
+                jwk["alg"] = alg.into();
+            }
+            let cached = CachedJwks {
+                keys: verification_keys(parse_jwks(&serde_json::json!({"keys":[jwk]}).to_string()))
+                    .unwrap(),
+                expires_at: Instant::now() + Duration::from_secs(60),
+            };
+            let key = select_jwks_key(Some(&cached), Some("ed"), JwtAlgorithm::Ed25519)
+                .unwrap()
+                .unwrap();
+            JwtAlgorithm::Ed25519
+                .verify(None, Some(&key), input, sig.as_ref())
+                .unwrap();
+            assert!(
+                JwtAlgorithm::Ed25519
+                    .verify(None, Some(&key), input, &[0; 64])
+                    .is_err()
+            );
+            assert!(
+                select_jwks_key(Some(&cached), None, JwtAlgorithm::Rs256)
+                    .unwrap()
+                    .is_none()
+            );
+        }
+        for (field, value) in [
+            ("alg", "RS256"),
+            ("alg", "ES256"),
+            ("alg", "HS256"),
+            ("alg", "Ed25519"),
+            ("crv", "Ed448"),
+            ("kty", "EC"),
+            ("use", "enc"),
+        ] {
+            let mut jwk = base.clone();
+            jwk[field] = value.into();
+            assert!(
+                verification_keys(parse_jwks(&serde_json::json!({"keys":[jwk]}).to_string()))
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+        for x in [
+            Some(URL_SAFE_NO_PAD.encode([0; 31])),
+            Some(URL_SAFE_NO_PAD.encode([0; 33])),
+            Some("!invalid".into()),
+            None,
+        ] {
+            let mut jwk = base.clone();
+            if let Some(x) = x {
+                jwk["x"] = x.into();
+            } else {
+                jwk.as_object_mut().unwrap().remove("x");
+            }
+            assert!(
+                verification_keys(parse_jwks(&serde_json::json!({"keys":[jwk]}).to_string()))
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn bearer_jwt_default_algorithms_remain_rs256_es256() {
+        for configured in [vec![], vec!["EdDSA".to_string()]] {
+            let config: BearerIdentityConfig = serde_json::from_value(serde_json::json!({
+                "source": {"mode":"jwt", "issuer":"test", "audience":"test", "jwks_url":"https://example.invalid/jwks", "algorithms":configured}
+            })).unwrap();
+            let identity = CompiledBearerIdentity::from_config("test", &config).unwrap();
+            let BearerSource::Jwt(source) = identity.source else {
+                panic!("expected JWT source")
+            };
+            assert_eq!(
+                source.algorithms,
+                if configured.is_empty() {
+                    vec![JwtAlgorithm::Rs256, JwtAlgorithm::Es256]
+                } else {
+                    vec![JwtAlgorithm::Ed25519]
+                }
+            );
+        }
+    }
+
+    #[test]
     fn ignores_encryption_keys_and_accepts_signature_keys() {
         let document = parse_jwks(
             r#"{"keys":[
@@ -1117,7 +1286,7 @@ mod tests {
 
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].kid.as_deref(), Some("sig"));
-        assert_eq!(keys[0].algorithm, JwtAlgorithm::Rs256);
+        assert_eq!(keys[0].algorithm, Some(JwtAlgorithm::Rs256));
     }
 
     #[test]
@@ -1141,7 +1310,7 @@ mod tests {
         let keys = verification_keys(document).expect("P-384 keys should convert");
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].kid.as_deref(), Some("p384"));
-        assert_eq!(keys[0].algorithm, JwtAlgorithm::Es384);
+        assert_eq!(keys[0].algorithm, Some(JwtAlgorithm::Es384));
         assert_eq!(keys[0].key.len(), 97);
         assert_eq!(keys[0].key[0], 4);
         // Mismatched alg keeps the key out of the verification set.

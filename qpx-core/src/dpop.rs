@@ -35,20 +35,12 @@ pub enum DpopAlgorithm {
     Es256,
     /// ECDSA using P-384 and SHA-384.
     Es384,
-    /// ECDSA using P-521 and SHA-512.
-    Es512,
     /// RSA PKCS#1 v1.5 using SHA-256.
     Rs256,
     /// RSA PKCS#1 v1.5 using SHA-384.
     Rs384,
     /// RSA PKCS#1 v1.5 using SHA-512.
     Rs512,
-    /// RSA-PSS using SHA-256.
-    Ps256,
-    /// RSA-PSS using SHA-384.
-    Ps384,
-    /// RSA-PSS using SHA-512.
-    Ps512,
     /// EdDSA using an Ed25519 public key.
     Ed25519,
 }
@@ -59,13 +51,9 @@ impl DpopAlgorithm {
         match value {
             "ES256" => Ok(Self::Es256),
             "ES384" => Ok(Self::Es384),
-            "ES512" => Ok(Self::Es512),
             "RS256" => Ok(Self::Rs256),
             "RS384" => Ok(Self::Rs384),
             "RS512" => Ok(Self::Rs512),
-            "PS256" => Ok(Self::Ps256),
-            "PS384" => Ok(Self::Ps384),
-            "PS512" => Ok(Self::Ps512),
             "EdDSA" => Ok(Self::Ed25519),
             _ => Err(DpopError::UnsupportedAlgorithm(value.to_string())),
         }
@@ -76,13 +64,9 @@ impl DpopAlgorithm {
         match self {
             Self::Es256 => "ES256",
             Self::Es384 => "ES384",
-            Self::Es512 => "ES512",
             Self::Rs256 => "RS256",
             Self::Rs384 => "RS384",
             Self::Rs512 => "RS512",
-            Self::Ps256 => "PS256",
-            Self::Ps384 => "PS384",
-            Self::Ps512 => "PS512",
             Self::Ed25519 => "EdDSA",
         }
     }
@@ -91,11 +75,7 @@ impl DpopAlgorithm {
         match (self, key) {
             (Self::Es256, DpopJwk::Ec { crv, .. }) => crv == "P-256",
             (Self::Es384, DpopJwk::Ec { crv, .. }) => crv == "P-384",
-            (Self::Es512, DpopJwk::Ec { crv, .. }) => crv == "P-521",
-            (
-                Self::Rs256 | Self::Rs384 | Self::Rs512 | Self::Ps256 | Self::Ps384 | Self::Ps512,
-                DpopJwk::Rsa { .. },
-            ) => true,
+            (Self::Rs256 | Self::Rs384 | Self::Rs512, DpopJwk::Rsa { .. }) => true,
             (Self::Ed25519, DpopJwk::Okp { crv, .. }) => crv == "Ed25519",
             _ => false,
         }
@@ -105,11 +85,8 @@ impl DpopAlgorithm {
         match self {
             Self::Es256 => Some(64),
             Self::Es384 => Some(96),
-            Self::Es512 => Some(132),
             Self::Ed25519 => Some(64),
-            Self::Rs256 | Self::Rs384 | Self::Rs512 | Self::Ps256 | Self::Ps384 | Self::Ps512 => {
-                None
-            }
+            Self::Rs256 | Self::Rs384 | Self::Rs512 => None,
         }
     }
 }
@@ -1059,6 +1036,19 @@ fn sha256(input: &[u8]) -> [u8; 32] {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn algorithms_match_the_six_runtime_supported_choices() {
+        for name in ["ES256", "ES384", "RS256", "RS384", "RS512", "EdDSA"] {
+            assert_eq!(DpopAlgorithm::parse(name).unwrap().as_str(), name);
+        }
+        for name in ["ES512", "PS256", "PS384", "PS512", "HS256", "none"] {
+            assert_eq!(
+                DpopAlgorithm::parse(name),
+                Err(DpopError::UnsupportedAlgorithm(name.into()))
+            );
+        }
+    }
 
     fn valid_jwk() -> Value {
         serde_json::json!({

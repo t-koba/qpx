@@ -129,7 +129,20 @@ bearer:
     algorithms: [ES256, ES384, RS256, RS384, RS512, EdDSA]
 ```
 
-The bearer JWT source above omits `algorithms`, so it verifies `RS256, ES256`. The DPoP `algorithms` list shown is the default; omitting it selects the same six. Unknown algorithms fail closed.
+Bearer JWT verification supports an explicit `algorithms` allow-list of `RS256`,
+`RS384`, `RS512`, `ES256`, `ES384`, and `EdDSA` (Ed25519). The bearer JWT source
+above omits `algorithms`, so its unchanged default is **`RS256`, `ES256` only**;
+EdDSA must be explicitly enabled. Ed25519 JWKS keys use `kty: OKP`,
+`crv: Ed25519`, and a 32-byte base64url `x`. A missing JWK `alg` or `EdDSA`
+is accepted for these keys. An RSA JWK without `alg` can be used with any
+locally allowed `RS256`, `RS384`, or `RS512`; an explicit JWK `alg` restricts
+it to that algorithm.
+
+DPoP separately supports exactly six proof algorithms: `ES256`, `ES384`,
+`RS256`, `RS384`, `RS512`, and `EdDSA` (Ed25519). The DPoP `algorithms` list
+shown is the unchanged default; omitting it selects the same six. `ES512`
+and `PS256`/`PS384`/`PS512` are not supported. Unknown or disallowed algorithms
+fail closed.
 
 When required, the request must use `Authorization: DPoP ...` and exactly one
 DPoP proof field. qpx verifies the proof signature and public JWK, normalized
