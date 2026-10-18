@@ -114,6 +114,65 @@ impl ResolvedStreamingLimits {
     fn from_runtime(runtime: &RuntimeConfig) -> Self {
         resolve_streaming_limits(runtime, None, None, None, None, None, None)
     }
+
+    /// Fail-closed intersection used when more than one request-side rule
+    /// contributes streaming limits: capacities and read/send timeouts take
+    /// the minimum clamped to at least 1, size and duration fields take the
+    /// unclamped minimum, observation and SSE compression flags are OR-ed,
+    /// `sse.flush_policy` is kept from the left operand, and the remaining
+    /// SSE limits take the minimum clamped to at least 1.
+    pub(crate) fn request_side_fail_closed(self, other: Self) -> Self {
+        Self {
+            body_channel_capacity: self
+                .body_channel_capacity
+                .min(other.body_channel_capacity)
+                .max(1),
+            body_read_timeout_ms: self
+                .body_read_timeout_ms
+                .min(other.body_read_timeout_ms)
+                .max(1),
+            body_send_timeout_ms: self
+                .body_send_timeout_ms
+                .min(other.body_send_timeout_ms)
+                .max(1),
+            max_request_body_bytes: self
+                .max_request_body_bytes
+                .min(other.max_request_body_bytes),
+            max_response_body_bytes: self
+                .max_response_body_bytes
+                .min(other.max_response_body_bytes),
+            max_grpc_message_bytes: self
+                .max_grpc_message_bytes
+                .min(other.max_grpc_message_bytes),
+            max_grpc_web_trailer_bytes: self
+                .max_grpc_web_trailer_bytes
+                .min(other.max_grpc_web_trailer_bytes),
+            max_grpc_stream_duration_ms: self
+                .max_grpc_stream_duration_ms
+                .min(other.max_grpc_stream_duration_ms),
+            observe_grpc_messages: self.observe_grpc_messages || other.observe_grpc_messages,
+            sse: SseStreamingPolicy {
+                disable_compression: self.sse.disable_compression || other.sse.disable_compression,
+                flush_policy: self.sse.flush_policy,
+                idle_timeout_ms: self
+                    .sse
+                    .idle_timeout_ms
+                    .min(other.sse.idle_timeout_ms)
+                    .max(1),
+                max_stream_duration_ms: self
+                    .sse
+                    .max_stream_duration_ms
+                    .min(other.sse.max_stream_duration_ms)
+                    .max(1),
+                max_line_bytes: self.sse.max_line_bytes.min(other.sse.max_line_bytes).max(1),
+                max_event_id_bytes: self
+                    .sse
+                    .max_event_id_bytes
+                    .min(other.sse.max_event_id_bytes)
+                    .max(1),
+            },
+        }
+    }
 }
 
 impl From<CompiledRuntimeLimits> for ResolvedStreamingLimits {

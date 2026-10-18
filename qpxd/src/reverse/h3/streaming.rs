@@ -15,60 +15,6 @@ pub(super) struct ReverseH3RequestPeer<'a> {
     pub(super) peer_certificates: Option<&'a [Vec<u8>]>,
 }
 
-fn request_side_fail_closed(
-    left: ResolvedStreamingLimits,
-    right: ResolvedStreamingLimits,
-) -> ResolvedStreamingLimits {
-    ResolvedStreamingLimits {
-        body_channel_capacity: left
-            .body_channel_capacity
-            .min(right.body_channel_capacity)
-            .max(1),
-        body_read_timeout_ms: left
-            .body_read_timeout_ms
-            .min(right.body_read_timeout_ms)
-            .max(1),
-        body_send_timeout_ms: left
-            .body_send_timeout_ms
-            .min(right.body_send_timeout_ms)
-            .max(1),
-        max_request_body_bytes: left
-            .max_request_body_bytes
-            .min(right.max_request_body_bytes),
-        max_response_body_bytes: left
-            .max_response_body_bytes
-            .min(right.max_response_body_bytes),
-        max_grpc_message_bytes: left
-            .max_grpc_message_bytes
-            .min(right.max_grpc_message_bytes),
-        max_grpc_web_trailer_bytes: left
-            .max_grpc_web_trailer_bytes
-            .min(right.max_grpc_web_trailer_bytes),
-        max_grpc_stream_duration_ms: left
-            .max_grpc_stream_duration_ms
-            .min(right.max_grpc_stream_duration_ms),
-        observe_grpc_messages: left.observe_grpc_messages || right.observe_grpc_messages,
-        sse: fail_closed_sse(left.sse, right.sse),
-    }
-}
-
-fn fail_closed_sse(
-    left: qpx_core::config::SseStreamingPolicy,
-    right: qpx_core::config::SseStreamingPolicy,
-) -> qpx_core::config::SseStreamingPolicy {
-    qpx_core::config::SseStreamingPolicy {
-        disable_compression: left.disable_compression || right.disable_compression,
-        flush_policy: left.flush_policy,
-        idle_timeout_ms: left.idle_timeout_ms.min(right.idle_timeout_ms).max(1),
-        max_stream_duration_ms: left
-            .max_stream_duration_ms
-            .min(right.max_stream_duration_ms)
-            .max(1),
-        max_line_bytes: left.max_line_bytes.min(right.max_line_bytes).max(1),
-        max_event_id_bytes: left.max_event_id_bytes.min(right.max_event_id_bytes).max(1),
-    }
-}
-
 pub(super) fn max_reverse_h3_request_body_bytes(
     reverse: &ReloadableReverse,
     fallback: ResolvedStreamingLimits,
@@ -172,14 +118,14 @@ pub(super) fn request_streaming_limits_for_head(
         {
             if route.matches_without_request_body_observation(&ctx) {
                 let current = deferred_limits.unwrap_or(edge.streaming);
-                deferred_limits = Some(request_side_fail_closed(current, route.plan.streaming));
+                deferred_limits = Some(current.request_side_fail_closed(route.plan.streaming));
             }
             return Ok(false);
         }
         if route.matches(&ctx) {
             selected_limits = Some(
                 deferred_limits
-                    .map(|limits| request_side_fail_closed(limits, route.plan.streaming))
+                    .map(|limits| limits.request_side_fail_closed(route.plan.streaming))
                     .unwrap_or(route.plan.streaming),
             );
             return Ok(true);

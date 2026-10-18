@@ -8,62 +8,6 @@ use crate::runtime::{ResolvedStreamingLimits, Runtime};
 use http::Request;
 use std::net::SocketAddr;
 
-fn request_side_fail_closed(
-    left: ResolvedStreamingLimits,
-    right: ResolvedStreamingLimits,
-) -> ResolvedStreamingLimits {
-    ResolvedStreamingLimits {
-        body_channel_capacity: left
-            .body_channel_capacity
-            .min(right.body_channel_capacity)
-            .max(1),
-        body_read_timeout_ms: left
-            .body_read_timeout_ms
-            .min(right.body_read_timeout_ms)
-            .max(1),
-        body_send_timeout_ms: left
-            .body_send_timeout_ms
-            .min(right.body_send_timeout_ms)
-            .max(1),
-        max_request_body_bytes: left
-            .max_request_body_bytes
-            .min(right.max_request_body_bytes),
-        max_response_body_bytes: left
-            .max_response_body_bytes
-            .min(right.max_response_body_bytes),
-        max_grpc_message_bytes: left
-            .max_grpc_message_bytes
-            .min(right.max_grpc_message_bytes),
-        max_grpc_web_trailer_bytes: left
-            .max_grpc_web_trailer_bytes
-            .min(right.max_grpc_web_trailer_bytes),
-        max_grpc_stream_duration_ms: left
-            .max_grpc_stream_duration_ms
-            .min(right.max_grpc_stream_duration_ms),
-        observe_grpc_messages: left.observe_grpc_messages || right.observe_grpc_messages,
-        sse: qpx_core::config::SseStreamingPolicy {
-            disable_compression: left.sse.disable_compression || right.sse.disable_compression,
-            flush_policy: left.sse.flush_policy,
-            idle_timeout_ms: left
-                .sse
-                .idle_timeout_ms
-                .min(right.sse.idle_timeout_ms)
-                .max(1),
-            max_stream_duration_ms: left
-                .sse
-                .max_stream_duration_ms
-                .min(right.sse.max_stream_duration_ms)
-                .max(1),
-            max_line_bytes: left.sse.max_line_bytes.min(right.sse.max_line_bytes).max(1),
-            max_event_id_bytes: left
-                .sse
-                .max_event_id_bytes
-                .min(right.sse.max_event_id_bytes)
-                .max(1),
-        },
-    }
-}
-
 pub(super) fn request_streaming_limits_for_head(
     runtime: &Runtime,
     listener_name: &str,
@@ -156,16 +100,14 @@ pub(super) fn request_streaming_limits_for_head(
         if !requirements.is_empty() {
             if rule.matches_without_request_body_observation(&ctx) {
                 let current = deferred_limits.unwrap_or(fallback);
-                deferred_limits = Some(request_side_fail_closed(
-                    current,
-                    compiled_rule.plan.streaming,
-                ));
+                deferred_limits =
+                    Some(current.request_side_fail_closed(compiled_rule.plan.streaming));
             }
             continue;
         }
         if rule.matches(&ctx) {
             return deferred_limits
-                .map(|limits| request_side_fail_closed(limits, compiled_rule.plan.streaming))
+                .map(|limits| limits.request_side_fail_closed(compiled_rule.plan.streaming))
                 .unwrap_or(compiled_rule.plan.streaming);
         }
     }

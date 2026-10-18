@@ -343,3 +343,117 @@ fn streaming_required_rejects_response_rules_that_need_request_body_observation(
             .expect_err("response rule request body observation should be rejected");
     assert!(err.to_string().contains("response_rules"));
 }
+
+#[test]
+fn request_side_fail_closed_merges_field_by_field() {
+    use qpx_core::config::SseFlushPolicy;
+
+    fn base() -> ResolvedStreamingLimits {
+        ResolvedStreamingLimits {
+            body_channel_capacity: 8,
+            body_read_timeout_ms: 100,
+            body_send_timeout_ms: 200,
+            max_request_body_bytes: 1024,
+            max_response_body_bytes: 2048,
+            max_grpc_message_bytes: 4096,
+            max_grpc_web_trailer_bytes: 512,
+            max_grpc_stream_duration_ms: 9000,
+            observe_grpc_messages: false,
+            sse: SseStreamingPolicy {
+                disable_compression: false,
+                flush_policy: SseFlushPolicy::Batched,
+                idle_timeout_ms: 1000,
+                max_stream_duration_ms: 2000,
+                max_line_bytes: 300,
+                max_event_id_bytes: 40,
+            },
+        }
+    }
+
+    let right = ResolvedStreamingLimits {
+        body_channel_capacity: 4,
+        body_read_timeout_ms: 300,
+        body_send_timeout_ms: 100,
+        max_request_body_bytes: 512,
+        max_response_body_bytes: 4096,
+        max_grpc_message_bytes: 8192,
+        max_grpc_web_trailer_bytes: 256,
+        max_grpc_stream_duration_ms: 8000,
+        observe_grpc_messages: true,
+        sse: SseStreamingPolicy {
+            disable_compression: true,
+            flush_policy: SseFlushPolicy::LowLatency,
+            idle_timeout_ms: 500,
+            max_stream_duration_ms: 4000,
+            max_line_bytes: 100,
+            max_event_id_bytes: 80,
+        },
+    };
+    assert_eq!(
+        base().request_side_fail_closed(right),
+        ResolvedStreamingLimits {
+            body_channel_capacity: 4,
+            body_read_timeout_ms: 100,
+            body_send_timeout_ms: 100,
+            max_request_body_bytes: 512,
+            max_response_body_bytes: 2048,
+            max_grpc_message_bytes: 4096,
+            max_grpc_web_trailer_bytes: 256,
+            max_grpc_stream_duration_ms: 8000,
+            observe_grpc_messages: true,
+            sse: SseStreamingPolicy {
+                disable_compression: true,
+                flush_policy: SseFlushPolicy::Batched,
+                idle_timeout_ms: 500,
+                max_stream_duration_ms: 2000,
+                max_line_bytes: 100,
+                max_event_id_bytes: 40,
+            },
+        }
+    );
+
+    // Zero inputs clamp capacities/timeouts and SSE numeric limits to 1 but
+    // leave size/duration fields unclamped at 0. The two whole-result asserts
+    // also cover flush policy coming from the left operand in both directions.
+    let zero = ResolvedStreamingLimits {
+        body_channel_capacity: 0,
+        body_read_timeout_ms: 0,
+        body_send_timeout_ms: 0,
+        max_request_body_bytes: 0,
+        max_response_body_bytes: 0,
+        max_grpc_message_bytes: 0,
+        max_grpc_web_trailer_bytes: 0,
+        max_grpc_stream_duration_ms: 0,
+        observe_grpc_messages: false,
+        sse: SseStreamingPolicy {
+            disable_compression: false,
+            flush_policy: SseFlushPolicy::LowLatency,
+            idle_timeout_ms: 0,
+            max_stream_duration_ms: 0,
+            max_line_bytes: 0,
+            max_event_id_bytes: 0,
+        },
+    };
+    assert_eq!(
+        zero.request_side_fail_closed(base()),
+        ResolvedStreamingLimits {
+            body_channel_capacity: 1,
+            body_read_timeout_ms: 1,
+            body_send_timeout_ms: 1,
+            max_request_body_bytes: 0,
+            max_response_body_bytes: 0,
+            max_grpc_message_bytes: 0,
+            max_grpc_web_trailer_bytes: 0,
+            max_grpc_stream_duration_ms: 0,
+            observe_grpc_messages: false,
+            sse: SseStreamingPolicy {
+                disable_compression: false,
+                flush_policy: SseFlushPolicy::LowLatency,
+                idle_timeout_ms: 1,
+                max_stream_duration_ms: 1,
+                max_line_bytes: 1,
+                max_event_id_bytes: 1,
+            },
+        }
+    );
+}
