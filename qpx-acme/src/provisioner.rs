@@ -571,26 +571,36 @@ fn write_bytes_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(unix)]
     use crate::ConfigProvider;
+    #[cfg(unix)]
     use crate::store::{AcmeCertStore, Http01TokenStore, TlsAlpn01CertStore};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    #[cfg(unix)]
     const TEST_SNI: &str = "acme.example";
 
+    #[cfg(unix)]
     struct UnusedConfigProvider;
 
+    #[cfg(unix)]
     impl ConfigProvider for UnusedConfigProvider {
         fn current_operational_config(&self) -> Arc<Config> {
             panic!("certificate loading does not consult operational configuration")
         }
     }
 
+    #[cfg(unix)]
     struct CertFixture(AcmeRuntime);
 
+    #[cfg(unix)]
     impl CertFixture {
         fn new() -> Self {
             static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-            let dir = std::env::temp_dir().join(format!(
+            // Canonicalize so macOS /var (/private/var symlink) does not trip ensure_dir.
+            let base = std::fs::canonicalize(std::env::temp_dir())
+                .expect("canonicalize system temp directory");
+            let dir = base.join(format!(
                 "qpx-acme-pair-{}-{}-{}",
                 std::process::id(),
                 SystemTime::now()
@@ -633,12 +643,14 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     impl Drop for CertFixture {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0.certs_dir);
         }
     }
 
+    #[cfg(unix)]
     fn test_pair() -> (rcgen::Certificate, KeyPair) {
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
@@ -646,6 +658,7 @@ mod tests {
         (params.self_signed(&key).unwrap(), key)
     }
 
+    #[cfg(unix)]
     #[test]
     fn matching_not_due_pair_is_loaded_and_reused() {
         let fixture = CertFixture::new();
@@ -676,6 +689,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn key_only_replacement_is_rejected_and_requests_renewal_without_publication() {
         let fixture = CertFixture::new();
@@ -702,6 +716,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn invalid_persisted_material_preserves_last_known_good_stores() {
         let fixture = CertFixture::new();
@@ -745,6 +760,7 @@ mod tests {
         assert_rejected();
     }
 
+    #[cfg(unix)]
     #[test]
     fn due_or_missing_certificate_is_not_reused() {
         let fixture = CertFixture::new();
@@ -755,6 +771,37 @@ mod tests {
         fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
         assert!(!reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
         fixture.assert_empty();
+    }
+
+    /// ACME secure file output fails closed where owner-only semantics are
+    /// unavailable (Windows): no output file may be left behind.
+    #[cfg(windows)]
+    #[test]
+    fn secure_file_output_fails_closed_on_unsupported_platform() {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "qpx-acme-unsupported-{}-{}-{}.pem",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&path);
+        let err = write_bytes_file(&path, b"synthetic-acme-contents", 0o600).unwrap_err();
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(
+                "secure file creation is not supported on this platform without owner-only file permissions"
+            ),
+            "ACME secure file output must fail closed on unsupported platform: {message}"
+        );
+        assert!(
+            !path.exists(),
+            "ACME secure file output must not create output on unsupported platform"
+        );
+        let _ = fs::remove_file(&path);
     }
 
     fn base_acme_config() -> AcmeConfig {
