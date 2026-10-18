@@ -5,6 +5,7 @@ use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::mpsc;
 
+const FCGI_VERSION_1: u8 = 1;
 pub(super) const FCGI_BEGIN_REQUEST: u8 = 1;
 pub(super) const FCGI_ABORT_REQUEST: u8 = 2;
 pub(super) const FCGI_END_REQUEST: u8 = 3;
@@ -175,7 +176,7 @@ where
     let content_len = u16::try_from(content.len()).context("fastcgi record too large")?;
     let padding_len = (8 - (content.len() % 8)) % 8;
     let header = [
-        1,
+        FCGI_VERSION_1,
         record_type,
         0,
         1,
@@ -201,6 +202,12 @@ where
         Ok(_) => {}
         Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
         Err(err) => return Err(err.into()),
+    }
+    let version = header[0];
+    if version != FCGI_VERSION_1 {
+        return Err(anyhow!(
+            "fastcgi backend returned unsupported version {version}"
+        ));
     }
     let record_type = header[1];
     let request_id = u16::from_be_bytes([header[2], header[3]]);
@@ -330,4 +337,52 @@ fn append_limited(out: &mut BytesMut, chunk: &[u8], limit: usize, label: &str) -
     }
     out.extend_from_slice(chunk);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        FCGI_END_REQUEST, FCGI_REQUEST_ID, FCGI_VERSION_1, read_fastcgi_streaming_response,
+    };
+    use anyhow::Result;
+    use bytes::Bytes;
+    use tokio::io::AsyncWriteExt;
+    use tokio::sync::mpsc;
+
+    async fn read_end_request(version: u8) -> Result<()> {
+        let (mut reader, mut backend) = tokio::io::duplex(64);
+        let header = [
+            version,
+            FCGI_END_REQUEST,
+            (FCGI_REQUEST_ID >> 8) as u8,
+            FCGI_REQUEST_ID as u8,
+            0,
+            8,
+            0,
+            0,
+        ];
+        backend.write_all(&header).await?;
+        backend.write_all(&[0; 8]).await?;
+        drop(backend);
+
+        let (stdout_tx, _stdout_rx) = mpsc::channel::<Bytes>(1);
+        let (stderr_tx, _stderr_rx) = mpsc::channel::<Bytes>(1);
+        read_fastcgi_streaming_response(&mut reader, 0, 0, stdout_tx, stderr_tx).await
+    }
+
+    #[tokio::test]
+    async fn streaming_response_requires_fastcgi_version_one() {
+        read_end_request(FCGI_VERSION_1)
+            .await
+            .expect("version 1 response accepted");
+        for version in [0, 2, u8::MAX] {
+            let error = read_end_request(version)
+                .await
+                .expect_err("unsupported version rejected");
+            assert!(
+                error.to_string().contains(&format!("version {version}")),
+                "unexpected error for version {version}: {error}"
+            );
+        }
+    }
 }
