@@ -111,3 +111,33 @@ async fn drain_declared_request_body(
         received_body = received_body.saturating_add(n);
     }
 }
+
+/// Echo one synthetic request head so dispatch tests can inspect the outgoing wire.
+pub(crate) async fn spawn_request_head_echo_server() -> SocketAddr {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind echo");
+    let addr = listener.local_addr().expect("echo addr");
+    tokio::spawn(async move {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async move {
+            let (mut stream, _) = listener.accept().await.expect("echo accept");
+            let mut raw = Vec::new();
+            let mut buf = [0; 1024];
+            while !raw.windows(4).any(|window| window == b"\r\n\r\n") {
+                let n = stream.read(&mut buf).await.expect("echo read");
+                assert!(n > 0 && raw.len() + n <= 8192, "bounded request head");
+                raw.extend_from_slice(&buf[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                raw.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("echo head");
+            stream.write_all(&raw).await.expect("echo body");
+        })
+        .await
+        .expect("echo timeout");
+    });
+    addr
+}

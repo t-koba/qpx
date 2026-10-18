@@ -240,3 +240,62 @@ async fn forward_request_preserves_upstream_early_hints() {
     );
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn forward_consumes_client_nominations_before_trusted_headers() {
+    let addr = crate::test_util::spawn_request_head_echo_server().await;
+    let config: Config = serde_yaml::from_str(
+        r#"
+edges:
+  - kind: forward
+    name: forward
+    listen: 127.0.0.1:0
+    default_action: { type: direct }
+    http:
+      forwarded: { trusted_peers: [10.0.0.0/8], by: qpx-test }
+    rules:
+      - name: headers
+        headers:
+          request_set: { x-qpx-trusted: proxy-value, keep-alive: timeout=5 }
+"#,
+    )
+    .expect("config");
+    let runtime = Runtime::new(config).expect("runtime");
+    let request = Request::builder()
+        .uri(format!("http://{addr}/"))
+        .header("host", addr.to_string())
+        .header("connection", "X-QpX-TrUsTeD, FoRwArDeD")
+        .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
+        .header("x-qpx-trusted", "client-value")
+        .header("x-client-only", "must-not-leak")
+        .body(Body::empty())
+        .expect("request");
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle_request_inner(
+            request,
+            runtime,
+            "forward",
+            "192.0.2.1:12345".parse().expect("peer"),
+        ),
+    )
+    .await
+    .expect("dispatch timeout")
+    .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body()).await.expect("echo");
+    let head = std::str::from_utf8(&body)
+        .expect("UTF-8")
+        .to_ascii_lowercase();
+    assert!(
+        head.contains("\r\nx-qpx-trusted: proxy-value\r\n"),
+        "{head}"
+    );
+    assert!(
+        head.contains("\r\nforwarded: for=192.0.2.1;by=qpx-test;proto=http;"),
+        "{head}"
+    );
+    assert!(!head.contains("\r\nx-client-only:"), "{head}");
+    assert!(!head.contains("\r\nkeep-alive:"), "{head}");
+    assert!(!head.contains("\r\nconnection:"), "{head}");
+}

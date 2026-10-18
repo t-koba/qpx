@@ -295,3 +295,72 @@ settings:
         bytes::Bytes::from_static(b"origin")
     );
 }
+
+#[tokio::test]
+async fn reverse_consumes_client_nominations_before_trusted_headers() {
+    let addr = crate::test_util::spawn_request_head_echo_server().await;
+    let config: Config = serde_yaml::from_str(&format!(
+        r#"
+upstreams:
+  - name: origin
+    url: http://{addr}
+edges:
+  - kind: reverse
+    name: reverse
+    listen: 127.0.0.1:0
+    routes:
+      - name: headers
+        match: {{}}
+        target: {{ type: upstream, upstreams: [origin] }}
+        http:
+          forwarded: {{ trusted_peers: [10.0.0.0/8], by: qpx-test }}
+        headers:
+          request_set: {{ x-qpx-trusted: proxy-value, keep-alive: timeout=5 }}
+"#
+    ))
+    .expect("config");
+    let reverse_config = config.reverse_edges().next().expect("reverse edge").clone();
+    let runtime = Runtime::new(config).expect("runtime");
+    let reverse = crate::reverse::ReloadableReverse::new(
+        reverse_config,
+        runtime,
+        StdArc::<str>::from("header-ordering-test"),
+    )
+    .expect("reverse");
+    let request = Request::builder()
+        .uri("/")
+        .header("host", "reverse.test")
+        .header("connection", "X-QpX-TrUsTeD, FoRwArDeD")
+        .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
+        .header("x-qpx-trusted", "client-value")
+        .header("x-client-only", "must-not-leak")
+        .body(Body::empty())
+        .expect("request");
+    let (_, response) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        handle_request_with_interim(
+            request,
+            reverse,
+            ReverseConnInfo::plain("192.0.2.1:12345".parse().expect("peer"), 80),
+        ),
+    )
+    .await
+    .expect("dispatch timeout")
+    .expect("response");
+    assert_eq!(response.status(), http::StatusCode::OK);
+    let body = to_bytes(response.into_body()).await.expect("echo");
+    let head = std::str::from_utf8(&body)
+        .expect("UTF-8")
+        .to_ascii_lowercase();
+    assert!(
+        head.contains("\r\nx-qpx-trusted: proxy-value\r\n"),
+        "{head}"
+    );
+    assert!(
+        head.contains("\r\nforwarded: for=192.0.2.1;by=qpx-test;proto=http;host=reverse.test\r\n"),
+        "{head}"
+    );
+    assert!(!head.contains("\r\nx-client-only:"), "{head}");
+    assert!(!head.contains("\r\nkeep-alive:"), "{head}");
+    assert!(!head.contains("\r\nconnection:"), "{head}");
+}

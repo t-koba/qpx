@@ -308,3 +308,107 @@ async fn max_forwards_is_ignored_for_other_methods() {
         "+1"
     );
 }
+
+fn request_set_headers(yaml: &str) -> CompiledHeaderControl {
+    CompiledHeaderControl::compile(&serde_yaml::from_str(yaml).expect("header config"))
+        .expect("compiled headers")
+}
+
+#[test]
+fn prepare_request_consumes_nominations_before_request_set() {
+    let control = request_set_headers(
+        r#"
+request_set:
+  x-qpx-trusted: proxy-value
+  connection: X-Configured-Hop
+  x-configured-hop: must-not-leak
+  keep-alive: timeout=5
+"#,
+    );
+    let mut request = Request::builder()
+        .uri("https://example.com/")
+        .header("connection", "X-QpX-TrUsTeD, x-ClIeNt-OnLy")
+        .header("connection", "Keep-Alive")
+        .header("x-qpx-trusted", "client-value")
+        .header("x-client-only", "must-not-leak")
+        .body(Body::empty())
+        .expect("request");
+    prepare_request_with_headers_in_place(&mut request, "qpx", Some(&control), false);
+    assert_eq!(request.headers()["x-qpx-trusted"], "proxy-value");
+    for name in [
+        "x-client-only",
+        "connection",
+        "x-configured-hop",
+        "keep-alive",
+    ] {
+        assert!(!request.headers().contains_key(name), "{name}");
+    }
+}
+
+#[test]
+fn consume_hop_headers_preserves_websocket_detection_and_strips_nominations() {
+    use crate::http::protocol::websocket::is_websocket_upgrade;
+    let control = request_set_headers("request_set: { x-qpx-trusted: proxy-value }");
+    let mut request = Request::builder()
+        .uri("http://example.com/socket")
+        .header("connection", "UpGrAdE, X-QpX-TrUsTeD")
+        .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header("x-qpx-trusted", "client-value")
+        .header("x-client-only", "must-not-leak")
+        .body(Body::empty())
+        .expect("request");
+    assert!(is_websocket_upgrade(request.method(), request.headers()).expect("original upgrade"));
+    consume_request_hop_headers(&mut request);
+    // Reverse applies route controls before it detects upgrades.
+    apply_request_header_control_in_place(&mut request, Some(&control));
+    let websocket = is_websocket_upgrade(request.method(), request.headers()).expect("upgrade");
+    assert!(websocket);
+    prepare_request_with_headers_in_place(&mut request, "qpx", None, websocket);
+    assert_eq!(request.headers()["connection"], "upgrade");
+    assert_eq!(request.headers()["upgrade"], "websocket");
+    assert_eq!(request.headers()["x-qpx-trusted"], "proxy-value");
+    assert!(!request.headers().contains_key("x-client-only"));
+}
+
+#[test]
+fn consume_hop_headers_defers_incomplete_upgrade_to_existing_route_controls() {
+    use crate::http::protocol::websocket::is_websocket_upgrade;
+    let mut request = Request::builder()
+        .header("connection", "X-Client-Only")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+        .header("x-client-only", "must-not-leak")
+        .body(Body::empty())
+        .expect("request");
+    consume_request_hop_headers(&mut request);
+    assert!(is_websocket_upgrade(request.method(), request.headers()).is_err());
+    // Existing route-driven completion of an upgrade is not moved before controls.
+    let control = request_set_headers("request_set: { connection: upgrade }");
+    apply_request_header_control_in_place(&mut request, Some(&control));
+    assert!(is_websocket_upgrade(request.method(), request.headers()).expect("route upgrade"));
+    assert!(!request.headers().contains_key("x-client-only"));
+}
+
+#[tokio::test]
+async fn consume_hop_headers_keeps_h1_trailer_validation() {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("2"),
+    );
+    let mut request = Request::builder()
+        .version(http::Version::HTTP_11)
+        .header("trailer", "content-length")
+        .header("connection", "X-Client-Only")
+        .body(Body::replay(Bytes::from_static(b"ok"), Some(trailers)))
+        .expect("request");
+    consume_request_hop_headers(&mut request);
+    prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
+    assert!(!request.headers().contains_key("trailer"));
+    assert_eq!(request.body_mut().data().await.unwrap().unwrap(), "ok");
+    assert!(request.body_mut().trailers().await.is_err());
+}

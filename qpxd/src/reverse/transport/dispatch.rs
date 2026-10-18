@@ -489,6 +489,7 @@ async fn execute_reverse_request(
         mut request_limits,
     } = access;
 
+    crate::http::protocol::l7::consume_request_hop_headers(&mut req);
     crate::http::protocol::forwarded::apply_forwarded_policy(
         req.headers_mut(),
         route.plan.forwarded.as_deref(),

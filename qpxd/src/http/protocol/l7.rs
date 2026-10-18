@@ -271,6 +271,29 @@ pub(crate) fn finalize_extended_connect_response_with_headers_in_place(
     );
 }
 
+/// Consume client hop metadata before synthesizing trusted request fields.
+/// Upgrade candidates and Trailer declarations still belong to the later handshake
+/// and body validation stages; the final request sanitizer removes them as needed.
+pub(crate) fn consume_request_hop_headers(request: &mut Request<Body>) {
+    let deferred: Vec<_> = [http::header::UPGRADE, http::header::TRAILER]
+        .into_iter()
+        .flat_map(|name| {
+            request
+                .headers()
+                .get_all(&name)
+                .iter()
+                .cloned()
+                .map(move |value| (name.clone(), value))
+        })
+        .collect();
+    sanitize_hop_by_hop_headers(request.headers_mut(), true);
+    request.headers_mut().remove(http::header::UPGRADE);
+    request.headers_mut().remove(http::header::TRAILER);
+    for (name, value) in deferred {
+        request.headers_mut().append(name, value);
+    }
+}
+
 pub(crate) fn prepare_request_with_headers_in_place(
     request: &mut Request<Body>,
     proxy_name: &str,
@@ -297,6 +320,7 @@ fn prepare_request_headers_in_place(
     let request_version = request.version();
     let validate_trailers = request_version == http::Version::HTTP_2
         || request.headers().contains_key(http::header::TRAILER);
+    sanitize_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
     apply_request_headers(request.headers_mut(), header_control);
     if sync_target_authority && request.uri().authority().is_some() {
         let request_uri = request.uri().clone();

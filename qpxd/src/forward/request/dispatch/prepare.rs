@@ -11,7 +11,9 @@ use crate::http::dispatch::{
     prepare_http_module_local_response,
 };
 use crate::http::protocol::forwarded::apply_forwarded_policy;
-use crate::http::protocol::l7::prepare_request_with_headers_in_place;
+use crate::http::protocol::l7::{
+    consume_request_hop_headers, prepare_request_with_headers_in_place,
+};
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::strip_untrusted_identity_headers;
 use tokio::time::Duration;
@@ -46,6 +48,7 @@ pub(super) async fn prepare_forward_dispatch(
     )?;
     let forwarded_scheme = req.uri().scheme_str().unwrap_or("http").to_string();
     let http_authority = forward_authority(host, None);
+    consume_request_hop_headers(&mut req);
     apply_forwarded_policy(
         req.headers_mut(),
         selected_plan.forwarded.as_deref(),
