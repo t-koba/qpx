@@ -108,7 +108,7 @@ impl SharedRouteState {
         self.addr_known(addr) || self.matches_cid(packet)
     }
 
-    fn matches_cid(&self, packet: &[u8]) -> bool {
+    pub(crate) fn matches_cid(&self, packet: &[u8]) -> bool {
         if let Some(long) = parse_quic_long_header(packet) {
             return long
                 .dcid

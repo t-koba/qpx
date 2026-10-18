@@ -526,7 +526,7 @@ fn should_bypass_source_limit(
     local_route: &SharedRouteState,
     remote_route: &SharedRouteState,
     remote_active: bool,
-    addr: SocketAddr,
+    _addr: SocketAddr,
     packet: &[u8],
 ) -> bool {
     // Handshake/long-header traffic (including QUIC Initials) always stays
@@ -535,10 +535,13 @@ fn should_bypass_source_limit(
     if crate::transparent::quic::looks_like_quic_initial(packet) || is_quic_long_header(packet) {
         return false;
     }
-    if local_route.matches_addr_or_cid(addr, packet) {
+    // CID-only: a known address alone must not bypass, or a known peer
+    // could flood unknown CIDs uncapped. Migration still bypasses because
+    // the CID itself is known.
+    if local_route.matches_cid(packet) {
         return true;
     }
-    remote_active && remote_route.matches_addr_or_cid(addr, packet)
+    remote_active && remote_route.matches_cid(packet)
 }
 
 impl LocalBrokerSocket {
@@ -646,6 +649,16 @@ mod tests {
             &remote,
             false,
             unknown,
+            &short_header_packet(&[9u8, 9, 9, 9]),
+        ));
+
+        // Known address with unknown CID stays limited: address alone must
+        // not bypass, or a known peer could flood unknown CIDs uncapped.
+        assert!(!should_bypass_source_limit(
+            &local,
+            &remote,
+            false,
+            addr,
             &short_header_packet(&[9u8, 9, 9, 9]),
         ));
 
