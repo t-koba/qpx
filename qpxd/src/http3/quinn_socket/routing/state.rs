@@ -21,7 +21,7 @@ pub(crate) struct RouteState {
 
 #[derive(Clone, Copy)]
 pub(crate) struct RouteEntry {
-    seen: Instant,
+    pub(super) seen: Instant,
     generation: u64,
 }
 

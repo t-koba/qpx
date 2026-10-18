@@ -12,5 +12,7 @@ use std::time::Duration;
 pub(super) const ROUTE_STATE_MAX_ADDRS: usize = 4096;
 pub(super) const ROUTE_STATE_MAX_CIDS: usize = 8192;
 const ROUTE_STATE_TTL: Duration = Duration::from_secs(600);
+// Refresh active routes before their idle TTL, without locking on every packet.
+const ROUTE_STATE_REFRESH_INTERVAL: Duration = Duration::from_secs(ROUTE_STATE_TTL.as_secs() / 2);
 const ROUTE_STATE_QUEUE_COMPACTION_FACTOR: usize = 2;
 const ROUTE_STATE_SHARDS: usize = 32;
