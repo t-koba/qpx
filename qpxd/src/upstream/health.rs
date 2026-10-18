@@ -10,6 +10,47 @@ pub(crate) const LATENCY_P95_WINDOW: usize = 100;
 /// needs a full window; override with `outlier_detection.latency.min_requests`.
 pub(crate) const LATENCY_P95_DEFAULT_MIN_SAMPLES: u64 = LATENCY_P95_WINDOW as u64;
 
+/// Trim adaptive counters above the owner's sample bound. Only atomic mechanics
+/// are shared; the bound and decisions about when to trim stay with each owner.
+pub(crate) fn maybe_trim_adaptive_window(
+    successes: &AtomicU32,
+    failures: &AtomicU32,
+    latency_total_ms: &AtomicU64,
+    latency_samples: &AtomicU32,
+    max_samples: u32,
+) {
+    let success_count = successes.load(Ordering::Relaxed);
+    let failure_count = failures.load(Ordering::Relaxed);
+    if success_count.saturating_add(failure_count) <= max_samples {
+        return;
+    }
+    successes.store(success_count / 2, Ordering::Relaxed);
+    failures.store(failure_count / 2, Ordering::Relaxed);
+    latency_samples
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current / 2)
+        })
+        .ok();
+    latency_total_ms
+        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+            Some(current / 2)
+        })
+        .ok();
+}
+
+/// Clear adaptive counters when requested by the endpoint owner.
+pub(crate) fn reset_adaptive_stats(
+    successes: &AtomicU32,
+    failures: &AtomicU32,
+    latency_total_ms: &AtomicU64,
+    latency_samples: &AtomicU32,
+) {
+    successes.store(0, Ordering::Relaxed);
+    failures.store(0, Ordering::Relaxed);
+    latency_total_ms.store(0, Ordering::Relaxed);
+    latency_samples.store(0, Ordering::Relaxed);
+}
+
 // Passive failure kinds shared by forward-cluster and reverse endpoints.
 // Only the kind discriminant and the consecutive-counter mechanics live here;
 // thresholds, ejection, backoff, recovery, lifecycle, and all policy mapping
@@ -131,6 +172,61 @@ impl LatencyWindow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn adaptive_window_is_unchanged_at_or_below_bound() {
+        for (success_count, failure_count) in [(0, 0), (7, 4), (15, 17)] {
+            let successes = AtomicU32::new(success_count);
+            let failures = AtomicU32::new(failure_count);
+            let latency_total_ms = AtomicU64::new(101);
+            let latency_samples = AtomicU32::new(37);
+            maybe_trim_adaptive_window(
+                &successes,
+                &failures,
+                &latency_total_ms,
+                &latency_samples,
+                32,
+            );
+            assert_eq!(successes.load(Ordering::Relaxed), success_count);
+            assert_eq!(failures.load(Ordering::Relaxed), failure_count);
+            assert_eq!(latency_total_ms.load(Ordering::Relaxed), 101);
+            assert_eq!(latency_samples.load(Ordering::Relaxed), 37);
+        }
+    }
+
+    #[test]
+    fn adaptive_window_halves_all_counters_above_caller_bound() {
+        for max_samples in [0, 16, 32] {
+            let successes = AtomicU32::new(17);
+            let failures = AtomicU32::new(18);
+            let latency_total_ms = AtomicU64::new(101);
+            let latency_samples = AtomicU32::new(36);
+            maybe_trim_adaptive_window(
+                &successes,
+                &failures,
+                &latency_total_ms,
+                &latency_samples,
+                max_samples,
+            );
+            assert_eq!(successes.load(Ordering::Relaxed), 8);
+            assert_eq!(failures.load(Ordering::Relaxed), 9);
+            assert_eq!(latency_total_ms.load(Ordering::Relaxed), 50);
+            assert_eq!(latency_samples.load(Ordering::Relaxed), 18);
+        }
+    }
+
+    #[test]
+    fn adaptive_stats_reset_to_zero() {
+        let successes = AtomicU32::new(17);
+        let failures = AtomicU32::new(18);
+        let latency_total_ms = AtomicU64::new(101);
+        let latency_samples = AtomicU32::new(36);
+        reset_adaptive_stats(&successes, &failures, &latency_total_ms, &latency_samples);
+        assert_eq!(successes.load(Ordering::Relaxed), 0);
+        assert_eq!(failures.load(Ordering::Relaxed), 0);
+        assert_eq!(latency_total_ms.load(Ordering::Relaxed), 0);
+        assert_eq!(latency_samples.load(Ordering::Relaxed), 0);
+    }
 
     #[test]
     fn empty_window_p95_is_zero() {

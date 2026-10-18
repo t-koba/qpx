@@ -3,6 +3,7 @@ use super::resolved::{EndpointConcurrencyPermit, ResolvedUpstreamProxy};
 use crate::runtime::now_millis;
 use crate::upstream::health::{
     LATENCY_P95_DEFAULT_MIN_SAMPLES, LatencyWindow, PassiveFailureCounters, PassiveFailureKind,
+    maybe_trim_adaptive_window, reset_adaptive_stats,
 };
 use crate::upstream::http1::{UpstreamProxyEndpoint, parse_upstream_proxy_endpoint};
 use crate::upstream::origin::discover_origin_endpoints;
@@ -255,32 +256,22 @@ impl ManagedUpstreamEndpoint {
     }
 
     fn maybe_trim_adaptive_window(&self) {
-        let successes = self.adaptive_successes.load(Ordering::Relaxed);
-        let failures = self.adaptive_failures.load(Ordering::Relaxed);
-        if successes.saturating_add(failures) <= ADAPTIVE_MAX_SAMPLES {
-            return;
-        }
-        self.adaptive_successes
-            .store(successes / 2, Ordering::Relaxed);
-        self.adaptive_failures
-            .store(failures / 2, Ordering::Relaxed);
-        self.adaptive_latency_samples
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current / 2)
-            })
-            .ok();
-        self.adaptive_latency_total_ms
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some(current / 2)
-            })
-            .ok();
+        maybe_trim_adaptive_window(
+            &self.adaptive_successes,
+            &self.adaptive_failures,
+            &self.adaptive_latency_total_ms,
+            &self.adaptive_latency_samples,
+            ADAPTIVE_MAX_SAMPLES,
+        );
     }
 
     fn reset_adaptive_stats(&self) {
-        self.adaptive_successes.store(0, Ordering::Relaxed);
-        self.adaptive_failures.store(0, Ordering::Relaxed);
-        self.adaptive_latency_total_ms.store(0, Ordering::Relaxed);
-        self.adaptive_latency_samples.store(0, Ordering::Relaxed);
+        reset_adaptive_stats(
+            &self.adaptive_successes,
+            &self.adaptive_failures,
+            &self.adaptive_latency_total_ms,
+            &self.adaptive_latency_samples,
+        );
     }
 }
 
