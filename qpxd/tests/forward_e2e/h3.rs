@@ -601,6 +601,11 @@ runtime:
             )
         },
     )?;
+    // Startup readiness covers the TCP listener, while this request uses the
+    // separate HTTP/3 UDP listener. Let that listener finish startup before
+    // connecting, as in the adjacent OPTIONS * direct-origin test.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
     let ca_cert = state_dir.join("ca.crt");
     wait_for_file(&ca_cert).await?;
 
