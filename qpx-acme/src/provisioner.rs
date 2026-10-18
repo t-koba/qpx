@@ -107,31 +107,50 @@ pub(crate) fn preload_certs(state: &AcmeRuntime) -> Result<()> {
     Ok(())
 }
 
-fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<()> {
+fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<bool> {
     let (cert_path, key_path) = cert_paths_for_sni(state, sni);
     if !cert_path.exists() || !key_path.exists() {
-        return Ok(());
+        return Ok(false);
     }
     let chain = load_cert_chain(&cert_path)?;
     #[cfg(feature = "http3")]
     let quic_chain = chain.clone();
     let key = load_private_key(&key_path)?;
     let signing_key = any_supported_type(&key).map_err(|_| anyhow!("unsupported key"))?;
-    state.store.upsert(
-        sni.to_string(),
-        Arc::new(CertifiedKey::new(chain, signing_key)),
-    );
+    let certified = CertifiedKey::new(chain, signing_key);
+    certified
+        .keys_match()
+        .with_context(|| format!("invalid ACME TLS certificate/key pair for {sni}"))?;
     #[cfg(feature = "http3")]
-    {
+    let quic_certified = {
         let signing_key = quinn::rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
             .map_err(|_| anyhow!("unsupported key"))?;
-        let certified = Arc::new(quinn::rustls::sign::CertifiedKey::new(
-            quic_chain,
-            signing_key,
-        ));
-        state.quic_store.upsert(sni.to_string(), certified);
+        let certified = quinn::rustls::sign::CertifiedKey::new(quic_chain, signing_key);
+        certified
+            .keys_match()
+            .with_context(|| format!("invalid ACME QUIC certificate/key pair for {sni}"))?;
+        certified
+    };
+
+    // Prepare and validate both representations before replacing either last-known-good pair.
+    state.store.upsert(sni.to_string(), Arc::new(certified));
+    #[cfg(feature = "http3")]
+    state
+        .quic_store
+        .upsert(sni.to_string(), Arc::new(quic_certified));
+    Ok(true)
+}
+
+// A not-due leaf alone is insufficient: an interrupted write may have replaced only its key.
+fn reuse_existing_certificate(state: &AcmeRuntime, sni: &str) -> Result<bool> {
+    let (cert_path, key_path) = cert_paths_for_sni(state, sni);
+    if !cert_path.exists() || !key_path.exists() {
+        return Ok(false);
     }
-    Ok(())
+    if should_renew(read_leaf_not_after(&cert_path)?, state.renew_before_days)? {
+        return Ok(false);
+    }
+    load_cert_into_store(state, sni)
 }
 
 async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
@@ -182,17 +201,11 @@ fn account_builder() -> Result<instant_acme::AccountBuilder> {
 
 async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -> Result<()> {
     let (cert_path, key_path) = cert_paths_for_sni(state, sni);
-    if cert_path.exists()
-        && key_path.exists()
-        && let Ok(not_after) = read_leaf_not_after(&cert_path)
-    {
-        match should_renew(not_after, state.renew_before_days) {
-            Ok(false) => {
-                let _ = load_cert_into_store(state, sni);
-                return Ok(());
-            }
-            Ok(true) => {}
-            Err(_) => {}
+    match reuse_existing_certificate(state, sni) {
+        Ok(true) => return Ok(()),
+        Ok(false) => {}
+        Err(err) => {
+            warn!(sni = %sni, error = ?err, "cannot reuse persisted acme certificate; attempting renewal");
         }
     }
 
@@ -254,10 +267,16 @@ async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -
         .with_context(|| "acme poll_certificate failed")?;
 
     ensure_dir(cert_path.parent().unwrap_or(&state.certs_dir), 0o700)?;
+    // These writes are not a transaction. If interrupted, pair validation prevents publication
+    // and the next ensure retries issuance even if the old leaf is not yet due for renewal.
     write_bytes_file(&key_path, key_pem.as_bytes(), 0o600)?;
     write_bytes_file(&cert_path, cert_chain_pem.as_bytes(), 0o644)?;
 
-    load_cert_into_store(state, sni)?;
+    if !load_cert_into_store(state, sni)? {
+        return Err(anyhow!(
+            "ACME certificate/key pair missing after issuance for {sni}"
+        ));
+    }
     Ok(())
 }
 
@@ -551,10 +570,192 @@ fn write_bytes_file(path: &Path, contents: &[u8], mode: u32) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(unix)]
-    use super::run_dns_hook;
-    use super::{acme_directory_url, tls_alpn01_challenge_cert};
-    use qpx_core::config::AcmeConfig;
+    use super::*;
+    use crate::ConfigProvider;
+    use crate::store::{AcmeCertStore, Http01TokenStore, TlsAlpn01CertStore};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    const TEST_SNI: &str = "acme.example";
+
+    struct UnusedConfigProvider;
+
+    impl ConfigProvider for UnusedConfigProvider {
+        fn current_operational_config(&self) -> Arc<Config> {
+            panic!("certificate loading does not consult operational configuration")
+        }
+    }
+
+    struct CertFixture(AcmeRuntime);
+
+    impl CertFixture {
+        fn new() -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            let dir = std::env::temp_dir().join(format!(
+                "qpx-acme-pair-{}-{}-{}",
+                std::process::id(),
+                SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos(),
+                NEXT_ID.fetch_add(1, Ordering::Relaxed)
+            ));
+            ensure_dir(&dir, 0o700).unwrap();
+            Self(AcmeRuntime {
+                operational_config_provider: Arc::new(UnusedConfigProvider),
+                directory_url: String::new(),
+                challenge: "http-01".to_string(),
+                renew_before_days: 30,
+                contact_email: None,
+                tos_agreed: true,
+                http01_listen: None,
+                dns_hook: None,
+                account_path: dir.join("account.json"),
+                certs_dir: dir,
+                store: Arc::new(AcmeCertStore::new()),
+                #[cfg(feature = "http3")]
+                quic_store: Arc::new(crate::AcmeQuicCertStore::new()),
+                tokens: Arc::new(Http01TokenStore::new()),
+                tls_alpn01: Arc::new(TlsAlpn01CertStore::new()),
+            })
+        }
+
+        fn write_pair(&self, cert: &rcgen::Certificate, key: &KeyPair) {
+            let (cert_path, key_path) = cert_paths_for_sni(&self.0, TEST_SNI);
+            ensure_dir(cert_path.parent().unwrap(), 0o700).unwrap();
+            write_bytes_file(&key_path, key.serialize_pem().as_bytes(), 0o600).unwrap();
+            write_bytes_file(&cert_path, cert.pem().as_bytes(), 0o644).unwrap();
+        }
+
+        fn assert_empty(&self) {
+            assert!(self.0.store.get(TEST_SNI).is_none());
+            #[cfg(feature = "http3")]
+            assert!(self.0.quic_store.get(TEST_SNI).is_none());
+        }
+    }
+
+    impl Drop for CertFixture {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0.certs_dir);
+        }
+    }
+
+    fn test_pair() -> (rcgen::Certificate, KeyPair) {
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        params.not_after = rcgen::date_time_ymd(4096, 1, 1);
+        (params.self_signed(&key).unwrap(), key)
+    }
+
+    #[test]
+    fn matching_not_due_pair_is_loaded_and_reused() {
+        let fixture = CertFixture::new();
+        let (cert, key) = test_pair();
+        fixture.write_pair(&cert, &key);
+        assert!(reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
+        let loaded = fixture.0.store.get(TEST_SNI).unwrap();
+        assert_eq!(loaded.cert, vec![cert.der().clone()]);
+        loaded.keys_match().unwrap();
+        #[cfg(feature = "http3")]
+        {
+            let loaded = fixture.0.quic_store.get(TEST_SNI).unwrap();
+            assert_eq!(loaded.cert, vec![cert.der().clone()]);
+            loaded.keys_match().unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let (cert_path, key_path) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+            assert_eq!(
+                fs::metadata(cert_path).unwrap().permissions().mode() & 0o777,
+                0o644
+            );
+            assert_eq!(
+                fs::metadata(key_path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+    }
+
+    #[test]
+    fn key_only_replacement_is_rejected_and_requests_renewal_without_publication() {
+        let fixture = CertFixture::new();
+        let (cert, key) = test_pair();
+        fixture.write_pair(&cert, &key);
+        let (cert_path, key_path) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+        assert!(!should_renew(read_leaf_not_after(&cert_path).unwrap(), 30).unwrap());
+        let (replacement_cert, replacement_key) = test_pair();
+        // Simulate interruption after key.pem is replaced but before cert.pem is written.
+        write_bytes_file(&key_path, replacement_key.serialize_pem().as_bytes(), 0o600).unwrap();
+        let err = load_cert_into_store(&fixture.0, TEST_SNI).unwrap_err();
+        assert!(format!("{err:#}").contains("certificate/key pair"));
+        fixture.assert_empty();
+        // This is the decision used by ensure: only Ok(true) avoids renewal.
+        assert!(reuse_existing_certificate(&fixture.0, TEST_SNI).is_err());
+        fixture.assert_empty();
+
+        // Completing/retrying issuance repairs the persisted pair and permits reuse.
+        fixture.write_pair(&replacement_cert, &replacement_key);
+        assert!(reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
+        assert_eq!(
+            fixture.0.store.get(TEST_SNI).unwrap().cert,
+            vec![replacement_cert.der().clone()]
+        );
+    }
+
+    #[test]
+    fn invalid_persisted_material_preserves_last_known_good_stores() {
+        let fixture = CertFixture::new();
+        let (cert, key) = test_pair();
+        fixture.write_pair(&cert, &key);
+        assert!(load_cert_into_store(&fixture.0, TEST_SNI).unwrap());
+        let good = fixture.0.store.get(TEST_SNI).unwrap();
+        #[cfg(feature = "http3")]
+        let quic_good = fixture.0.quic_store.get(TEST_SNI).unwrap();
+        let (_, key_path) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+        let assert_rejected = || {
+            assert!(!matches!(
+                load_cert_into_store(&fixture.0, TEST_SNI),
+                Ok(true)
+            ));
+            assert!(!matches!(
+                reuse_existing_certificate(&fixture.0, TEST_SNI),
+                Ok(true)
+            ));
+            assert!(Arc::ptr_eq(&good, &fixture.0.store.get(TEST_SNI).unwrap()));
+            #[cfg(feature = "http3")]
+            assert!(Arc::ptr_eq(
+                &quic_good,
+                &fixture.0.quic_store.get(TEST_SNI).unwrap()
+            ));
+        };
+        let replacement_key = KeyPair::generate().unwrap();
+        for contents in [
+            Some(replacement_key.serialize_pem()),
+            Some("invalid key".to_string()),
+            None,
+        ] {
+            match contents {
+                Some(contents) => write_bytes_file(&key_path, contents.as_bytes(), 0o600).unwrap(),
+                None => fs::remove_file(&key_path).unwrap(),
+            }
+            assert_rejected();
+        }
+        // A directory causes a deterministic read failure even when tests run as root.
+        fs::create_dir(&key_path).unwrap();
+        assert_rejected();
+    }
+
+    #[test]
+    fn due_or_missing_certificate_is_not_reused() {
+        let fixture = CertFixture::new();
+        assert!(!reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        params.not_after = rcgen::date_time_ymd(2000, 1, 1);
+        fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
+        assert!(!reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
+        fixture.assert_empty();
+    }
 
     fn base_acme_config() -> AcmeConfig {
         AcmeConfig {
