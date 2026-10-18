@@ -4,6 +4,7 @@ use anyhow::anyhow;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use regex::Regex;
 use std::collections::HashSet;
+use std::fmt::Write as _;
 #[cfg(feature = "tls-rustls")]
 use std::path::Path;
 use std::path::PathBuf;
@@ -171,7 +172,10 @@ impl CompiledUpstreamTlsTrust {
                 key.push('1');
                 for path in [&auth.cert, &auth.key] {
                     // Preserve path bytes rather than using a lossy UTF-8 conversion.
-                    let encoded = hex_encode(path.as_os_str().as_encoded_bytes());
+                    let mut encoded = String::new();
+                    for byte in path.as_os_str().as_encoded_bytes() {
+                        let _ = write!(&mut encoded, "{byte:02x}");
+                    }
                     push_key_field(&mut key, &encoded);
                 }
             }
@@ -333,25 +337,8 @@ impl PatternSet {
     }
 }
 
-fn push_decimal(key: &mut String, mut value: usize) {
-    let mut digits = [0u8; std::mem::size_of::<usize>() * 3];
-    let mut len = 0;
-    loop {
-        digits[len] = b'0' + (value % 10) as u8;
-        len += 1;
-        value /= 10;
-        if value == 0 {
-            break;
-        }
-    }
-    for digit in digits[..len].iter().rev() {
-        key.push(char::from(*digit));
-    }
-}
-
 fn push_key_field(key: &mut String, value: &str) {
-    push_decimal(key, value.len());
-    key.push(':');
+    let _ = write!(key, "{}:", value.len());
     key.push_str(value);
 }
 
@@ -359,22 +346,11 @@ fn sorted_list_key<'a>(values: impl Iterator<Item = &'a str>) -> String {
     let mut values = values.collect::<Vec<_>>();
     values.sort_unstable();
     let mut key = String::new();
-    push_decimal(&mut key, values.len());
-    key.push(':');
+    let _ = write!(&mut key, "{}:", values.len());
     for value in values {
         push_key_field(&mut key, value);
     }
     key
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::new();
-    for &byte in bytes {
-        encoded.push(char::from(HEX[(byte >> 4) as usize]));
-        encoded.push(char::from(HEX[(byte & 0x0f) as usize]));
-    }
-    encoded
 }
 
 fn normalize_text(value: &str) -> Option<String> {
