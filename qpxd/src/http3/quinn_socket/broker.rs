@@ -209,21 +209,13 @@ impl LocalBrokerSocket {
 
     fn route_inbound(&self, addr: SocketAddr, packet: &[u8]) -> RouteDecision {
         let remote_active = self.remote_writer.load().is_some();
-        if !remote_active {
-            return RouteDecision::Local;
-        }
-
-        if self.local_route.matches_addr_or_cid(addr, packet) {
-            return RouteDecision::Local;
-        }
-        if self.remote_route.matches_addr_or_cid(addr, packet) {
-            return RouteDecision::Remote;
-        }
-        if crate::transparent::quic::looks_like_quic_initial(packet) || is_quic_long_header(packet)
-        {
-            return RouteDecision::Remote;
-        }
-        RouteDecision::Drop
+        decide_inbound_route(
+            &self.local_route,
+            &self.remote_route,
+            remote_active,
+            addr,
+            packet,
+        )
     }
 
     fn observe_local_inbound(&self, addr: SocketAddr, packet: &[u8]) {
@@ -399,6 +391,42 @@ enum RouteDecision {
     Local,
     Remote,
     Drop,
+}
+
+fn decide_inbound_route(
+    local_route: &SharedRouteState,
+    remote_route: &SharedRouteState,
+    remote_active: bool,
+    addr: SocketAddr,
+    packet: &[u8],
+) -> RouteDecision {
+    if !remote_active {
+        return RouteDecision::Local;
+    }
+    // CID-first: known connection IDs route to their owner before any
+    // address fallback, prioritizing the child/new generation so child CIDs
+    // shadow parent address entries and old sessions keep parent affinity.
+    if remote_route.matches_cid(packet) {
+        return RouteDecision::Remote;
+    }
+    if local_route.matches_cid(packet) {
+        return RouteDecision::Local;
+    }
+    // Fresh handshakes (Initial/long header with unknown CID) go to the
+    // child even when the peer address is already known on the parent, so a
+    // new connection from an old peer socket reaches the new generation.
+    if crate::transparent::quic::looks_like_quic_initial(packet) || is_quic_long_header(packet) {
+        return RouteDecision::Remote;
+    }
+    // Address fallback preserves old-session affinity for non-handshake
+    // traffic; truly unknown peers fail closed below.
+    if local_route.matches_addr(addr) {
+        return RouteDecision::Local;
+    }
+    if remote_route.matches_addr(addr) {
+        return RouteDecision::Remote;
+    }
+    RouteDecision::Drop
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -589,7 +617,9 @@ impl RemoteBrokerSocket {
 
 #[cfg(test)]
 mod tests {
+    use super::RouteDecision;
     use super::SharedRouteState;
+    use super::decide_inbound_route;
     use super::rate_limiter::ShardedDatagramRateLimiter;
     use super::should_bypass_source_limit;
     use std::net::SocketAddr;
@@ -748,5 +778,111 @@ mod tests {
         }
         assert_eq!(allowed, 512);
         assert_eq!(limited, 88);
+    }
+
+    #[test]
+    fn upgrade_handoff_prefers_child_cid_and_routes_fresh_initial_to_child() {
+        let local = SharedRouteState::default();
+        let remote = SharedRouteState::default();
+        // Single UDP client socket shared by the established parent
+        // connection and the new child connection (TEST-NET-2, synthetic).
+        let client_addr = test_addr(7, 9200);
+        let parent_dcid = [0xA1u8, 0xA2, 0xA3, 0xA4];
+        let parent_scid = [0xB1u8, 0xB2, 0xB3, 0xB4];
+        let child_dcid = [0xC1u8, 0xC2, 0xC3, 0xC4];
+        let child_scid = [0xD1u8, 0xD2, 0xD3, 0xD4];
+
+        // Established parent session on the client socket.
+        local.observe_inbound(client_addr, &long_header_packet(&parent_dcid, &parent_scid));
+        // New child connection from the same socket; the child table also
+        // knows the same peer address, so the child CID must shadow the
+        // parent address entry.
+        remote.observe_inbound(client_addr, &long_header_packet(&child_dcid, &child_scid));
+
+        // Old session affinity: known parent CID stays on the parent even
+        // though the address is known on both generations.
+        assert_eq!(
+            decide_inbound_route(
+                &local,
+                &remote,
+                true,
+                client_addr,
+                &short_header_packet(&parent_dcid),
+            ),
+            RouteDecision::Local
+        );
+        // Known parent CID in a long-header retransmit also stays local,
+        // proving CID precedes the handshake fallback.
+        assert_eq!(
+            decide_inbound_route(
+                &local,
+                &remote,
+                true,
+                client_addr,
+                &long_header_packet(&parent_dcid, &parent_scid),
+            ),
+            RouteDecision::Local
+        );
+        // Child CID shadows the parent address entry (short header proves
+        // the CID path, not the long-header fallback).
+        assert_eq!(
+            decide_inbound_route(
+                &local,
+                &remote,
+                true,
+                client_addr,
+                &short_header_packet(&child_dcid),
+            ),
+            RouteDecision::Remote
+        );
+        // Fresh Initial with an unknown CID from the old peer socket reaches
+        // the new generation instead of sticking to the parent address.
+        let fresh_dcid = [0xE1u8, 0xE2, 0xE3, 0xE4];
+        let fresh_scid = [0xF1u8, 0xF2, 0xF3, 0xF4];
+        assert_eq!(
+            decide_inbound_route(
+                &local,
+                &remote,
+                true,
+                client_addr,
+                &long_header_packet(&fresh_dcid, &fresh_scid),
+            ),
+            RouteDecision::Remote
+        );
+        // Truly unknown short-header traffic fails closed.
+        let unknown_addr = test_addr(8, 9300);
+        let unknown_cid = [0x11u8, 0x22, 0x33, 0x44];
+        assert_eq!(
+            decide_inbound_route(
+                &local,
+                &remote,
+                true,
+                unknown_addr,
+                &short_header_packet(&unknown_cid),
+            ),
+            RouteDecision::Drop
+        );
+        // Unknown-peer handshakes still go to the child for acceptance.
+        assert_eq!(
+            decide_inbound_route(
+                &local,
+                &remote,
+                true,
+                unknown_addr,
+                &long_header_packet(&fresh_dcid, &fresh_scid),
+            ),
+            RouteDecision::Remote
+        );
+        // Without an attached child everything stays local.
+        assert_eq!(
+            decide_inbound_route(
+                &local,
+                &remote,
+                false,
+                client_addr,
+                &short_header_packet(&child_dcid),
+            ),
+            RouteDecision::Local
+        );
     }
 }

@@ -104,8 +104,8 @@ impl SharedRouteState {
         false
     }
 
-    pub(crate) fn matches_addr_or_cid(&self, addr: SocketAddr, packet: &[u8]) -> bool {
-        self.addr_known(addr) || self.matches_cid(packet)
+    pub(crate) fn matches_addr(&self, addr: SocketAddr) -> bool {
+        self.addr_known(addr)
     }
 
     pub(crate) fn matches_cid(&self, packet: &[u8]) -> bool {
