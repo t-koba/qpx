@@ -1,3 +1,5 @@
+mod staging;
+
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use memchr::memmem;
@@ -130,13 +132,6 @@ async fn push_ring_eof(ring: &mut ShmRingBuffer, wait_timeout: Duration) -> Resu
 fn log_executor_stderr_chunk(chunk: &[u8]) {
     if !chunk.is_empty() {
         warn!(bytes = chunk.len(), "CGI STDERR chunk suppressed");
-    }
-}
-
-fn text_plain_meta(status: u16) -> IpcResponseMeta {
-    IpcResponseMeta {
-        status,
-        headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
     }
 }
 
@@ -360,12 +355,19 @@ where
     };
 
     let Execution {
+        max_stdout_bytes,
         stdin: exec_stdin,
         stdout: mut exec_stdout,
         stderr: mut exec_stderr,
         abort: exec_abort,
         done: exec_done,
     } = exec;
+
+    let stderr_task = tokio::spawn(async move {
+        while let Some(chunk) = exec_stderr.recv().await {
+            log_executor_stderr_chunk(&chunk);
+        }
+    });
 
     // Drain request body into executor stdin concurrently with header parsing.
     let req_path_task = req_path.clone();
@@ -435,78 +437,42 @@ where
         release_ipc_shm_path(req_path_task, shm_reusable);
     });
 
-    // Read until headers are fully accumulated
-    let mut header_buf = BytesMut::new();
-    tokio::pin!(stdin_result_rx);
-    let mut stdin_result_rx_active = true;
-    let parsed_res = loop {
-        tokio::select! {
-            res = &mut stdin_result_rx, if stdin_result_rx_active => {
-                match res {
-                    Ok(outcome) => {
-                        if let Some((status, body)) = outcome.error_response() {
-                            let res_meta = text_plain_meta(status);
-                            write_frame(stream, &res_meta).await?;
-                            let _ = push_ring_bytes(&mut res_ring, body, input_idle).await;
-                            let _ = push_ring_eof(&mut res_ring, input_idle).await;
-                            abort_execution(exec_abort, stdin_task, exec_done).await;
-                            release_ipc_shm_path(&res_path, shm_reusable);
-                            return Ok(());
-                        }
-                        stdin_result_rx_active = false;
-                    }
-                    _ => {
-                        stdin_result_rx_active = false;
-                    }
-                }
-            }
-            chunk = exec_stdout.recv() => {
-                let Some(chunk) = chunk else {
-                    break None;
-                };
-                match consume_cgi_stdout_header(&mut header_buf, chunk) {
-                    Ok(Some(parsed)) => break Some(parsed),
-                    Ok(None) => {}
-                    Err(_) => break None,
-                }
-            }
+    let mut prepared = match staging::prepare_response(
+        &mut exec_stdout,
+        stdin_result_rx,
+        max_stdout_bytes,
+        b"bad gateway (invalid CGI headers)",
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(response) => {
+            let _ = write_shm_plain_response(stream, &mut res_ring, &response, input_idle).await;
+            abort_execution(exec_abort, stdin_task, exec_done).await;
+            release_ipc_shm_path(&res_path, shm_reusable);
+            return Ok(());
         }
     };
-
-    if stdin_result_rx_active
-        && let Ok(outcome) = (&mut stdin_result_rx).await
-        && let Some((status, body)) = outcome.error_response()
-    {
-        let res_meta = text_plain_meta(status);
-        write_frame(stream, &res_meta).await?;
-        let _ = push_ring_bytes(&mut res_ring, body, input_idle).await;
-        let _ = push_ring_eof(&mut res_ring, input_idle).await;
-        abort_execution(exec_abort, stdin_task, exec_done).await;
-        release_ipc_shm_path(&res_path, shm_reusable);
-        return Ok(());
-    }
-
-    let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {
-        (parsed.meta, parsed.body_leftover)
-    } else {
-        let meta = text_plain_meta(502);
-        write_frame(stream, &meta).await?;
-        let _ = push_ring_bytes(
-            &mut res_ring,
-            b"bad gateway (invalid CGI headers)",
-            input_idle,
-        )
-        .await;
-        let _ = push_ring_eof(&mut res_ring, input_idle).await;
-        abort_execution(exec_abort, stdin_task, exec_done).await;
-        release_ipc_shm_path(&res_path, shm_reusable);
-        return Ok(());
-    };
+    let res_meta = &prepared.meta;
 
     // Write IpcResponseMeta
     write_frame(stream, &res_meta).await?;
 
-    // Handle initial leftover stdout body bytes
+    // Replay bounded pre-commit output before forwarding new stdout.
+    let replay_result: Result<()> = async {
+        while let Some(chunk) = prepared.next_staged_chunk().await? {
+            push_ring_bytes(&mut res_ring, &chunk, input_idle).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(err) = replay_result {
+        abort_execution(exec_abort, stdin_task, exec_done).await;
+        release_ipc_shm_path(&res_path, shm_reusable);
+        return Err(err);
+    }
+
+    let body_leftover = prepared.body_leftover;
     if !body_leftover.is_empty()
         && push_ring_bytes(&mut res_ring, body_leftover.as_ref(), input_idle)
             .await
@@ -532,12 +498,6 @@ where
         let _ = push_ring_eof(&mut ring, input_idle).await;
         drop(ring);
         release_ipc_shm_path(res_path_task, shm_reusable);
-    });
-
-    let stderr_task = tokio::spawn(async move {
-        while let Some(chunk) = exec_stderr.recv().await {
-            log_executor_stderr_chunk(&chunk);
-        }
     });
 
     let _ = exec_done.await;
@@ -660,12 +620,19 @@ where
     };
 
     let Execution {
+        max_stdout_bytes,
         stdin: exec_stdin,
         stdout: mut exec_stdout,
         stderr: mut exec_stderr,
         abort: exec_abort,
         done: exec_done,
     } = exec;
+
+    let stderr_task = tokio::spawn(async move {
+        while let Some(chunk) = exec_stderr.recv().await {
+            log_executor_stderr_chunk(&chunk);
+        }
+    });
 
     let (mut rx, mut tx) = tokio::io::split(stream);
 
@@ -721,69 +688,42 @@ where
         }
     });
 
-    let mut header_buf = BytesMut::new();
-    tokio::pin!(stdin_result_rx);
-    let mut stdin_result_rx_active = true;
-    let parsed_res = loop {
-        tokio::select! {
-            res = &mut stdin_result_rx, if stdin_result_rx_active => {
-                match res {
-                    Ok(outcome) => {
-                        if let Some((status, body)) = outcome.error_response() {
-                            let res_meta = text_plain_meta(status);
-                            write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
-                            let _ = write_all_with_timeout(&mut tx, body, output_idle).await;
-                            abort_execution(exec_abort, stdin_task, exec_done).await;
-                            return Ok(());
-                        }
-                        stdin_result_rx_active = false;
-                    }
-                    _ => {
-                        stdin_result_rx_active = false;
-                    }
-                }
-            }
-            chunk = exec_stdout.recv() => {
-                let Some(chunk) = chunk else {
-                    break None;
-                };
-                match consume_cgi_stdout_header(&mut header_buf, chunk) {
-                    Ok(Some(parsed)) => break Some(parsed),
-                    Ok(None) => {}
-                    Err(_) => break None,
-                }
-            }
+    let mut prepared = match staging::prepare_response(
+        &mut exec_stdout,
+        stdin_result_rx,
+        max_stdout_bytes,
+        b"bad gateway (no output)",
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(response) => {
+            let result = write_tcp_plain_response(&mut tx, &response, output_idle).await;
+            abort_execution(exec_abort, stdin_task, exec_done).await;
+            result?;
+            return Ok(());
         }
     };
-
-    if stdin_result_rx_active
-        && let Ok(outcome) = (&mut stdin_result_rx).await
-        && let Some((status, body)) = outcome.error_response()
-    {
-        let res_meta = text_plain_meta(status);
-        write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
-        let _ = write_all_with_timeout(&mut tx, body, output_idle).await;
-        abort_execution(exec_abort, stdin_task, exec_done).await;
-        return Ok(());
-    }
-
-    let (res_meta, body_leftover) = if let Some(parsed) = parsed_res {
-        (parsed.meta, parsed.body_leftover)
-    } else {
-        // Executor ended before headers were completed.
-        let meta = text_plain_meta(502);
-        write_frame_with_timeout(&mut tx, &meta, output_idle).await?;
-        write_all_with_timeout(&mut tx, b"bad gateway (no output)", output_idle).await?;
-        abort_execution(exec_abort, stdin_task, exec_done).await;
-        return Ok(());
-    };
+    let res_meta = &prepared.meta;
 
     // Write IpcResponseMeta
     write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
 
-    // Handle initial leftover stdout body bytes
-    if !body_leftover.is_empty() {
-        write_all_with_timeout(&mut tx, &body_leftover, output_idle).await?;
+    // Replay bounded pre-commit output before forwarding new stdout.
+    let replay_result: Result<()> = async {
+        while let Some(chunk) = prepared.next_staged_chunk().await? {
+            write_all_with_timeout(&mut tx, &chunk, output_idle).await?;
+        }
+        Ok(())
+    }
+    .await;
+    if let Err(err) = replay_result {
+        abort_execution(exec_abort, stdin_task, exec_done).await;
+        return Err(err);
+    }
+
+    if !prepared.body_leftover.is_empty() {
+        write_all_with_timeout(&mut tx, &prepared.body_leftover, output_idle).await?;
     }
 
     // Task to forward executor STDOUT to stream
@@ -795,12 +735,6 @@ where
             {
                 break;
             }
-        }
-    });
-
-    let stderr_task = tokio::spawn(async move {
-        while let Some(chunk) = exec_stderr.recv().await {
-            log_executor_stderr_chunk(&chunk);
         }
     });
 

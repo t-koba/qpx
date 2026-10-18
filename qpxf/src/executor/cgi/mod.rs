@@ -217,6 +217,7 @@ fn dedupe_script_candidates(candidates: Vec<ScriptSearchCandidate>) -> Vec<Scrip
 impl Executor for CgiExecutor {
     async fn start(&self, req: CgiRequest) -> Result<Execution> {
         fn immediate(output: Bytes) -> Execution {
+            let output_limit = output.len();
             let (stdin_tx, _stdin_rx) = mpsc::channel::<Bytes>(1);
             let (stdout_tx, stdout_rx) = mpsc::channel::<Bytes>(1);
             let (_stderr_tx, stderr_rx) = mpsc::channel::<Bytes>(1);
@@ -226,6 +227,7 @@ impl Executor for CgiExecutor {
                 Ok(())
             });
             Execution {
+                max_stdout_bytes: output_limit,
                 stdin: stdin_tx,
                 stdout: stdout_rx,
                 stderr: stderr_rx,
@@ -413,6 +415,7 @@ impl Executor for CgiExecutor {
         });
 
         Ok(Execution {
+            max_stdout_bytes: self.max_stdout_bytes,
             stdin: stdin_tx,
             stdout: stdout_rx,
             stderr: stderr_rx,

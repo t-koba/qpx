@@ -7,6 +7,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 pub struct WasmExecutor {
+    max_stdout_bytes: usize,
     instances: Vec<Arc<qpx_wasm::WasmExecutor>>,
     semaphore: Arc<Semaphore>,
     next: AtomicUsize,
@@ -44,6 +45,7 @@ impl WasmExecutor {
             )?));
         }
         Ok(Self {
+            max_stdout_bytes: config.max_stdout_bytes,
             instances,
             semaphore: Arc::new(Semaphore::new(max_instances)),
             next: AtomicUsize::new(0),
@@ -97,6 +99,7 @@ impl Executor for WasmExecutor {
             result.map_err(anyhow::Error::from)
         });
         Ok(Execution {
+            max_stdout_bytes: self.max_stdout_bytes,
             stdin: exec.stdin,
             stdout: exec.stdout,
             stderr: exec.stderr,

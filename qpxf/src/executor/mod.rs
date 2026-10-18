@@ -35,6 +35,8 @@ pub struct CgiRequest {
 /// A running execution instance: stdin is fed by the IPC server, stdout/stderr
 /// are streamed back to the IPC client.
 pub struct Execution {
+    /// Existing backend stdout limit, also bounding pre-commit response staging.
+    pub max_stdout_bytes: usize,
     pub stdin: mpsc::Sender<Bytes>,
     pub stdout: mpsc::Receiver<Bytes>,
     pub stderr: mpsc::Receiver<Bytes>,

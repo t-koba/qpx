@@ -101,6 +101,7 @@ impl Executor for FastCgiExecutor {
         });
 
         Ok(Execution {
+            max_stdout_bytes: self.max_stdout_bytes,
             stdin: stdin_tx,
             stdout: stdout_rx,
             stderr: stderr_rx,
@@ -264,6 +265,7 @@ impl PersistentExecutor {
         });
 
         Ok(Execution {
+            max_stdout_bytes: self.max_stdout_bytes,
             stdin: stdin_tx,
             stdout: stdout_rx,
             stderr: stderr_rx,

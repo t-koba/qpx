@@ -181,10 +181,24 @@ handlers:
         script_name: &str,
         body_bytes: &[u8],
     ) -> Result<(u16, Vec<u8>), String> {
+        send_tcp_body(addr, script_name, body_bytes, None).await
+    }
+
+    async fn send_tcp_body(
+        addr: &str,
+        script_name: &str,
+        body_bytes: &[u8],
+        declared_len: Option<usize>,
+    ) -> Result<(u16, Vec<u8>), String> {
         let mut stream = TcpStream::connect(addr)
             .await
             .map_err(|err| format!("connect: {err}"))?;
-        write_frame(&mut stream, &ipc_meta(script_name, "POST"))
+        let mut meta = ipc_meta(script_name, "POST");
+        if let Some(len) = declared_len {
+            meta.headers
+                .push(("Content-Length".to_string(), len.to_string()));
+        }
+        write_frame(&mut stream, &meta)
             .await
             .map_err(|err| format!("write meta: {err}"))?;
         stream
@@ -277,6 +291,16 @@ handlers:
         script_name: &str,
         body_bytes: &[u8],
     ) -> Result<(u16, Vec<u8>), String> {
+        send_shm_body(addr, script_name, body_bytes, None, 4096).await
+    }
+
+    async fn send_shm_body(
+        addr: &str,
+        script_name: &str,
+        body_bytes: &[u8],
+        declared_len: Option<usize>,
+        ring_size: usize,
+    ) -> Result<(u16, Vec<u8>), String> {
         let shm_dir = ShmRingBuffer::default_shm_dir().join("ipc");
         std::fs::create_dir_all(&shm_dir).map_err(|err| format!("create shm dir: {err}"))?;
         let nonce = SystemTime::now()
@@ -295,16 +319,20 @@ handlers:
         );
         let req_path = shm_dir.join(&req_token);
         let res_path = shm_dir.join(&res_token);
-        let mut req_ring = ShmRingBuffer::create_or_open(&req_path, 4096)
+        let mut req_ring = ShmRingBuffer::create_or_open(&req_path, ring_size)
             .map_err(|err| format!("create req ring: {err}"))?;
-        let mut res_ring = ShmRingBuffer::create_or_open(&res_path, 4096)
+        let mut res_ring = ShmRingBuffer::create_or_open(&res_path, ring_size)
             .map_err(|err| format!("create res ring: {err}"))?;
 
         let mut meta = ipc_meta(script_name, "POST");
+        if let Some(len) = declared_len {
+            meta.headers
+                .push(("Content-Length".to_string(), len.to_string()));
+        }
         meta.req_body_shm_path = Some(req_token);
-        meta.req_body_shm_size_bytes = Some(4096);
+        meta.req_body_shm_size_bytes = Some(ring_size);
         meta.res_body_shm_path = Some(res_token);
-        meta.res_body_shm_size_bytes = Some(4096);
+        meta.res_body_shm_size_bytes = Some(ring_size);
 
         let mut stream = TcpStream::connect(addr)
             .await
@@ -312,12 +340,18 @@ handlers:
         write_frame(&mut stream, &meta)
             .await
             .map_err(|err| format!("write meta: {err}"))?;
-        req_ring
-            .try_push(body_bytes)
-            .map_err(|err| format!("push body: {err}"))?;
-        req_ring
-            .try_push(&[])
-            .map_err(|err| format!("push eof: {err}"))?;
+        // Upload fully before reading metadata, as a non-duplex IPC client may do.
+        for chunk in body_bytes.chunks(8192).chain(std::iter::once(&[][..])) {
+            while !req_ring
+                .try_push(chunk)
+                .map_err(|err| format!("push body: {err}"))?
+            {
+                timeout(Duration::from_secs(2), req_ring.wait_for_space(chunk.len()))
+                    .await
+                    .map_err(|_| "upload timeout".to_string())?
+                    .map_err(|err| format!("wait upload: {err}"))?;
+            }
+        }
         let res_meta: IpcResponseMeta = read_frame(&mut stream)
             .await
             .map_err(|err| format!("read meta: {err}"))?;
@@ -338,6 +372,82 @@ handlers:
         let _ = std::fs::remove_file(&req_path);
         let _ = std::fs::remove_file(&res_path);
         Ok((res_meta.status, response_body))
+    }
+
+    async fn large_cgi_duplex(shm: bool, truncated: bool) {
+        let tmp = tempdir("qpxf-regression-duplex");
+        let headers =
+            "printf 'Status: 201 Created\\r\\nContent-Type: application/octet-stream\\r\\n\\r\\n'";
+        write_script(&tmp, "duplex.sh", &format!("#!/bin/sh\n{headers}\ncat\n"));
+        // Exercise stderr backpressure both before and after parsing headers.
+        let noise = "dd if=/dev/zero bs=8192 count=32 >&2";
+        write_script(
+            &tmp,
+            "noisy-duplex.sh",
+            &format!("#!/bin/sh\n{noise}\n{headers}\n{noise}\ncat\n"),
+        );
+        let (addr, server_task) = spawn_qpxf(&tmp, 2, 16 * 1024 * 1024, 2000).await;
+        // Much larger than all 16-chunk queues and the SHM rings. Binary pattern
+        // detects missing, duplicated, or reordered bytes, including replay/live boundaries.
+        let payload: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
+        let lengths = if truncated {
+            vec![Some(payload.len() + 1)]
+        } else {
+            vec![None, Some(payload.len())]
+        };
+        for (script, declared_len) in ["/duplex.sh", "/noisy-duplex.sh"]
+            .into_iter()
+            .flat_map(|script| lengths.iter().map(move |len| (script, *len)))
+        {
+            let result = timeout(Duration::from_secs(10), async {
+                if shm {
+                    send_shm_body(&addr, script, &payload, declared_len, 65536).await
+                } else {
+                    send_tcp_body(&addr, script, &payload, declared_len).await
+                }
+            })
+            .await;
+            // Clean up even when an assertion below fails.
+            let (status, body) = match result {
+                Ok(Ok(response)) => response,
+                other => {
+                    server_task.abort();
+                    panic!(
+                        "duplex request failed (shm={shm}, script={script}, length={declared_len:?}): {other:?}"
+                    );
+                }
+            };
+            if truncated {
+                assert_eq!(status, 400);
+                assert_eq!(body, b"request body truncated");
+            } else {
+                assert_eq!(status, 201);
+                assert_eq!(body.len(), payload.len());
+                assert!(body == payload, "duplex response payload differs");
+            }
+        }
+        server_task.abort();
+        std::fs::remove_dir_all(tmp).unwrap();
+    }
+
+    #[tokio::test]
+    async fn tcp_large_cgi_duplex_completes() {
+        large_cgi_duplex(false, false).await;
+    }
+
+    #[tokio::test]
+    async fn shm_large_cgi_duplex_completes() {
+        large_cgi_duplex(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn tcp_large_cgi_duplex_truncation_replaces_staged_response() {
+        large_cgi_duplex(false, true).await;
+    }
+
+    #[tokio::test]
+    async fn shm_large_cgi_duplex_truncation_replaces_staged_response() {
+        large_cgi_duplex(true, true).await;
     }
 
     #[tokio::test]

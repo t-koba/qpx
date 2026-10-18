@@ -29,6 +29,7 @@ dirs-next.workspace = true
 libc.workspace = true
 memchr.workspace = true
 metrics.workspace = true
+tempfile.workspace = true
 
 qpx-wasm = { path = "../qpx-wasm", optional = true }
 qpx-core = { path = "../qpx-core", default-features = false, features = ["ipc-support"] }
