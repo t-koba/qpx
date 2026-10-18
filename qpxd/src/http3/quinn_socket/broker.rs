@@ -157,7 +157,12 @@ impl LocalBrokerSocket {
                 if !this.filter.allow(addr, payload.as_ref()) {
                     continue;
                 }
-                if !this.allow_source_datagram(addr, "local") {
+                // Established 1-RTT traffic bypasses the per-source handshake
+                // flood cap; handshakes and unknown peers stay limited below.
+                // Bounded queues and QUIC flow control still bound bypassed flows.
+                if !this.bypass_source_limiter(addr, payload.as_ref())
+                    && !this.allow_source_datagram(addr, "local")
+                {
                     continue;
                 }
                 match this.route_inbound(addr, payload.as_ref()) {
@@ -373,6 +378,9 @@ impl RemoteBrokerSocket {
                 if !this.filter.allow(addr, payload.as_ref()) {
                     continue;
                 }
+                // Fail-closed: direct mode has no route state to distinguish
+                // established peers, so the per-source handshake cap still
+                // applies to every datagram here.
                 if !this.allow_source_datagram(addr, "remote_direct") {
                     continue;
                 }
@@ -514,7 +522,37 @@ impl AsyncUdpSocket for RemoteBrokerSocket {
     }
 }
 
+fn should_bypass_source_limit(
+    local_route: &SharedRouteState,
+    remote_route: &SharedRouteState,
+    remote_active: bool,
+    addr: SocketAddr,
+    packet: &[u8],
+) -> bool {
+    // Handshake/long-header traffic (including QUIC Initials) always stays
+    // under the per-source cap, even from a known address, so a single known
+    // peer cannot flood new handshakes without bound.
+    if crate::transparent::quic::looks_like_quic_initial(packet) || is_quic_long_header(packet) {
+        return false;
+    }
+    if local_route.matches_addr_or_cid(addr, packet) {
+        return true;
+    }
+    remote_active && remote_route.matches_addr_or_cid(addr, packet)
+}
+
 impl LocalBrokerSocket {
+    fn bypass_source_limiter(&self, addr: SocketAddr, packet: &[u8]) -> bool {
+        let remote_active = self.remote_writer.load().is_some();
+        should_bypass_source_limit(
+            &self.local_route,
+            &self.remote_route,
+            remote_active,
+            addr,
+            packet,
+        )
+    }
+
     fn allow_source_datagram(&self, addr: SocketAddr, queue: &'static str) -> bool {
         allow_source_datagram(&self.source_limiter, addr, queue)
     }
@@ -543,5 +581,159 @@ impl RemoteBrokerSocket {
 
     fn owned_transmit_contents(&self, payload: &[u8]) -> Bytes {
         pooled_bytes_from_slice(self.packet_pool.clone(), payload)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SharedRouteState;
+    use super::rate_limiter::ShardedDatagramRateLimiter;
+    use super::should_bypass_source_limit;
+    use std::net::SocketAddr;
+
+    fn test_addr(ip_last: u8, port: u16) -> SocketAddr {
+        SocketAddr::from(([198, 51, 100, ip_last], port))
+    }
+
+    fn long_header_packet(dcid: &[u8], scid: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0xC0, 0x00, 0x00, 0x00, 0x01, dcid.len() as u8];
+        packet.extend_from_slice(dcid);
+        packet.push(scid.len() as u8);
+        packet.extend_from_slice(scid);
+        packet.extend_from_slice(&[0u8; 16]);
+        packet
+    }
+
+    fn short_header_packet(dcid: &[u8]) -> Vec<u8> {
+        let mut packet = vec![0x40];
+        packet.extend_from_slice(dcid);
+        packet
+    }
+
+    #[test]
+    fn established_short_header_bypasses_while_handshake_and_unknown_stay_limited() {
+        let local = SharedRouteState::default();
+        let remote = SharedRouteState::default();
+        let addr = test_addr(1, 5000);
+        let dcid = [1u8, 2, 3, 4];
+        let scid = [5u8, 6, 7, 8];
+
+        // First inbound Initial learns addr, CID, and server CID length.
+        local.observe_inbound(addr, &long_header_packet(&dcid, &scid));
+
+        // Healthy established 1-RTT burst from the known addr/CID bypasses.
+        assert!(should_bypass_source_limit(
+            &local,
+            &remote,
+            false,
+            addr,
+            &short_header_packet(&dcid),
+        ));
+
+        // New handshake (long header) from the same known address stays limited.
+        assert!(!should_bypass_source_limit(
+            &local,
+            &remote,
+            false,
+            addr,
+            &long_header_packet(&[9u8, 9, 9, 9], &scid),
+        ));
+
+        // Unknown peer short-header with unknown CID stays limited.
+        let unknown = test_addr(2, 6000);
+        assert!(!should_bypass_source_limit(
+            &local,
+            &remote,
+            false,
+            unknown,
+            &short_header_packet(&[9u8, 9, 9, 9]),
+        ));
+
+        // Same CID from a migrated address still matches as established.
+        let migrated = test_addr(3, 7000);
+        assert!(should_bypass_source_limit(
+            &local,
+            &remote,
+            false,
+            migrated,
+            &short_header_packet(&dcid),
+        ));
+    }
+
+    #[test]
+    fn remote_route_bypass_requires_active_remote() {
+        let local = SharedRouteState::default();
+        let remote = SharedRouteState::default();
+        let addr = test_addr(4, 8000);
+        let dcid = [11u8, 12, 13, 14];
+        let scid = [15u8, 16, 17, 18];
+        remote.observe_inbound(addr, &long_header_packet(&dcid, &scid));
+
+        assert!(should_bypass_source_limit(
+            &local,
+            &remote,
+            true,
+            addr,
+            &short_header_packet(&dcid),
+        ));
+        // Fail-closed: stale remote knowledge must not bypass once detached.
+        assert!(!should_bypass_source_limit(
+            &local,
+            &remote,
+            false,
+            addr,
+            &short_header_packet(&dcid),
+        ));
+    }
+
+    #[test]
+    fn established_burst_avoids_cap_while_unknown_handshake_flood_is_capped() {
+        let local = SharedRouteState::default();
+        let remote = SharedRouteState::default();
+        let limiter = ShardedDatagramRateLimiter::new(32);
+
+        let established_addr = test_addr(5, 9000);
+        let dcid = [21u8, 22, 23, 24];
+        let scid = [25u8, 26, 27, 28];
+        local.observe_inbound(established_addr, &long_header_packet(&dcid, &scid));
+        let established_packet = short_header_packet(&dcid);
+
+        // Healthy burst: 600 established 1-RTT datagrams never hit the limiter.
+        let mut established_limited = 0usize;
+        for _ in 0..600 {
+            if !should_bypass_source_limit(
+                &local,
+                &remote,
+                false,
+                established_addr,
+                &established_packet,
+            ) && !limiter.allow(established_addr)
+            {
+                established_limited += 1;
+            }
+        }
+        assert_eq!(established_limited, 0);
+
+        // Unknown-peer handshake flood: nothing bypasses, limiter caps at 512/window.
+        let unknown_addr = test_addr(6, 9100);
+        let handshake_packet = long_header_packet(&[31u8, 32, 33, 34], &[35u8, 36, 37, 38]);
+        let mut allowed = 0usize;
+        let mut limited = 0usize;
+        for _ in 0..600 {
+            assert!(!should_bypass_source_limit(
+                &local,
+                &remote,
+                false,
+                unknown_addr,
+                &handshake_packet,
+            ));
+            if limiter.allow(unknown_addr) {
+                allowed += 1;
+            } else {
+                limited += 1;
+            }
+        }
+        assert_eq!(allowed, 512);
+        assert_eq!(limited, 88);
     }
 }
