@@ -1175,7 +1175,7 @@ impl<S: WebDavStore> WebDavService<S> {
         let Some(source_metadata) = self.store.metadata(source)? else {
             return response(StatusCode::NOT_FOUND, Vec::new());
         };
-        if source.is_ancestor_or_same(&destination) {
+        if source.is_ancestor_or_same(&destination) || destination.is_ancestor_or_same(source) {
             return response(StatusCode::FORBIDDEN, Vec::new());
         }
         if !self.parent_collection_exists(&destination)? {
@@ -2565,6 +2565,82 @@ mod tests {
                 .unwrap(),
             b"payload".as_slice()
         );
+    }
+
+    #[test]
+    fn copy_and_move_onto_ancestor_are_forbidden_and_preserve_data() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+        service
+            .handle(
+                Request::builder()
+                    .method("MKCOL")
+                    .uri("/a")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        service
+            .handle(
+                Request::builder()
+                    .method("MKCOL")
+                    .uri("/a/b")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        service
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/a/b/payload.txt")
+                    .body(b"payload".to_vec())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+
+        for method in ["COPY", "MOVE"] {
+            let response = service
+                .handle(
+                    Request::builder()
+                        .method(method)
+                        .uri("/a/b")
+                        .header("destination", "/a")
+                        .header("overwrite", "T")
+                        .body(Vec::new())
+                        .unwrap(),
+                    &context,
+                )
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+            assert!(
+                service
+                    .store
+                    .metadata(&ResourceId::parse("/a").unwrap())
+                    .unwrap()
+                    .is_some()
+            );
+            assert!(
+                service
+                    .store
+                    .metadata(&ResourceId::parse("/a/b").unwrap())
+                    .unwrap()
+                    .is_some()
+            );
+            assert_eq!(
+                service
+                    .store
+                    .read(&ResourceId::parse("/a/b/payload.txt").unwrap())
+                    .unwrap(),
+                b"payload".as_slice()
+            );
+        }
     }
 
     #[test]

@@ -493,10 +493,8 @@ impl WebDavDataStore for FileSystemDataStore {
     }
 
     fn copy(&self, source: &ResourceId, destination: &ResourceId, overwrite: bool) -> Result<()> {
-        if source.is_ancestor_or_same(destination) {
-            return Err(anyhow!(
-                "WebDAV destination must not be the source or inside it"
-            ));
+        if source.is_ancestor_or_same(destination) || destination.is_ancestor_or_same(source) {
+            return Err(anyhow!("WebDAV source and destination must not overlap"));
         }
         let source_path = self.resolve(source, false)?;
         self.require_parent(destination)?;
@@ -518,10 +516,8 @@ impl WebDavDataStore for FileSystemDataStore {
         destination: &ResourceId,
         overwrite: bool,
     ) -> Result<()> {
-        if source.is_ancestor_or_same(destination) {
-            return Err(anyhow!(
-                "WebDAV destination must not be the source or inside it"
-            ));
+        if source.is_ancestor_or_same(destination) || destination.is_ancestor_or_same(source) {
+            return Err(anyhow!("WebDAV source and destination must not overlap"));
         }
         let source_path = self.resolve(source, false)?;
         self.require_parent(destination)?;
@@ -683,6 +679,28 @@ mod tests {
 
         assert!(store.move_resource(&exact_file, &exact_file, true).is_err());
         assert_eq!(store.read(&exact_file).unwrap(), b"exact".as_slice());
+    }
+
+    #[test]
+    fn copy_and_move_onto_ancestor_are_rejected_and_preserve_data() {
+        let directory = tempdir().unwrap();
+        let store = FileSystemDataStore::open(directory.path()).unwrap();
+        let ancestor = ResourceId::parse("/a").unwrap();
+        let source = ResourceId::parse("/a/b").unwrap();
+        let payload = ResourceId::parse("/a/b/payload.txt").unwrap();
+        store.create_collection(&ancestor).unwrap();
+        store.create_collection(&source).unwrap();
+        store.put(&payload, b"payload", None).unwrap();
+
+        assert!(store.copy(&source, &ancestor, true).is_err());
+        assert!(store.metadata(&ancestor).unwrap().is_some());
+        assert!(store.metadata(&source).unwrap().is_some());
+        assert_eq!(store.read(&payload).unwrap(), b"payload".as_slice());
+
+        assert!(store.move_resource(&source, &ancestor, true).is_err());
+        assert!(store.metadata(&ancestor).unwrap().is_some());
+        assert!(store.metadata(&source).unwrap().is_some());
+        assert_eq!(store.read(&payload).unwrap(), b"payload".as_slice());
     }
 
     #[cfg(unix)]
