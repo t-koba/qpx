@@ -591,7 +591,7 @@ impl<S: WebDavStore> WebDavService<S> {
 
     fn search(&self, request_resource: &ResourceId, body: &[u8]) -> Result<Response<Vec<u8>>> {
         let query = parse_basic_search(body, self.max_depth)?;
-        if !resource_contains(request_resource, &query.scope) {
+        if !request_resource.is_ancestor_or_same(&query.scope) {
             return response(StatusCode::FORBIDDEN, Vec::new());
         }
         if self.store.metadata(&query.scope)?.is_none() {
@@ -1175,7 +1175,7 @@ impl<S: WebDavStore> WebDavService<S> {
         let Some(source_metadata) = self.store.metadata(source)? else {
             return response(StatusCode::NOT_FOUND, Vec::new());
         };
-        if source == &destination {
+        if source.is_ancestor_or_same(&destination) {
             return response(StatusCode::FORBIDDEN, Vec::new());
         }
         if !self.parent_collection_exists(&destination)? {
@@ -1774,14 +1774,6 @@ fn parse_basic_search(body: &[u8], max_depth: usize) -> Result<BasicSearchQuery>
         depth,
         predicate,
     })
-}
-
-fn resource_contains(parent: &ResourceId, child: &ResourceId) -> bool {
-    parent.is_root()
-        || child == parent
-        || child
-            .as_str()
-            .starts_with(&format!("{}/", parent.as_str().trim_end_matches('/')))
 }
 
 fn is_calendar_content_type(content_type: Option<&str>) -> bool {
@@ -2484,6 +2476,94 @@ mod tests {
                 .metadata(&ResourceId::parse("/shallow/child").unwrap())
                 .unwrap()
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn copy_and_move_to_descendant_are_forbidden_and_preserve_source() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+        service
+            .handle(
+                Request::builder()
+                    .method("MKCOL")
+                    .uri("/source")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        service
+            .handle(
+                Request::builder()
+                    .method("MKCOL")
+                    .uri("/source/child")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        service
+            .handle(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/source/file.txt")
+                    .body(b"payload".to_vec())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+
+        for (method, depth) in [("COPY", None), ("COPY", Some("0")), ("MOVE", None)] {
+            let mut builder = Request::builder()
+                .method(method)
+                .uri("/source")
+                .header("destination", "/source/child/copied");
+            if let Some(depth) = depth {
+                builder = builder.header("depth", depth);
+            }
+            let response = service
+                .handle(builder.body(Vec::new()).unwrap(), &context)
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+
+        let same_target = service
+            .handle(
+                Request::builder()
+                    .method("COPY")
+                    .uri("/source")
+                    .header("destination", "/source")
+                    .body(Vec::new())
+                    .unwrap(),
+                &context,
+            )
+            .unwrap();
+        assert_eq!(same_target.status(), StatusCode::FORBIDDEN);
+
+        assert!(
+            service
+                .store
+                .metadata(&ResourceId::parse("/source/child/copied").unwrap())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            service
+                .store
+                .metadata(&ResourceId::parse("/source").unwrap())
+                .unwrap()
+                .is_some()
+        );
+        assert_eq!(
+            service
+                .store
+                .read(&ResourceId::parse("/source/file.txt").unwrap())
+                .unwrap(),
+            b"payload".as_slice()
         );
     }
 

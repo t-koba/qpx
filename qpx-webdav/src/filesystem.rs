@@ -169,7 +169,7 @@ impl FileSystemDataStore {
         self.read_cache.rcu(|current| {
             let mut entries = Vec::with_capacity(current.entries.len());
             for entry in &current.entries {
-                if resource_contains(resource, &entry.resource) {
+                if resource.is_ancestor_or_same(&entry.resource) {
                     continue;
                 }
                 entries.push(entry.clone());
@@ -493,6 +493,11 @@ impl WebDavDataStore for FileSystemDataStore {
     }
 
     fn copy(&self, source: &ResourceId, destination: &ResourceId, overwrite: bool) -> Result<()> {
+        if source.is_ancestor_or_same(destination) {
+            return Err(anyhow!(
+                "WebDAV destination must not be the source or inside it"
+            ));
+        }
         let source_path = self.resolve(source, false)?;
         self.require_parent(destination)?;
         let destination_path = self.resolve(destination, true)?;
@@ -513,6 +518,11 @@ impl WebDavDataStore for FileSystemDataStore {
         destination: &ResourceId,
         overwrite: bool,
     ) -> Result<()> {
+        if source.is_ancestor_or_same(destination) {
+            return Err(anyhow!(
+                "WebDAV destination must not be the source or inside it"
+            ));
+        }
         let source_path = self.resolve(source, false)?;
         self.require_parent(destination)?;
         let destination_path = self.resolve(destination, true)?;
@@ -548,15 +558,6 @@ impl WebDavDataStore for FileSystemDataStore {
         children.sort();
         Ok(children)
     }
-}
-
-fn resource_contains(parent: &ResourceId, child: &ResourceId) -> bool {
-    parent == child
-        || parent.is_root()
-        || child
-            .as_str()
-            .strip_prefix(parent.as_str())
-            .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 #[cfg(test)]
@@ -642,6 +643,46 @@ mod tests {
                 .read(&ResourceId::parse("/escape/secret").unwrap())
                 .is_err()
         );
+    }
+
+    #[test]
+    fn copy_and_move_reject_same_or_descendant_destinations() {
+        let directory = tempdir().unwrap();
+        let store = FileSystemDataStore::open(directory.path()).unwrap();
+        let source = ResourceId::parse("/source").unwrap();
+        let child = ResourceId::parse("/source/child").unwrap();
+        let file = ResourceId::parse("/source/file.txt").unwrap();
+        store.create_collection(&source).unwrap();
+        store.create_collection(&child).unwrap();
+        store.put(&file, b"payload", None).unwrap();
+
+        let descendant = ResourceId::parse("/source/child/copied").unwrap();
+        assert!(store.copy(&source, &descendant, true).is_err());
+        assert!(store.metadata(&descendant).unwrap().is_none());
+        assert!(store.metadata(&source).unwrap().is_some());
+        assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
+
+        assert!(store.copy(&source, &source, true).is_err());
+        assert!(store.metadata(&source).unwrap().is_some());
+        assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
+
+        let exact_file = ResourceId::parse("/exact.txt").unwrap();
+        store.put(&exact_file, b"exact", None).unwrap();
+        assert!(store.copy(&exact_file, &exact_file, true).is_err());
+        assert_eq!(store.read(&exact_file).unwrap(), b"exact".as_slice());
+
+        let moved = ResourceId::parse("/source/child/moved").unwrap();
+        assert!(store.move_resource(&source, &moved, true).is_err());
+        assert!(store.metadata(&moved).unwrap().is_none());
+        assert!(store.metadata(&source).unwrap().is_some());
+        assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
+
+        assert!(store.move_resource(&source, &source, true).is_err());
+        assert!(store.metadata(&source).unwrap().is_some());
+        assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
+
+        assert!(store.move_resource(&exact_file, &exact_file, true).is_err());
+        assert_eq!(store.read(&exact_file).unwrap(), b"exact".as_slice());
     }
 
     #[cfg(unix)]

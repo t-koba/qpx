@@ -54,6 +54,20 @@ impl ResourceId {
         Arc::ptr_eq(&self.0, &other.0) || self == other
     }
 
+    /// Returns true when `other` names this resource or a descendant of it.
+    ///
+    /// Both identifiers are already canonical root-relative paths, so a
+    /// segment-boundary prefix check is sufficient (`/a` contains `/a/b` but
+    /// not `/ab`; the root contains every resource).
+    pub(crate) fn is_ancestor_or_same(&self, other: &Self) -> bool {
+        self == other
+            || self.is_root()
+            || other
+                .as_str()
+                .strip_prefix(self.as_str())
+                .is_some_and(|suffix| suffix.starts_with('/'))
+    }
+
     pub fn is_root(&self) -> bool {
         self.0.as_ref() == "/"
     }
@@ -102,6 +116,22 @@ impl fmt::Display for ResourceId {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ancestor_or_same_checks_segment_boundaries() {
+        let parent = ResourceId::parse("/a").unwrap();
+        assert!(parent.is_ancestor_or_same(&ResourceId::parse("/a").unwrap()));
+        assert!(parent.is_ancestor_or_same(&ResourceId::parse("/a/b").unwrap()));
+        assert!(parent.is_ancestor_or_same(&ResourceId::parse("/a/b/c").unwrap()));
+        assert!(!parent.is_ancestor_or_same(&ResourceId::parse("/ab").unwrap()));
+        assert!(!parent.is_ancestor_or_same(&ResourceId::parse("/b").unwrap()));
+        assert!(!parent.is_ancestor_or_same(&ResourceId::parse("/").unwrap()));
+
+        let root = ResourceId::root();
+        assert!(root.is_ancestor_or_same(&ResourceId::parse("/").unwrap()));
+        assert!(root.is_ancestor_or_same(&parent));
+        assert!(!parent.is_ancestor_or_same(&root));
+    }
 
     #[test]
     fn canonicalizes_resource_paths_and_rejects_traversal() {
