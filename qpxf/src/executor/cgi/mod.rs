@@ -331,52 +331,46 @@ impl Executor for CgiExecutor {
                 Ok(())
             }
 
-            let (err_tx, mut err_rx) = mpsc::channel::<anyhow::Error>(1);
-
-            let stdin_task = {
-                let err_tx = err_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = pump_stdin(stdin, stdin_rx).await {
-                        let _ = err_tx.send(e).await;
-                    }
-                })
-            };
-            let stdout_task = {
-                let err_tx = err_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = pump_reader(stdout, stdout_tx, max_stdout, "stdout").await {
-                        let _ = err_tx.send(e).await;
-                    }
-                })
-            };
-            let stderr_task = {
-                let err_tx = err_tx.clone();
-                tokio::spawn(async move {
-                    if let Err(e) = pump_reader(stderr, stderr_tx, max_stderr, "stderr").await {
-                        let _ = err_tx.send(e).await;
-                    }
-                })
-            };
-            drop(err_tx);
+            let mut pumps = tokio::task::JoinSet::new();
+            let stdin_task = pumps.spawn(pump_stdin(stdin, stdin_rx));
+            pumps.spawn(pump_reader(stdout, stdout_tx, max_stdout, "stdout"));
+            pumps.spawn(pump_reader(stderr, stderr_tx, max_stderr, "stderr"));
 
             let mut abort_rx = abort_rx;
-            let status = tokio::select! {
-                _ = &mut abort_rx => Err(anyhow!("CGI request aborted")),
-                Some(e) = err_rx.recv() => Err(e),
-                res = timeout(timeout_dur, child.wait()) => match res {
-                    Ok(Ok(status)) => Ok(status),
-                    Ok(Err(e)) => Err(anyhow!("CGI wait failed: {}", e)),
-                    Err(_) => Err(anyhow!("CGI timed out after {:?}", timeout_dur)),
-                },
-            };
+            // One deadline covers both the child and its output pipes, which may
+            // remain open in descendants after the direct child has exited.
+            let status = timeout(timeout_dur, async {
+                let mut exit_status = None;
+                loop {
+                    if pumps.is_empty()
+                        && let Some(status) = exit_status
+                    {
+                        return Ok(status);
+                    }
+                    tokio::select! {
+                        _ = &mut abort_rx => return Err(anyhow!("CGI request aborted")),
+                        result = pumps.join_next(), if !pumps.is_empty() => {
+                            match result.expect("pump set is nonempty") {
+                                Ok(result) => result?,
+                                // Only stdin is cancelled here, once the child exits.
+                                Err(err) if err.is_cancelled() && exit_status.is_some() => {},
+                                Err(err) => return Err(anyhow!("CGI pump task failed: {err}")),
+                            }
+                        }
+                        result = child.wait(), if exit_status.is_none() => {
+                            exit_status = Some(result.map_err(|e| anyhow!("CGI wait failed: {}", e))?);
+                            // Stop accepting input after child exit, but still join
+                            // stdin so an already-completed write failure is not lost.
+                            stdin_task.abort();
+                        }
+                    }
+                }
+            })
+            .await
+            .unwrap_or_else(|_| Err(anyhow!("CGI timed out after {:?}", timeout_dur)));
 
             match status {
                 Ok(exit_status) => {
-                    // Ensure output tasks complete and flush remaining buffered data.
-                    stdin_task.abort();
-                    let _ = stdin_task.await;
-                    let _ = stdout_task.await;
-                    let _ = stderr_task.await;
                     if !exit_status.success() {
                         warn!(
                             script = %script_label.display(),
@@ -393,14 +387,10 @@ impl Executor for CgiExecutor {
                 }
                 Err(e) => {
                     let err_text = e.to_string();
+                    pumps.abort_all();
                     let _ = child.start_kill();
                     let _ = tokio::time::timeout(Duration::from_secs(5), child.wait()).await;
-                    stdin_task.abort();
-                    stdout_task.abort();
-                    stderr_task.abort();
-                    let _ = stdin_task.await;
-                    let _ = stdout_task.await;
-                    let _ = stderr_task.await;
+                    while pumps.join_next().await.is_some() {}
                     if err_text.contains("timed out") {
                         crate::metrics::backend_request("cgi", "timeout");
                         crate::metrics::timeout("cgi", "request");

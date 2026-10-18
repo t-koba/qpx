@@ -136,3 +136,119 @@ fn set_secure_file(path: &Path) {
 
 #[cfg(not(unix))]
 fn set_secure_file(_path: &Path) {}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn timeout_remains_effective_while_inherited_output_pipes_drain() {
+    let root = temp_cgi_root();
+    let script = root.join("app");
+    create_script(&script);
+    std::fs::write(&script, b"#!/bin/sh\nsleep 2 &\nexit 0\n").unwrap();
+    let mut executor = test_executor(&root);
+    executor.timeout = Duration::from_millis(40);
+    let mut execution = executor
+        .start(test_request("/app", "", None))
+        .await
+        .expect("start CGI");
+
+    let result = timeout(Duration::from_millis(500), execution.done).await;
+    let _ = std::fs::remove_dir_all(root);
+    let err = result
+        .expect("configured timeout must cover inherited output pipes")
+        .expect("execution task")
+        .expect_err("CGI must time out");
+    assert!(
+        err.to_string().contains("CGI timed out after 40ms"),
+        "{err}"
+    );
+    assert_eq!(
+        execution.stdout.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    );
+    assert_eq!(
+        execution.stderr.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    );
+}
+
+// Only emit output once the direct child has been reaped. This synchronizes the
+// tests with the drain phase rather than assuming a sleep lets child.wait finish.
+#[cfg(unix)]
+fn create_drain_script(root: &Path, output: &str) {
+    let script = root.join("app");
+    create_script(&script);
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nparent=$$\n(\n\
+             i=0\n\
+             while kill -0 \"$parent\" 2>/dev/null; do\n\
+               i=$((i + 1))\n\
+               [ \"$i\" -lt 200 ] || exit 1\n\
+               sleep 0.01\n\
+             done\n\
+             {output}\n\
+             ) &\nexit 0\n"
+        ),
+    )
+    .expect("write drain script");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn abort_remains_effective_while_inherited_output_pipes_drain() {
+    let root = temp_cgi_root();
+    create_drain_script(&root, "printf draining; sleep 2");
+    let mut executor = test_executor(&root);
+    executor.timeout = Duration::from_secs(5);
+    let mut execution = executor
+        .start(test_request("/app", "", None))
+        .await
+        .expect("start CGI");
+    let ready = timeout(Duration::from_secs(1), execution.stdout.recv())
+        .await
+        .expect("descendant must observe direct child exit")
+        .expect("drain marker");
+    assert_eq!(ready, Bytes::from_static(b"draining"));
+    execution.abort.send(()).expect("send abort during drain");
+
+    let result = timeout(Duration::from_millis(500), execution.done).await;
+    let _ = std::fs::remove_dir_all(root);
+    let err = result
+        .expect("abort must interrupt inherited output drain")
+        .expect("execution task")
+        .expect_err("CGI must abort");
+    assert_eq!(err.to_string(), "CGI request aborted");
+    assert_eq!(
+        execution.stdout.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    );
+    assert_eq!(
+        execution.stderr.try_recv(),
+        Err(mpsc::error::TryRecvError::Disconnected)
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_pump_errors_after_child_exit_are_propagated() {
+    for (stream, redirect) in [("stdout", ""), ("stderr", ">&2")] {
+        let root = temp_cgi_root();
+        create_drain_script(&root, &format!("printf 123456789 {redirect}"));
+        let mut executor = test_executor(&root);
+        executor.max_stdout_bytes = 8;
+        executor.max_stderr_bytes = 8;
+        let execution = executor
+            .start(test_request("/app", "", None))
+            .await
+            .expect("start CGI");
+
+        let result = timeout(Duration::from_millis(500), execution.done).await;
+        let _ = std::fs::remove_dir_all(root);
+        let err = result
+            .expect("output pump failure must end execution")
+            .expect("execution task")
+            .expect_err("output limit failure must not be lost after child exit");
+        assert_eq!(err.to_string(), format!("cgi {stream} exceeded size limit"));
+    }
+}
