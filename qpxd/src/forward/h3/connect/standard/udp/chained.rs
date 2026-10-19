@@ -1,10 +1,11 @@
+use super::super::super::apply_connect_udp_bandwidth_controls;
 use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::h3_buf_to_bytes;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::config::ConnectUdpConfig;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, timeout};
 
 use crate::http3::capsule::encode_datagram_capsule_header;
 
@@ -124,20 +125,6 @@ pub(super) async fn relay_h3_connect_udp_stream_chained(
 
     let _ = timeout(idle_timeout, upstream_send.finish()).await;
     let _ = timeout(idle_timeout, downstream_send.finish()).await;
-    Ok(())
-}
-
-pub(super) async fn apply_connect_udp_bandwidth_controls(
-    ctx: &RateLimitContext,
-    limits: &AppliedRateLimits,
-    bytes: usize,
-) -> Result<()> {
-    let delay = limits
-        .reserve_bytes(ctx, bytes as u64)
-        .map_err(|_| anyhow!("CONNECT-UDP bandwidth quota exceeded"))?;
-    if !delay.is_zero() {
-        sleep(delay).await;
-    }
     Ok(())
 }
 

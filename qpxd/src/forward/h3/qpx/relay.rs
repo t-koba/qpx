@@ -1,3 +1,4 @@
+use super::super::connect::apply_connect_udp_bandwidth_controls;
 use crate::http3::capsule::{
     CapsuleBuffer, decode_connect_udp_payload, decode_quic_varint, encode_capsule_header,
     encode_datagram_capsule_context_header, encode_datagram_capsule_header,
@@ -11,7 +12,7 @@ use qpx_http::connect_ip::{
     ROUTE_ADVERTISEMENT_CAPSULE, decode_ip_prefix_records, decode_ip_routes,
 };
 use tokio::net::UdpSocket;
-use tokio::time::{Duration, sleep, timeout};
+use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(super) async fn relay_qpx_extended_connect_stream(
@@ -639,20 +640,6 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
 
     let _ = timeout(idle_timeout, upstream_send.finish()).await;
     let _ = timeout(idle_timeout, downstream_send.finish()).await;
-    Ok(())
-}
-
-async fn apply_connect_udp_bandwidth_controls(
-    ctx: &RateLimitContext,
-    limits: &AppliedRateLimits,
-    bytes: usize,
-) -> Result<()> {
-    let delay = limits
-        .reserve_bytes(ctx, bytes as u64)
-        .map_err(|_| anyhow!("CONNECT-UDP bandwidth quota exceeded"))?;
-    if !delay.is_zero() {
-        sleep(delay).await;
-    }
     Ok(())
 }
 

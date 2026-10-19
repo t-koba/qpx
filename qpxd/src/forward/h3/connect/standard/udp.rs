@@ -7,8 +7,9 @@ use super::{
 mod chained;
 mod upstream;
 
-use self::chained::{apply_connect_udp_bandwidth_controls, relay_h3_connect_udp_stream_chained};
+use self::chained::relay_h3_connect_udp_stream_chained;
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
+use super::super::apply_connect_udp_bandwidth_controls;
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::protocol::common::too_many_requests_response as too_many_requests;
 use crate::http::protocol::l7::finalize_response_with_headers;
