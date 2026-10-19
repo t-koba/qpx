@@ -1,7 +1,7 @@
 use super::super::ConnectTarget;
 use super::types::{TransparentPolicyEvaluation, TransparentPolicyInput};
 use crate::http::body::size::observed_request_size;
-use crate::http::pipeline::PolicyStage;
+use crate::http::pipeline::{PolicyStage, staged_request_observation_requirements};
 use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
 };
@@ -81,52 +81,8 @@ pub(super) fn evaluate_transparent_policy_staged(
         proxy_name,
         forbidden_message,
     } = input;
-    let prefilter_ctx = MatchPrefilterContext {
-        method: ctx.method,
-        dst_port: ctx.dst_port,
-        src_ip: ctx.src_ip,
-        host: ctx.host,
-        sni: ctx.sni,
-        path: ctx.path,
-    };
-    let candidates = engine.candidate_rule_indices(prefilter_ctx);
-    for (pos, idx) in candidates.iter().copied().enumerate() {
-        let Some(rule) = engine.rule_at(idx) else {
-            continue;
-        };
-        let requirements = rule.request_observation_requirements();
-        if !requirements.is_empty() {
-            if !rule.matches_without_request_body_observation(&ctx) {
-                continue;
-            }
-            let mut combined = qpx_core::rules::CandidateRequestObservationRequirements::default();
-            for later_idx in candidates.iter().copied().skip(pos) {
-                if let Some(later) = engine.rule_at(later_idx) {
-                    let later_requirements = later.request_observation_requirements();
-                    if later_requirements.is_empty()
-                        || later.matches_without_request_body_observation(&ctx)
-                    {
-                        combined.include(later_requirements);
-                    }
-                }
-            }
-            return Ok(PolicyStage::Observe(combined));
-        }
-        if rule.matches(&ctx) {
-            return evaluate_transparent_policy(TransparentPolicyInput {
-                engine,
-                req,
-                base,
-                sanitized_headers,
-                destination,
-                identity,
-                request_rpc,
-                proxy_name,
-                forbidden_message,
-            })
-            .map(Box::new)
-            .map(PolicyStage::Decision);
-        }
+    if let Some(requirements) = staged_request_observation_requirements(engine, &ctx) {
+        return Ok(PolicyStage::Observe(requirements));
     }
     evaluate_transparent_policy(TransparentPolicyInput {
         engine,

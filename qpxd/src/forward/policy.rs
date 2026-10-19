@@ -1,4 +1,4 @@
-use crate::http::pipeline::PolicyStage;
+use crate::http::pipeline::{PolicyStage, staged_request_observation_requirements};
 use crate::runtime::Runtime;
 #[cfg(feature = "auth-basic")]
 use crate::runtime::auth::AuthChallenge;
@@ -6,8 +6,6 @@ use crate::runtime::auth::{AuthOutcome, AuthenticatedUser};
 use anyhow::{Result, anyhow};
 use hyper::HeaderMap;
 use qpx_core::config::ActionConfig;
-use qpx_core::prefilter::MatchPrefilterContext;
-use qpx_core::rules::CandidateRequestObservationRequirements;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::rules::RuleMatchContext;
 use std::collections::HashMap;
@@ -42,62 +40,8 @@ pub(crate) async fn evaluate_forward_policy_staged(
         .rules_by_listener
         .get(listener_name)
         .ok_or_else(|| anyhow!("rule engine not found"))?;
-    let prefilter_ctx = MatchPrefilterContext {
-        method: ctx.method,
-        dst_port: ctx.dst_port,
-        src_ip: ctx.src_ip,
-        host: ctx.host,
-        sni: ctx.sni,
-        path: ctx.path,
-    };
-    let candidates = engine.candidate_rule_indices(prefilter_ctx);
-    if candidates.is_empty() {
-        return evaluate_forward_policy(
-            runtime,
-            listener_name,
-            ctx,
-            request_headers,
-            auth_method,
-            auth_uri,
-        )
-        .await
-        .map(PolicyStage::Decision);
-    }
-
-    for (pos, idx) in candidates.iter().copied().enumerate() {
-        let Some(rule) = engine.rule_at(idx) else {
-            continue;
-        };
-        let requirements = rule.request_observation_requirements();
-        if !requirements.is_empty() {
-            if !rule.matches_without_request_body_observation(&ctx) {
-                continue;
-            }
-            let mut combined = CandidateRequestObservationRequirements::default();
-            for later_idx in candidates.iter().copied().skip(pos) {
-                if let Some(later) = engine.rule_at(later_idx) {
-                    let later_requirements = later.request_observation_requirements();
-                    if later_requirements.is_empty()
-                        || later.matches_without_request_body_observation(&ctx)
-                    {
-                        combined.include(later_requirements);
-                    }
-                }
-            }
-            return Ok(PolicyStage::Observe(combined));
-        }
-        if rule.matches(&ctx) {
-            return evaluate_forward_policy(
-                runtime,
-                listener_name,
-                ctx,
-                request_headers,
-                auth_method,
-                auth_uri,
-            )
-            .await
-            .map(PolicyStage::Decision);
-        }
+    if let Some(requirements) = staged_request_observation_requirements(engine, &ctx) {
+        return Ok(PolicyStage::Observe(requirements));
     }
 
     evaluate_forward_policy(
