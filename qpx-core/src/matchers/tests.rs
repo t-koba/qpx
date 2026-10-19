@@ -461,3 +461,160 @@ fn path_regex_stays_case_sensitive_and_preserves_escapes() {
     assert!(!case.matches(&lower));
     assert!(!case.matches_with_trace(&lower).result);
 }
+
+#[test]
+fn header_trace_reports_later_duplicate_exact_match() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "x-token".to_string(),
+            value: Some("secret".to_string()),
+            regex: None,
+        }],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut headers = HeaderMap::new();
+    headers.append("x-token", HeaderValue::from_static("other"));
+    headers.append("x-token", HeaderValue::from_static("secret"));
+    let ctx = RuleMatchContext {
+        headers: Some(&headers),
+        ..Default::default()
+    };
+    assert!(compiled.matches(&ctx));
+    let trace = compiled.matches_with_trace(&ctx);
+    assert!(trace.result);
+    let reason = trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header {
+                name,
+                configured,
+                actual,
+                result,
+            } if name == "x-token" => Some((configured, actual, result)),
+            _ => None,
+        })
+        .expect("header reason");
+    assert!(*reason.2);
+    assert_eq!(reason.1.as_deref(), Some("secret"));
+    assert_eq!(reason.0, "secret");
+}
+
+#[test]
+fn header_trace_reports_first_value_when_no_duplicate_exact_match() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "x-token".to_string(),
+            value: Some("secret".to_string()),
+            regex: None,
+        }],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut headers = HeaderMap::new();
+    headers.append("x-token", HeaderValue::from_static("other"));
+    headers.append("x-token", HeaderValue::from_static("another"));
+    let ctx = RuleMatchContext {
+        headers: Some(&headers),
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&ctx));
+    let trace = compiled.matches_with_trace(&ctx);
+    assert!(!trace.result);
+    let reason = trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header {
+                name,
+                actual,
+                result,
+                ..
+            } if name == "x-token" => Some((actual, result)),
+            _ => None,
+        })
+        .expect("header reason");
+    assert!(!*reason.1);
+    assert_eq!(reason.0.as_deref(), Some("other"));
+}
+
+#[test]
+fn header_trace_reports_later_duplicate_regex_match() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "x-tag".to_string(),
+            value: None,
+            regex: Some("^ab[0-9]+$".to_string()),
+        }],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut headers = HeaderMap::new();
+    headers.append("x-tag", HeaderValue::from_static("nope"));
+    headers.append("x-tag", HeaderValue::from_static("ab123"));
+    let ctx = RuleMatchContext {
+        headers: Some(&headers),
+        ..Default::default()
+    };
+    assert!(compiled.matches(&ctx));
+    let trace = compiled.matches_with_trace(&ctx);
+    assert!(trace.result);
+    let reason = trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header {
+                name,
+                actual,
+                result,
+                ..
+            } if name == "x-tag" => Some((actual, result)),
+            _ => None,
+        })
+        .expect("header reason");
+    assert!(*reason.1);
+    assert_eq!(reason.0.as_deref(), Some("ab123"));
+}
+
+#[test]
+fn header_trace_reports_first_value_when_no_duplicate_regex_match() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "x-tag".to_string(),
+            value: None,
+            regex: Some("^ab[0-9]+$".to_string()),
+        }],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut headers = HeaderMap::new();
+    headers.append("x-tag", HeaderValue::from_static("nope"));
+    headers.append("x-tag", HeaderValue::from_static("still-no"));
+    let ctx = RuleMatchContext {
+        headers: Some(&headers),
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&ctx));
+    let trace = compiled.matches_with_trace(&ctx);
+    assert!(!trace.result);
+    let reason = trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header {
+                name,
+                actual,
+                result,
+                ..
+            } if name == "x-tag" => Some((actual, result)),
+            _ => None,
+        })
+        .expect("header reason");
+    assert!(!*reason.1);
+    assert_eq!(reason.0.as_deref(), Some("nope"));
+}

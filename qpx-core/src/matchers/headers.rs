@@ -102,10 +102,13 @@ pub(super) fn trace_fast_header(
         HeaderFastMode::Present => "<present>".to_string(),
         HeaderFastMode::Exact(expected) => expected.to_string(),
     };
-    let actual = first_header_value(headers, matcher.name.as_ref());
-    let result = match &matcher.mode {
-        HeaderFastMode::Present => actual.is_some(),
-        HeaderFastMode::Exact(expected) => actual.as_deref() == Some(expected.as_ref()),
+    let (actual, result) = match &matcher.mode {
+        HeaderFastMode::Present => matching_header_value(headers, matcher.name.as_ref(), |_| true),
+        HeaderFastMode::Exact(expected) => {
+            matching_header_value(headers, matcher.name.as_ref(), |value| {
+                value == expected.as_ref()
+            })
+        }
     };
     (configured, actual, result)
 }
@@ -114,18 +117,28 @@ pub(super) fn trace_regex_header(
     matcher: &HeaderMatcherRegex,
     headers: Option<&http::HeaderMap>,
 ) -> (Option<String>, bool) {
-    let actual = first_header_value(headers, matcher.name.as_ref());
-    let result = actual
-        .as_deref()
-        .is_some_and(|actual| matcher.regex.is_match(actual));
-    (actual, result)
+    matching_header_value(headers, matcher.name.as_ref(), |value| {
+        matcher.regex.is_match(value)
+    })
 }
 
-fn first_header_value(headers: Option<&http::HeaderMap>, name: &str) -> Option<String> {
-    headers.and_then(|headers| {
-        headers
+fn matching_header_value(
+    headers: Option<&http::HeaderMap>,
+    name: &str,
+    mut predicate: impl FnMut(&str) -> bool,
+) -> (Option<String>, bool) {
+    let mut first = None;
+    if let Some(headers) = headers {
+        for value in headers
             .get_all(name)
             .iter()
-            .find_map(|value| value.to_str().ok().map(str::to_string))
-    })
+            .filter_map(|value| value.to_str().ok())
+        {
+            first.get_or_insert(value);
+            if predicate(value) {
+                return (Some(value.to_string()), true);
+            }
+        }
+    }
+    (first.map(str::to_string), false)
 }
