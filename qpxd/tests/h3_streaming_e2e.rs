@@ -212,18 +212,35 @@ async fn grpc_message_exceeds_limit_aborts() -> Result<()> {
     )
     .await?;
 
-    match request_h3(port, &cert_path, "/grpc-limit", &[], false).await {
+    let response = timeout(
+        Duration::from_secs(10),
+        request_h3(port, &cert_path, "/grpc-limit", &[], false),
+    )
+    .await
+    .context("oversized gRPC message did not reset within 10s")?;
+    match response {
         Ok(response) => {
             assert_eq!(response.status, http::StatusCode::OK);
+            let data_error = response
+                .data_error
+                .as_deref()
+                .expect("oversized gRPC message should reset the stream");
             assert!(
-                response.data_error.is_some(),
-                "oversized gRPC message should reset the stream"
+                data_error.contains("Remote reset"),
+                "expected an H3 stream reset, got: {data_error}"
             );
         }
         Err(err) if err.to_string().contains("Remote reset") => {}
         Err(err) => return Err(err),
     }
-    backend_task.await?;
+    // The shared fixture can wait for another request after a downstream reset; this
+    // case only needs the over-limit response that triggers the reset.
+    backend_task.abort();
+    if let Err(err) = backend_task.await
+        && !err.is_cancelled()
+    {
+        return Err(err.into());
+    }
     Ok(())
 }
 
