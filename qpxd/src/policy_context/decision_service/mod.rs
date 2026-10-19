@@ -32,6 +32,7 @@ use zeroize::Zeroizing;
 
 use super::identity::{EffectivePolicyContext, ResolvedIdentity};
 use super::util::{normalize_string_list, selected_headers_map};
+use qpx_observability::access_log::RequestLogContext;
 
 mod cache;
 mod signature;
@@ -188,6 +189,19 @@ impl DecisionServiceEnforcement {
             Self::Continue(allow) => &allow.policy_tags,
             Self::Deny(deny) => &deny.policy_tags,
         }
+    }
+
+    pub(crate) fn tagged_log_context(
+        &self,
+        identity: &ResolvedIdentity,
+        matched_rule: Option<&str>,
+        matched_route: Option<&str>,
+    ) -> (Option<String>, RequestLogContext) {
+        let policy_id = self.policy_id().map(str::to_owned);
+        let mut log_context =
+            identity.to_log_context(matched_rule, matched_route, policy_id.as_deref());
+        log_context.policy_tags = self.policy_tags().to_vec();
+        (policy_id, log_context)
     }
 }
 

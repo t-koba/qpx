@@ -246,14 +246,8 @@ pub(super) async fn handle_connect(
         },
     )
     .await?;
-    let decision_service_policy_id = decision_service.policy_id().map(str::to_owned);
-    let decision_service_policy_tags = decision_service.policy_tags().to_vec();
-    let mut log_context = identity.to_log_context(
-        matched_rule_name,
-        None,
-        decision_service_policy_id.as_deref(),
-    );
-    log_context.policy_tags = decision_service_policy_tags;
+    let (decision_service_policy_id, log_context) =
+        decision_service.tagged_log_context(&identity, matched_rule_name, None);
     let audit = ConnectAuditContext {
         state: &state,
         listener_name,
