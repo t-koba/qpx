@@ -2,7 +2,7 @@ use super::{TlsResult, UpstreamCertificateInfo};
 use crate::config::UpstreamTlsTrustConfig;
 use anyhow::anyhow;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::collections::HashSet;
 use std::fmt::Write as _;
 #[cfg(feature = "tls-rustls")]
@@ -214,12 +214,14 @@ impl PatternSet {
         let mut glob_values = Vec::new();
         let mut regex = Vec::new();
         for value in values {
+            if let Some(pattern) = extract_regex_pattern(value.trim()) {
+                regex.push(compile_case_insensitive_regex(pattern)?);
+                continue;
+            }
             let Some(normalized) = normalize_text(value.as_str()) else {
                 continue;
             };
-            if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
-                regex.push(Regex::new(pattern)?);
-            } else if is_exact_pattern(normalized.as_str()) {
+            if is_exact_pattern(normalized.as_str()) {
                 exact.insert(normalized);
             } else {
                 glob_values.push(normalized);
@@ -240,6 +242,10 @@ impl PatternSet {
         let mut glob_values = Vec::new();
         let mut regex = Vec::new();
         for value in values {
+            if let Some(pattern) = extract_regex_pattern(value.trim()) {
+                regex.push(compile_case_insensitive_regex(pattern)?);
+                continue;
+            }
             let Some(normalized) = normalize_domain(value.as_str()) else {
                 continue;
             };
@@ -250,9 +256,7 @@ impl PatternSet {
                 suffix.push(rest.to_string());
                 continue;
             }
-            if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
-                regex.push(Regex::new(pattern)?);
-            } else if is_exact_pattern(normalized.as_str()) {
+            if is_exact_pattern(normalized.as_str()) {
                 exact.insert(normalized);
             } else {
                 glob_values.push(normalized);
@@ -268,50 +272,57 @@ impl PatternSet {
     }
 
     fn matches_text(&self, value: &str) -> bool {
-        let Some(normalized) = normalize_text(value) else {
+        if let Some(normalized) = normalize_text(value) {
+            if self.exact.contains(normalized.as_str()) {
+                return true;
+            }
+            if self
+                .glob
+                .as_ref()
+                .map(|glob| glob.is_match(normalized.as_str()))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        // Regex syntax is preserved at compile time and matched
+        // case-insensitively, so match the trimmed original value here
+        // rather than the lowercased normalization.
+        let Some(candidate) = trim_text_candidate(value) else {
             return false;
         };
-        if self.exact.contains(normalized.as_str()) {
-            return true;
-        }
-        if self
-            .glob
-            .as_ref()
-            .map(|glob| glob.is_match(normalized.as_str()))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        self.regex
-            .iter()
-            .any(|pattern| pattern.is_match(normalized.as_str()))
+        self.regex.iter().any(|pattern| pattern.is_match(candidate))
     }
 
     fn matches_domain(&self, value: &str) -> bool {
-        let Some(normalized) = normalize_domain(value) else {
+        if let Some(normalized) = normalize_domain(value) {
+            if self.exact.contains(normalized.as_str()) {
+                return true;
+            }
+            if self
+                .suffix
+                .iter()
+                .any(|suffix| host_matches_suffix(normalized.as_str(), suffix.as_str()))
+            {
+                return true;
+            }
+            if self
+                .glob
+                .as_ref()
+                .map(|glob| glob.is_match(normalized.as_str()))
+                .unwrap_or(false)
+            {
+                return true;
+            }
+        }
+        // Regex syntax is preserved at compile time and matched
+        // case-insensitively, so match the trimmed original value (with the
+        // same trailing-dot removal as domain normalization, but without
+        // lowercasing) rather than the lowercased normalization.
+        let Some(candidate) = trim_domain_candidate(value) else {
             return false;
         };
-        if self.exact.contains(normalized.as_str()) {
-            return true;
-        }
-        if self
-            .suffix
-            .iter()
-            .any(|suffix| host_matches_suffix(normalized.as_str(), suffix.as_str()))
-        {
-            return true;
-        }
-        if self
-            .glob
-            .as_ref()
-            .map(|glob| glob.is_match(normalized.as_str()))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        self.regex
-            .iter()
-            .any(|pattern| pattern.is_match(normalized.as_str()))
+        self.regex.iter().any(|pattern| pattern.is_match(candidate))
     }
 
     fn is_empty(&self) -> bool {
@@ -363,11 +374,53 @@ fn normalize_domain(value: &str) -> Option<String> {
     (!value.is_empty()).then(|| value.to_ascii_lowercase())
 }
 
+/// Extract a `re:`/`regex:` expression from the trimmed raw value, before
+/// literal/domain normalization. Prefix recognition stays case-insensitive
+/// (so `RE:` keeps working) but the returned expression keeps its original
+/// case so regex operators such as `\D`, `\S`, `\B`, and Unicode property
+/// spellings are not mutated by lowercasing.
 fn extract_regex_pattern(item: &str) -> Option<&str> {
-    item.strip_prefix("re:")
-        .or_else(|| item.strip_prefix("regex:"))
+    strip_regex_prefix(item)
         .map(str::trim)
         .filter(|pattern| !pattern.is_empty())
+}
+
+fn strip_regex_prefix(item: &str) -> Option<&str> {
+    let bytes = item.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].eq_ignore_ascii_case(&b'r')
+        && bytes[1].eq_ignore_ascii_case(&b'e')
+        && bytes[2] == b':'
+    {
+        return item.get(3..);
+    }
+    if bytes.len() >= 6
+        && bytes[0].eq_ignore_ascii_case(&b'r')
+        && bytes[1].eq_ignore_ascii_case(&b'e')
+        && bytes[2].eq_ignore_ascii_case(&b'g')
+        && bytes[3].eq_ignore_ascii_case(&b'e')
+        && bytes[4].eq_ignore_ascii_case(&b'x')
+        && bytes[5] == b':'
+    {
+        return item.get(6..);
+    }
+    None
+}
+
+/// Compile a trust regex with case-insensitive matching while preserving the
+/// expression's original syntax.
+fn compile_case_insensitive_regex(pattern: &str) -> TlsResult<Regex> {
+    Ok(RegexBuilder::new(pattern).case_insensitive(true).build()?)
+}
+
+fn trim_text_candidate(value: &str) -> Option<&str> {
+    let value = value.trim();
+    (!value.is_empty()).then_some(value)
+}
+
+fn trim_domain_candidate(value: &str) -> Option<&str> {
+    let value = value.trim().trim_end_matches('.');
+    (!value.is_empty()).then_some(value)
 }
 
 fn is_exact_pattern(item: &str) -> bool {
@@ -452,6 +505,115 @@ mod tests {
             fingerprint_sha256: None,
         };
         assert!(trust.validate_certificate("example.com", &cert).is_err());
+    }
+
+    fn cert_with_dns(names: &[&str]) -> UpstreamCertificateInfo {
+        UpstreamCertificateInfo {
+            present: true,
+            subject: None,
+            issuer: None,
+            san_dns: names.iter().map(|name| (*name).to_owned()).collect(),
+            san_uri: Vec::new(),
+            fingerprint_sha256: None,
+        }
+    }
+
+    fn cert_with_issuer(issuer: &str) -> UpstreamCertificateInfo {
+        UpstreamCertificateInfo {
+            present: true,
+            subject: None,
+            issuer: Some(issuer.to_owned()),
+            san_dns: Vec::new(),
+            san_uri: Vec::new(),
+            fingerprint_sha256: None,
+        }
+    }
+
+    fn cert_with_uri(uris: &[&str]) -> UpstreamCertificateInfo {
+        UpstreamCertificateInfo {
+            present: true,
+            subject: None,
+            issuer: None,
+            san_dns: Vec::new(),
+            san_uri: uris.iter().map(|uri| (*uri).to_owned()).collect(),
+            fingerprint_sha256: None,
+        }
+    }
+
+    #[test]
+    fn trust_regex_preserves_uppercase_escape_class_for_san_dns() {
+        let trust = compile(&UpstreamTlsTrustConfig {
+            san_dns: vec![r"re:^\D+$".into()],
+            ..Default::default()
+        });
+        // `\D` must keep matching non-digits; lowercasing it to `\d`
+        // would reverse both outcomes below.
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_dns(&["proxy"]))
+                .is_ok()
+        );
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_dns(&["123"]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn trust_regex_preserves_uppercase_escape_class_for_text_constraints() {
+        let trust = compile(&UpstreamTlsTrustConfig {
+            issuer: vec![r"re:^CN=\D+$".into()],
+            ..Default::default()
+        });
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_issuer("CN=External-CA"))
+                .is_ok()
+        );
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_issuer("CN=12345"))
+                .is_err()
+        );
+
+        let trust = compile(&UpstreamTlsTrustConfig {
+            san_uri: vec![r"RE:^spiffe://trust/\S+$".into()],
+            ..Default::default()
+        });
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_uri(&["spiffe://trust/workload"]))
+                .is_ok()
+        );
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_uri(&["spiffe://trust/has space"]))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn trust_regex_matches_case_insensitively_with_trailing_dot() {
+        let trust = compile(&UpstreamTlsTrustConfig {
+            san_dns: vec![r"re:^api\.example\.com$".into()],
+            ..Default::default()
+        });
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_dns(&["API.EXAMPLE.COM"]))
+                .is_ok()
+        );
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_dns(&["API.EXAMPLE.COM."]))
+                .is_ok()
+        );
+        assert!(
+            trust
+                .validate_certificate("peer", &cert_with_dns(&["other.example.com"]))
+                .is_err()
+        );
     }
 
     fn compile(raw: &UpstreamTlsTrustConfig) -> Arc<CompiledUpstreamTlsTrust> {
