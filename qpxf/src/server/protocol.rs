@@ -450,63 +450,41 @@ where
         Err(response) => {
             let _ = write_shm_plain_response(stream, &mut res_ring, &response, input_idle).await;
             abort_execution(exec_abort, stdin_task, exec_done).await;
+            let _ = stderr_task.await;
+            drop(res_ring);
             release_ipc_shm_path(&res_path, shm_reusable);
             return Ok(());
         }
     };
-    let res_meta = &prepared.meta;
-
-    // Write IpcResponseMeta
-    write_frame(stream, &res_meta).await?;
-
-    // Replay bounded pre-commit output before forwarding new stdout.
-    let replay_result: Result<()> = async {
+    // Forward in the handler so a failed ring push cancels execution before
+    // waiting for the backend. Keep response-ring ownership on this path.
+    let forwarding_result: Result<()> = async {
+        write_frame(stream, &prepared.meta).await?;
         while let Some(chunk) = prepared.next_staged_chunk().await? {
             push_ring_bytes(&mut res_ring, &chunk, input_idle).await?;
         }
-        Ok(())
+        if !prepared.body_leftover.is_empty() {
+            push_ring_bytes(&mut res_ring, &prepared.body_leftover, input_idle).await?;
+        }
+        while let Some(chunk) = exec_stdout.recv().await {
+            push_ring_bytes(&mut res_ring, &chunk, input_idle).await?;
+        }
+        push_ring_eof(&mut res_ring, input_idle).await
     }
     .await;
-    if let Err(err) = replay_result {
+
+    if forwarding_result.is_err() {
+        // Join stdin rather than aborting its task: it owns request-path release.
         abort_execution(exec_abort, stdin_task, exec_done).await;
-        release_ipc_shm_path(&res_path, shm_reusable);
-        return Err(err);
+    } else {
+        let _ = exec_done.await;
+        let _ = stdin_task.await;
     }
-
-    let body_leftover = prepared.body_leftover;
-    if !body_leftover.is_empty()
-        && push_ring_bytes(&mut res_ring, body_leftover.as_ref(), input_idle)
-            .await
-            .is_err()
-    {
-        abort_execution(exec_abort, stdin_task, exec_done).await;
-        release_ipc_shm_path(&res_path, shm_reusable);
-        return Ok(());
-    }
-
-    // Task to forward executor STDOUT to response ring
-    let res_path_task = res_path.clone();
-    let stdout_task = tokio::spawn(async move {
-        let mut ring = res_ring;
-        while let Some(chunk) = exec_stdout.recv().await {
-            if push_ring_bytes(&mut ring, &chunk, input_idle)
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-        let _ = push_ring_eof(&mut ring, input_idle).await;
-        drop(ring);
-        release_ipc_shm_path(res_path_task, shm_reusable);
-    });
-
-    let _ = exec_done.await;
-    let _ = stdin_task.await;
-    let _ = stdout_task.await;
     let _ = stderr_task.await;
+    drop(res_ring);
+    release_ipc_shm_path(&res_path, shm_reusable);
 
-    Ok(())
+    forwarding_result
 }
 
 async fn write_frame_with_timeout<S, T>(

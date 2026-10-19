@@ -37,7 +37,11 @@ mod regression {
         workers: usize,
         max_stdin_bytes: usize,
         input_idle_timeout_ms: u64,
-    ) -> (String, tokio::task::JoinHandle<()>) {
+    ) -> (
+        String,
+        tokio::task::JoinHandle<()>,
+        tokio::sync::mpsc::UnboundedReceiver<anyhow::Result<()>>,
+    ) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let cfg_yaml = format!(
@@ -70,13 +74,15 @@ handlers:
         let max_params_bytes = cfg.max_params_bytes;
         let max_stdin_bytes = cfg.max_stdin_bytes;
 
+        let (completed_tx, completed_rx) = tokio::sync::mpsc::unbounded_channel();
         let task = tokio::spawn(async move {
             loop {
                 let (stream, _) = listener.accept().await.unwrap();
                 let router = Arc::clone(&router);
                 let semaphore = Arc::clone(&semaphore);
+                let completed_tx = completed_tx.clone();
                 tokio::spawn(async move {
-                    if let Err(err) = qpxf::server::handle_connection(
+                    let result = qpxf::server::handle_connection(
                         stream,
                         qpxf::server::ConnectionContext {
                             router,
@@ -89,14 +95,15 @@ handlers:
                             max_stdin_bytes,
                         },
                     )
-                    .await
-                    {
+                    .await;
+                    if let Err(err) = &result {
                         warn!(error = ?err, "qpxf regression test connection failed");
                     }
+                    let _ = completed_tx.send(result);
                 });
             }
         });
-        (format!("127.0.0.1:{}", addr.port()), task)
+        (format!("127.0.0.1:{}", addr.port()), task, completed_rx)
     }
 
     fn ipc_meta(script_name: &str, method: &str) -> IpcRequestMeta {
@@ -386,7 +393,7 @@ handlers:
             "noisy-duplex.sh",
             &format!("#!/bin/sh\n{noise}\n{headers}\n{noise}\ncat\n"),
         );
-        let (addr, server_task) = spawn_qpxf(&tmp, 2, 16 * 1024 * 1024, 2000).await;
+        let (addr, server_task, _) = spawn_qpxf(&tmp, 2, 16 * 1024 * 1024, 2000).await;
         let shm_ring_size = 256 * 1024;
         // The 8 MiB payload is 32x larger than each ring and exceeds all 16-chunk queues.
         // Its binary pattern detects missing, duplicated, or reordered bytes across ring and
@@ -550,6 +557,76 @@ handlers:
     }
 
     #[tokio::test]
+    async fn shm_response_push_failure_releases_cgi_worker() {
+        let tmp = tempfile::tempdir().unwrap();
+        let gate = tmp.path().join("release");
+        write_script(
+            tmp.path(),
+            "gated.sh",
+            &format!(
+                "#!/bin/sh\nprintf 'Status: 200 OK\\r\\nContent-Type: text/plain\\r\\n\\r\\nhello'\n\
+                 while [ ! -e '{}' ]; do sleep 0.01; done\n\
+                 printf '%s' '{}'\nexec sleep 30\n",
+                gate.display(),
+                "x".repeat(16 * 1024),
+            ),
+        );
+        write_script(
+            tmp.path(),
+            "fast.sh",
+            "#!/bin/sh\nprintf 'Status: 200 OK\\r\\n\\r\\nOK'\n",
+        );
+        let (addr, server_task, mut completed) = spawn_qpxf(tmp.path(), 1, 1024, 100).await;
+        let (stalled, meta) = timeout(
+            Duration::from_secs(2),
+            start_shm_request(&addr, "/gated.sh", 4096),
+        )
+        .await
+        .expect("initial metadata must stream before the gate opens")
+        .unwrap();
+        assert_eq!(meta.status, 200);
+        // Wait for initial body output without consuming it. Opening the gate
+        // only now ensures the 16 KiB is forwarded live, not during staging.
+        timeout(Duration::from_secs(1), stalled._res_ring.wait_for_data())
+            .await
+            .expect("initial hello must stream")
+            .unwrap();
+        std::fs::write(&gate, b"go").unwrap();
+
+        let result = timeout(Duration::from_secs(1), completed.recv()).await;
+        if result.is_err() {
+            // Join the production handler after its backend deadline on failure,
+            // rather than leaving the CGI running when the assertion panics.
+            let _ = completed.recv().await;
+            server_task.abort();
+            panic!("live SHM push failure retained the worker beyond one second");
+        }
+        let err = result
+            .unwrap()
+            .unwrap()
+            .expect_err("report the live ring push failure");
+        assert!(
+            err.downcast_ref::<tokio::time::error::Elapsed>().is_some()
+                || err
+                    .to_string()
+                    .contains("Message too large for ring buffer"),
+            "unexpected forwarding error: {err:#}"
+        );
+        assert!(!stalled.req_path.exists(), "request path must be released");
+        assert!(!stalled.res_path.exists(), "response path must be released");
+        let (status, body) = timeout(
+            Duration::from_secs(1),
+            send_tcp_ipc_request(&addr, "/fast.sh", "GET"),
+        )
+        .await
+        .expect("released worker must accept another request")
+        .unwrap();
+        assert_eq!(status, 200);
+        assert_eq!(body, b"OK");
+        server_task.abort();
+    }
+
+    #[tokio::test]
     async fn tcp_large_cgi_duplex_completes() {
         large_cgi_duplex(false, false).await;
     }
@@ -577,7 +654,7 @@ handlers:
             "fast.sh",
             "#!/bin/sh\nprintf 'Status: 200 OK\\r\\n'\nprintf 'Content-Type: text/plain\\r\\n'\nprintf 'Content-Length: 2\\r\\n\\r\\n'\nprintf 'OK'\n",
         );
-        let (addr, server_task) = spawn_qpxf(&tmp, 1, 32, 150).await;
+        let (addr, server_task, _) = spawn_qpxf(&tmp, 1, 32, 150).await;
 
         let mut first = TcpStream::connect(&addr).await.unwrap();
         let mut meta = ipc_meta("/fast.sh", "POST");
@@ -629,7 +706,7 @@ handlers:
             "wait.sh",
             "#!/bin/sh\ncat >/dev/null\nprintf 'Status: 200 OK\\r\\n'\nprintf 'Content-Type: text/plain\\r\\n'\nprintf 'Content-Length: 2\\r\\n\\r\\n'\nprintf 'OK'\n",
         );
-        let (addr, server_task) = spawn_qpxf(&tmp, 1, 1024, 100).await;
+        let (addr, server_task, _) = spawn_qpxf(&tmp, 1, 1024, 100).await;
 
         let (status, body) = send_tcp_partial_body_ipc_request(&addr, "/wait.sh", 10, b"x")
             .await
@@ -648,7 +725,7 @@ handlers:
             "echo-stdin.sh",
             "#!/bin/sh\nbody=$(cat)\nprintf 'Status: 200 OK\\r\\n'\nprintf 'Content-Type: text/plain\\r\\n'\nprintf 'Content-Length: %s\\r\\n\\r\\n' \"${#body}\"\nprintf '%s' \"$body\"\n",
         );
-        let (addr, server_task) = spawn_qpxf(&tmp, 2, 1024, 300).await;
+        let (addr, server_task, _) = spawn_qpxf(&tmp, 2, 1024, 300).await;
 
         let (tcp_status, tcp_body) =
             send_tcp_body_without_content_length(&addr, "/echo-stdin.sh", b"tcp-body")
@@ -675,7 +752,7 @@ handlers:
             "fast.sh",
             "#!/bin/sh\nprintf 'Status: 200 OK\\r\\n'\nprintf 'Content-Type: text/plain\\r\\n'\nprintf 'Content-Length: 2\\r\\n\\r\\n'\nprintf 'OK'\n",
         );
-        let (addr, server_task) = spawn_qpxf(&tmp, 2, 32, 300).await;
+        let (addr, server_task, _) = spawn_qpxf(&tmp, 2, 32, 300).await;
         let body = vec![b'x'; 128];
 
         let (tcp_status, tcp_body) = send_tcp_body_without_content_length(&addr, "/fast.sh", &body)
@@ -711,7 +788,7 @@ handlers:
             "fast.sh",
             "#!/bin/sh\nprintf 'Status: 200 OK\\r\\n'\nprintf 'Content-Type: text/plain\\r\\n'\nprintf 'Content-Length: 2\\r\\n\\r\\n'\nprintf 'OK'\n",
         );
-        let (addr, server_task) = spawn_qpxf(&tmp, 1, 1024, 150).await;
+        let (addr, server_task, _) = spawn_qpxf(&tmp, 1, 1024, 150).await;
 
         let (stalled_request, res_meta) = start_shm_request(&addr, "/stream.sh", 2048)
             .await
