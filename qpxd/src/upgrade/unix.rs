@@ -1,3 +1,4 @@
+use crate::unix_fd::set_cloexec;
 use anyhow::{Context, Result, anyhow};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 
@@ -204,30 +205,6 @@ impl ReadyNotifier {
         file.flush().ok();
         Ok(())
     }
-}
-
-fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
-    // SAFETY: fcntl with F_GETFD does not mutate memory and fd validity is checked by libc.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(anyhow!(
-            "failed to read fd flags: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let next = if enabled {
-        flags | libc::FD_CLOEXEC
-    } else {
-        flags & !libc::FD_CLOEXEC
-    };
-    // SAFETY: fcntl with F_SETFD only updates flags for the provided fd.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
-        return Err(anyhow!(
-            "failed to set fd flags: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(test)]

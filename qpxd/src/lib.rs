@@ -51,6 +51,8 @@ mod tunnel;
 mod udp_bindings;
 mod udp_session_handoff;
 mod udp_socket_handoff;
+#[cfg(unix)]
+mod unix_fd;
 mod upgrade;
 mod upstream;
 mod windows_handoff;

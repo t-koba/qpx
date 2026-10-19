@@ -1,33 +1,10 @@
 #[cfg(unix)]
 mod unix {
+    use crate::unix_fd::set_cloexec;
     use anyhow::{Context, Result, anyhow};
     #[cfg(any(feature = "http3", test))]
     use std::os::fd::IntoRawFd;
     use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
-
-    fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
-        // SAFETY: fcntl with F_GETFD only reads descriptor flags for a valid fd supplied by caller.
-        let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-        if flags < 0 {
-            return Err(anyhow!(
-                "failed to read fd flags: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        let next = if enabled {
-            flags | libc::FD_CLOEXEC
-        } else {
-            flags & !libc::FD_CLOEXEC
-        };
-        // SAFETY: fd is valid and next is derived from existing descriptor flags.
-        if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
-            return Err(anyhow!(
-                "failed to set fd flags: {}",
-                std::io::Error::last_os_error()
-            ));
-        }
-        Ok(())
-    }
 
     fn duplicate_raw_fd(fd: i32, cloexec: bool) -> Result<OwnedFd> {
         // SAFETY: dup duplicates a valid fd; ownership of the returned fd is handled below.

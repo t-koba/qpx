@@ -4,6 +4,8 @@ use super::{
 };
 #[cfg(windows)]
 use super::{WindowsSingleTcp, WindowsTcpBindingHandoff, WindowsTcpGroup};
+#[cfg(unix)]
+use crate::unix_fd::set_cloexec;
 use anyhow::{Context, Result, anyhow};
 use qpx_core::config::Config;
 use std::net::TcpListener;
@@ -349,31 +351,6 @@ fn duplicate_listener_for_handoff(
     let raw = owned.as_raw_fd();
     kept_fds.push(owned);
     Ok(raw)
-}
-
-#[cfg(unix)]
-fn set_cloexec(fd: i32, enabled: bool) -> Result<()> {
-    // SAFETY: `fd` is an open file descriptor owned by a reconstructed or duplicated listener.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(anyhow!(
-            "failed to read fd flags: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    let next = if enabled {
-        flags | libc::FD_CLOEXEC
-    } else {
-        flags & !libc::FD_CLOEXEC
-    };
-    // SAFETY: `fd` is valid and `next` is derived from existing fd flags.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, next) } < 0 {
-        return Err(anyhow!(
-            "failed to set fd flags: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    Ok(())
 }
 
 #[cfg(all(test, unix))]
