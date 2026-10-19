@@ -40,12 +40,11 @@ mod tests {
 
         set_cloexec(fd, false).expect("clear close-on-exec");
         // SAFETY: `fd` remains borrowed from the live UnixStream above.
-        assert_eq!(unsafe { libc::fcntl(fd, libc::F_GETFD) }, preserved);
+        let cleared_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(cleared_flags, preserved);
         set_cloexec(fd, true).expect("set close-on-exec");
         // SAFETY: `fd` remains borrowed from the live UnixStream above.
-        assert_eq!(
-            unsafe { libc::fcntl(fd, libc::F_GETFD) },
-            preserved | libc::FD_CLOEXEC
-        );
+        let enabled_flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
+        assert_eq!(enabled_flags, preserved | libc::FD_CLOEXEC);
     }
 }
