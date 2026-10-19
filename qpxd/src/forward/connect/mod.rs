@@ -19,7 +19,7 @@ use crate::policy_context::{
     authentication_response_for_error, enforce_decision_service, resolve_identity_for_request,
     sanitize_headers_for_policy,
 };
-use crate::rate_limit::{RateLimitContext, TransportScope};
+use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::upstream::connect::connect_tunnel_target;
 use crate::upstream::io_copy::BandwidthThrottle;
@@ -30,6 +30,7 @@ use qpx_core::config::ActionKind;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
 use std::net::SocketAddr;
+use std::time::Duration as StdDuration;
 use tokio::task;
 use tokio::time::Duration;
 use tracing::warn;
@@ -54,6 +55,20 @@ pub(super) use self::inspect::{
     listener_upstream_trust,
 };
 use self::tunnel::{TunnelConnectContext, tunnel_connect};
+
+/// Initial Connect-only plan limits (scope `Connect`, cost 1); the context feeds profile merging.
+pub(super) fn acquire_initial_connect_rate_limit(
+    rate_limiters: &crate::rate_limit::RateLimiters,
+    plan: &crate::rate_limit::CompiledRateLimitPlan,
+    remote_ip: std::net::IpAddr,
+    identity: &crate::policy_context::ResolvedIdentity,
+    matched_rule_name: Option<&str>,
+) -> Result<(RateLimitContext, AppliedRateLimits, Option<StdDuration>)> {
+    let ctx = RateLimitContext::from_identity(remote_ip, identity, matched_rule_name, None);
+    let acquired =
+        rate_limiters.collect_checked_plan_request(plan, None, TransportScope::Connect, &ctx, 1)?;
+    Ok((ctx, acquired.limits, acquired.retry_after))
+}
 
 pub(super) async fn handle_connect(
     req: Request<Body>,
@@ -202,17 +217,12 @@ pub(super) async fn handle_connect(
         .ingress_edge_execution_plan(listener_name, matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled CONNECT listener execution plan not found"))?;
     let matched_rule_name = matched_rule.as_deref();
-    let request_limit_ctx =
-        RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule_name, None);
-    let crate::rate_limit::RequestLimitAcquire {
-        limits: mut request_limits,
-        retry_after,
-    } = state.policy.rate_limiters.collect_checked_plan_request(
+    let (request_limit_ctx, mut request_limits, retry_after) = acquire_initial_connect_rate_limit(
+        &state.policy.rate_limiters,
         &selected_plan.rate_limits,
-        None,
-        TransportScope::Connect,
-        &request_limit_ctx,
-        1,
+        remote_addr.ip(),
+        &identity,
+        matched_rule_name,
     )?;
     if let Some(retry_after) = retry_after {
         let mut response = finalize_response_for_request(

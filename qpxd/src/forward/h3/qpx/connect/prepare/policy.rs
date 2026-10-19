@@ -15,7 +15,7 @@ use crate::policy_context::{
     DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
     enforce_decision_service, prepare_decision_service_allow,
 };
-use crate::rate_limit::{RateLimitContext, TransportScope};
+use crate::rate_limit::TransportScope;
 use anyhow::{Result, anyhow};
 use hyper::StatusCode;
 use qpx_core::config::ActionKind;
@@ -212,18 +212,14 @@ pub(super) async fn apply_connect_rate_limits(
         }};
     }
 
-    let request_limit_ctx =
-        RateLimitContext::from_identity(conn.remote_addr.ip(), &identity, matched_rule_name, None);
-    let crate::rate_limit::RequestLimitAcquire {
-        limits: mut request_limits,
-        retry_after,
-    } = state.policy.rate_limiters.collect_checked_plan_request(
-        &selected_plan.rate_limits,
-        None,
-        TransportScope::Connect,
-        &request_limit_ctx,
-        1,
-    )?;
+    let (request_limit_ctx, mut request_limits, retry_after) =
+        crate::forward::connect::acquire_initial_connect_rate_limit(
+            &state.policy.rate_limiters,
+            &selected_plan.rate_limits,
+            conn.remote_addr.ip(),
+            &identity,
+            matched_rule_name,
+        )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule_name, None, None);
         send_rate_limited!(retry_after, &request_limits, None, &log_context);

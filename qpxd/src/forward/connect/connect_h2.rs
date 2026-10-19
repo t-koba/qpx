@@ -31,7 +31,7 @@ use crate::policy_context::{
     authentication_response_for_error, enforce_decision_service, resolve_identity_for_request,
     sanitize_headers_for_policy,
 };
-use crate::rate_limit::{RateLimitContext, TransportScope};
+use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
 use ::http::{Method, Request, Response, StatusCode};
 use anyhow::{Result, anyhow};
@@ -223,18 +223,14 @@ pub(super) async fn handle_h2_extended_connect(
         .ingress_edge_execution_plan(listener_name, matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled HTTP/2 CONNECT listener execution plan not found"))?;
     let matched_rule_name = matched_rule.as_deref();
-    let request_limit_ctx =
-        RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule_name, None);
-    let crate::rate_limit::RequestLimitAcquire {
-        limits: mut request_limits,
-        retry_after,
-    } = state.policy.rate_limiters.collect_checked_plan_request(
-        &selected_plan.rate_limits,
-        None,
-        TransportScope::Connect,
-        &request_limit_ctx,
-        1,
-    )?;
+    let (request_limit_ctx, mut request_limits, retry_after) =
+        super::acquire_initial_connect_rate_limit(
+            &state.policy.rate_limiters,
+            &selected_plan.rate_limits,
+            remote_addr.ip(),
+            &identity,
+            matched_rule_name,
+        )?;
     if let Some(retry_after) = retry_after {
         let mut response = finalize_response_for_request(
             &Method::CONNECT,
