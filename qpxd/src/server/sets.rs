@@ -138,8 +138,9 @@ pub(super) async fn run_tcp_server_set(
             joined = tasks.join_next() => {
                 match joined {
                     Some(Ok((label, Ok(())))) => {
-                        tasks.abort_all();
-                        return Err(anyhow::anyhow!("{label} exited"));
+                        return finish_server_tasks_after_success(
+                            tasks, &label, &shutdown, |stop| *stop,
+                        ).await;
                     }
                     Some(Ok((label, Err(err)))) => {
                         tasks.abort_all();
@@ -155,14 +156,7 @@ pub(super) async fn run_tcp_server_set(
         }
     }
 
-    while let Some(joined) = tasks.join_next().await {
-        match joined {
-            Ok((_label, Ok(()))) => {}
-            Ok((label, Err(err))) => return Err(err).with_context(|| format!("{label} failed")),
-            Err(err) => return Err(anyhow::anyhow!("task join failed: {err}")),
-        }
-    }
-    Ok(())
+    drain_server_tasks(tasks).await
 }
 
 async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> Result<()> {
@@ -353,13 +347,10 @@ async fn await_exportable_sidecar_tasks(
             joined = tasks.join_next() => {
                 match joined {
                     Some(Ok((label, Ok(())))) => {
-                        if stop_mode.should_stop() {
-                            if tasks.is_empty() {
-                                return Ok(());
-                            }
-                        } else {
-                            return Err(anyhow::anyhow!("{label} exited"));
-                        }
+                        return finish_server_tasks_after_success(
+                            tasks, &label, &control,
+                            |mode| stop_mode.should_stop() || mode.should_stop(),
+                        ).await;
                     }
                     Some(Ok((label, Err(err)))) => {
                         return Err(err).with_context(|| format!("{label} failed"));
@@ -481,8 +472,9 @@ async fn run_brokered_h3_server_set(
             joined = tasks.join_next() => {
                 match joined {
                     Some(Ok((label, Ok(())))) => {
-                        tasks.abort_all();
-                        return Err(anyhow::anyhow!("{label} exited"));
+                        return finish_server_tasks_after_success(
+                            tasks, &label, &control, |mode| mode.should_stop(),
+                        ).await;
                     }
                     Some(Ok((label, Err(err)))) => {
                         tasks.abort_all();
@@ -498,6 +490,26 @@ async fn run_brokered_h3_server_set(
         }
     }
 
+    drain_server_tasks(tasks).await
+}
+
+// A child can observe stop and finish before the supervisor selects changed().
+// Inspect the current request (or sender closure), not just the selected branch.
+async fn finish_server_tasks_after_success<T>(
+    mut tasks: JoinSet<(String, Result<()>)>,
+    label: &str,
+    control: &watch::Receiver<T>,
+    should_stop: impl FnOnce(&T) -> bool,
+) -> Result<()> {
+    let stopping = should_stop(&control.borrow()) || control.has_changed().is_err();
+    if !stopping {
+        tasks.abort_all();
+        return Err(anyhow::anyhow!("{label} exited"));
+    }
+    drain_server_tasks(tasks).await
+}
+
+async fn drain_server_tasks(mut tasks: JoinSet<(String, Result<()>)>) -> Result<()> {
     while let Some(joined) = tasks.join_next().await {
         match joined {
             Ok((_label, Ok(()))) => {}
@@ -518,5 +530,186 @@ pub(crate) async fn wait_for_connection_drain(runtime: &runtime::Runtime) {
         .max_concurrent_connections;
     while semaphore.available_permits() < target {
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+    use tokio::sync::oneshot;
+
+    async fn ready_success() -> JoinSet<(String, Result<()>)> {
+        let mut tasks = JoinSet::new();
+        let child = tasks.spawn(async { ("completed".to_owned(), Ok(())) });
+        // Wait for actual task completion, not just a notification before return.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !child.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("child completed");
+        tasks
+    }
+
+    async fn select_success_first<T>(
+        tasks: &mut JoinSet<(String, Result<()>)>,
+        control: &mut watch::Receiver<T>,
+    ) -> String {
+        assert!(control.has_changed().unwrap_or(true));
+        // Both branches are ready. Deliberately take the ordering that caused the
+        // race, then exercise the same completion helper as the production arms.
+        tokio::select! {
+            biased;
+            joined = tasks.join_next() => {
+                let (label, result) = joined.expect("child").expect("join");
+                result.expect("success");
+                label
+            }
+            _ = control.changed() => panic!("completed child was not ready"),
+        }
+    }
+
+    async fn assert_orderly_completion<T>(
+        mut tasks: JoinSet<(String, Result<()>)>,
+        control: &mut watch::Receiver<T>,
+        should_stop: impl FnOnce(&T) -> bool,
+    ) {
+        let (release, wait) = oneshot::channel();
+        let (finished, did_finish) = oneshot::channel();
+        tasks.spawn(async move {
+            wait.await.expect("release sibling");
+            finished.send(()).expect("report sibling completion");
+            ("sibling".to_owned(), Ok(()))
+        });
+        let label = select_success_first(&mut tasks, control).await;
+        let completion = finish_server_tasks_after_success(tasks, &label, control, should_stop);
+        tokio::pin!(completion);
+        // Poll once while the sibling is gated: success must wait, not abort it.
+        assert!(
+            std::future::poll_fn(|cx| {
+                std::task::Poll::Ready(std::future::Future::poll(completion.as_mut(), cx))
+            })
+            .await
+            .is_pending()
+        );
+        release.send(()).expect("sibling not aborted");
+        tokio::time::timeout(Duration::from_secs(5), completion)
+            .await
+            .expect("drain completed")
+            .expect("orderly completion");
+        did_finish.await.expect("sibling finished normally");
+    }
+
+    #[tokio::test]
+    async fn tcp_success_with_ready_shutdown_or_closed_sender_drains() {
+        for close_sender in [false, true] {
+            let tasks = ready_success().await;
+            let (sender, mut shutdown) = watch::channel(false);
+            if close_sender {
+                drop(sender);
+            } else {
+                sender.send(true).expect("request shutdown");
+            }
+            assert_orderly_completion(tasks, &mut shutdown, |stop| *stop).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn sidecar_success_with_ready_stop_export_or_closed_sender_drains() {
+        for mode in [
+            Some(SidecarControl::Stop),
+            Some(SidecarControl::ExportForUpgrade),
+            None,
+        ] {
+            let tasks = ready_success().await;
+            let (sender, mut control) = watch::channel(SidecarControl::Running);
+            if let Some(mode) = mode {
+                sender.send(mode).expect("request stop/export");
+            } else {
+                drop(sender);
+            }
+            assert_orderly_completion(tasks, &mut control, |mode| mode.should_stop()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn successful_exit_while_running_is_unexpected() {
+        let mut tasks = ready_success().await;
+        let (_sender, control) = watch::channel(false);
+        let (label, result) = tasks.join_next().await.unwrap().unwrap();
+        result.unwrap();
+        let err = finish_server_tasks_after_success(tasks, &label, &control, |stop| *stop)
+            .await
+            .expect_err("TCP exit while running");
+        assert_eq!(err.to_string(), "completed exited");
+
+        let tasks = ready_success().await;
+        let (_sender, control) = watch::channel(SidecarControl::Running);
+        let err = await_exportable_sidecar_tasks(tasks, control)
+            .await
+            .expect_err("sidecar exit while running");
+        assert_eq!(err.to_string(), "completed exited");
+    }
+
+    #[tokio::test]
+    async fn exportable_sidecar_success_checks_current_stop_not_local_mode() {
+        for mode in [SidecarControl::Stop, SidecarControl::ExportForUpgrade] {
+            let tasks = ready_success().await;
+            let (sender, mut control) = watch::channel(SidecarControl::Running);
+            sender.send(mode).expect("request stop/export");
+            // Make changed() pending so the real supervisor must process the
+            // successful join while its local stop_mode is still Running.
+            assert_eq!(*control.borrow_and_update(), mode);
+            tokio::time::timeout(
+                Duration::from_secs(5),
+                await_exportable_sidecar_tasks(tasks, control),
+            )
+            .await
+            .expect("supervisor completed")
+            .expect("current stop request permits success");
+        }
+    }
+
+    #[tokio::test]
+    async fn drain_preserves_child_and_join_errors_during_stop() {
+        let (sender, control) = watch::channel(false);
+        sender.send(true).unwrap();
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { ("failing".to_owned(), Err(anyhow::anyhow!("child failure"))) });
+        let err = finish_server_tasks_after_success(tasks, "completed", &control, |stop| *stop)
+            .await
+            .expect_err("child error remains fatal");
+        assert_eq!(format!("{err:#}"), "failing failed: child failure");
+
+        let mut tasks = JoinSet::new();
+        tasks.spawn(async { panic!("child panic") });
+        let err = finish_server_tasks_after_success(tasks, "completed", &control, |stop| *stop)
+            .await
+            .expect_err("join error remains fatal");
+        assert!(err.to_string().starts_with("task join failed:"));
+        assert!(err.to_string().contains("child panic"));
+    }
+
+    #[tokio::test]
+    async fn exportable_sidecar_errors_remain_fatal_with_stop_ready() {
+        for panic in [false, true] {
+            let (sender, control) = watch::channel(SidecarControl::Running);
+            sender.send(SidecarControl::Stop).unwrap();
+            let mut tasks = JoinSet::new();
+            tasks.spawn(async move {
+                assert!(!panic, "sidecar panic");
+                ("sidecar".to_owned(), Err(anyhow::anyhow!("child failure")))
+            });
+            let err = await_exportable_sidecar_tasks(tasks, control)
+                .await
+                .expect_err("errors remain fatal during stop");
+            if panic {
+                assert!(err.to_string().starts_with("task join failed:"));
+            } else {
+                assert_eq!(format!("{err:#}"), "sidecar failed: child failure");
+            }
+        }
     }
 }
