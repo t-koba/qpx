@@ -1,10 +1,9 @@
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http3::codec::prepare_h3_response_head;
 use crate::http3::response_error::{H3ResponseSendError, emit_h3_response_send_error};
-use crate::http3::stream_limits::timeout_or_deadline;
+use crate::http3::stream_limits::{response_stream_timeouts, timeout_or_deadline};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::HeaderMap;
 use hyper::Response;
 use qpx_http::body::Body;
 use tokio::time::{Duration, Instant};
@@ -300,31 +299,6 @@ fn h3_response_send_error_for_body(
     } else {
         H3ResponseSendError::after_response_head(source)
     }
-}
-
-fn response_stream_timeouts(
-    headers: &HeaderMap,
-    default_timeout: Duration,
-    default_send_timeout: Duration,
-    default_deadline: Option<Instant>,
-    sse_policy: Option<qpx_core::config::SseStreamingPolicy>,
-) -> (Duration, Duration, Option<Instant>) {
-    let Some(policy) = sse_policy else {
-        return (default_timeout, default_send_timeout, default_deadline);
-    };
-    if !crate::http::modules::is_event_stream_headers(headers) {
-        return (default_timeout, default_send_timeout, default_deadline);
-    }
-    let idle = Duration::from_millis(policy.idle_timeout_ms.max(1));
-    let deadline = if policy.max_stream_duration_ms == 0 {
-        None
-    } else {
-        let duration_ms = policy
-            .max_stream_duration_ms
-            .min(qpx_core::config::MAX_SSE_STREAM_DURATION_MS);
-        Instant::now().checked_add(Duration::from_millis(duration_ms))
-    };
-    (idle, default_send_timeout, deadline)
 }
 
 pub(crate) async fn send_h3_static_response<S>(
