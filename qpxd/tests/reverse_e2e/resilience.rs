@@ -5,14 +5,16 @@ async fn reverse_route_retries_and_mirrors() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-route-e2e")?;
     let cfg = dir.join("reverse-route.yaml");
     let (live_addr, live_hits) = start_text_backend("LIVE", vec![]).await?;
-    let dead_port = reverse_support::pick_free_tcp_port()?;
+    // A literal destination port 0 cannot identify a listener: binding port 0
+    // asks the OS to choose an ephemeral port. Connecting here fails fast with
+    // connection-refused without a picked-then-released port reuse race.
     let (mirror_addr, mirror_hits) = start_text_backend("MIRROR", vec![]).await?;
 
     let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("reverse-route.log"), |port| {
         format!(
             r#"upstreams:
 - name: dead
-  url: http://127.0.0.1:{dead_port}
+  url: http://127.0.0.1:0
 - name: live
   url: http://{live_addr}
 - name: mirror
