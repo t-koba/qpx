@@ -129,6 +129,34 @@ pub(in crate::forward) fn parse_connect_authority_with_default(
 }
 
 #[cfg(feature = "http3")]
+pub(in crate::forward::h3) fn parse_extended_connect_upstream(
+    uri: &::http::Uri,
+    upstream: Option<&str>,
+) -> Result<(String, u16)> {
+    if let Some(upstream) = upstream {
+        if upstream.contains("://") {
+            let parsed = url::Url::parse(upstream)?;
+            match parsed.scheme() {
+                "https" | "h3" => {}
+                _ => return Err(anyhow!("extended CONNECT upstream requires https/h3 URL")),
+            }
+            let host = parsed
+                .host_str()
+                .ok_or_else(|| anyhow!("extended CONNECT upstream host missing"))?;
+            let port = parsed.port().unwrap_or(443);
+            return Ok((host.to_string(), port));
+        }
+        return qpx_http::protocol::address::parse_authority_host_port(upstream, 443)
+            .ok_or_else(|| anyhow!("invalid extended CONNECT upstream authority"));
+    }
+    let authority = uri
+        .authority()
+        .ok_or_else(|| anyhow!("extended CONNECT missing authority"))?;
+    qpx_http::protocol::address::parse_authority_host_port(authority.as_str(), 443)
+        .ok_or_else(|| anyhow!("invalid extended CONNECT authority"))
+}
+
+#[cfg(feature = "http3")]
 pub(in crate::forward) fn default_connect_port_for_scheme(scheme: Option<&str>) -> Option<u16> {
     match scheme {
         Some("http") => Some(80),
@@ -463,5 +491,27 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[cfg(feature = "http3")]
+    #[test]
+    fn extended_connect_upstream_parser_preserves_url_and_authority_rules() {
+        let request_uri: ::http::Uri = "https://r.test/path".parse().expect("uri");
+        for (upstream, expected_host, expected_port) in [
+            (Some("h3://u.test:8443/path"), "u.test", 8443),
+            (Some("https://u.test/path"), "u.test", 443),
+            (Some("u.test:9443"), "u.test", 9443),
+        ] {
+            let (host, port) =
+                parse_extended_connect_upstream(&request_uri, upstream).expect("valid upstream");
+            assert_eq!(host, expected_host);
+            assert_eq!(port, expected_port);
+        }
+        assert_eq!(
+            parse_extended_connect_upstream(&request_uri, None).unwrap(),
+            ("r.test".into(), 443)
+        );
+        assert!(parse_extended_connect_upstream(&request_uri, Some("ftp://u.test")).is_err());
+        let relative_uri: ::http::Uri = "/path".parse().expect("relative uri");
+        assert!(parse_extended_connect_upstream(&relative_uri, None).is_err());
     }
 }

@@ -1,3 +1,4 @@
+use super::super::parse::parse_extended_connect_upstream;
 use crate::http::protocol::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
@@ -100,7 +101,7 @@ pub(super) async fn open_upstream_extended_connect_stream(
     input: OpenUpstreamExtendedConnectInput<'_>,
 ) -> Result<UpstreamExtendedConnectStream> {
     let (connect_host, connect_port) =
-        parse_extended_connect_upstream(input.req_head.uri(), input.upstream).await?;
+        parse_extended_connect_upstream(input.req_head.uri(), input.upstream)?;
     let upstream_addr = match timeout(
         input.timeout_dur,
         lookup_host((connect_host.as_str(), connect_port)),
@@ -207,33 +208,6 @@ pub(super) async fn open_upstream_extended_connect_stream(
         driver,
         datagram_task,
     })
-}
-
-async fn parse_extended_connect_upstream(
-    uri: &::http::Uri,
-    upstream: Option<&str>,
-) -> Result<(String, u16)> {
-    if let Some(upstream) = upstream {
-        if upstream.contains("://") {
-            let parsed = url::Url::parse(upstream)?;
-            match parsed.scheme() {
-                "https" | "h3" => {}
-                _ => return Err(anyhow!("extended CONNECT upstream requires https/h3 URL")),
-            }
-            let host = parsed
-                .host_str()
-                .ok_or_else(|| anyhow!("extended CONNECT upstream host missing"))?;
-            let port = parsed.port().unwrap_or(443);
-            return Ok((host.to_string(), port));
-        }
-        return qpx_http::protocol::address::parse_authority_host_port(upstream, 443)
-            .ok_or_else(|| anyhow!("invalid extended CONNECT upstream authority"));
-    }
-    let authority = uri
-        .authority()
-        .ok_or_else(|| anyhow!("extended CONNECT missing authority"))?;
-    qpx_http::protocol::address::parse_authority_host_port(authority.as_str(), 443)
-        .ok_or_else(|| anyhow!("invalid extended CONNECT authority"))
 }
 
 pub(super) fn finalize_h3_connect_head_response(

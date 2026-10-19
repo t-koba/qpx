@@ -2,7 +2,9 @@ mod pool;
 
 pub(crate) use self::pool::QpxH3UpstreamSessionPool;
 use self::pool::{QpxH3UpstreamSessionKey, open_pooled_qpx_h3_extended_connect_stream};
-use super::super::connect::parse::{H3ConnectProtocol, validate_h3_connect_pseudo_headers};
+use super::super::connect::parse::{
+    H3ConnectProtocol, parse_extended_connect_upstream, validate_h3_connect_pseudo_headers,
+};
 use crate::http::protocol::common::connect_established_response as connect_established;
 use crate::http::protocol::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
@@ -91,8 +93,7 @@ pub(super) async fn open_upstream_qpx_extended_connect_stream(
         enable_datagram,
         timeout_dur,
     } = input;
-    let (connect_host, connect_port) =
-        parse_qpx_extended_connect_upstream(req_head.uri(), upstream).await?;
+    let (connect_host, connect_port) = parse_extended_connect_upstream(req_head.uri(), upstream)?;
     let normalized_headers =
         normalize_qpx_upstream_connect_headers(req_head.uri(), sanitized_headers, proxy_name)?;
     let mut request = http::Request::builder()
@@ -193,31 +194,4 @@ fn normalize_qpx_upstream_connect_headers(
     *request.headers_mut() = headers.clone();
     prepare_request_with_headers_in_place(&mut request, proxy_name, None, false);
     Ok(request.headers().clone())
-}
-
-async fn parse_qpx_extended_connect_upstream(
-    uri: &http::Uri,
-    upstream: Option<&str>,
-) -> Result<(String, u16)> {
-    if let Some(upstream) = upstream {
-        if upstream.contains("://") {
-            let parsed = url::Url::parse(upstream)?;
-            match parsed.scheme() {
-                "https" | "h3" => {}
-                _ => return Err(anyhow!("extended CONNECT upstream requires https/h3 URL")),
-            }
-            let host = parsed
-                .host_str()
-                .ok_or_else(|| anyhow!("extended CONNECT upstream host missing"))?;
-            let port = parsed.port().unwrap_or(443);
-            return Ok((host.to_string(), port));
-        }
-        return qpx_http::protocol::address::parse_authority_host_port(upstream, 443)
-            .ok_or_else(|| anyhow!("invalid extended CONNECT upstream authority"));
-    }
-    let authority = uri
-        .authority()
-        .ok_or_else(|| anyhow!("extended CONNECT missing authority"))?;
-    qpx_http::protocol::address::parse_authority_host_port(authority.as_str(), 443)
-        .ok_or_else(|| anyhow!("invalid extended CONNECT authority"))
 }
