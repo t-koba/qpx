@@ -49,7 +49,6 @@ pub(crate) fn inspect_request(
         let message_size = request_summary
             .as_ref()
             .map(|summary| summary.message_bytes)
-            .filter(|size| *size > 0)
             .or(observed_size);
         let request_message_count = request_summary
             .as_ref()
@@ -144,7 +143,6 @@ pub(crate) fn inspect_response(
         let message_size = body_summary
             .as_ref()
             .map(|summary| summary.message_bytes)
-            .filter(|size| *size > 0)
             .or(observed_size);
         let response_message_count = body_summary.as_ref().map(|summary| summary.message_count);
         let response_message_bytes = body_summary.as_ref().map(|summary| summary.message_bytes);

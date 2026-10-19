@@ -74,7 +74,182 @@ async fn buffered_grpc_request_precomputes_rpc_summary() {
     let rpc = inspect_request(&req).await;
     assert_eq!(rpc.request_message_count, Some(2));
     assert_eq!(rpc.request_message_bytes, Some(10));
+    assert_eq!(rpc.message_size, Some(10));
     assert_eq!(rpc.streaming.as_deref(), Some("client"));
+}
+
+#[tokio::test]
+async fn empty_grpc_request_reports_zero_payload_size_and_matches() {
+    let body = frame_grpc_message(Bytes::from_static(b""));
+    assert_eq!(body.len(), 5);
+    let req = Request::builder()
+        .method("POST")
+        .uri("/demo.Echo/Say")
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .body(Body::from(body))
+        .expect("request");
+
+    let req = crate::http::body::size::buffer_request_body_with_reason(
+        req,
+        1024,
+        Duration::from_secs(1),
+        "rpc.body",
+    )
+    .await
+    .expect("buffered");
+    let rpc = inspect_request(&req).await;
+    assert_eq!(rpc.protocol.as_deref(), Some("grpc"));
+    assert_eq!(rpc.request_message_count, Some(1));
+    assert_eq!(rpc.request_message_bytes, Some(0));
+    assert_eq!(rpc.message_size, Some(0));
+
+    let cfg = qpx_core::config::MatchConfig {
+        rpc: Some(qpx_core::config::RpcMatchConfig {
+            message_size: vec!["0".to_string()],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut interner = qpx_core::prefilter::StringInterner::default();
+    let (compiled, _) =
+        qpx_core::matchers::CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let ctx = qpx_core::rules::RuleMatchContext {
+        rpc_message_size: rpc.message_size,
+        ..Default::default()
+    };
+    assert!(compiled.matches(&ctx));
+}
+
+#[tokio::test]
+async fn empty_grpc_response_reports_zero_payload_size() {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/demo.Echo/Say")
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .body(Body::empty())
+        .expect("request");
+    let ctx = inspect_request(&req).await;
+
+    let body = frame_grpc_message(Bytes::from_static(b""));
+    let response = http::Response::builder()
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .body(Body::from(body))
+        .expect("response");
+    let response = crate::http::body::size::buffer_response_body_with_reason(
+        response,
+        1024,
+        Duration::from_secs(1),
+        "rpc.body",
+    )
+    .await
+    .expect("buffered");
+    let inspected = inspect_response(&ctx, &response).await;
+    assert_eq!(inspected.protocol.as_deref(), Some("grpc"));
+    assert_eq!(inspected.response_message_count, Some(1));
+    assert_eq!(inspected.response_message_bytes, Some(0));
+    assert_eq!(inspected.message_size, Some(0));
+}
+
+#[tokio::test]
+async fn trailer_only_grpc_web_response_keeps_zero_size_with_trailers() {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/demo.Echo/Say")
+        .header(http::header::CONTENT_TYPE, "application/grpc-web+proto")
+        .body(Body::empty())
+        .expect("request");
+    let ctx = inspect_request(&req).await;
+
+    let body = frame_grpc_web_trailers(b"grpc-status: 0\r\n");
+    let response = http::Response::builder()
+        .header(http::header::CONTENT_TYPE, "application/grpc-web+proto")
+        .body(Body::from(body))
+        .expect("response");
+    let response = crate::http::body::size::buffer_response_body_with_reason(
+        response,
+        1024,
+        Duration::from_secs(1),
+        "rpc.body",
+    )
+    .await
+    .expect("buffered");
+    let inspected = inspect_response(&ctx, &response).await;
+    assert_eq!(inspected.protocol.as_deref(), Some("grpc_web"));
+    assert_eq!(inspected.response_message_count, Some(0));
+    assert_eq!(inspected.response_message_bytes, Some(0));
+    assert_eq!(inspected.message_size, Some(0));
+    assert_eq!(inspected.status.as_deref(), Some("0"));
+    let trailers = inspected.trailers.as_ref().expect("trailers");
+    assert_eq!(
+        trailers
+            .get("grpc-status")
+            .and_then(|value| value.to_str().ok()),
+        Some("0")
+    );
+}
+
+#[tokio::test]
+async fn malformed_grpc_request_falls_back_to_observed_size() {
+    let body = vec![0, 0, 0, 0, 5, b'h', b'i'];
+    let req = Request::builder()
+        .method("POST")
+        .uri("/demo.Echo/Say")
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .body(Body::from(body.clone()))
+        .expect("request");
+
+    let req = crate::http::body::size::buffer_request_body_with_reason(
+        req,
+        1024,
+        Duration::from_secs(1),
+        "rpc.body",
+    )
+    .await
+    .expect("buffered");
+    assert!(
+        req.extensions()
+            .get::<PrecomputedRpcBodySummary>()
+            .is_none()
+    );
+    let rpc = inspect_request(&req).await;
+    assert_eq!(rpc.request_message_count, None);
+    assert_eq!(rpc.request_message_bytes, None);
+    assert_eq!(rpc.message_size, Some(body.len() as u64));
+}
+
+#[tokio::test]
+async fn malformed_grpc_response_falls_back_to_observed_size() {
+    let req = Request::builder()
+        .method("POST")
+        .uri("/demo.Echo/Say")
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .body(Body::empty())
+        .expect("request");
+    let ctx = inspect_request(&req).await;
+
+    let body = vec![0, 0, 0, 0, 5, b'h', b'i'];
+    let response = http::Response::builder()
+        .header(http::header::CONTENT_TYPE, "application/grpc")
+        .body(Body::from(body.clone()))
+        .expect("response");
+    let response = crate::http::body::size::buffer_response_body_with_reason(
+        response,
+        1024,
+        Duration::from_secs(1),
+        "rpc.body",
+    )
+    .await
+    .expect("buffered");
+    assert!(
+        response
+            .extensions()
+            .get::<PrecomputedRpcBodySummary>()
+            .is_none()
+    );
+    let inspected = inspect_response(&ctx, &response).await;
+    assert_eq!(inspected.response_message_count, None);
+    assert_eq!(inspected.response_message_bytes, None);
+    assert_eq!(inspected.message_size, Some(body.len() as u64));
 }
 
 #[test]
