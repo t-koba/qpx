@@ -1,4 +1,5 @@
 use super::parse_declared_content_length;
+use crate::http::codec::h1::write::{chunk_size_header, write_vectored_all};
 use crate::http::codec::h1_common::serialize_headers;
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
@@ -8,7 +9,6 @@ use hyper::header::{
 use hyper::{Method, Request, Version};
 use qpx_http::body::Body;
 use std::future::{Future, poll_fn};
-use std::io::{Error as IoError, ErrorKind, IoSlice};
 use std::task::Poll;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -303,82 +303,13 @@ where
     }
     let mut header = [0_u8; 18];
     let header = chunk_size_header(chunk.len(), &mut header);
-    write_vectored_all(stream, &[header, chunk, b"\r\n"]).await?;
+    write_vectored_all(
+        stream,
+        &[header, chunk, b"\r\n"],
+        "failed to write HTTP/1 request",
+    )
+    .await?;
     Ok(())
-}
-
-async fn write_vectored_all<S>(stream: &mut S, slices: &[&[u8]]) -> std::io::Result<()>
-where
-    S: AsyncWrite + Unpin,
-{
-    let mut index = 0usize;
-    let mut offset = 0usize;
-    while index < slices.len() {
-        while index < slices.len() && offset == slices[index].len() {
-            index += 1;
-            offset = 0;
-        }
-        if index >= slices.len() {
-            return Ok(());
-        }
-        let mut io_slices = std::array::from_fn::<_, 4, _>(|_| IoSlice::new(&[]));
-        let mut io_slice_count = 0usize;
-        io_slices[io_slice_count] = IoSlice::new(&slices[index][offset..]);
-        io_slice_count += 1;
-        for slice in &slices[index + 1..] {
-            if !slice.is_empty() {
-                if io_slice_count == io_slices.len() {
-                    break;
-                }
-                io_slices[io_slice_count] = IoSlice::new(slice);
-                io_slice_count += 1;
-            }
-        }
-        let written = stream.write_vectored(&io_slices[..io_slice_count]).await?;
-        if written == 0 {
-            return Err(IoError::new(
-                ErrorKind::WriteZero,
-                "failed to write HTTP/1 request",
-            ));
-        }
-        advance_slices(slices, &mut index, &mut offset, written);
-    }
-    Ok(())
-}
-
-fn advance_slices(slices: &[&[u8]], index: &mut usize, offset: &mut usize, written: usize) {
-    let mut remaining = written;
-    while remaining > 0 && *index < slices.len() {
-        let available = slices[*index].len() - *offset;
-        if remaining < available {
-            *offset += remaining;
-            return;
-        }
-        remaining -= available;
-        *index += 1;
-        *offset = 0;
-    }
-}
-
-fn chunk_size_header(len: usize, out: &mut [u8; 18]) -> &[u8] {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    let mut value = len;
-    let mut cursor = 16;
-    if value == 0 {
-        cursor -= 1;
-        out[cursor] = b'0';
-    } else {
-        while value > 0 {
-            cursor -= 1;
-            out[cursor] = HEX[value & 0x0f];
-            value >>= 4;
-        }
-    }
-    let digits = 16 - cursor;
-    out.copy_within(cursor..16, 0);
-    out[digits] = b'\r';
-    out[digits + 1] = b'\n';
-    &out[..digits + 2]
 }
 
 #[cfg(test)]

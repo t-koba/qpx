@@ -20,6 +20,7 @@ use tokio::task::JoinHandle;
 use tokio::time::Duration;
 
 mod response;
+pub(crate) mod write;
 mod zero_copy;
 
 use self::response::{ConnectionHeaderMode, http1_upgrade_accepted, write_status_and_headers};
