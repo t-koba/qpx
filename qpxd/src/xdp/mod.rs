@@ -223,6 +223,25 @@ fn parse_proxy_v2_header_and_payload(
 
 fn parse_proxy_v2_payload(fam_proto: u8, payload: &[u8]) -> Result<ProxyMeta> {
     let family = fam_proto & 0xF0;
+    if !matches!(family, 0x00 | 0x10 | 0x20 | 0x30) {
+        return Err(anyhow!(
+            "unsupported proxy-v2 address family 0x{:x}",
+            family
+        ));
+    }
+    let no_address = ProxyMeta {
+        src: None,
+        dst: None,
+    };
+    match fam_proto & 0x0F {
+        // These consumers use TCP: UNSPEC ignores addresses, and unsupported DGRAM
+        // must fall back to UNSPEC rather than trusting its address block.
+        0x00 | 0x02 => {
+            return Ok(no_address);
+        }
+        0x01 => {} // STREAM
+        other => return Err(anyhow!("unsupported proxy-v2 transport 0x{:x}", other)),
+    }
     match family {
         0x10 => {
             if payload.len() < 12 {
@@ -256,10 +275,7 @@ fn parse_proxy_v2_payload(fam_proto: u8, payload: &[u8]) -> Result<ProxyMeta> {
                 dst: Some(SocketAddr::new(std::net::IpAddr::V6(dst), dst_port)),
             })
         }
-        0x00 => Ok(ProxyMeta {
-            src: None,
-            dst: None,
-        }),
+        0x00 => Ok(no_address),
         other => Err(anyhow!("unsupported proxy-v2 address family 0x{:x}", other)),
     }
 }
@@ -277,16 +293,95 @@ pub(crate) fn fuzz_parse_proxy_v2_frame(frame: &[u8]) {
 mod tests {
     use crate::xdp::*;
 
+    fn proxy_header(command: u8, fam_proto: u8, payload_len: usize) -> [u8; 16] {
+        let mut hdr = [0u8; 16];
+        hdr[..12].copy_from_slice(&PROXY_V2_SIGNATURE);
+        hdr[12] = 0x20 | command;
+        hdr[13] = fam_proto;
+        hdr[14..16].copy_from_slice(&(payload_len as u16).to_be_bytes());
+        hdr
+    }
+
     #[test]
-    fn parse_proxy_v2_ipv4_payload() {
-        let payload = [
-            10, 0, 0, 1, // src ip
-            203, 0, 113, 7, // dst ip
-            0x86, 0xA7, // src port 34471
-            0x1F, 0x90, // dst port 8080
+    fn parse_proxy_v2_transport_table() {
+        let cases = [
+            (0x10, "10.0.0.1:34471", "203.0.113.7:8080"),
+            (0x20, "[2001:db8::1]:34471", "[2001:db8::2]:8080"),
         ];
-        let meta = parse_proxy_v2_payload(0x11, &payload).expect("ok");
-        assert_eq!(meta.src.unwrap().to_string(), "10.0.0.1:34471");
-        assert_eq!(meta.dst.unwrap().to_string(), "203.0.113.7:8080");
+        for (family, src, dst) in cases {
+            let src: SocketAddr = src.parse().unwrap();
+            let dst: SocketAddr = dst.parse().unwrap();
+            let mut payload = Vec::new();
+            for addr in [src, dst] {
+                match addr.ip() {
+                    IpAddr::V4(ip) => payload.extend_from_slice(&ip.octets()),
+                    IpAddr::V6(ip) => payload.extend_from_slice(&ip.octets()),
+                }
+            }
+            payload.extend_from_slice(&src.port().to_be_bytes());
+            payload.extend_from_slice(&dst.port().to_be_bytes());
+
+            for transport in 0..=15 {
+                let fam_proto = family | transport;
+                let hdr = proxy_header(1, fam_proto, payload.len());
+                let optional = parse_proxy_v2_header_and_payload(hdr, &payload, false);
+                let required = parse_proxy_v2_header_and_payload(hdr, &payload, true);
+                match transport {
+                    1 => {
+                        for result in [optional, required] {
+                            let meta = result.expect("STREAM accepted").expect("metadata");
+                            assert_eq!(meta.src, Some(src));
+                            assert_eq!(meta.dst, Some(dst));
+                        }
+                    }
+                    0 | 2 => {
+                        let meta = optional.expect("UNSPEC fallback").expect("metadata");
+                        assert_eq!(meta.src, None, "fam_proto={fam_proto:#x}");
+                        assert_eq!(meta.dst, None, "fam_proto={fam_proto:#x}");
+                        assert!(required.is_err(), "fam_proto={fam_proto:#x}");
+                        // Ignored address data must not require a full address block either.
+                        let empty = parse_proxy_v2_payload(fam_proto, &[]).unwrap();
+                        assert!(empty.src.is_none() && empty.dst.is_none());
+                    }
+                    _ => {
+                        assert!(optional.is_err(), "reserved fam_proto={fam_proto:#x}");
+                        assert!(required.is_err(), "reserved fam_proto={fam_proto:#x}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn parse_proxy_v2_local_ignores_family_and_transport() {
+        for fam_proto in 0..=u8::MAX {
+            let hdr = proxy_header(0, fam_proto, 3);
+            assert!(
+                parse_proxy_v2_header_and_payload(hdr, &[1, 2, 3], false)
+                    .unwrap()
+                    .is_none(),
+                "LOCAL fam_proto={fam_proto:#x}"
+            );
+            let err = parse_proxy_v2_header_and_payload(hdr, &[1, 2, 3], true).unwrap_err();
+            assert!(err.to_string().contains("LOCAL command"));
+        }
+    }
+
+    #[test]
+    fn parse_proxy_v2_family_validation_and_unsupported_fallback() {
+        let meta = parse_proxy_v2_payload(0x01, &[]).unwrap();
+        assert!(meta.src.is_none() && meta.dst.is_none());
+        assert!(parse_proxy_v2_payload(0x11, &[0; 11]).is_err());
+        assert!(parse_proxy_v2_payload(0x21, &[0; 35]).is_err());
+        assert!(parse_proxy_v2_payload(0x31, &[0; 36]).is_err());
+        for family in 4..=15 {
+            for transport in [0, 1, 2] {
+                assert!(parse_proxy_v2_payload((family << 4) | transport, &[0; 36]).is_err());
+            }
+        }
+        for fam_proto in [0x30, 0x32] {
+            let meta = parse_proxy_v2_payload(fam_proto, &[]).expect("valid unsupported fallback");
+            assert!(meta.src.is_none() && meta.dst.is_none());
+        }
     }
 }

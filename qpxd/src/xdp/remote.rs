@@ -66,6 +66,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resolve_remote_addr_with_xdp_dgram_uses_unspec_fallback() {
+        for require_metadata in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let mut client = TcpStream::connect(listener.local_addr().unwrap())
+                .await
+                .expect("connect");
+            let (stream, remote_addr) = listener.accept().await.expect("accept");
+            let mut proxy = proxy_v2_header(
+                "10.1.2.3:40123".parse().unwrap(),
+                "203.0.113.7:443".parse().unwrap(),
+            );
+            proxy[13] = 0x12; // IPv4 DGRAM metadata on a TCP connection.
+            let payload = b"GET /status HTTP/1.1\r\n\r\n";
+            proxy.extend_from_slice(payload);
+            client
+                .write_all(&proxy)
+                .await
+                .expect("write frame and payload");
+            client.shutdown().await.expect("shutdown write");
+
+            let cfg = super::super::CompiledXdpConfig {
+                require_metadata,
+                trusted_peers: vec!["127.0.0.0/8".parse::<IpCidr>().expect("cidr")],
+            };
+            let result = resolve_remote_addr_with_xdp(
+                stream,
+                remote_addr,
+                Some(&cfg),
+                Duration::from_secs(1),
+            )
+            .await;
+            if require_metadata {
+                let err = result
+                    .err()
+                    .expect("required metadata rejects DGRAM fallback");
+                assert!(err.to_string().contains("proxy metadata required"));
+            } else {
+                let (mut prefixed, effective_remote) = result.expect("optional metadata");
+                assert_eq!(effective_remote, remote_addr);
+                let mut received = Vec::new();
+                prefixed
+                    .read_to_end(&mut received)
+                    .await
+                    .expect("read payload");
+                assert_eq!(received, payload);
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn resolve_remote_addr_with_xdp_uses_proxy_source_for_trusted_peer() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let listen_addr = listener.local_addr().expect("local addr");
