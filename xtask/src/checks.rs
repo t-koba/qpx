@@ -2035,23 +2035,48 @@ fn qpxf_ipc_cleanup_backpressure_violations(content: &str) -> Vec<&'static str> 
         violations.push("missing SHM IPC handler");
         return violations;
     };
-    let Some(leftover_pos) = shm_fn.find("if !body_leftover.is_empty()") else {
+    let Some(forwarding_start) = shm_fn.find("let forwarding_result: Result<()> = async {") else {
         violations.push("SHM handler missing body_leftover write path");
         return violations;
     };
-    let leftover_section = &shm_fn[leftover_pos..];
-    let stdout_pos = leftover_section
-        .find("let stdout_task")
-        .unwrap_or(leftover_section.len());
-    let leftover_section = &leftover_section[..stdout_pos];
-    if !leftover_section
-        .contains("push_ring_bytes(&mut res_ring, body_leftover.as_ref(), input_idle)")
-        || !leftover_section.contains(".is_err()")
-        || !leftover_section.contains("abort_execution(exec_abort, stdin_task, exec_done).await")
-        || !leftover_section.contains("release_ipc_shm_path(&res_path, shm_reusable)")
+    let forwarding_tail = &shm_fn[forwarding_start..];
+    let Some(forwarding_end) = forwarding_tail.find(".await;") else {
+        violations.push("SHM handler missing body_leftover write path");
+        return violations;
+    };
+    let forwarding = &forwarding_tail[..forwarding_end];
+    if !forwarding.contains("if !prepared.body_leftover.is_empty()")
+        || !forwarding
+            .contains("push_ring_bytes(&mut res_ring, &prepared.body_leftover, input_idle).await?")
+    {
+        violations.push("SHM body_leftover push failures must propagate to forwarding cleanup");
+    }
+
+    let cleanup = &forwarding_tail[forwarding_end..];
+    let Some(error_check) = cleanup.find("if forwarding_result.is_err()") else {
+        violations
+            .push("SHM body_leftover push failures must abort execution and release response ring");
+        return violations;
+    };
+    let error_handling = &cleanup[error_check..];
+    let Some(success_branch) = error_handling.find("} else {") else {
+        violations
+            .push("SHM body_leftover push failures must abort execution and release response ring");
+        return violations;
+    };
+    let error_branch = &error_handling[..success_branch];
+    let success_branch = &error_handling[success_branch..];
+    let drop_ring = cleanup.find("drop(res_ring);");
+    let release_path = cleanup.find("release_ipc_shm_path(&res_path, shm_reusable)");
+    if !error_branch.contains("abort_execution(exec_abort, stdin_task, exec_done).await")
+        || error_branch.contains("exec_done.await")
+        || !success_branch.contains("exec_done.await")
+        || drop_ring.is_none()
+        || release_path.is_none()
+        || drop_ring >= release_path
     {
         violations
-            .push("SHM body_leftover write failure must abort executor and release response ring");
+            .push("SHM body_leftover push failures must abort execution and release response ring");
     }
     violations
 }
@@ -5019,14 +5044,23 @@ mod tests {
                 drain_req_ring(input_idle, shm_reusable, max_stdin_bytes,).await;
                 drain_req_ring(input_idle, shm_reusable, max_stdin_bytes,).await;
                 drain_req_ring(input_idle, shm_reusable, max_stdin_bytes,).await;
-                if !body_leftover.is_empty()
-                    && push_ring_bytes(&mut res_ring, body_leftover.as_ref(), input_idle).await.is_err()
-                {
-                    abort_execution(exec_abort, stdin_task, exec_done).await;
-                    release_ipc_shm_path(&res_path, shm_reusable);
-                    return Ok(());
+                let forwarding_result: Result<()> = async {
+                    if !prepared.body_leftover.is_empty() {
+                        push_ring_bytes(&mut res_ring, &prepared.body_leftover, input_idle).await?;
+                    }
+                    push_ring_eof(&mut res_ring, input_idle).await
                 }
-                let stdout_task = tokio::spawn(async move {});
+                .await;
+                if forwarding_result.is_err() {
+                    abort_execution(exec_abort, stdin_task, exec_done).await;
+                } else {
+                    let _ = exec_done.await;
+                    let _ = stdin_task.await;
+                }
+                let _ = stderr_task.await;
+                drop(res_ring);
+                release_ipc_shm_path(&res_path, shm_reusable);
+                forwarding_result
             }
             pub(super) async fn handle_one_request_tcp() {
                 drained = drained.saturating_add(n);
@@ -5047,10 +5081,20 @@ mod tests {
             }
             pub(super) async fn handle_one_request_shm() {
                 drain_req_ring(input_idle, shm_reusable).await;
-                if !body_leftover.is_empty() {
-                    let _ = push_ring_bytes(&mut res_ring, body_leftover.as_ref(), input_idle).await;
+                let forwarding_result: Result<()> = async {
+                    if !prepared.body_leftover.is_empty() {
+                        let _ = push_ring_bytes(&mut res_ring, &prepared.body_leftover, input_idle).await;
+                    }
+                    push_ring_eof(&mut res_ring, input_idle).await
                 }
-                let stdout_task = tokio::spawn(async move {});
+                .await;
+                if forwarding_result.is_err() {
+                    // Missing executor abort.
+                } else {
+                    let _ = exec_done.await;
+                }
+                drop(res_ring);
+                release_ipc_shm_path(&res_path, shm_reusable);
             }
             pub(super) async fn handle_one_request_tcp() {
                 loop {
@@ -5070,7 +5114,8 @@ mod tests {
                 "SHM rejection/overload/startup-error drains must pass max_stdin_bytes",
                 "TCP rejected-request drain must enforce max_stdin_bytes",
                 "TCP incomplete CGI headers must abort executor and stdin relay",
-                "SHM body_leftover write failure must abort executor and release response ring",
+                "SHM body_leftover push failures must propagate to forwarding cleanup",
+                "SHM body_leftover push failures must abort execution and release response ring",
             ]
         );
     }
