@@ -8,6 +8,7 @@ use crate::reverse::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_connection_filter_match,
     reverse_tls_fingerprints_required,
 };
+use crate::server::connection_permit::acquire_connection_permit;
 use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::tls::{extract_client_hello_info_with_fingerprints, read_client_hello_with_timeout};
 use anyhow::Result;
@@ -97,16 +98,7 @@ pub(crate) async fn run_reverse_tls_acceptor(
 ) -> Result<()> {
     let semaphore = reverse.runtime.state().connection_semaphore.clone();
     loop {
-        let permit = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            permit = semaphore.clone().acquire_owned() => Some(permit?),
-        };
+        let permit = acquire_connection_permit(&semaphore, &mut shutdown).await?;
         let Some(permit) = permit else {
             break;
         };
@@ -182,16 +174,7 @@ pub(crate) async fn run_reverse_tls_acceptor(
 ) -> Result<()> {
     let semaphore = reverse.runtime.state().connection_semaphore.clone();
     loop {
-        let permit = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            permit = semaphore.clone().acquire_owned() => Some(permit?),
-        };
+        let permit = acquire_connection_permit(&semaphore, &mut shutdown).await?;
         let Some(permit) = permit else {
             break;
         };

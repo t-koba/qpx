@@ -5,6 +5,7 @@ use crate::http::codec::interim::{
 use crate::http::metrics as http_metrics;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
+use crate::server::connection_permit::acquire_connection_permit;
 #[cfg(feature = "http3")]
 use crate::server::control::SidecarControl;
 use crate::tcp_bindings::filter::{
@@ -110,16 +111,7 @@ async fn run_forward_acceptor(
 ) -> Result<()> {
     let semaphore = runtime.state().connection_semaphore.clone();
     loop {
-        let permit = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            permit = semaphore.clone().acquire_owned() => Some(permit?),
-        };
+        let permit = acquire_connection_permit(&semaphore, &mut shutdown).await?;
         let Some(permit) = permit else {
             break;
         };

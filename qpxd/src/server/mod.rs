@@ -1,4 +1,5 @@
 pub(crate) mod admin_tasks;
+pub(crate) mod connection_permit;
 pub(crate) mod control;
 pub(crate) mod proxy_tasks;
 pub(crate) mod sets;
