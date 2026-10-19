@@ -27,6 +27,27 @@ pub(crate) fn has_connection_token(headers: &HeaderMap, token: &str) -> bool {
         .any(|part| part.trim().eq_ignore_ascii_case(token))
 }
 
+pub(crate) fn raw_has_connection_token(headers: &[httparse::Header<'_>], expected: &[u8]) -> bool {
+    headers.iter().any(|header| {
+        header.name.eq_ignore_ascii_case("connection")
+            && header
+                .value
+                .split(|byte| *byte == b',')
+                .map(trim_ascii)
+                .any(|token| token.eq_ignore_ascii_case(expected))
+    })
+}
+
+fn trim_ascii(mut value: &[u8]) -> &[u8] {
+    while value.first().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[1..];
+    }
+    while value.last().is_some_and(u8::is_ascii_whitespace) {
+        value = &value[..value.len() - 1];
+    }
+    value
+}
+
 pub(crate) fn has_only_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
     let mut tokens = Vec::new();
     for value in headers.get_all(TRANSFER_ENCODING).iter() {
@@ -206,6 +227,31 @@ pub(crate) fn parse_version(version: Option<u8>, missing_message: &'static str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_connection_token_matching_trims_and_ignores_ascii_case() {
+        let headers = [
+            httparse::Header {
+                name: "X-Connection",
+                value: b"upgrade",
+            },
+            httparse::Header {
+                name: "Connection",
+                value: b"keep-alive,\tUpGrAdE  ",
+            },
+            httparse::Header {
+                name: "connection",
+                value: b" close ",
+            },
+        ];
+
+        assert!(!raw_has_connection_token(&headers[..1], b"upgrade"));
+        assert!(raw_has_connection_token(&headers, b"upgrade"));
+        assert!(raw_has_connection_token(&headers, b"keep-alive"));
+        assert!(raw_has_connection_token(&headers, b"close"));
+        assert!(!raw_has_connection_token(&headers, b"keep"));
+        assert!(!raw_has_connection_token(&headers, b"upgrade-extra"));
+    }
 
     #[test]
     fn response_parser_interns_bounded_non_sensitive_values() {

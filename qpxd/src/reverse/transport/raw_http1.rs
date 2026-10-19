@@ -2,6 +2,7 @@ use super::mirrors::{
     record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
 };
 use super::{InterimList, ReverseConnInfo};
+use crate::http::codec::h1_common::raw_has_connection_token;
 use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
 use crate::reverse::{CompiledReverse, ReloadableReverse};
 use crate::upstream::origin::{
@@ -319,7 +320,7 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
         }
     };
 
-    let keep_alive = !has_connection_token(request.headers, b"close");
+    let keep_alive = !raw_has_connection_token(request.headers, b"close");
     let direct_combined_access_log =
         qpx_observability::access_log::direct_combined_access_log_enabled(
             &state.resources.access_log,
@@ -890,7 +891,7 @@ fn serialize_upstream_request_head(
         let name = header.name.as_bytes();
         if name.eq_ignore_ascii_case(b"host")
             || is_hop_by_hop_header(name)
-            || connection_lists_header(headers, name)
+            || raw_has_connection_token(headers, name)
         {
             continue;
         }
@@ -937,39 +938,7 @@ fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {
     headers
         .iter()
         .any(|header| header.name.eq_ignore_ascii_case("upgrade"))
-        || has_connection_token(headers, b"upgrade")
-}
-
-fn has_connection_token(headers: &[httparse::Header<'_>], expected: &[u8]) -> bool {
-    headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("connection")
-            && header
-                .value
-                .split(|byte| *byte == b',')
-                .map(trim_ascii)
-                .any(|token| token.eq_ignore_ascii_case(expected))
-    })
-}
-
-fn connection_lists_header(headers: &[httparse::Header<'_>], name: &[u8]) -> bool {
-    headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("connection")
-            && header
-                .value
-                .split(|byte| *byte == b',')
-                .map(trim_ascii)
-                .any(|token| token.eq_ignore_ascii_case(name))
-    })
-}
-
-fn trim_ascii(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[1..];
-    }
-    while value.last().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[..value.len() - 1];
-    }
-    value
+        || raw_has_connection_token(headers, b"upgrade")
 }
 
 fn is_hop_by_hop_header(name: &[u8]) -> bool {

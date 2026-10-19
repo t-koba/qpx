@@ -1,3 +1,4 @@
+use crate::http::codec::h1_common::raw_has_connection_token;
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::header::{HeaderMap, HeaderName, HeaderValue};
@@ -107,8 +108,8 @@ impl RawHttp1ResponseHead {
             RawHttp1BodyFraming::CloseDelimited
         };
         let upstream_keep_alive = match version {
-            Version::HTTP_10 => has_connection_token(headers, b"keep-alive"),
-            _ => !has_connection_token(headers, b"close"),
+            Version::HTTP_10 => raw_has_connection_token(headers, b"keep-alive"),
+            _ => !raw_has_connection_token(headers, b"close"),
         };
         let strip_content_length = (no_body && request_method != Method::HEAD) || chunked;
         let preserve_proxy_auth = status == StatusCode::PROXY_AUTHENTICATION_REQUIRED;
@@ -127,7 +128,7 @@ impl RawHttp1ResponseHead {
         for header in headers {
             let name = header.name.as_bytes();
             if is_sanitized_hop_header(name, preserve_proxy_auth)
-                || (has_connection_header && connection_lists_header(headers, name))
+                || (has_connection_header && raw_has_connection_token(headers, name))
                 || (strip_content_length && name.eq_ignore_ascii_case(b"content-length"))
             {
                 continue;
@@ -357,38 +358,6 @@ fn has_only_chunked_transfer_encoding(headers: &[httparse::Header<'_>]) -> Resul
             "unsupported transfer-encoding: only a single chunked coding is supported"
         )),
     }
-}
-
-fn has_connection_token(headers: &[httparse::Header<'_>], expected: &[u8]) -> bool {
-    headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("connection")
-            && header
-                .value
-                .split(|byte| *byte == b',')
-                .map(trim_ascii)
-                .any(|token| token.eq_ignore_ascii_case(expected))
-    })
-}
-
-fn connection_lists_header(headers: &[httparse::Header<'_>], name: &[u8]) -> bool {
-    headers.iter().any(|header| {
-        header.name.eq_ignore_ascii_case("connection")
-            && header
-                .value
-                .split(|byte| *byte == b',')
-                .map(trim_ascii)
-                .any(|token| token.eq_ignore_ascii_case(name))
-    })
-}
-
-fn trim_ascii(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[1..];
-    }
-    while value.last().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[..value.len() - 1];
-    }
-    value
 }
 
 fn is_sanitized_hop_header(name: &[u8], preserve_proxy_auth: bool) -> bool {
