@@ -70,7 +70,7 @@ where
             Some(next) => next.min(MAX_CLIENT_HELLO_PEEK_BYTES),
             None => return Ok(buf),
         };
-        if buf.len() >= next || next == MAX_CLIENT_HELLO_PEEK_BYTES {
+        if buf.len() >= next {
             return Ok(buf);
         }
         desired = next;
