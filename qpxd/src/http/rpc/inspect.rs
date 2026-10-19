@@ -199,6 +199,9 @@ async fn summarize_observed_request_body(
             )
             .await?
         }
+        Some("connect") => {
+            connect_observed_body_summary(body, response_content_type(headers).as_deref()).await?
+        }
         _ => FramedBodySummary {
             message_count: usize::from(body.len() > 0),
             message_bytes: body.len(),
@@ -231,7 +234,7 @@ async fn summarize_observed_response_body(
             )
             .await?
         }
-        Some("connect") => connect_response_summary(body, content_type).await?,
+        Some("connect") => connect_observed_body_summary(body, content_type).await?,
         _ => FramedBodySummary {
             message_count: usize::from(body.len() > 0),
             message_bytes: body.len(),
@@ -242,20 +245,20 @@ async fn summarize_observed_response_body(
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-fn connect_response_is_enveloped(content_type: Option<&str>) -> bool {
+fn connect_observed_body_is_enveloped(content_type: Option<&str>) -> bool {
     content_type.is_some_and(|value| value.starts_with("application/connect+"))
 }
 
-/// Summarizes a buffered Connect response body with the same envelope rule
+/// Summarizes a buffered Connect request or response body with the same envelope rule
 /// the streaming observer uses: enveloped streaming bodies parse frames for
 /// message counts and end-stream trailers, while unary JSON keeps the
 /// whole-body fallback.
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-async fn connect_response_summary(
+async fn connect_observed_body_summary(
     body: &ObservedBodyReader,
     content_type: Option<&str>,
 ) -> Result<FramedBodySummary> {
-    if !connect_response_is_enveloped(content_type) {
+    if !connect_observed_body_is_enveloped(content_type) {
         return Ok(FramedBodySummary {
             message_count: usize::from(body.len() > 0),
             message_bytes: body.len(),
@@ -268,7 +271,7 @@ async fn connect_response_summary(
 }
 
 #[cfg(not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
-async fn connect_response_summary(
+async fn connect_observed_body_summary(
     body: &ObservedBodyReader,
     content_type: Option<&str>,
 ) -> Result<FramedBodySummary> {

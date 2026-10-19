@@ -906,7 +906,9 @@ fn connect_end_stream_skips_unrepresentable_metadata() {
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 mod connect_inspection_tests {
     use super::*;
-    use crate::http::body::size::{buffer_response_body, buffer_response_body_with_reason};
+    use crate::http::body::size::{
+        buffer_request_body_with_reason, buffer_response_body, buffer_response_body_with_reason,
+    };
 
     fn frame_connect_payload(payload: &[u8]) -> Vec<u8> {
         let mut out = Vec::with_capacity(5 + payload.len());
@@ -1014,6 +1016,101 @@ mod connect_inspection_tests {
         assert_eq!(inspected.message.as_deref(), Some("busy"));
     }
 
+    async fn inspect_buffered_connect_request(
+        body: Vec<u8>,
+        content_type: &'static str,
+        reason: &'static str,
+    ) -> RpcMatchContext {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, content_type)
+            .body(Body::from(body))
+            .expect("request");
+        let req = buffer_request_body_with_reason(req, 1024, Duration::from_secs(1), reason)
+            .await
+            .expect("buffered");
+        inspect_request(&req).await
+    }
+
+    async fn inspect_buffered_unary_connect_request(
+        body: Vec<u8>,
+        reason: &'static str,
+    ) -> RpcMatchContext {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("connect-protocol-version", "1")
+            .body(Body::from(body))
+            .expect("request");
+        let req = buffer_request_body_with_reason(req, 1024, Duration::from_secs(1), reason)
+            .await
+            .expect("buffered");
+        inspect_request(&req).await
+    }
+
+    fn assert_connect_post_summary(inspected: &RpcMatchContext, count: usize, bytes: u64) {
+        assert_eq!(inspected.protocol.as_deref(), Some("connect"));
+        assert_eq!(inspected.request_message_count, Some(count));
+        assert_eq!(inspected.request_message_bytes, Some(bytes));
+        assert_eq!(inspected.message_size, Some(bytes));
+        // Connect POST currently infers no streaming label.
+        assert_eq!(inspected.streaming, None);
+        assert_eq!(
+            infer_request_streaming(Some("connect"), "POST", inspected.request_message_count),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn buffered_connect_request_envelopes_match_across_buffer_reasons() {
+        let mut body = frame_connect_payload(b"a");
+        body.extend_from_slice(&frame_connect_payload(b"b"));
+        for content_type in ["application/connect+proto", "application/connect+json"] {
+            let rpc =
+                inspect_buffered_connect_request(body.clone(), content_type, "rpc.body").await;
+            let guarded =
+                inspect_buffered_connect_request(body.clone(), content_type, "http_guard.body")
+                    .await;
+            assert_connect_post_summary(&rpc, 2, 2);
+            assert_connect_post_summary(&guarded, 2, 2);
+        }
+    }
+
+    #[tokio::test]
+    async fn buffered_connect_request_empty_envelope_matches_across_buffer_reasons() {
+        let body = frame_connect_payload(b"");
+        assert_eq!(body.len(), 5);
+        for content_type in ["application/connect+proto", "application/connect+json"] {
+            let rpc =
+                inspect_buffered_connect_request(body.clone(), content_type, "rpc.body").await;
+            let guarded =
+                inspect_buffered_connect_request(body.clone(), content_type, "http_guard.body")
+                    .await;
+            assert_connect_post_summary(&rpc, 1, 0);
+            assert_connect_post_summary(&guarded, 1, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn unary_connect_request_keeps_whole_body_across_buffer_reasons() {
+        let body = br#"{"message":"hi"}"#.to_vec();
+        let expected = body.len() as u64;
+        for reason in ["rpc.body", "http_guard.body"] {
+            let inspected = inspect_buffered_unary_connect_request(body.clone(), reason).await;
+            assert_eq!(inspected.protocol.as_deref(), Some("connect"));
+            assert_eq!(inspected.request_message_count, Some(1));
+            assert_eq!(inspected.request_message_bytes, Some(expected));
+            assert_eq!(inspected.message_size, Some(expected));
+            assert_eq!(inspected.streaming, None);
+            assert_eq!(
+                infer_request_streaming(Some("connect"), "POST", inspected.request_message_count),
+                None
+            );
+        }
+    }
+
     #[test]
     fn connect_trailers_win_over_unary_body() {
         let trailers = parse_connect_end_stream_metadata(
@@ -1032,6 +1129,43 @@ mod connect_inspection_tests {
             extract_rpc_status_and_message(Some("connect"), &headers, None, Some(&body)),
             (Some("unavailable".to_string()), Some("busy".to_string()))
         );
+    }
+}
+
+#[cfg(not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
+#[tokio::test]
+async fn connect_enveloped_request_keeps_whole_body_without_backend_features() {
+    // Without the Connect backend features the observed-body fallback stays
+    // generic whole-body for both precompute-eligible and guard reasons.
+    let mut body = Vec::new();
+    for payload in [b"a".as_slice(), b"b".as_slice()] {
+        body.push(0x00);
+        body.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        body.extend_from_slice(payload);
+    }
+    let expected = body.len() as u64;
+    assert_eq!(expected, 12);
+    for reason in ["rpc.body", "http_guard.body"] {
+        let req = Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/connect+proto")
+            .body(Body::from(body.clone()))
+            .expect("request");
+        let req = crate::http::body::size::buffer_request_body_with_reason(
+            req,
+            1024,
+            Duration::from_secs(1),
+            reason,
+        )
+        .await
+        .expect("buffered");
+        let inspected = inspect_request(&req).await;
+        assert_eq!(inspected.protocol.as_deref(), Some("connect"));
+        assert_eq!(inspected.request_message_count, Some(1));
+        assert_eq!(inspected.request_message_bytes, Some(expected));
+        assert_eq!(inspected.message_size, Some(expected));
+        assert_eq!(inspected.streaming, None);
     }
 }
 
