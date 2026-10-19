@@ -1,10 +1,11 @@
+use super::server_tls::build_forward_tls_config;
 use crate::http3::quinn_socket::{
     NoopQuinnUdpIngressFilter, PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream,
     QuinnEndpointSocket, build_server_endpoint, prepare_server_endpoint_socket,
 };
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use qpx_core::config::{
     ConnectIpConfig, ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig,
 };
@@ -135,38 +136,4 @@ pub(crate) async fn run_http3_listener(
     }
 
     Ok(())
-}
-
-fn build_forward_tls_config(
-    listener: &IngressEdgeConfig,
-    runtime: &Runtime,
-    listen_addr: SocketAddr,
-) -> Result<quinn::rustls::ServerConfig> {
-    let state = runtime.state();
-    let ca = state
-        .security
-        .destination
-        .tls
-        .ca
-        .as_ref()
-        .ok_or_else(|| anyhow!("forward HTTP/3 requires CA state"))?;
-
-    let mut sans = vec![
-        "localhost".to_string(),
-        "127.0.0.1".to_string(),
-        "::1".to_string(),
-        listen_addr.ip().to_string(),
-        listener.name.clone(),
-    ];
-    sans.sort();
-    sans.dedup();
-    let (cert_chain, key) = ca.issue_server_cert(&sans)?;
-
-    let provider = quinn::rustls::crypto::aws_lc_rs::default_provider();
-    let tls = quinn::rustls::ServerConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])
-        .map_err(|_| anyhow!("failed to configure TLS versions for forward HTTP/3"))?
-        .with_no_client_auth()
-        .with_single_cert(cert_chain, key)?;
-    Ok(tls)
 }

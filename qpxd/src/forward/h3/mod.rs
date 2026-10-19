@@ -15,6 +15,8 @@ mod connect;
 mod invalid;
 #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 mod qpx;
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+mod server_tls;
 mod streaming;
 
 #[cfg(all(
