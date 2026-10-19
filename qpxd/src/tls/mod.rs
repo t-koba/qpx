@@ -1,5 +1,6 @@
 #[cfg(feature = "mitm")]
 pub(crate) mod mitm;
+pub(crate) mod preview;
 pub(crate) mod sniff;
 
 #[cfg(feature = "http3")]

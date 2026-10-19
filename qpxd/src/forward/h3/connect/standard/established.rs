@@ -12,13 +12,13 @@ use crate::http3::server::H3ServerRequestStream;
 use crate::policy_context::{AuditRecord, ResolvedIdentity, emit_audit_log};
 #[cfg(feature = "mitm")]
 use crate::tls::TlsClientHelloInfo;
+use crate::tls::preview::preview_client_certificate_with_timeout;
 use crate::upstream::connect::TunnelIo;
 use anyhow::{Result, anyhow};
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::CompiledHeaderControl;
 #[cfg(feature = "mitm")]
 use qpx_core::tls::CompiledUpstreamTlsTrust;
-use qpx_http::tls::builder::preview_client_certificate;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -116,11 +116,12 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
         let preview_server = server
             .take()
             .ok_or_else(|| anyhow!("HTTP/3 CONNECT upstream tunnel missing before cert preview"))?;
-        match preview_client_certificate(
+        match preview_client_certificate_with_timeout(
             host.as_str(),
             preview_server,
             preview_verify,
             listener_trust.as_deref(),
+            upstream_timeout,
         )
         .await
         {

@@ -15,6 +15,7 @@ use crate::runtime::{PlanFlags, Runtime};
 use crate::tls::mitm::prewarm_mitm_cert;
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream};
+use crate::tls::preview::preview_client_certificate_with_timeout;
 use crate::tls::{
     TlsClientHelloInfo, extract_client_hello_info_with_fingerprints, looks_like_tls_client_hello,
     try_read_client_hello_with_timeout,
@@ -30,7 +31,6 @@ use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_http::body::Body;
-use qpx_http::tls::builder::preview_client_certificate;
 #[cfg(feature = "mitm")]
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 #[cfg(feature = "mitm")]
@@ -265,11 +265,12 @@ async fn prepare_connect_upstream_after_preview(
         let preview_server = server
             .take()
             .ok_or_else(|| anyhow!("CONNECT upstream tunnel missing before cert preview"))?;
-        match preview_client_certificate(
+        match preview_client_certificate_with_timeout(
             ctx.host.as_str(),
             preview_server.io,
             preview_verify,
             listener_upstream_trust.as_deref(),
+            upstream_timeout,
         )
         .await
         {

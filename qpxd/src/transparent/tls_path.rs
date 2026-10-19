@@ -7,9 +7,9 @@ use crate::policy_context::{
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::tls::TlsClientHelloInfo;
+use crate::tls::preview::preview_client_certificate_with_timeout;
 use anyhow::{Result, anyhow};
 use qpx_core::config::ActionKind;
-use qpx_http::tls::builder::preview_client_certificate;
 use std::net::SocketAddr;
 use tokio::time::Duration;
 use tracing::warn;
@@ -126,20 +126,23 @@ where
             .or(host_for_match_owned.as_deref())
             .unwrap_or_default();
         let preview_upstream = resolve_upstream(&decision.action, &state, listener_cfg)?;
+        let upstream_timeout =
+            Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms);
         match connect_target_stream(
             &connect_target,
             preview_upstream.as_ref(),
             state.plan.identity.proxy_name.as_ref(),
-            Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms),
+            upstream_timeout,
         )
         .await
         {
             Ok(upstream_connected) => {
-                match preview_client_certificate(
+                match preview_client_certificate_with_timeout(
                     preview_domain,
                     upstream_connected.io,
                     verify_upstream,
                     listener_trust.as_deref(),
+                    upstream_timeout,
                 )
                 .await
                 {
