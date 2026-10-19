@@ -133,7 +133,7 @@ pub(crate) fn emit_grpc_status_metric(
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-pub(crate) fn emit_grpc_stream_duration_metric(
+fn emit_grpc_stream_duration_metric(
     listener: &str,
     protocol: &str,
     streaming: &str,
@@ -153,4 +153,20 @@ pub(crate) fn emit_grpc_stream_duration_metric(
         "streaming" => streaming.to_string()
     )
     .record(duration.as_secs_f64());
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn emit_grpc_stream_duration_metric_from_summaries(
+    listener: &str,
+    protocol: &str,
+    request_summary: Option<&FramedBodySummary>,
+    response_summary: Option<&FramedBodySummary>,
+    elapsed: impl FnOnce() -> Duration,
+) {
+    let streaming = super::streaming::grpc_streaming_label(
+        protocol,
+        request_summary.map(|summary| summary.message_count()),
+        response_summary.map(|summary| summary.message_count()),
+    );
+    emit_grpc_stream_duration_metric(listener, protocol, streaming, elapsed());
 }

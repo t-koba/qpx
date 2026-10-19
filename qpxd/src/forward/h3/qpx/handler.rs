@@ -336,20 +336,12 @@ impl ForwardQpxHandler {
         if response_streaming.observe_grpc_messages
             && let Some(protocol) = grpc_protocol.as_deref()
         {
-            let streaming = crate::http::rpc::grpc_streaming_label(
-                protocol,
-                request_summary
-                    .as_ref()
-                    .map(|summary| summary.message_count()),
-                response_summary
-                    .as_ref()
-                    .map(|summary| summary.message_count()),
-            );
-            crate::http::rpc::emit_grpc_stream_duration_metric(
+            crate::http::rpc::emit_grpc_stream_duration_metric_from_summaries(
                 self.listener_name.as_ref(),
                 protocol,
-                streaming,
-                grpc_started.elapsed(),
+                request_summary.as_ref(),
+                response_summary.as_ref(),
+                || grpc_started.elapsed(),
             );
         }
         Ok(())

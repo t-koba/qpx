@@ -30,10 +30,10 @@ pub(crate) use deadline::{
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(crate) use metrics::{
     emit_grpc_body_metrics, emit_grpc_deadline_exceeded_metric, emit_grpc_status_metric,
-    emit_grpc_stream_duration_metric,
+    emit_grpc_stream_duration_metric_from_summaries,
 };
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-pub(crate) use streaming::{grpc_streaming_label, streaming_rpc_observer, streaming_rpc_protocol};
+pub(crate) use streaming::{streaming_rpc_observer, streaming_rpc_protocol};
 
 #[cfg(test)]
 use base64::Engine;
