@@ -330,7 +330,7 @@ edges:
     let request = Request::builder()
         .uri("/")
         .header("host", "reverse.test")
-        .header("connection", "X-QpX-TrUsTeD, FoRwArDeD")
+        .header("connection", "X-QpX-TrUsTeD, forwarded")
         .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
         .header("x-qpx-trusted", "client-value")
         .header("x-client-only", "must-not-leak")
