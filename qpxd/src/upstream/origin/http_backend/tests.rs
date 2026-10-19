@@ -10,7 +10,7 @@ use qpx_http::body::to_bytes;
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 use tokio::task::yield_now;
@@ -76,16 +76,7 @@ async fn spawn_closing_keepalive_http1_origin() -> Result<(
             tokio::spawn(async move {
                 let mut raw = Vec::new();
                 let mut buf = [0_u8; 1024];
-                loop {
-                    let n = stream.read(&mut buf).await.expect("read request");
-                    if n == 0 {
-                        break;
-                    }
-                    raw.extend_from_slice(&buf[..n]);
-                    if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                        break;
-                    }
-                }
+                crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
                 stream
                     .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
                     .await

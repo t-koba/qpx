@@ -126,16 +126,7 @@ async fn forward_request_preserves_upstream_early_hints() {
         let (mut stream, _) = upstream.accept().await.expect("accept upstream");
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.expect("read request");
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
+        crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
         stream
             .write_all(
                 b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload; as=style\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK",

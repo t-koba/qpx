@@ -1,6 +1,6 @@
 use std::io::Read;
 use std::net::SocketAddr;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 pub(crate) fn decode_gzip(bytes: &[u8]) -> String {
@@ -8,6 +8,28 @@ pub(crate) fn decode_gzip(bytes: &[u8]) -> String {
     let mut out = String::new();
     decoder.read_to_string(&mut out).expect("decode gzip");
     out
+}
+
+/// Read one HTTP request head until `CRLFCRLF`, preserving over-read bytes.
+///
+/// Test-only exact clone of the inline loops previously scattered across
+/// `qpxd` test servers: unbounded `read`, break on EOF (`n == 0`), extend
+/// `raw`, break once `raw` contains `CRLFCRLF`. No timeout, same 1024-byte
+/// caller buffer, same `expect("read request")` semantics.
+pub(crate) async fn read_request_head<S>(stream: &mut S, raw: &mut Vec<u8>, buf: &mut [u8; 1024])
+where
+    S: AsyncRead + Unpin,
+{
+    loop {
+        let n = stream.read(buf).await.expect("read request");
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
 }
 
 pub(crate) async fn spawn_static_http_server(
@@ -25,16 +47,7 @@ pub(crate) async fn spawn_static_http_server(
             let (mut stream, _) = listener.accept().await.expect("accept");
             let mut raw = Vec::new();
             let mut buf = [0u8; 1024];
-            loop {
-                let n = stream.read(&mut buf).await.expect("read request");
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            read_request_head(&mut stream, &mut raw, &mut buf).await;
             drain_declared_request_body(&mut stream, raw.as_slice(), &mut buf).await;
             let mut response = format!(
                 "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n",

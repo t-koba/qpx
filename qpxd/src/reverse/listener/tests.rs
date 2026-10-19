@@ -237,16 +237,7 @@ async fn reverse_h2_service_emits_early_hints() {
             let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
             let mut raw = Vec::new();
             let mut buf = [0u8; 1024];
-            loop {
-                let n = stream.read(&mut buf).await.expect("read request");
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
             if !raw.windows(4).any(|window| window == b"\r\n\r\n") {
                 continue;
             }
@@ -345,16 +336,7 @@ async fn reverse_h1_listener_emits_early_hints() {
             let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
             let mut raw = Vec::new();
             let mut buf = [0u8; 1024];
-            loop {
-                let n = stream.read(&mut buf).await.expect("read request");
-                if n == 0 {
-                    break;
-                }
-                raw.extend_from_slice(&buf[..n]);
-                if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
-                }
-            }
+            crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
             if !raw.windows(4).any(|window| window == b"\r\n\r\n") {
                 continue;
             }

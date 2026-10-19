@@ -34,16 +34,7 @@ async fn send_http1_request_with_interim_preserves_absolute_form_target() {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.expect("read request");
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
+        crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
         stream
             .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
             .await
@@ -81,16 +72,7 @@ async fn send_http1_request_with_interim_parses_early_hints() {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.expect("read request");
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            if raw.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
+        crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
         assert!(
             std::str::from_utf8(&raw)
                 .expect("utf8")
@@ -361,16 +343,7 @@ async fn upstream_response_rejects_non_http_status_class() {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.expect("read request");
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            if raw.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
+        crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
         stream
             .write_all(b"HTTP/1.1 700 Weird\r\nContent-Length: 0\r\n\r\n")
             .await
@@ -404,16 +377,7 @@ async fn switching_protocols_is_not_parsed_as_interim() {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.expect("read request");
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            if raw.windows(4).any(|w| w == b"\r\n\r\n") {
-                break;
-            }
-        }
+        crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
         stream
                 .write_all(
                     b"HTTP/1.1 101 Switching Protocols\r\nConnection: upgrade\r\nUpgrade: websocket\r\n\r\n",

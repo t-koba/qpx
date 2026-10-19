@@ -8,16 +8,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.expect("read request");
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
+        crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
         stream
             .write_all(
                 b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload; as=style\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
@@ -157,16 +148,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let mut raw = Vec::new();
         let mut buf = [0u8; 1024];
-        loop {
-            let n = stream.read(&mut buf).await.expect("read request");
-            if n == 0 {
-                break;
-            }
-            raw.extend_from_slice(&buf[..n]);
-            if raw.windows(4).any(|window| window == b"\r\n\r\n") {
-                break;
-            }
-        }
+        crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
         stream
             .write_all(
                 b"HTTP/1.1 103 Early Hints\r\nLink: </style.css>; rel=preload; as=style\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK",
