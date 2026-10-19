@@ -335,7 +335,7 @@ async fn dns_discovery_skips_https_rr_with_mandatory_self_reference() -> Result<
 }
 
 #[tokio::test]
-async fn dns_discovery_skips_https_rr_with_unsorted_or_duplicate_svc_params() -> Result<()> {
+async fn dns_discovery_falls_back_to_a_and_aaaa_when_https_rrset_is_malformed() -> Result<()> {
     let mut answers = HashMap::new();
     answers.insert(
         ("service.example".to_string(), DNS_TYPE_A),
@@ -344,18 +344,32 @@ async fn dns_discovery_skips_https_rr_with_unsorted_or_duplicate_svc_params() ->
             ttl_secs: 30,
         }],
     );
-    answers.insert(("service.example".to_string(), DNS_TYPE_AAAA), Vec::new());
+    answers.insert(
+        ("service.example".to_string(), DNS_TYPE_AAAA),
+        vec![TestDnsRecord::Aaaa {
+            addr: Ipv6Addr::LOCALHOST,
+            ttl_secs: 30,
+        }],
+    );
     answers.insert(
         ("service.example".to_string(), DNS_TYPE_HTTPS),
-        vec![TestDnsRecord::HttpsRaw {
-            priority: 1,
-            target: None,
-            params: vec![
-                (3, 9443u16.to_be_bytes().to_vec()),
-                (1, vec![2, b'h', b'3']),
-            ],
-            ttl_secs: 5,
-        }],
+        vec![
+            TestDnsRecord::HttpsRaw {
+                priority: 1,
+                target: None,
+                params: vec![
+                    (1, vec![2, b'h', b'3']),
+                    (4, Ipv4Addr::new(127, 0, 0, 12).octets().to_vec()),
+                ],
+                ttl_secs: 5,
+            },
+            TestDnsRecord::HttpsRaw {
+                priority: 1,
+                target: None,
+                params: vec![(1, vec![2, b'h', b'3']), (3, vec![0x12])],
+                ttl_secs: 5,
+            },
+        ],
     );
     let (nameserver, server) = spawn_fake_dns_server(answers).await?;
 
@@ -370,8 +384,12 @@ async fn dns_discovery_skips_https_rr_with_unsorted_or_duplicate_svc_params() ->
     server.abort();
     let _ = server.await;
 
-    let (endpoints, _delay) = result?;
-    assert_eq!(endpoints.len(), 1);
+    // One malformed HTTPS record invalidates its whole RRset, preserving only
+    // ordinary A/AAAA discovery and preventing the otherwise valid h3 record.
+    let (endpoints, delay) = result?;
+    assert_eq!(delay, Duration::from_secs(30));
+    assert_eq!(endpoints.len(), 2);
     assert_eq!(endpoints[0].connect_authority(443)?, "127.0.0.10:443");
+    assert_eq!(endpoints[1].connect_authority(443)?, "[::1]:443");
     Ok(())
 }

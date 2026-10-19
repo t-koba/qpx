@@ -191,9 +191,11 @@ pub(super) fn parse_https_records(response: &[u8]) -> Result<Vec<DnsHttpsRecord>
     let answers = parse_answer_records(response)?;
     let mut records = Vec::new();
     for answer in answers {
-        if answer.qtype != DNS_TYPE_HTTPS || answer.class != DNS_CLASS_IN || answer.rdata.len() < 3
-        {
+        if answer.qtype != DNS_TYPE_HTTPS || answer.class != DNS_CLASS_IN {
             continue;
+        }
+        if answer.rdata.len() < 3 {
+            return Err(anyhow!("HTTPS DNS RDATA too short"));
         }
         let (priority, mut offset) = (
             u16::from_be_bytes([answer.rdata[0], answer.rdata[1]]),
@@ -214,12 +216,10 @@ pub(super) fn parse_https_records(response: &[u8]) -> Result<Vec<DnsHttpsRecord>
             ttl_secs: answer.ttl,
         };
         let mut last_key = None::<u16>;
-        let mut malformed = false;
         while offset + 4 <= answer.rdata.len() {
             let key = u16::from_be_bytes([answer.rdata[offset], answer.rdata[offset + 1]]);
             if last_key.is_some_and(|last| key <= last) {
-                malformed = true;
-                break;
+                return Err(anyhow!("HTTPS DNS SvcParam keys not strictly increasing"));
             }
             last_key = Some(key);
             let len =
@@ -232,8 +232,8 @@ pub(super) fn parse_https_records(response: &[u8]) -> Result<Vec<DnsHttpsRecord>
             parse_https_svc_param(key, &answer.rdata[offset..end], &mut record)?;
             offset = end;
         }
-        if malformed {
-            continue;
+        if offset != answer.rdata.len() {
+            return Err(anyhow!("HTTPS DNS SvcParam truncated"));
         }
         if record.priority == 0 {
             if record.target.is_some()
@@ -261,21 +261,30 @@ fn parse_https_svc_param(key: u16, value: &[u8], record: &mut DnsHttpsRecord) ->
     record.svc_param_keys.insert(key);
     match key {
         0 => {
-            if !value.len().is_multiple_of(2) {
-                return Err(anyhow!("HTTPS DNS mandatory SvcParam truncated"));
+            if value.is_empty() || !value.len().is_multiple_of(2) {
+                return Err(anyhow!("HTTPS DNS mandatory SvcParam malformed"));
             }
-            record.mandatory.extend(
-                value
-                    .as_chunks::<2>()
-                    .0
-                    .iter()
-                    .map(|chunk| u16::from_be_bytes(*chunk)),
-            );
+            let keys = value
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|chunk| u16::from_be_bytes(*chunk))
+                .collect::<Vec<_>>();
+            if keys.windows(2).any(|pair| pair[0] >= pair[1]) {
+                return Err(anyhow!("HTTPS DNS mandatory keys not strictly increasing"));
+            }
+            record.mandatory.extend(keys);
         }
         1 => {
+            if value.is_empty() {
+                return Err(anyhow!("HTTPS DNS alpn value malformed"));
+            }
             let mut offset = 0usize;
             while offset < value.len() {
                 let len = value[offset] as usize;
+                if len == 0 {
+                    return Err(anyhow!("HTTPS DNS alpn id malformed"));
+                }
                 offset += 1;
                 let end = offset + len;
                 if end > value.len() {
@@ -287,17 +296,26 @@ fn parse_https_svc_param(key: u16, value: &[u8], record: &mut DnsHttpsRecord) ->
                 offset = end;
             }
         }
-        3 if value.len() == 2 => {
+        3 => {
+            if value.len() != 2 {
+                return Err(anyhow!("HTTPS DNS port SvcParam malformed"));
+            }
             record.port = Some(u16::from_be_bytes([value[0], value[1]]));
         }
-        4 if value.len().is_multiple_of(4) => {
+        4 => {
+            if value.is_empty() || !value.len().is_multiple_of(4) {
+                return Err(anyhow!("HTTPS DNS ipv4hints SvcParam malformed"));
+            }
             for chunk in value.as_chunks::<4>().0 {
                 record
                     .ipv4_hints
                     .push(Ipv4Addr::new(chunk[0], chunk[1], chunk[2], chunk[3]));
             }
         }
-        6 if value.len().is_multiple_of(16) => {
+        6 => {
+            if value.is_empty() || !value.len().is_multiple_of(16) {
+                return Err(anyhow!("HTTPS DNS ipv6hints SvcParam malformed"));
+            }
             for chunk in value.as_chunks::<16>().0 {
                 record.ipv6_hints.push(Ipv6Addr::from(*chunk));
             }
@@ -433,4 +451,179 @@ pub(in crate::upstream::origin) fn encode_dns_name(name: &str, out: &mut Vec<u8>
     }
     out.push(0);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn https_rdata(priority: u16, params: &[(u16, &[u8])], trailing: &[u8]) -> Vec<u8> {
+        let mut rdata = Vec::new();
+        rdata.extend_from_slice(&priority.to_be_bytes());
+        rdata.push(0);
+        for (key, value) in params {
+            rdata.extend_from_slice(&key.to_be_bytes());
+            rdata.extend_from_slice(&(value.len() as u16).to_be_bytes());
+            rdata.extend_from_slice(value);
+        }
+        rdata.extend_from_slice(trailing);
+        rdata
+    }
+
+    fn response_with_https_rdatalist(rdatas: Vec<(u32, Vec<u8>)>) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&0x1234u16.to_be_bytes());
+        out.extend_from_slice(&0x8180u16.to_be_bytes());
+        out.extend_from_slice(&1u16.to_be_bytes());
+        out.extend_from_slice(&(rdatas.len() as u16).to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        out.extend_from_slice(&0u16.to_be_bytes());
+        encode_dns_name("service.example", &mut out).expect("encode query name");
+        out.extend_from_slice(&DNS_TYPE_HTTPS.to_be_bytes());
+        out.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+        for (ttl, rdata) in rdatas {
+            out.extend_from_slice(&0xc00cu16.to_be_bytes());
+            out.extend_from_slice(&DNS_TYPE_HTTPS.to_be_bytes());
+            out.extend_from_slice(&DNS_CLASS_IN.to_be_bytes());
+            out.extend_from_slice(&ttl.to_be_bytes());
+            out.extend_from_slice(&(rdata.len() as u16).to_be_bytes());
+            out.extend_from_slice(&rdata);
+        }
+        out
+    }
+
+    fn alpn_h3_value() -> Vec<u8> {
+        vec![2, b'h', b'3']
+    }
+
+    #[test]
+    fn https_parser_accepts_valid_port_and_ignores_unknown_keys() -> Result<()> {
+        let rdata = https_rdata(
+            1,
+            &[
+                (1, &alpn_h3_value()),
+                (3, &443u16.to_be_bytes()),
+                (65001, &[9, 8, 7]),
+            ],
+            &[],
+        );
+        let response = response_with_https_rdatalist(vec![(30, rdata)]);
+        let records = parse_https_records(response.as_slice())?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].port, Some(443));
+        assert_eq!(records[0].alpn, vec!["h3".to_string()]);
+        assert!(records[0].svc_param_keys.contains(&65001));
+        Ok(())
+    }
+
+    #[test]
+    fn https_parser_rejects_invalid_port_lengths() -> Result<()> {
+        for value in [Vec::new(), vec![0x12], vec![1, 2, 3]] {
+            let rdata = https_rdata(1, &[(1, &alpn_h3_value()), (3, &value)], &[]);
+            let response = response_with_https_rdatalist(vec![(30, rdata)]);
+            assert!(
+                parse_https_records(response.as_slice()).is_err(),
+                "port length {} must invalidate the RRset",
+                value.len()
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn https_parser_rejects_trailing_bytes() -> Result<()> {
+        for len in 1..=3usize {
+            let trailing = vec![0u8; len];
+            let rdata = https_rdata(1, &[(1, &alpn_h3_value())], &trailing);
+            let response = response_with_https_rdatalist(vec![(30, rdata)]);
+            assert!(
+                parse_https_records(response.as_slice()).is_err(),
+                "{len} trailing byte(s) must invalidate the RRset"
+            );
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn https_parser_rejects_mixed_valid_and_malformed_rrset() -> Result<()> {
+        let valid = https_rdata(1, &[(1, &alpn_h3_value())], &[]);
+        let malformed = https_rdata(1, &[(1, &alpn_h3_value()), (3, &[0x12])], &[]);
+        let response = response_with_https_rdatalist(vec![(30, valid), (30, malformed)]);
+        assert!(parse_https_records(response.as_slice()).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn https_parser_rejects_malformed_known_formats() -> Result<()> {
+        // RDATA too short.
+        let short = vec![0x00, 0x01];
+        let response = response_with_https_rdatalist(vec![(30, short)]);
+        assert!(parse_https_records(response.as_slice()).is_err());
+
+        // Outer keys not strictly increasing, including duplicates.
+        for params in [
+            vec![(3, vec![0x1b, 0xbb]), (1, alpn_h3_value())],
+            vec![(1, alpn_h3_value()), (1, alpn_h3_value())],
+        ] {
+            let refs = params
+                .iter()
+                .map(|(k, v)| (*k, v.as_slice()))
+                .collect::<Vec<_>>();
+            let rdata = https_rdata(1, &refs, &[]);
+            let response = response_with_https_rdatalist(vec![(30, rdata)]);
+            assert!(parse_https_records(response.as_slice()).is_err());
+        }
+
+        // key 4 empty or wrong width.
+        for value in [Vec::new(), vec![1, 2, 3], vec![1, 2, 3, 4, 5]] {
+            let rdata = https_rdata(1, &[(1, &alpn_h3_value()), (4, &value)], &[]);
+            let response = response_with_https_rdatalist(vec![(30, rdata)]);
+            assert!(parse_https_records(response.as_slice()).is_err());
+        }
+
+        // key 6 empty or wrong width.
+        for value in [Vec::new(), vec![0u8; 15], vec![0u8; 17]] {
+            let rdata = https_rdata(1, &[(1, &alpn_h3_value()), (6, &value)], &[]);
+            let response = response_with_https_rdatalist(vec![(30, rdata)]);
+            assert!(parse_https_records(response.as_slice()).is_err());
+        }
+
+        // key 1 empty, zero-length id, or truncated id.
+        for value in [Vec::new(), vec![0], vec![2, b'h'], vec![5, b'h', b'3']] {
+            let rdata = https_rdata(1, &[(1, &value)], &[]);
+            let response = response_with_https_rdatalist(vec![(30, rdata)]);
+            assert!(parse_https_records(response.as_slice()).is_err());
+        }
+
+        // key 0 empty, odd length, or not strictly increasing.
+        for value in [
+            Vec::new(),
+            vec![0x00],
+            vec![0x00, 0x01, 0x00, 0x01],
+            vec![0x00, 0x03, 0x00, 0x01],
+        ] {
+            let rdata = https_rdata(1, &[(0, &value), (1, &alpn_h3_value())], &[]);
+            let response = response_with_https_rdatalist(vec![(30, rdata)]);
+            assert!(parse_https_records(response.as_slice()).is_err());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn https_parser_keeps_compatible_filtering_for_well_formed_records() -> Result<()> {
+        // Well-formed mandatory referencing an unsupported key is skipped, not a parse error.
+        let mut mandatory = Vec::new();
+        mandatory.extend_from_slice(&65000u16.to_be_bytes());
+        let rdata = https_rdata(1, &[(0, &mandatory), (1, &alpn_h3_value())], &[]);
+        let response = response_with_https_rdatalist(vec![(30, rdata)]);
+        assert!(parse_https_records(response.as_slice())?.is_empty());
+
+        // Well-formed mandatory referencing a missing key is skipped, not a parse error.
+        let mut missing = Vec::new();
+        missing.extend_from_slice(&3u16.to_be_bytes());
+        let rdata = https_rdata(1, &[(0, &missing), (1, &alpn_h3_value())], &[]);
+        let response = response_with_https_rdatalist(vec![(30, rdata)]);
+        assert!(parse_https_records(response.as_slice())?.is_empty());
+        Ok(())
+    }
 }
