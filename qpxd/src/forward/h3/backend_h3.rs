@@ -3,10 +3,7 @@ use crate::http3::listener::{
     H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
 };
 use crate::http3::quic::build_h3_server_config_from_tls;
-use crate::http3::quinn_socket::{
-    NoopQuinnUdpIngressFilter, PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream,
-    QuinnEndpointSocket, build_server_endpoint, prepare_server_endpoint_socket,
-};
+use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::Result;
@@ -19,20 +16,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tracing::info;
-
-pub(crate) fn prepare_http3_listener_socket(
-    listener_name: &str,
-    udp_socket: std::net::UdpSocket,
-    inherited_broker: Option<QuinnBrokerStream>,
-) -> Result<PreparedServerEndpointSocket> {
-    prepare_server_endpoint_socket(
-        listener_name,
-        QuinnBrokerKind::Forward,
-        udp_socket,
-        inherited_broker,
-        Arc::new(NoopQuinnUdpIngressFilter),
-    )
-}
 
 pub(crate) async fn run_http3_listener(
     listener: IngressEdgeConfig,

@@ -1,8 +1,5 @@
 use super::server_tls::build_forward_tls_config;
-use crate::http3::quinn_socket::{
-    NoopQuinnUdpIngressFilter, PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream,
-    QuinnEndpointSocket, build_server_endpoint, prepare_server_endpoint_socket,
-};
+use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::Result;
@@ -24,20 +21,6 @@ mod webtransport_dispatch;
 
 pub(crate) use self::connect_upstream::QpxH3UpstreamSessionPool;
 pub(super) use self::handler::{ForwardQpxHandler, h3_body_read_timeout};
-
-pub(crate) fn prepare_http3_listener_socket(
-    listener_name: &str,
-    udp_socket: std::net::UdpSocket,
-    inherited_broker: Option<QuinnBrokerStream>,
-) -> Result<PreparedServerEndpointSocket> {
-    prepare_server_endpoint_socket(
-        listener_name,
-        QuinnBrokerKind::Forward,
-        udp_socket,
-        inherited_broker,
-        Arc::new(NoopQuinnUdpIngressFilter),
-    )
-}
 
 pub(crate) async fn run_http3_listener(
     listener: IngressEdgeConfig,
