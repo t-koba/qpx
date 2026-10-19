@@ -1,6 +1,6 @@
 use super::*;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test]
 #[cfg(feature = "auth-basic")]
 pub(super) async fn forward_proxy_supports_basic_and_digest_proxy_auth() -> Result<()> {
     let dir = temp_dir("qpxd-forward-auth-e2e")?;
@@ -50,8 +50,9 @@ security:
     let unauthorized = format!(
         "GET {basic_uri} HTTP/1.1\r\nHost: {basic_backend_addr}\r\nConnection: close\r\n\r\n"
     );
-    let (status, headers, _) =
-        send_http1_and_read_head(proxy_addr, unauthorized.as_bytes()).await?;
+    let (status, headers, _) = send_http1_and_read_head(proxy_addr, unauthorized.as_bytes())
+        .await
+        .context("reading unauthenticated Basic proxy response")?;
     assert_eq!(status, 407);
     let basic_challenge = header_values(&headers, "proxy-authenticate")
         .into_iter()
@@ -73,7 +74,9 @@ security:
     let authorized = format!(
         "GET {basic_uri} HTTP/1.1\r\nHost: {basic_backend_addr}\r\nProxy-Authorization: {basic_auth}\r\nConnection: close\r\n\r\n"
     );
-    let (status, _, _) = send_http1_and_read_head(proxy_addr, authorized.as_bytes()).await?;
+    let (status, _, _) = send_http1_and_read_head(proxy_addr, authorized.as_bytes())
+        .await
+        .context("reading authenticated Basic proxy response")?;
     assert_eq!(status, 200);
     let basic_upstream = timeout(Duration::from_secs(5), basic_capture)
         .await
@@ -94,8 +97,9 @@ security:
         let digest_probe = format!(
             "GET {digest_uri} HTTP/1.1\r\nHost: {digest_backend_addr}\r\nConnection: close\r\n\r\n"
         );
-        let (status, headers, _) =
-            send_http1_and_read_head(proxy_addr, digest_probe.as_bytes()).await?;
+        let (status, headers, _) = send_http1_and_read_head(proxy_addr, digest_probe.as_bytes())
+            .await
+            .context("reading unauthenticated Digest proxy response")?;
         assert_eq!(status, 407);
         let digest_challenge = header_values(&headers, "proxy-authenticate")
             .into_iter()
@@ -111,8 +115,9 @@ security:
         let digest_request = format!(
             "GET {digest_uri} HTTP/1.1\r\nHost: {digest_backend_addr}\r\nProxy-Authorization: {digest_auth}\r\nConnection: close\r\n\r\n"
         );
-        let (status, _, _) =
-            send_http1_and_read_head(proxy_addr, digest_request.as_bytes()).await?;
+        let (status, _, _) = send_http1_and_read_head(proxy_addr, digest_request.as_bytes())
+            .await
+            .context("reading authenticated Digest proxy response")?;
         assert_eq!(status, 200);
         let digest_upstream = timeout(Duration::from_secs(5), digest_capture)
             .await
