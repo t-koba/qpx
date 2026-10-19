@@ -61,9 +61,18 @@ case "$CLIENT" in
     ;;
   chromium)
     : "${CHROMIUM_BIN:?CHROMIUM_BIN is required}"
+    chromium_status=0
     timeout 45 "$CHROMIUM_BIN" --headless --disable-gpu --no-sandbox \
       --enable-quic --origin-to-force-quic-on=localhost:18443 \
-      --ignore-certificate-errors-spki-list="$SPKI_HASH" --dump-dom "$URL" >"$TMP_DIR/client.out"
+      --ignore-certificate-errors-spki-list="$SPKI_HASH" --dump-dom "$URL" >"$TMP_DIR/client.out" || chromium_status=$?
+    if [ "$chromium_status" -ne 0 ]; then
+      echo "chromium HTTP/3 client failed with status $chromium_status" >&2
+      if [ -f "$TMP_DIR/client.out" ]; then
+        cat "$TMP_DIR/client.out" >&2
+      fi
+      cat "$TMP_DIR/qpxd.log" >&2
+      exit "$chromium_status"
+    fi
     ;;
   *)
     echo "unknown external H3 client: $CLIENT" >&2
