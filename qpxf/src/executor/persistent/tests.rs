@@ -437,6 +437,136 @@ async fn scgi_cancel_cleans_up_worker_permit() {
     server.await.expect("server");
 }
 
+#[tokio::test]
+async fn scgi_abort_while_waiting_for_worker_permit_completes_promptly() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr").to_string();
+    let (first_started_tx, first_started_rx) = oneshot::channel::<()>();
+    let (release_first_tx, release_first_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.expect("accept first");
+        read_scgi_request_from_tcp(&mut first).await;
+        first_started_tx
+            .send(())
+            .expect("first request reached backend");
+        release_first_rx.await.expect("release first request");
+        let _ = first.write_all(b"Status: 200 OK\r\n\r\nfirst").await;
+        drop(first);
+    });
+
+    let executor = Arc::new(
+        PersistentExecutor::new(address, 2000, 1, Vec::new(), 1024, 1024, 1024).expect("executor"),
+    );
+    let mut first = executor
+        .start(test_cgi_request())
+        .await
+        .expect("first start");
+    drop(first.stdin);
+    timeout(Duration::from_secs(1), first_started_rx)
+        .await
+        .expect("first request reaches backend")
+        .expect("first request signal");
+
+    let mut queued = executor
+        .start(test_cgi_request())
+        .await
+        .expect("queued start");
+    drop(queued.stdin);
+    tokio::task::yield_now().await;
+    queued.abort.send(()).expect("abort queued request");
+    let prompt_cancel = timeout(Duration::from_secs(1), &mut queued.done).await;
+    let cancelled_before_release = prompt_cancel.is_ok();
+
+    release_first_tx.send(()).expect("release first request");
+    let mut first_stdout = BytesMut::new();
+    while let Some(chunk) = first.stdout.recv().await {
+        first_stdout.extend_from_slice(&chunk);
+    }
+    first
+        .done
+        .await
+        .expect("first join")
+        .expect("first response");
+    assert_eq!(
+        first_stdout.freeze(),
+        Bytes::from_static(b"Status: 200 OK\r\n\r\nfirst")
+    );
+
+    let queued_join = match prompt_cancel {
+        Ok(joined) => joined,
+        Err(_) => timeout(Duration::from_secs(2), &mut queued.done)
+            .await
+            .expect("queued request settles after permit release"),
+    };
+    queued_join.expect("queued join").expect("queued abort");
+    server.await.expect("server");
+    assert!(
+        cancelled_before_release,
+        "SCGI abort must complete before the queued request obtains a permit"
+    );
+}
+
+#[tokio::test]
+async fn scgi_abort_during_unknown_length_backend_io_releases_permit() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr").to_string();
+    let (first_started_tx, first_started_rx) = oneshot::channel::<()>();
+    let (release_first_tx, release_first_rx) = oneshot::channel::<()>();
+    let server = tokio::spawn(async move {
+        let (mut first, _) = listener.accept().await.expect("accept first");
+        read_scgi_request_from_tcp(&mut first).await;
+        first_started_tx
+            .send(())
+            .expect("first request reached backend");
+        release_first_rx.await.expect("release first request");
+        drop(first);
+
+        let (mut second, _) = listener.accept().await.expect("accept second");
+        read_scgi_request_from_tcp(&mut second).await;
+        let _ = second.write_all(b"Status: 200 OK\r\n\r\nsecond").await;
+    });
+
+    let executor = Arc::new(
+        PersistentExecutor::new(address, 2000, 1, Vec::new(), 1024, 1024, 1024).expect("executor"),
+    );
+    let mut req = test_cgi_request();
+    req.declared_content_length = None;
+    let mut execution = executor.start(req).await.expect("unknown-length start");
+    drop(execution.stdin);
+    timeout(Duration::from_secs(1), first_started_rx)
+        .await
+        .expect("unknown-length request reaches backend")
+        .expect("first request signal");
+    execution.abort.send(()).expect("abort backend request");
+    let prompt_cancel = timeout(Duration::from_secs(1), &mut execution.done).await;
+    let cancelled_during_backend_io = prompt_cancel.is_ok();
+
+    release_first_tx
+        .send(())
+        .expect("release held backend response");
+    let first_join = match prompt_cancel {
+        Ok(joined) => joined,
+        Err(_) => timeout(Duration::from_secs(2), &mut execution.done)
+            .await
+            .expect("request settles after backend closes"),
+    };
+    first_join.expect("first join").expect("first cancellation");
+    assert!(execution.stdout.recv().await.is_none());
+
+    let next_stdout = timeout(Duration::from_secs(2), start_persistent_request(executor))
+        .await
+        .expect("follow-up request completes");
+    assert_eq!(
+        next_stdout,
+        Bytes::from_static(b"Status: 200 OK\r\n\r\nsecond")
+    );
+    server.await.expect("server");
+    assert!(
+        cancelled_during_backend_io,
+        "SCGI abort must cancel backend I/O without waiting for response completion"
+    );
+}
+
 async fn start_persistent_request(executor: Arc<PersistentExecutor>) -> Bytes {
     let mut execution = executor
         .start(test_cgi_request())
