@@ -1,10 +1,10 @@
-use super::parse::QuicConnectionId;
-#[cfg(test)]
-use super::parse::{parse_quic_long_header, parse_quic_short_dcid};
 use super::{
     ROUTE_STATE_MAX_ADDRS, ROUTE_STATE_MAX_CIDS, ROUTE_STATE_QUEUE_COMPACTION_FACTOR,
     ROUTE_STATE_TTL,
 };
+use crate::http3::quic_packet::QuicConnectionId;
+#[cfg(test)]
+use crate::http3::quic_packet::{parse_quic_long_header, parse_quic_short_dcid};
 use std::collections::{HashMap, VecDeque};
 use std::net::SocketAddr;
 use std::time::{Duration, Instant};

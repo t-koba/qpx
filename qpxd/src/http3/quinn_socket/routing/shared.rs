@@ -1,6 +1,6 @@
-use super::parse::{QuicConnectionId, parse_quic_long_header, parse_quic_short_dcid};
 use super::state::RouteState;
 use super::{ROUTE_STATE_REFRESH_INTERVAL, ROUTE_STATE_SHARDS};
+use crate::http3::quic_packet::{QuicConnectionId, parse_quic_long_header, parse_quic_short_dcid};
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::net::SocketAddr;

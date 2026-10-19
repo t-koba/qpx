@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use super::quic::QuicConnectionId;
+use crate::http3::quic_packet::QuicConnectionId;
 
 const TOUCH_COALESCE_MS: u64 = 1_000;
 

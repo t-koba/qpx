@@ -25,6 +25,7 @@ pub(crate) mod priority;
 pub(crate) mod qpx_stream;
 #[cfg(feature = "http3")]
 pub(crate) mod quic;
+pub(crate) mod quic_packet;
 pub(crate) mod quinn_socket;
 #[cfg(feature = "http3")]
 pub(crate) mod response_error;

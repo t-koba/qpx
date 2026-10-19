@@ -1,8 +1,7 @@
-mod parse;
 mod shared;
 mod state;
 
-pub(crate) use parse::is_quic_long_header;
+pub(crate) use crate::http3::quic_packet::is_quic_long_header;
 pub(super) use shared::SharedRouteState;
 #[cfg(test)]
 pub(crate) use state::RouteState;

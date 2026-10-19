@@ -6,8 +6,8 @@ use std::sync::{Arc, Mutex, RwLock};
 
 use tokio::sync::mpsc;
 
-use super::quic::{QuicConnectionId, parse_quic_long_header, parse_quic_short_dcid};
 use super::session::{PassthroughSession, SessionTouch};
+use crate::http3::quic_packet::{QuicConnectionId, parse_quic_long_header, parse_quic_short_dcid};
 
 const MAX_CIDS_PER_SESSION: usize = 32;
 
