@@ -265,3 +265,35 @@ fn regex_headers_stay_on_slow_path() {
     let out = engine.evaluate_ref(&ctx);
     assert!(matches!(out.action.kind, ActionKind::Block));
 }
+
+#[test]
+fn prefilter_selects_host_regex_rule_for_letters_not_digits() {
+    let rules = vec![RuleConfig {
+        name: "host-regex".to_string(),
+        r#match: Some(MatchConfig {
+            host: vec![r"re:^api-\D+$".to_string()],
+            ..Default::default()
+        }),
+        auth: None,
+        action: Some(action(ActionKind::Block)),
+        headers: None,
+        rate_limit: None,
+    }];
+    let engine = RuleEngine::new(rules, action(ActionKind::Direct)).expect("engine");
+
+    let letters = RuleMatchContext {
+        host: Some("api-abc"),
+        ..Default::default()
+    };
+    let hit = engine.evaluate_ref(&letters);
+    assert!(matches!(hit.action.kind, ActionKind::Block));
+    assert_eq!(hit.matched_rule, Some("host-regex"));
+
+    let digits = RuleMatchContext {
+        host: Some("api-123"),
+        ..Default::default()
+    };
+    let miss = engine.evaluate_ref(&digits);
+    assert!(matches!(miss.action.kind, ActionKind::Direct));
+    assert!(miss.matched_rule.is_none());
+}

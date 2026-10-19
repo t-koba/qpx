@@ -1,6 +1,6 @@
 use anyhow::Result;
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -79,7 +79,11 @@ impl TextPatternMatcher {
         }
 
         if !self.regex.is_empty() {
-            return self.regex.iter().any(|regex| regex.is_match(normalized));
+            // Regex syntax is preserved at compile time (case-insensitive
+            // compilation for lowercase matchers), so test the original input
+            // rather than the lowercased normalization; `\D`, `\S`, `\B`
+            // and similar operators must keep their meaning.
+            return self.regex.iter().any(|regex| regex.is_match(input));
         }
         false
     }
@@ -124,7 +128,10 @@ impl TextPatternMatcher {
             out.push(TextMatchTrace {
                 mode: TextMatchMode::Regex,
                 configured: regex.as_str().to_string(),
-                result: normalized.is_some_and(|input| regex.is_match(input)),
+                // Match the original candidate so trace agrees with
+                // `matches`; literal/glob/suffix traces above keep using the
+                // normalized candidate.
+                result: input.is_some_and(|raw| regex.is_match(raw)),
             });
         }
         out
@@ -178,6 +185,38 @@ fn extract_regex_pattern(item: &str) -> Option<&str> {
         .filter(|pattern| !pattern.is_empty())
 }
 
+/// Extract a `re:`/`regex:` expression with case-insensitive prefix
+/// recognition, preserving the expression's original case. No leading
+/// whitespace is trimmed before prefix detection, matching the historical
+/// case-sensitive behavior.
+fn extract_regex_pattern_case_insensitive(item: &str) -> Option<&str> {
+    strip_regex_prefix_case_insensitive(item)
+        .map(str::trim)
+        .filter(|pattern| !pattern.is_empty())
+}
+
+fn strip_regex_prefix_case_insensitive(item: &str) -> Option<&str> {
+    let bytes = item.as_bytes();
+    if bytes.len() >= 3
+        && bytes[0].eq_ignore_ascii_case(&b'r')
+        && bytes[1].eq_ignore_ascii_case(&b'e')
+        && bytes[2] == b':'
+    {
+        return item.get(3..);
+    }
+    if bytes.len() >= 6
+        && bytes[0].eq_ignore_ascii_case(&b'r')
+        && bytes[1].eq_ignore_ascii_case(&b'e')
+        && bytes[2].eq_ignore_ascii_case(&b'g')
+        && bytes[3].eq_ignore_ascii_case(&b'e')
+        && bytes[4].eq_ignore_ascii_case(&b'x')
+        && bytes[5] == b':'
+    {
+        return item.get(6..);
+    }
+    None
+}
+
 pub(crate) fn compile_text_patterns(
     items: &[String],
     lowercase: bool,
@@ -206,17 +245,26 @@ pub(crate) fn compile_text_patterns(
     };
 
     for item in items {
+        if lowercase {
+            // Detect the prefix case-insensitively (preserving the historical
+            // behavior of lowercasing first) but compile the raw body with its
+            // original case so regex operators keep their meaning.
+            if let Some(pattern) = extract_regex_pattern_case_insensitive(item) {
+                hint.complex = true;
+                regex.push(RegexBuilder::new(pattern).case_insensitive(true).build()?);
+                continue;
+            }
+        } else if let Some(pattern) = extract_regex_pattern(item) {
+            hint.complex = true;
+            regex.push(Regex::new(pattern)?);
+            continue;
+        }
+
         let normalized = if lowercase {
             item.to_ascii_lowercase()
         } else {
             item.clone()
         };
-
-        if let Some(pattern) = extract_regex_pattern(&normalized) {
-            hint.complex = true;
-            regex.push(Regex::new(pattern)?);
-            continue;
-        }
 
         if is_exact_pattern(&normalized) {
             let value = interner.intern(normalized.as_str());

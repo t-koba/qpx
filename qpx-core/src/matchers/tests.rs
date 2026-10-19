@@ -306,3 +306,158 @@ fn unary_streaming_matcher_selects_connect_get_label() {
     };
     assert!(!compiled.matches(&server));
 }
+
+#[test]
+fn host_and_sni_regex_preserve_uppercase_escapes() {
+    let mut interner = StringInterner::default();
+    let (host_compiled, _) = CompiledMatch::compile(
+        &MatchConfig {
+            host: vec![r"re:^api-\D+$".to_string()],
+            ..Default::default()
+        },
+        &mut interner,
+    )
+    .expect("compile host regex");
+    let letters = RuleMatchContext {
+        host: Some("api-abc"),
+        ..Default::default()
+    };
+    assert!(host_compiled.matches(&letters));
+    let letters_trace = host_compiled.matches_with_trace(&letters);
+    assert!(letters_trace.result);
+    assert!(letters_trace.reasons.iter().any(|reason| matches!(
+        reason,
+        MatchReason::Host {
+            mode: MatchMode::Regex,
+            result: true,
+            ..
+        }
+    )));
+    let digits = RuleMatchContext {
+        host: Some("api-123"),
+        ..Default::default()
+    };
+    assert!(!host_compiled.matches(&digits));
+    let digits_trace = host_compiled.matches_with_trace(&digits);
+    assert!(!digits_trace.result);
+    assert!(digits_trace.reasons.iter().any(|reason| matches!(
+        reason,
+        MatchReason::Host {
+            mode: MatchMode::Regex,
+            result: false,
+            ..
+        }
+    )));
+
+    let mut interner = StringInterner::default();
+    let (sni_compiled, _) = CompiledMatch::compile(
+        &MatchConfig {
+            sni: vec![r"RE:^api-\D+$".to_string()],
+            ..Default::default()
+        },
+        &mut interner,
+    )
+    .expect("compile sni regex");
+    let letters = RuleMatchContext {
+        sni: Some("api-abc"),
+        ..Default::default()
+    };
+    assert!(sni_compiled.matches(&letters));
+    let letters_trace = sni_compiled.matches_with_trace(&letters);
+    assert!(letters_trace.result);
+    assert!(letters_trace.reasons.iter().any(|reason| matches!(
+        reason,
+        MatchReason::Sni {
+            mode: MatchMode::Regex,
+            result: true,
+            ..
+        }
+    )));
+    let digits = RuleMatchContext {
+        sni: Some("api-123"),
+        ..Default::default()
+    };
+    assert!(!sni_compiled.matches(&digits));
+    let digits_trace = sni_compiled.matches_with_trace(&digits);
+    assert!(!digits_trace.result);
+    assert!(digits_trace.reasons.iter().any(|reason| matches!(
+        reason,
+        MatchReason::Sni {
+            mode: MatchMode::Regex,
+            result: false,
+            ..
+        }
+    )));
+
+    let mut interner = StringInterner::default();
+    let (literal, _) = CompiledMatch::compile(
+        &MatchConfig {
+            host: vec![r"re:^hello$".to_string()],
+            ..Default::default()
+        },
+        &mut interner,
+    )
+    .expect("compile literal regex");
+    let upper = RuleMatchContext {
+        host: Some("HELLO"),
+        ..Default::default()
+    };
+    assert!(literal.matches(&upper));
+    let upper_trace = literal.matches_with_trace(&upper);
+    assert!(upper_trace.result);
+    assert!(upper_trace.reasons.iter().any(|reason| matches!(
+        reason,
+        MatchReason::Host {
+            mode: MatchMode::Regex,
+            result: true,
+            ..
+        }
+    )));
+}
+
+#[test]
+fn path_regex_stays_case_sensitive_and_preserves_escapes() {
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(
+        &MatchConfig {
+            path: vec![r"re:^/v1/\D+$".to_string()],
+            ..Default::default()
+        },
+        &mut interner,
+    )
+    .expect("compile path regex");
+    let letters = RuleMatchContext {
+        path: Some("/v1/ABC"),
+        ..Default::default()
+    };
+    assert!(compiled.matches(&letters));
+    assert!(compiled.matches_with_trace(&letters).result);
+    let digits = RuleMatchContext {
+        path: Some("/v1/123"),
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&digits));
+    assert!(!compiled.matches_with_trace(&digits).result);
+
+    let mut interner = StringInterner::default();
+    let (case, _) = CompiledMatch::compile(
+        &MatchConfig {
+            path: vec![r"re:^/V1/ABC$".to_string()],
+            ..Default::default()
+        },
+        &mut interner,
+    )
+    .expect("compile case-sensitive path regex");
+    let exact = RuleMatchContext {
+        path: Some("/V1/ABC"),
+        ..Default::default()
+    };
+    assert!(case.matches(&exact));
+    assert!(case.matches_with_trace(&exact).result);
+    let lower = RuleMatchContext {
+        path: Some("/v1/abc"),
+        ..Default::default()
+    };
+    assert!(!case.matches(&lower));
+    assert!(!case.matches_with_trace(&lower).result);
+}
