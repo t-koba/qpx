@@ -387,8 +387,10 @@ handlers:
             &format!("#!/bin/sh\n{noise}\n{headers}\n{noise}\ncat\n"),
         );
         let (addr, server_task) = spawn_qpxf(&tmp, 2, 16 * 1024 * 1024, 2000).await;
-        // Much larger than all 16-chunk queues and the SHM rings. Binary pattern
-        // detects missing, duplicated, or reordered bytes, including replay/live boundaries.
+        let shm_ring_size = 256 * 1024;
+        // The 8 MiB payload is 32x larger than each ring and exceeds all 16-chunk queues.
+        // Its binary pattern detects missing, duplicated, or reordered bytes across ring and
+        // replay/live boundaries.
         let payload: Vec<u8> = (0..8 * 1024 * 1024).map(|i| (i % 251) as u8).collect();
         let lengths = if truncated {
             vec![Some(payload.len() + 1)]
@@ -401,7 +403,7 @@ handlers:
         {
             let result = timeout(Duration::from_secs(10), async {
                 if shm {
-                    send_shm_body(&addr, script, &payload, declared_len, 65536).await
+                    send_shm_body(&addr, script, &payload, declared_len, shm_ring_size).await
                 } else {
                     send_tcp_body(&addr, script, &payload, declared_len).await
                 }
