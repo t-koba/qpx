@@ -705,43 +705,36 @@ where
             return Ok(());
         }
     };
-    let res_meta = &prepared.meta;
+    // Forward in the handler so a failed client write cancels execution before
+    // waiting for the backend. The executor itself already runs concurrently.
+    let forwarding_result: Result<()> = async {
+        write_frame_with_timeout(&mut tx, &prepared.meta, output_idle).await?;
 
-    // Write IpcResponseMeta
-    write_frame_with_timeout(&mut tx, &res_meta, output_idle).await?;
-
-    // Replay bounded pre-commit output before forwarding new stdout.
-    let replay_result: Result<()> = async {
+        // Replay bounded pre-commit output before forwarding new stdout.
         while let Some(chunk) = prepared.next_staged_chunk().await? {
+            write_all_with_timeout(&mut tx, &chunk, output_idle).await?;
+        }
+        if !prepared.body_leftover.is_empty() {
+            write_all_with_timeout(&mut tx, &prepared.body_leftover, output_idle).await?;
+        }
+        while let Some(chunk) = exec_stdout.recv().await {
             write_all_with_timeout(&mut tx, &chunk, output_idle).await?;
         }
         Ok(())
     }
     .await;
-    if let Err(err) = replay_result {
+
+    if let Err(err) = forwarding_result {
+        // The client can no longer receive a response. Do not wait for an
+        // outstanding request read (or its input deadline) during cancellation.
+        stdin_task.abort();
         abort_execution(exec_abort, stdin_task, exec_done).await;
+        let _ = stderr_task.await;
         return Err(err);
     }
 
-    if !prepared.body_leftover.is_empty() {
-        write_all_with_timeout(&mut tx, &prepared.body_leftover, output_idle).await?;
-    }
-
-    // Task to forward executor STDOUT to stream
-    let stdout_task = tokio::spawn(async move {
-        while let Some(chunk) = exec_stdout.recv().await {
-            if write_all_with_timeout(&mut tx, &chunk, output_idle)
-                .await
-                .is_err()
-            {
-                break;
-            }
-        }
-    });
-
     let _ = exec_done.await;
     let _ = stdin_task.await;
-    let _ = stdout_task.await;
     let _ = stderr_task.await;
 
     Ok(())

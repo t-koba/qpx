@@ -432,6 +432,123 @@ handlers:
         std::fs::remove_dir_all(tmp).unwrap();
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn tcp_response_write_failure_releases_cgi_worker() {
+        use std::os::fd::AsRawFd;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let gate = tmp.path().join("release");
+        write_script(
+            tmp.path(),
+            "gated.sh",
+            &format!(
+                "#!/bin/sh\nprintf 'Status: 200 OK\\r\\nContent-Type: text/plain\\r\\n\\r\\nhello'\n\
+                 while [ ! -e '{}' ]; do sleep 0.01; done\n\
+                 printf 'after reset'\nexec sleep 30\n",
+                gate.display()
+            ),
+        );
+        let cfg: qpxf::config::QpxfConfig = serde_yaml::from_str(&format!(
+            r#"workers: 1
+handlers:
+  - match:
+      path_prefix: "/"
+    backend:
+      type: cgi
+      root: "{}"
+      timeout_ms: 5000
+      env_passthrough: []
+"#,
+            tmp.path().display()
+        ))
+        .unwrap();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let ctx = qpxf::server::ConnectionContext {
+            router: Arc::new(qpxf::router::Router::new(&cfg).unwrap()),
+            semaphore: Arc::clone(&semaphore),
+            allow_shm_reuse: false,
+            input_idle: Duration::from_secs(1),
+            conn_idle: Duration::from_secs(1),
+            max_requests_per_connection: cfg.max_requests_per_connection,
+            max_params_bytes: cfg.max_params_bytes,
+            max_stdin_bytes: cfg.max_stdin_bytes,
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let mut client = TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        // Observe delivery of the RST on a duplicate real socket before opening
+        // the file gate. No mock transport or timing assumption drives the write.
+        let server = server.into_std().unwrap();
+        let mut observer = TcpStream::from_std(server.try_clone().unwrap()).unwrap();
+        let server = TcpStream::from_std(server).unwrap();
+        let mut task = tokio::spawn(qpxf::server::handle_connection(server, ctx));
+        let mut meta = ipc_meta("/gated.sh", "GET");
+        meta.headers.push(("Content-Length".into(), "0".into()));
+        write_frame(&mut client, &meta).await.unwrap();
+        timeout(Duration::from_secs(2), async {
+            let response: IpcResponseMeta = read_frame(&mut client).await.unwrap();
+            assert_eq!(response.status, 200);
+            let mut hello = [0; 5];
+            client.read_exact(&mut hello).await.unwrap();
+            assert_eq!(&hello, b"hello");
+        })
+        .await
+        .expect("initial response must stream before the gate opens");
+        assert_eq!(semaphore.available_permits(), 0);
+        let linger = libc::linger {
+            l_onoff: 1,
+            l_linger: 0,
+        };
+        assert_eq!(
+            // SAFETY: the live socket fd and linger pointer/length are valid.
+            unsafe {
+                libc::setsockopt(
+                    client.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_LINGER,
+                    (&linger as *const libc::linger).cast(),
+                    std::mem::size_of_val(&linger) as libc::socklen_t,
+                )
+            },
+            0
+        );
+        drop(client);
+        let reset = timeout(Duration::from_secs(1), observer.read(&mut [0; 1]))
+            .await
+            .expect("RST must arrive before releasing CGI")
+            .expect_err("client must close with RST, not FIN");
+        assert_eq!(reset.kind(), std::io::ErrorKind::ConnectionReset);
+        drop(observer);
+        std::fs::write(&gate, b"go").unwrap();
+
+        let result = match timeout(Duration::from_secs(1), &mut task).await {
+            Ok(result) => result.unwrap(),
+            Err(_) => {
+                let finished = task.is_finished();
+                let permits = semaphore.available_permits();
+                // Let the backend deadline clean up even on the unfixed path.
+                let _ = task.await;
+                panic!("write failure retained worker: finished={finished} permits={permits}");
+            }
+        };
+        // Metadata and `hello` already arrived before the reset, so this raw I/O
+        // error can only come from the live stdout forwarding write, not staging.
+        let error = result.expect_err("forwarding must report the client write failure");
+        let io = error
+            .downcast_ref::<std::io::Error>()
+            .expect("write I/O error");
+        assert!(matches!(
+            io.kind(),
+            std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+        ));
+        let _permit = semaphore
+            .try_acquire_owned()
+            .expect("worker must be reusable");
+    }
+
     #[tokio::test]
     async fn tcp_large_cgi_duplex_completes() {
         large_cgi_duplex(false, false).await;
