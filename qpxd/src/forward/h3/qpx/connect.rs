@@ -490,19 +490,12 @@ async fn handle_qpx_extended_connect_stream(
         return Ok(());
     }
 
-    let listener_cfg = state
-        .ingress_edge_settings(handler.listener_name.as_ref())
-        .ok_or_else(|| anyhow!("listener not found"))?;
-    let listener_trust = crate::forward::connect::listener_upstream_trust(listener_cfg)?;
-    let verify_upstream = listener_cfg
-        .tls_inspection
-        .as_ref()
-        .map(|cfg| {
-            cfg.verify_upstream
-                && !state
-                    .tls_verify_exception_matches(handler.listener_name.as_ref(), host.as_str())
-        })
-        .unwrap_or(true);
+    let (verify_upstream, listener_trust) =
+        crate::forward::connect::listener_upstream_tls_settings(
+            &state,
+            handler.listener_name.as_ref(),
+            host.as_str(),
+        )?;
     let upstream = match open_upstream_qpx_extended_connect_stream(
         &state.pools,
         OpenUpstreamQpxExtendedConnectInput {

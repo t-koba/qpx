@@ -46,6 +46,8 @@ pub(in crate::forward) mod udp_upstream;
 use self::audit::ConnectAuditContext;
 use self::connect_h2::handle_h2_extended_connect;
 use self::decision_service::apply_connect_decision_service;
+#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
+pub(super) use self::inspect::listener_upstream_tls_settings;
 pub(super) use self::inspect::{
     ConnectPolicyInput, decide_connect_action_from_client_hello,
     decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
