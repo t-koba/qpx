@@ -7,7 +7,7 @@ use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tokio::time::sleep;
+use tokio::time::{sleep, timeout};
 
 type Result<T> = std::result::Result<T, ShmRingError>;
 
@@ -207,7 +207,6 @@ impl ShmRingBuffer {
 
         let r = self.read_idx().load(Ordering::Acquire);
         let mut w = self.write_idx().load(Ordering::Acquire);
-        let was_empty = r == w;
 
         let available_space = available_space(self.capacity, r, w);
 
@@ -229,7 +228,10 @@ impl ShmRingBuffer {
         // Publish the new write index
         self.write_idx().store(w, Ordering::Release);
 
-        if was_empty && self.consumer_waiting().swap(0, Ordering::AcqRel) == 1 {
+        // A consumer may drain the last message after our initial index snapshot
+        // and register while this write is being copied. Re-check the waiter flag
+        // after publishing instead of gating notification on the stale `was_empty`.
+        if self.consumer_waiting().swap(0, Ordering::AcqRel) == 1 {
             self.data_doorbell.signal()?;
         }
 
@@ -333,7 +335,7 @@ impl ShmRingBuffer {
                 return Ok(());
             }
 
-            self.data_doorbell.wait().await?;
+            wait_for_doorbell_or_recheck(&self.data_doorbell).await?;
         }
     }
 
@@ -374,7 +376,7 @@ impl ShmRingBuffer {
                 return Ok(());
             }
 
-            self.space_doorbell.wait().await?;
+            wait_for_doorbell_or_recheck(&self.space_doorbell).await?;
         }
     }
 
@@ -690,6 +692,15 @@ impl Drop for ShmDoorbell {
             let _ = windows_sys::Win32::Foundation::CloseHandle(handle);
         }
     }
+}
+
+/// Doorbells are hints; periodically return to the ring predicate in case a
+/// cross-process notification was missed during waiter registration.
+async fn wait_for_doorbell_or_recheck(doorbell: &ShmDoorbell) -> Result<()> {
+    if let Ok(result) = timeout(DOORBELL_POLL_MAX_INTERVAL, doorbell.wait()).await {
+        result?;
+    }
+    Ok(())
 }
 
 fn open_shm_file(path: &Path) -> Result<File> {
@@ -1171,5 +1182,81 @@ mod tests {
             err.to_string().contains("owner-only file permissions"),
             "unexpected error: {err}"
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shm_ring_push_wakes_consumer_registered_during_drain() -> Result<()> {
+        let temp_file = NamedTempFile::new()?;
+        let mut ring = ShmRingBuffer::create_or_open(temp_file.path(), 1024)?;
+        ring.unlink_doorbells()?;
+
+        assert!(ring.try_push(b"first")?);
+        // This state can arise if the consumer drains a message after a producer
+        // snapshots a nonempty ring, then registers before that producer publishes.
+        ring.consumer_waiting().store(1, Ordering::Release);
+        assert!(ring.try_push(b"second")?);
+
+        tokio::time::timeout(Duration::from_millis(100), ring.data_doorbell.wait())
+            .await
+            .map_err(|_| anyhow!("producer did not wake the registered consumer"))??;
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shm_ring_wait_for_data_rechecks_after_missed_doorbell() -> Result<()> {
+        let temp_file = NamedTempFile::new()?;
+        let mut producer = ShmRingBuffer::create_or_open(temp_file.path(), 1024)?;
+        let mut consumer = ShmRingBuffer::create_or_open(temp_file.path(), 1024)?;
+        producer.unlink_doorbells()?;
+
+        let mut wait = Box::pin(consumer.wait_for_data());
+        tokio::select! {
+            biased;
+            result = &mut wait => panic!("empty-ring wait completed unexpectedly: {result:?}"),
+            _ = sleep(Duration::from_millis(1)) => {}
+        }
+        assert_eq!(producer.consumer_waiting().load(Ordering::Acquire), 1);
+
+        // Simulate a lost doorbell by clearing its waiter flag before publishing.
+        // The ring state, not the notification, must eventually release the waiter.
+        producer.consumer_waiting().store(0, Ordering::Release);
+        assert!(producer.try_push(b"payload")?);
+        timeout(Duration::from_millis(250), &mut wait)
+            .await
+            .map_err(|_| anyhow!("data wait did not recheck the ring predicate"))??;
+        drop(wait);
+        assert_eq!(consumer.try_pop()?.as_deref(), Some(b"payload".as_slice()));
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shm_ring_wait_for_space_rechecks_after_missed_doorbell() -> Result<()> {
+        let temp_file = NamedTempFile::new()?;
+        let mut producer = ShmRingBuffer::create_or_open(temp_file.path(), 1024)?;
+        let mut consumer = ShmRingBuffer::create_or_open(temp_file.path(), 1024)?;
+        producer.unlink_doorbells()?;
+
+        let existing = vec![0; 900];
+        assert!(producer.try_push(&existing)?);
+        let mut wait = Box::pin(producer.wait_for_space(100));
+        tokio::select! {
+            biased;
+            result = &mut wait => panic!("full-ring wait completed unexpectedly: {result:?}"),
+            _ = sleep(Duration::from_millis(1)) => {}
+        }
+        assert_eq!(consumer.producer_waiting().load(Ordering::Acquire), 1);
+
+        // Simulate a lost doorbell while freeing enough space for the waiter.
+        consumer.producer_waiting().store(0, Ordering::Release);
+        assert_eq!(consumer.try_pop()?.as_deref(), Some(existing.as_slice()));
+        timeout(Duration::from_millis(250), &mut wait)
+            .await
+            .map_err(|_| anyhow!("space wait did not recheck the ring predicate"))??;
+        drop(wait);
+        assert!(producer.try_push(&[1; 100])?);
+        Ok(())
     }
 }
