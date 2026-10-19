@@ -404,15 +404,13 @@ require .github/workflows/ci.yml './scripts/e2e-control-plane.ps1'
 require .github/workflows/ci.yml 'bash ./scripts/check-config-samples.sh'
 require .github/workflows/ci.yml 'bash ./scripts/audit-config-usecases.sh'
 require .github/workflows/ci.yml 'bash ./scripts/audit-config-behavior.sh'
-require .github/workflows/ci.yml 'QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-smoke.jsonl'
-require .github/workflows/ci.yml 'QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/advanced-transport-perf.jsonl'
-require .github/workflows/ci.yml 'cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture --test-threads=1'
 require .github/workflows/ci.yml 'cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture --test-threads=1'
-require .github/workflows/ci.yml 'id: perf_smoke_release'
-require .github/workflows/ci.yml 'id: advanced_transport_perf_release'
 require .github/workflows/ci.yml 'continue-on-error: true'
-require .github/workflows/ci.yml 'fail if any perf smoke evaluation failed'
 require .github/workflows/ci.yml 'actions/upload-artifact@v7'
+require .github/workflows/ci.yml 'stage perf smoke compatibility artifact'
+require .github/workflows/ci.yml 'target/perf/perf-smoke.jsonl'
+require .github/workflows/ci.yml 'target/perf/advanced-transport-perf.jsonl'
+require .github/workflows/ci.yml '- perf_audit_qpx'
 require scripts/check-http2-performance.sh 'perf-audit-policy.py'
 require scripts/check-origin-cache-performance.sh 'perf-audit-policy.py'
 require scripts/compare-proxy-baseline.sh 'perf-audit-policy.py'
@@ -432,6 +430,15 @@ require docs/performance.md 'lane unmeasured — reported visibly, not failed'
 
 check_deprecated_node_actions
 require .github/workflows/ci.yml 'qpx-perf-smoke-jsonl'
+require .github/workflows/ci.yml 'qpx-perf-audit-jsonl-qpx'
+
+# The standalone perf_smoke job was consolidated into perf_audit_qpx: the H3
+# perf_smoke suite and the advanced-transport suite now run there, with
+# canonical perf-smoke.jsonl / advanced-transport-perf.jsonl copies.
+if grep -Eq '^[[:space:]]+perf_smoke:' .github/workflows/ci.yml; then
+  echo "ci.yml must not contain a separate perf_smoke job (covered by perf_audit_qpx)" >&2
+  exit 1
+fi
 require .github/workflows/ci.yml 'target/perf/perf-audit-criterion.jsonl'
 require .github/workflows/ci.yml 'cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10'
 require .github/workflows/ci.yml 'target/perf/perf-audit-protocol-h3-crate-perf.jsonl'

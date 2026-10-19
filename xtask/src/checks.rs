@@ -2994,8 +2994,13 @@ fn ci_acceptance_violations(
         "bash ./scripts/check-config-samples.sh",
         "bash ./scripts/audit-config-usecases.sh",
         "bash ./scripts/audit-config-behavior.sh",
-        "cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture",
         "cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture",
+        "stage perf smoke compatibility artifact",
+        "target/perf/perf-smoke.jsonl",
+        "target/perf/advanced-transport-perf.jsonl",
+        "qpx-perf-smoke-jsonl",
+        "qpx-perf-audit-jsonl-qpx",
+        "- perf_audit_qpx",
         "cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10",
         "target/perf/perf-audit-protocol-h3-crate-perf.jsonl",
         "target/perf/perf-audit-protocol-qpx-h3-perf.jsonl",
@@ -3048,6 +3053,12 @@ fn ci_acceptance_violations(
             ));
             break;
         }
+    }
+    if ci.lines().any(|line| line == "  perf_smoke:") {
+        violations.push(
+            "ci.yml must not contain a separate perf_smoke job (covered by perf_audit_qpx)"
+                .to_string(),
+        );
     }
     for required in [
         "RUSTFLAGS: -Zsanitizer=address",
@@ -5338,8 +5349,13 @@ mod tests {
             bash ./scripts/check-config-samples.sh
             bash ./scripts/audit-config-usecases.sh
             bash ./scripts/audit-config-behavior.sh
-            cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture
             cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture
+            stage perf smoke compatibility artifact
+            target/perf/perf-smoke.jsonl
+            target/perf/advanced-transport-perf.jsonl
+            qpx-perf-smoke-jsonl
+            qpx-perf-audit-jsonl-qpx
+            - perf_audit_qpx
             cargo bench -p qpxd --bench streaming_throughput --locked -- --sample-size 10
             target/perf/perf-audit-protocol-h3-crate-perf.jsonl
             target/perf/perf-audit-protocol-qpx-h3-perf.jsonl

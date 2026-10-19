@@ -344,55 +344,6 @@ jobs:
           fi
           bash ./scripts/h3-interop/external-client.sh "${{ matrix.client }}"
 
-  perf_smoke:
-    name: perf smoke
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v5
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: perf smoke (release)
-        id: perf_smoke_release
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-D warnings"
-          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/perf-smoke.jsonl
-        run: |
-          mkdir -p target/perf
-          cargo test -p qpxd --release --test perf_smoke --locked -- --nocapture --test-threads=1
-      - name: advanced transport perf (release)
-        id: advanced_transport_perf_release
-        continue-on-error: true
-        env:
-          RUSTFLAGS: "-D warnings"
-          QPX_PERF_SMOKE_JSON: ${{ github.workspace }}/target/perf/advanced-transport-perf.jsonl
-        run: |
-          mkdir -p target/perf
-          cargo test -p qpxd --release --test advanced_transport_perf --locked --features http3-backend-qpx,mitm -- --nocapture --test-threads=1
-      - name: fail if any perf smoke evaluation failed
-        if: always()
-        env:
-          PERF_SMOKE_RELEASE: ${{ steps.perf_smoke_release.outcome }}
-          ADVANCED_TRANSPORT_PERF_RELEASE: ${{ steps.advanced_transport_perf_release.outcome }}
-        run: |
-          failed=0
-          if [ "$PERF_SMOKE_RELEASE" != "success" ]; then
-            echo "perf smoke (release) failed: $PERF_SMOKE_RELEASE" >&2
-            failed=1
-          fi
-          if [ "$ADVANCED_TRANSPORT_PERF_RELEASE" != "success" ]; then
-            echo "advanced transport perf (release) failed: $ADVANCED_TRANSPORT_PERF_RELEASE" >&2
-            failed=1
-          fi
-          exit "$failed"
-      - name: upload perf smoke artifact
-        uses: actions/upload-artifact@v7
-        if: always()
-        with:
-          name: qpx-perf-smoke-jsonl
-          path: target/perf/*.jsonl
-          if-no-files-found: ignore
-
   # Perf audit split: three parallel jobs so wall time tracks the longest group
   # (~30 min) instead of the serial sum (~89 min). Same-VM rule: every bench
   # whose rows are compared with each other runs together with its enforcing
@@ -517,6 +468,24 @@ jobs:
             target/perf/*.json
             target/perf/allocations/**
             target/perf/profiles/**
+          if-no-files-found: ignore
+      - name: stage perf smoke compatibility artifact
+        if: always()
+        run: |
+          if [ -f target/perf/perf-audit-protocol-h3-crate-perf.jsonl ]; then
+            cp target/perf/perf-audit-protocol-h3-crate-perf.jsonl target/perf/perf-smoke.jsonl
+          fi
+          if [ -f target/perf/perf-audit-advanced-transport-perf.jsonl ]; then
+            cp target/perf/perf-audit-advanced-transport-perf.jsonl target/perf/advanced-transport-perf.jsonl
+          fi
+      - name: upload perf smoke artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: qpx-perf-smoke-jsonl
+          path: |
+            target/perf/perf-smoke.jsonl
+            target/perf/advanced-transport-perf.jsonl
           if-no-files-found: ignore
 
   perf_audit_proxy:
@@ -935,7 +904,6 @@ jobs:
       - webdav_external_compliance
       - http_rfc_all_features
       - external_h3_interop
-      - perf_smoke
       - perf_audit_qpx
       - perf_audit_proxy
       - perf_audit_protocol
