@@ -1,16 +1,14 @@
-use super::super::{
-    ReloadableReverse, record_reverse_connection_filter_block, reverse_quic_connection_filter_match,
-};
+use super::super::ReloadableReverse;
+#[cfg(test)]
+use super::super::{record_reverse_connection_filter_block, reverse_quic_connection_filter_match};
+pub(crate) use super::terminate_socket::prepare_reverse_terminate_socket;
 pub(crate) use super::terminate_tls::build_reverse_tls_config;
 use crate::http3::codec::http_headers_to_h1;
 use crate::http3::listener::{
     H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
 };
 use crate::http3::quic::build_h3_server_config_from_tls;
-use crate::http3::quinn_socket::{
-    PreparedServerEndpointSocket, QuinnBrokerKind, QuinnBrokerStream, QuinnEndpointSocket,
-    QuinnUdpIngressFilter, build_server_endpoint, prepare_server_endpoint_socket,
-};
+use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
 use crate::http3::server::{H3ServerRequestStream, send_h3_static_response};
 use crate::reverse::transport::{self, ReverseConnInfo};
 use crate::server::control::SidecarControl;
@@ -26,25 +24,6 @@ use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tracing::warn;
-
-pub(crate) fn prepare_reverse_terminate_socket(
-    reverse_name: &str,
-    reverse_rt: ReloadableReverse,
-    std_socket: std::net::UdpSocket,
-    inherited_broker: Option<QuinnBrokerStream>,
-) -> Result<PreparedServerEndpointSocket> {
-    let local_port = std_socket.local_addr()?.port();
-    prepare_server_endpoint_socket(
-        reverse_name,
-        QuinnBrokerKind::ReverseTerminate,
-        std_socket,
-        inherited_broker,
-        Arc::new(ReverseQuicPacketFilter {
-            reverse: reverse_rt,
-            local_port,
-        }),
-    )
-}
 
 pub(crate) async fn run_http3_terminate(
     reverse: ReverseEdgeConfig,
@@ -78,35 +57,6 @@ pub(crate) async fn run_http3_terminate(
         shutdown,
     )
     .await
-}
-
-struct ReverseQuicPacketFilter {
-    reverse: ReloadableReverse,
-    local_port: u16,
-}
-
-impl QuinnUdpIngressFilter for ReverseQuicPacketFilter {
-    fn allow(&self, remote_addr: SocketAddr, packet: &[u8]) -> bool {
-        match reverse_quic_connection_filter_match(
-            &self.reverse,
-            remote_addr,
-            self.local_port,
-            packet,
-        ) {
-            Some((stage, matched_rule, sni)) => {
-                record_reverse_connection_filter_block(
-                    &self.reverse,
-                    remote_addr,
-                    self.local_port,
-                    stage,
-                    matched_rule.as_str(),
-                    sni.as_deref(),
-                );
-                false
-            }
-            None => true,
-        }
-    }
 }
 
 #[cfg(test)]

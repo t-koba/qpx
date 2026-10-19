@@ -28,6 +28,9 @@ pub(crate) mod passthrough {
 #[cfg(feature = "http3")]
 mod streaming;
 
+#[cfg(feature = "http3")]
+mod terminate_socket;
+
 #[cfg(all(
     feature = "http3",
     any(
