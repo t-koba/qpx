@@ -25,6 +25,21 @@ pub(crate) struct DestinationMetadata {
 }
 
 impl DestinationMetadata {
+    pub(crate) fn apply_to_rule_context<'a>(
+        &'a self,
+        ctx: &mut qpx_core::rules::RuleMatchContext<'a>,
+    ) {
+        ctx.destination_category = self.category.as_deref();
+        ctx.destination_category_source = self.category_source;
+        ctx.destination_category_confidence = self.category_confidence.map(u64::from);
+        ctx.destination_reputation = self.reputation.as_deref();
+        ctx.destination_reputation_source = self.reputation_source;
+        ctx.destination_reputation_confidence = self.reputation_confidence.map(u64::from);
+        ctx.destination_application = self.application.as_deref();
+        ctx.destination_application_source = self.application_source;
+        ctx.destination_application_confidence = self.application_confidence.map(u64::from);
+    }
+
     pub(crate) fn decision_trace(&self) -> Option<String> {
         let mut traces = [
             self.category_trace.as_deref(),

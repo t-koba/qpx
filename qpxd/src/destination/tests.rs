@@ -237,3 +237,50 @@ fn resolution_override_can_prefer_certificate_evidence() {
     assert_eq!(destination.category.as_deref(), Some("cert"));
     assert_eq!(destination.category_source, Some("cert_issuer"));
 }
+
+#[test]
+fn destination_metadata_apply_to_rule_context_maps_nine_fields() {
+    let metadata = DestinationMetadata {
+        category: Some("web".to_string()),
+        category_source: Some("host"),
+        category_confidence: Some(100),
+        reputation: Some("suspicious".to_string()),
+        reputation_source: Some("ip"),
+        reputation_confidence: Some(94),
+        application: Some(Arc::from("chrome")),
+        application_source: Some("ja4"),
+        application_confidence: Some(77),
+        ..Default::default()
+    };
+    let mut ctx = qpx_core::rules::RuleMatchContext {
+        host: Some("example.com"),
+        ..Default::default()
+    };
+    metadata.apply_to_rule_context(&mut ctx);
+    assert_eq!(ctx.destination_category, Some("web"));
+    assert_eq!(ctx.destination_category_source, Some("host"));
+    assert_eq!(ctx.destination_category_confidence, Some(100u64));
+    assert_eq!(ctx.destination_reputation, Some("suspicious"));
+    assert_eq!(ctx.destination_reputation_source, Some("ip"));
+    assert_eq!(ctx.destination_reputation_confidence, Some(94u64));
+    assert_eq!(ctx.destination_application, Some("chrome"));
+    assert_eq!(ctx.destination_application_source, Some("ja4"));
+    assert_eq!(ctx.destination_application_confidence, Some(77u64));
+    assert_eq!(ctx.host, Some("example.com"));
+}
+
+#[test]
+fn destination_metadata_apply_to_rule_context_leaves_defaults_for_empty() {
+    let metadata = DestinationMetadata::default();
+    let mut ctx = qpx_core::rules::RuleMatchContext::default();
+    metadata.apply_to_rule_context(&mut ctx);
+    assert_eq!(ctx.destination_category, None);
+    assert_eq!(ctx.destination_category_source, None);
+    assert_eq!(ctx.destination_category_confidence, None);
+    assert_eq!(ctx.destination_reputation, None);
+    assert_eq!(ctx.destination_reputation_source, None);
+    assert_eq!(ctx.destination_reputation_confidence, None);
+    assert_eq!(ctx.destination_application, None);
+    assert_eq!(ctx.destination_application_source, None);
+    assert_eq!(ctx.destination_application_confidence, None);
+}

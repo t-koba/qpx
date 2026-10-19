@@ -138,7 +138,7 @@ pub(super) async fn handle_h2_extended_connect(
         .path_and_query()
         .and_then(|pq| pq.query())
         .map(str::to_string);
-    let ctx = RuleMatchContext {
+    let mut ctx = RuleMatchContext {
         src_ip: Some(remote_addr.ip()),
         dst_port: Some(port),
         host: Some(host.as_str()),
@@ -150,15 +150,6 @@ pub(super) async fn handle_h2_extended_connect(
         scheme: Some(scheme.as_str()),
         http_version: Some(http_version_label(req_version)),
         alpn: Some("h2"),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source,
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source,
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source,
-        destination_application_confidence: destination.application_confidence.map(u64::from),
         headers: Some(&sanitized_headers),
         user: identity.user.as_deref(),
         user_groups: &identity.groups,
@@ -169,6 +160,7 @@ pub(super) async fn handle_h2_extended_connect(
         idp: identity.idp.as_deref(),
         ..Default::default()
     };
+    destination.apply_to_rule_context(&mut ctx);
     #[cfg(feature = "auth-basic")]
     macro_rules! pre_access_response {
         ($base:expr, $log_context:expr, $outcome:expr) => {{

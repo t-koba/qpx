@@ -92,7 +92,7 @@ pub(super) fn prepare_udp_rule_evaluation<'a>(
         },
         destination_resolution,
     );
-    let ctx = RuleMatchContext {
+    let mut ctx = RuleMatchContext {
         src_ip: Some(client_addr.ip()),
         dst_port: Some(connect_target.port()),
         host: host_for_match_owned.as_deref(),
@@ -114,15 +114,6 @@ pub(super) fn prepare_udp_rule_evaluation<'a>(
         tls_version: client_hello
             .as_ref()
             .and_then(|hello| hello.tls_version.as_deref()),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source,
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source,
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source,
-        destination_application_confidence: destination.application_confidence.map(u64::from),
         ja3: client_hello.as_ref().and_then(|hello| hello.ja3.as_deref()),
         ja4: client_hello.as_ref().and_then(|hello| hello.ja4.as_deref()),
         request_size: Some(packet.len() as u64),
@@ -135,6 +126,7 @@ pub(super) fn prepare_udp_rule_evaluation<'a>(
         idp: identity.idp.as_deref(),
         ..Default::default()
     };
+    destination.apply_to_rule_context(&mut ctx);
     let outcome = engine.evaluate_ref(&ctx);
     let request_limit_ctx =
         RateLimitContext::from_identity(client_addr.ip(), &identity, outcome.matched_rule, None);

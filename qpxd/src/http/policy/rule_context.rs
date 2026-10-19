@@ -46,7 +46,7 @@ pub(crate) fn build_request_rule_match_context(
     let mut ctx = base.rule_match_context();
     ctx.headers = Some(headers);
     ctx.request_size = request_size;
-    apply_destination(&mut ctx, destination);
+    destination.apply_to_rule_context(&mut ctx);
     apply_identity(&mut ctx, identity);
     apply_client_cert(&mut ctx, client_cert);
     apply_upstream_cert(&mut ctx, upstream_cert);
@@ -74,7 +74,7 @@ pub(crate) fn build_response_rule_match_context(
     ctx.headers = headers;
     ctx.response_status = Some(response_status);
     ctx.response_size = response_size;
-    apply_destination(&mut ctx, destination);
+    destination.apply_to_rule_context(&mut ctx);
     apply_identity(&mut ctx, identity);
     apply_client_cert(&mut ctx, client_cert);
     apply_upstream_cert(&mut ctx, upstream_cert);
@@ -89,18 +89,6 @@ pub(crate) fn attach_destination_trace(
     destination: &DestinationMetadata,
 ) {
     log_context.destination_trace = destination.decision_trace();
-}
-
-fn apply_destination<'a>(ctx: &mut RuleMatchContext<'a>, destination: &'a DestinationMetadata) {
-    ctx.destination_category = destination.category.as_deref();
-    ctx.destination_category_source = destination.category_source;
-    ctx.destination_category_confidence = destination.category_confidence.map(u64::from);
-    ctx.destination_reputation = destination.reputation.as_deref();
-    ctx.destination_reputation_source = destination.reputation_source;
-    ctx.destination_reputation_confidence = destination.reputation_confidence.map(u64::from);
-    ctx.destination_application = destination.application.as_deref();
-    ctx.destination_application_source = destination.application_source;
-    ctx.destination_application_confidence = destination.application_confidence.map(u64::from);
 }
 
 fn apply_identity<'a>(ctx: &mut RuleMatchContext<'a>, identity: &'a ResolvedIdentity) {

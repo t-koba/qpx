@@ -29,7 +29,7 @@ pub(crate) fn build_dispatch_connect_rule_context<'a>(
         headers,
         identity,
     } = input;
-    RuleMatchContext {
+    let mut ctx = RuleMatchContext {
         src_ip: Some(remote_ip),
         dst_port: Some(port),
         host: Some(host),
@@ -39,15 +39,6 @@ pub(crate) fn build_dispatch_connect_rule_context<'a>(
         authority: Some(authority),
         http_version: Some(http_version),
         alpn,
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source,
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source,
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source,
-        destination_application_confidence: destination.application_confidence.map(u64::from),
         headers: Some(headers),
         user: identity.user.as_deref(),
         user_groups: &identity.groups,
@@ -57,5 +48,7 @@ pub(crate) fn build_dispatch_connect_rule_context<'a>(
         auth_strength: identity.auth_strength.as_deref(),
         idp: identity.idp.as_deref(),
         ..Default::default()
-    }
+    };
+    destination.apply_to_rule_context(&mut ctx);
+    ctx
 }

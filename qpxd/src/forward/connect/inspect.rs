@@ -66,7 +66,7 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
         },
         base_plan.destination_resolution.as_ref(),
     );
-    let ctx = RuleMatchContext {
+    let mut ctx = RuleMatchContext {
         src_ip: Some(input.remote_addr.ip()),
         dst_port: Some(input.port),
         host: Some(input.host),
@@ -76,15 +76,6 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
         scheme: Some("https"),
         alpn: input.client_hello.alpn.as_deref(),
         tls_version: input.client_hello.tls_version.as_deref(),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source,
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source,
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source,
-        destination_application_confidence: destination.application_confidence.map(u64::from),
         ja3: input.client_hello.ja3.as_deref(),
         ja4: input.client_hello.ja4.as_deref(),
         headers: Some(input.sanitized_headers),
@@ -111,6 +102,7 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
             .and_then(|cert| cert.fingerprint_sha256.as_deref()),
         ..Default::default()
     };
+    destination.apply_to_rule_context(&mut ctx);
     match evaluate_forward_policy(
         input.runtime,
         input.listener_name,

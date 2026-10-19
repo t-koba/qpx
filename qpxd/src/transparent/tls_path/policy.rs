@@ -75,7 +75,7 @@ pub(super) fn evaluate_tls_policy_decision(
         },
         base_plan.destination_resolution.as_ref(),
     );
-    let ctx = RuleMatchContext {
+    let mut ctx = RuleMatchContext {
         src_ip: Some(remote_addr.ip()),
         dst_port: Some(connect_target.port()),
         host: host_for_match,
@@ -84,15 +84,6 @@ pub(super) fn evaluate_tls_policy_decision(
         path: None,
         alpn: client_hello.and_then(|hello| hello.alpn.as_deref()),
         tls_version: client_hello.and_then(|hello| hello.tls_version.as_deref()),
-        destination_category: destination.category.as_deref(),
-        destination_category_source: destination.category_source,
-        destination_category_confidence: destination.category_confidence.map(u64::from),
-        destination_reputation: destination.reputation.as_deref(),
-        destination_reputation_source: destination.reputation_source,
-        destination_reputation_confidence: destination.reputation_confidence.map(u64::from),
-        destination_application: destination.application.as_deref(),
-        destination_application_source: destination.application_source,
-        destination_application_confidence: destination.application_confidence.map(u64::from),
         ja3: client_hello.and_then(|hello| hello.ja3.as_deref()),
         ja4: client_hello.and_then(|hello| hello.ja4.as_deref()),
         headers: None,
@@ -116,6 +107,7 @@ pub(super) fn evaluate_tls_policy_decision(
             .and_then(|cert| cert.fingerprint_sha256.as_deref()),
         ..Default::default()
     };
+    destination.apply_to_rule_context(&mut ctx);
     let outcome = engine.evaluate_ref(&ctx);
     Ok(TransparentTlsDecision {
         action: outcome.action.clone(),
