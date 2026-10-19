@@ -618,3 +618,24 @@ fn header_trace_reports_first_value_when_no_duplicate_regex_match() {
     assert!(!*reason.1);
     assert_eq!(reason.0.as_deref(), Some("nope"));
 }
+
+#[test]
+fn impossible_request_size_never_matches() {
+    let cfg = MatchConfig {
+        request_size: vec!["<0".to_string()],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    assert!(!compiled.is_unconditional());
+    for request_size in [0, 1, u64::MAX] {
+        let ctx = RuleMatchContext {
+            request_size: Some(request_size),
+            ..Default::default()
+        };
+        assert!(
+            !compiled.matches(&ctx),
+            "request-size <0 must never match {request_size}"
+        );
+    }
+}
