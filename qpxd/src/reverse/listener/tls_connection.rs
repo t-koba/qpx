@@ -1,4 +1,6 @@
-use super::{ReverseInterimService, reverse_body_channel_capacity};
+use super::{
+    ReverseInterimService, prepare_reverse_accepted_stream, reverse_body_channel_capacity,
+};
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::serve_h2_with_interim_and_capacity_and_tuning;
 use crate::reverse::transport::ReverseConnInfo;
@@ -8,7 +10,6 @@ use crate::reverse::{
 };
 use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::tls::{extract_client_hello_info_with_fingerprints, read_client_hello_with_timeout};
-use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
 use bytes::Bytes;
 use http::{Request, Response};
@@ -141,42 +142,18 @@ pub(crate) async fn run_reverse_tls_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout = Duration::from_millis(
-                reverse
-                    .runtime
-                    .state()
-                    .plan
-                    .limits
-                    .timeouts
-                    .http_header_read_timeout_ms,
-            );
-            let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
-                stream,
-                remote_addr,
-                xdp_cfg.as_ref(),
-                header_read_timeout,
-            )
-            .await
-            {
-                Ok(resolved) => resolved,
-                Err(err) => {
-                    warn!(error = ?err, "failed to resolve xdp remote metadata");
-                    return;
-                }
-            };
-            if let Some(matched_rule) =
-                reverse_connection_filter_match(&reverse, remote_addr, local_port, None)
-            {
-                record_reverse_connection_filter_block(
+            let Some((stream, remote_addr, _header_read_timeout)) =
+                prepare_reverse_accepted_stream(
                     &reverse,
+                    stream,
                     remote_addr,
+                    xdp_cfg.as_ref(),
                     local_port,
-                    ConnectionFilterStage::Accept,
-                    matched_rule.as_str(),
-                    None,
-                );
+                )
+                .await
+            else {
                 return;
-            }
+            };
             let reverse_name_for_log = reverse_name.clone();
             let ctx = ReverseTlsContext { reverse };
             if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {
@@ -250,42 +227,18 @@ pub(crate) async fn run_reverse_tls_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout = Duration::from_millis(
-                reverse
-                    .runtime
-                    .state()
-                    .plan
-                    .limits
-                    .timeouts
-                    .http_header_read_timeout_ms,
-            );
-            let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
-                stream,
-                remote_addr,
-                xdp_cfg.as_ref(),
-                header_read_timeout,
-            )
-            .await
-            {
-                Ok(resolved) => resolved,
-                Err(err) => {
-                    warn!(error = ?err, "failed to resolve xdp remote metadata");
-                    return;
-                }
-            };
-            if let Some(matched_rule) =
-                reverse_connection_filter_match(&reverse, remote_addr, local_port, None)
-            {
-                record_reverse_connection_filter_block(
+            let Some((stream, remote_addr, _header_read_timeout)) =
+                prepare_reverse_accepted_stream(
                     &reverse,
+                    stream,
                     remote_addr,
+                    xdp_cfg.as_ref(),
                     local_port,
-                    ConnectionFilterStage::Accept,
-                    matched_rule.as_str(),
-                    None,
-                );
+                )
+                .await
+            else {
                 return;
-            }
+            };
             let reverse_name_for_log = reverse_name.clone();
             let ctx = ReverseTlsContext { reverse };
             if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {

@@ -38,6 +38,51 @@ fn reverse_body_channel_capacity(reverse: &ReloadableReverse) -> usize {
         .unwrap_or(state.plan.limits.body.body_channel_capacity)
 }
 
+async fn prepare_reverse_accepted_stream(
+    reverse: &ReloadableReverse,
+    stream: tokio::net::TcpStream,
+    remote_addr: std::net::SocketAddr,
+    xdp_cfg: Option<&crate::xdp::CompiledXdpConfig>,
+    local_port: u16,
+) -> Option<(
+    crate::http::protocol::io_prefix::PrefixedIo<tokio::net::TcpStream>,
+    std::net::SocketAddr,
+    Duration,
+)> {
+    let header_read_timeout = Duration::from_millis(
+        reverse
+            .runtime
+            .state()
+            .plan
+            .limits
+            .timeouts
+            .http_header_read_timeout_ms,
+    );
+    let (stream, remote_addr) =
+        match resolve_remote_addr_with_xdp(stream, remote_addr, xdp_cfg, header_read_timeout).await
+        {
+            Ok(resolved) => resolved,
+            Err(err) => {
+                warn!(error = ?err, "failed to resolve xdp remote metadata");
+                return None;
+            }
+        };
+    if let Some(matched_rule) =
+        reverse_connection_filter_match(reverse, remote_addr, local_port, None)
+    {
+        record_reverse_connection_filter_block(
+            reverse,
+            remote_addr,
+            local_port,
+            ConnectionFilterStage::Accept,
+            matched_rule.as_str(),
+            None,
+        );
+        return None;
+    }
+    Some((stream, remote_addr, header_read_timeout))
+}
+
 #[derive(Clone)]
 struct ReverseInterimService {
     reverse: ReloadableReverse,
@@ -162,42 +207,17 @@ pub(super) async fn run_reverse_http_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout = Duration::from_millis(
-                reverse
-                    .runtime
-                    .state()
-                    .plan
-                    .limits
-                    .timeouts
-                    .http_header_read_timeout_ms,
-            );
-            let (stream, remote_addr) = match resolve_remote_addr_with_xdp(
+            let Some((stream, remote_addr, header_read_timeout)) = prepare_reverse_accepted_stream(
+                &reverse,
                 stream,
                 remote_addr,
                 xdp_cfg.as_ref(),
-                header_read_timeout,
+                local_port,
             )
             .await
-            {
-                Ok(resolved) => resolved,
-                Err(err) => {
-                    warn!(error = ?err, "failed to resolve xdp remote metadata");
-                    return;
-                }
-            };
-            if let Some(matched_rule) =
-                reverse_connection_filter_match(&reverse, remote_addr, local_port, None)
-            {
-                record_reverse_connection_filter_block(
-                    &reverse,
-                    remote_addr,
-                    local_port,
-                    ConnectionFilterStage::Accept,
-                    matched_rule.as_str(),
-                    None,
-                );
+            else {
                 return;
-            }
+            };
             let mut stream = stream;
             let preface = match sniff_h2_preface(&mut stream, header_read_timeout).await {
                 Ok(preface) => preface,
