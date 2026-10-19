@@ -216,6 +216,15 @@ pub(crate) fn decode_quic_varint(buf: &[u8]) -> Option<(u64, usize)> {
     Some((value, len))
 }
 
+#[cfg(feature = "http3")]
+pub(crate) fn decode_connect_udp_payload(buf: &[u8]) -> Option<&[u8]> {
+    let (context_id, offset) = decode_quic_varint(buf)?;
+    if context_id != 0 || offset > buf.len() {
+        return None;
+    }
+    Some(&buf[offset..])
+}
+
 #[cfg(any(test, feature = "http3"))]
 pub(crate) fn encode_quic_varint(value: u64, out: &mut Vec<u8>) -> Result<()> {
     if value <= 63 {
@@ -416,5 +425,13 @@ mod tests {
         let (_, offset) = decode_quic_varint(value.as_ref()).expect("context");
         assert_eq!(&value[offset..], payload);
         assert!(buf.is_empty());
+    }
+    #[cfg(feature = "http3")]
+    #[test]
+    fn connect_udp_payload_requires_context_zero_and_accepts_empty_payload() {
+        assert_eq!(decode_connect_udp_payload(&[0, 1, 2]), Some(&[1, 2][..]));
+        assert_eq!(decode_connect_udp_payload(&[0]), Some(&[][..]));
+        assert_eq!(decode_connect_udp_payload(&[1, 2]), None);
+        assert_eq!(decode_connect_udp_payload(&[]), None);
     }
 }

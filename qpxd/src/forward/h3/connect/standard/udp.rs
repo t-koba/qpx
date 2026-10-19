@@ -13,7 +13,7 @@ use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::protocol::common::too_many_requests_response as too_many_requests;
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::capsule::{
-    CapsuleBuffer, decode_quic_varint, encode_datagram_capsule_context_header,
+    CapsuleBuffer, decode_connect_udp_payload, encode_datagram_capsule_context_header,
 };
 use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::h3_buf_to_bytes;
@@ -403,20 +403,16 @@ async fn relay_h3_connect_udp_stream(
                             if capsule_type != 0 {
                                 continue;
                             }
-                            let (context_id, offset) = match decode_quic_varint(payload.as_ref()) {
-                                Some(v) => v,
-                                None => continue,
-                            };
-                            if context_id != 0 || offset > payload.len() {
+                            let Some(datagram_payload) = decode_connect_udp_payload(payload.as_ref()) else {
                                 continue;
-                            }
+                            };
                             apply_connect_udp_bandwidth_controls(
                                 &rate_limit_ctx,
                                 &request_limits,
-                                payload.len().saturating_sub(offset),
+                                datagram_payload.len(),
                             )
                             .await?;
-                            udp.send(&payload[offset..]).await?;
+                            udp.send(datagram_payload).await?;
                         }
                         idle_deadline
                             .as_mut()
@@ -442,20 +438,16 @@ async fn relay_h3_connect_udp_stream(
                 let Some(payload) = payload else {
                     break;
                 };
-                let (context_id, offset) = match decode_quic_varint(payload.as_ref()) {
-                    Some(v) => v,
-                    None => continue,
-                };
-                if context_id != 0 || offset > payload.len() {
+                let Some(datagram_payload) = decode_connect_udp_payload(payload.as_ref()) else {
                     continue;
-                }
+                };
                 apply_connect_udp_bandwidth_controls(
                     &rate_limit_ctx,
                     &request_limits,
-                    payload.len().saturating_sub(offset),
+                    datagram_payload.len(),
                 )
                 .await?;
-                udp.send(&payload[offset..]).await?;
+                udp.send(datagram_payload).await?;
                 idle_deadline
                     .as_mut()
                     .reset(crate::runtime::tokio_deadline_after(idle_timeout));
