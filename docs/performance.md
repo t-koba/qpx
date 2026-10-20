@@ -423,9 +423,9 @@ the proxy and the shared backend. Stability is mandatory for qpx, the direct
 backend, the winning external proxy, and every external proxy within 25% of the
 leader. A distant unstable implementation remains visible in the artifact but
 cannot invalidate an otherwise stable competitive comparison. qpx's own p99
-gap and scheduler queue-delay sample spreads must also stay within the tracked
-stability cap: a wider spread makes those metrics unjudgeable rather than
-merely noisy, and the run fails as invalid.
+gap, scheduler queue-delay and CPU-rate sample spreads must also stay within
+the tracked stability cap: a wider spread makes those metrics unjudgeable
+rather than merely noisy, and the run fails as invalid.
 
 `scripts/check-streaming-performance.sh` enforces the tracked objectives in
 `perf/streaming-performance-objectives.json`. For a fast reader, qpx must:

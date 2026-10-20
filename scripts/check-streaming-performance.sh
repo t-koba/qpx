@@ -383,10 +383,12 @@ for key in sorted(stability_records):
             f"streaming {key} total-time sample spread {total_spread:.6f} "
             f"> objective {max_total_sample_spread_ratio:.6f}"
         )
-# The metric-matched bands above are only meaningful while qpx's own tail
+# The metric-matched bands above are only meaningful while qpx's own
 # measurements stay stable. A spread beyond the cap makes those metrics
 # unjudgeable rather than merely noisy, so the run fails as invalid instead of
-# excusing the miss.
+# excusing the miss. The CPU-rate spread belongs here with the tail metrics:
+# it is the measurement noise of the CPU-efficiency objectives, so an
+# unstable CPU-rate measurement makes those objectives unjudgeable too.
 metric_spread_cap = ratio_limit(
     stability_objectives, "max_qpx_metric_sample_spread_ratio"
 )
@@ -395,6 +397,7 @@ for key in (("fast", "qpxd"), ("slow", "qpxd")):
     for field in (
         "p99_chunk_gap_ms_ratio",
         "scheduler_queue_delay_us_per_transfer_ratio",
+        "requests_per_total_cpu_second_ratio",
     ):
         metric_spread = nested_number(record, "sample_spread", field)
         if metric_spread > metric_spread_cap + 1e-12:

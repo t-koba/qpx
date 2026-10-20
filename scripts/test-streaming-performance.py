@@ -519,6 +519,25 @@ class StreamingGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("p99_chunk_gap_ms_ratio sample spread", result.stderr)
 
+    def test_unstable_cpu_rate_measurement_is_invalid(self):
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={"sample_spread": {"requests_per_total_cpu_second_ratio": 3.5}},
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("requests_per_total_cpu_second_ratio sample spread", result.stderr)
+
+    def test_stable_cpu_rate_measurement_stays_valid(self):
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={"sample_spread": {"requests_per_total_cpu_second_ratio": 2.5}},
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_missing_queue_delay_spread_is_rejected(self):
         fast = lane(FAST_LANE)
         del fast["qpxd"]["sample_spread"]["scheduler_queue_delay_us_per_transfer_ratio"]
