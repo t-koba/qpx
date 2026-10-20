@@ -201,7 +201,13 @@ async fn buffer_request_body_spools_large_observed_body() {
     assert!(!path.exists());
 }
 
+// The observed body spills to a spool file that the secure temp file helper
+// creates with owner-only permissions, which it provides on unix only. On the
+// other platforms the collection fails before it spills, so there is no spool
+// file to observe there.
+
 /// The number of spool files this thread's collections have created so far.
+#[cfg(unix)]
 fn created_spool_count() -> usize {
     created_spool_paths().len()
 }
@@ -210,6 +216,7 @@ fn created_spool_count() -> usize {
 ///
 /// The wait observes the collection itself, so it never depends on how long
 /// the write to the spool file takes.
+#[cfg(unix)]
 async fn wait_for_created_spool_file(before: usize) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while created_spool_count() <= before {
@@ -222,11 +229,13 @@ async fn wait_for_created_spool_file(before: usize) {
 }
 
 /// A body chunk that is large enough to leave the in-memory buffer.
+#[cfg(unix)]
 fn spilling_chunk() -> Bytes {
     Bytes::from(vec![b'x'; OBSERVED_BODY_MEMORY_BYTES + 1])
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn failed_request_body_collection_after_spill_removes_the_spool_file() {
     let before = created_spool_count();
     let chunk = spilling_chunk();
@@ -250,6 +259,7 @@ async fn failed_request_body_collection_after_spill_removes_the_spool_file() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn failed_request_body_size_collection_after_spill_removes_the_spool_file() {
     let before = created_spool_count();
     let chunk = spilling_chunk();
@@ -273,6 +283,7 @@ async fn failed_request_body_size_collection_after_spill_removes_the_spool_file(
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn cancelled_request_body_collection_after_spill_removes_the_spool_file() {
     let before = created_spool_count();
     let (mut sender, body) = Body::channel();
@@ -303,6 +314,7 @@ async fn cancelled_request_body_collection_after_spill_removes_the_spool_file() 
 }
 
 #[tokio::test]
+#[cfg(unix)]
 async fn cancelled_request_body_size_collection_after_spill_removes_the_spool_file() {
     let before = created_spool_count();
     let (mut sender, body) = Body::channel();
