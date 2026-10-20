@@ -471,14 +471,16 @@ For a slow reader, total time, first byte, p99 gap, and maximum gap are bounded
 relative to the direct backend. This independently detects lost backpressure or
 event-loop starvation even when bulk throughput remains high.
 
-Every objective is judged against the measurement noise of the metric it
-measures. Time and CPU-rate objectives use the lane's observed total-time and
-CPU-rate sample spread; the tail objectives (p99 chunk gap and scheduler queue
-delay) use the spread of their own metric, because a tail statistic moves
-further between samples than a total does. A miss inside that band is reported
-as a marginal objective and stays visible for trend review; a miss beyond it is
-a decisive failure. Reference spreads never widen the band, because competitor
-instability must not excuse a qpx miss.
+Every objective is judged against a measurement band. The tail objectives (p99
+chunk gap and scheduler queue delay) use the spread of their own metric, because
+a tail statistic moves further between samples than a total does. The
+remaining objectives - the time, CPU-rate, first-byte, max-gap, dominance and
+resource-peak ones - use the lane's observed total-time and CPU-rate sample
+spread, because the benchmark publishes no per-sample spread for the metrics
+they measure. A miss inside that band is reported as a marginal objective and
+stays visible for trend review; a miss beyond it is a decisive failure.
+Reference spreads never widen the band, because competitor instability must not
+excuse a qpx miss.
 
 Every band is bounded by a named policy multiplier, so an objective's
 effective limit is its documented cap times at most that multiplier: the
