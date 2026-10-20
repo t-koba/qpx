@@ -4,12 +4,13 @@ mod output;
 mod tests;
 
 use self::output::validate_secure_cgi_script;
-use self::output::{prepare_cgi_script_for_spawn, validate_secure_cgi_root};
+use self::output::{PreparedCgiScript, prepare_cgi_script_for_spawn, validate_secure_cgi_root};
 use super::{CgiRequest, CgiResponse, Execution, Executor};
 use crate::config::CgiBackendConfig;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::Command;
@@ -18,6 +19,12 @@ use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(crate) use env::cgi_env_passthrough_is_reserved;
+
+/// Maximum number of spawn attempts while the CGI script is momentarily open
+/// for writing (ETXTBSY).
+const ETXTBSY_MAX_ATTEMPTS: usize = 10;
+/// Delay between two ETXTBSY spawn attempts.
+const ETXTBSY_RETRY_DELAY: Duration = Duration::from_millis(10);
 
 pub struct CgiExecutor {
     root: PathBuf,
@@ -213,6 +220,67 @@ fn dedupe_script_candidates(candidates: Vec<ScriptSearchCandidate>) -> Vec<Scrip
     out
 }
 
+/// Spawns the CGI child from the already validated script descriptor.
+///
+/// Every attempt uses the same descriptor, so the script is neither resolved
+/// nor validated again, and no policy is re-applied.
+fn spawn_prepared_cgi_child(
+    prepared_script: &PreparedCgiScript,
+    env: &HashMap<String, String>,
+) -> std::io::Result<tokio::process::Child> {
+    let mut command = Command::new(prepared_script.command_path());
+    command.args(prepared_script.command_args());
+    command
+        .env_clear()
+        .envs(env)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    command.spawn()
+}
+
+/// Spawn the CGI child, retrying only while the script is momentarily open for
+/// writing.
+///
+/// Linux reports `ETXTBSY` as a hard error while BSD sleeps and retries, so a
+/// request that lands in an operator's script-replacement window would
+/// otherwise fail outright. Every attempt reuses the already validated script
+/// descriptor; only the spawn call is repeated, and every other spawn error
+/// still fails on the first attempt. The retry sequence stays inside the
+/// configured CGI timeout, so the request deadline semantics are unchanged.
+async fn spawn_cgi_child<F>(
+    mut attempt: F,
+    max_attempts: usize,
+    retry_delay: Duration,
+    budget: Duration,
+) -> std::io::Result<tokio::process::Child>
+where
+    F: FnMut() -> std::io::Result<tokio::process::Child>,
+{
+    let started = std::time::Instant::now();
+    let mut attempts = 0usize;
+    loop {
+        attempts += 1;
+        let err = match attempt() {
+            Ok(child) => return Ok(child),
+            Err(err) => err,
+        };
+        if err.raw_os_error() != Some(libc::ETXTBSY) || attempts >= max_attempts {
+            return Err(err);
+        }
+        // Keep the whole retry sequence inside the configured CGI timeout.
+        if started.elapsed().saturating_add(retry_delay) > budget {
+            return Err(err);
+        }
+        // One warning per spawn sequence: the condition is transient and the
+        // attempt count is already bounded.
+        if attempts == 1 {
+            warn!("CGI script is open for writing (ETXTBSY), retrying spawn");
+        }
+        tokio::time::sleep(retry_delay).await;
+    }
+}
+
 #[async_trait]
 impl Executor for CgiExecutor {
     async fn start(&self, req: CgiRequest) -> Result<Execution> {
@@ -258,16 +326,16 @@ impl Executor for CgiExecutor {
         let env = self.build_env(&req);
         let prepared_script = prepare_cgi_script_for_spawn(&self.canonical_root, &script_path)?;
 
-        let mut command = Command::new(prepared_script.command_path());
-        command.args(prepared_script.command_args());
-        let mut child = command
-            .env_clear()
-            .envs(&env)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .map_err(|e| anyhow!("failed to spawn CGI script: {}", e))?;
+        // The script is resolved and validated once; only the spawn call is
+        // repeated while the script is momentarily open for writing.
+        let mut child = spawn_cgi_child(
+            || spawn_prepared_cgi_child(&prepared_script, &env),
+            ETXTBSY_MAX_ATTEMPTS,
+            ETXTBSY_RETRY_DELAY,
+            self.timeout,
+        )
+        .await
+        .map_err(|e| anyhow!("failed to spawn CGI script: {}", e))?;
 
         let stdin = child
             .stdin

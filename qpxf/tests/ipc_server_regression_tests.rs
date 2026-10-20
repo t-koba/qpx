@@ -23,11 +23,31 @@ mod regression {
         dir
     }
 
+    // Writes the script from a helper process. A script left open for
+    // writing in this process can be inherited by a child forked during the
+    // write, and the exec of that script then fails with ETXTBSY.
     fn write_script(dir: &std::path::Path, name: &str, body: &str) -> std::path::PathBuf {
         let path = dir.join(name);
-        let mut file = std::fs::File::create(&path).unwrap();
-        file.write_all(body.as_bytes()).unwrap();
-        drop(file);
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("cat > \"$1\"")
+            .arg("qpxf-cgi-script-writer")
+            .arg(&path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "the script writer must succeed"
+        );
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
         path
     }

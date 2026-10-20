@@ -10,15 +10,38 @@ mod cgi_tests {
 
     use qpx_core::shm_ring::ShmRingBuffer;
 
+    // Writes the script from a helper process. A script left open for
+    // writing in this process can be inherited by a child forked during the
+    // write, and the exec of that script then fails with ETXTBSY.
+    fn write_script(path: &std::path::Path, body: &str) {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("cat > \"$1\"")
+            .arg("qpxf-cgi-script-writer")
+            .arg(path)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(body.as_bytes())
+            .unwrap();
+        assert!(
+            child.wait().unwrap().success(),
+            "the script writer must succeed"
+        );
+    }
+
     fn create_cgi_script(dir: &std::path::Path) -> std::path::PathBuf {
         let script_path = dir.join("hello.sh");
-        let mut f = std::fs::File::create(&script_path).unwrap();
-        writeln!(f, "#!/bin/sh").unwrap();
-        writeln!(f, "echo 'Content-Type: text/plain'").unwrap();
-        writeln!(f, "echo 'Status: 200 OK'").unwrap();
-        writeln!(f, "echo ''").unwrap();
-        writeln!(f, "echo \"Hello from CGI! METHOD=$REQUEST_METHOD\"").unwrap();
-        drop(f);
+        write_script(
+            &script_path,
+            "#!/bin/sh\necho 'Content-Type: text/plain'\necho 'Status: 200 OK'\necho ''\necho \"Hello from CGI! METHOD=$REQUEST_METHOD\"\n",
+        );
         std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).unwrap();
         script_path
     }
