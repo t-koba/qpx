@@ -394,7 +394,8 @@ for key in sorted(stability_records):
     if total_spread > max_total_sample_spread_ratio + 1e-12:
         failures.append(
             f"streaming {key} total-time sample spread {total_spread:.6f} "
-            f"> objective {max_total_sample_spread_ratio:.6f}"
+            f"> stability cap {max_total_sample_spread_ratio:.6f}: the measurement "
+            f"is unjudgeable"
         )
 # The metric-matched bands above are only meaningful while qpx's own
 # measurements stay stable. A spread beyond the cap makes those metrics
@@ -416,7 +417,8 @@ for key in (("fast", "qpxd"), ("slow", "qpxd")):
         if metric_spread > metric_spread_cap + 1e-12:
             failures.append(
                 f"streaming {key} {field} sample spread {metric_spread:.6f} "
-                f"> objective {metric_spread_cap:.6f}"
+                f"> stability cap {metric_spread_cap:.6f}: the measurement "
+                f"is unjudgeable"
             )
 for name, current, objective, direction in fast_checks:
     # The time and CPU-rate objectives use the bounded lane band; the tail
