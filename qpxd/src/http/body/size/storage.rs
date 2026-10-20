@@ -5,6 +5,7 @@ use anyhow::Context;
 use anyhow::Result;
 use bytes::{Bytes, BytesMut};
 use http::HeaderMap;
+use qpx_http::body::spool::SpoolFile;
 #[cfg(test)]
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -32,47 +33,17 @@ pub(super) enum ObservedBodyStorage {
     File(Arc<ObservedBodyFile>),
 }
 
-/// Owns the spool path and unlinks the file when dropped.
+/// The observed body of a spooled payload.
 ///
-/// The guard is created together with the spool file, before any write, so
-/// every failure path - limit exceeded, read or trailer timeout, write or
-/// flush error, cancellation - removes the file. A completed collection
-/// transfers the guard into [`ObservedBodyFile`], which therefore unlinks the
-/// file at the end of its own lifetime with no disarm step.
-#[derive(Debug)]
-pub(super) struct ObservedBodySpool {
-    path: PathBuf,
-}
-
-impl ObservedBodySpool {
-    pub(super) fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    pub(super) fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for ObservedBodySpool {
-    fn drop(&mut self) {
-        match std::fs::remove_file(&self.path) {
-            Ok(()) => {}
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => {
-                qpx_http::body::metrics::spool_cleanup_error();
-            }
-        }
-    }
-}
-
+/// It keeps the spool guard, so the spool file is removed when the last
+/// reference to the observed body is released.
 #[derive(Debug)]
 pub(super) struct ObservedBodyFile {
-    spool: ObservedBodySpool,
+    spool: SpoolFile<TokioFile>,
 }
 
 impl ObservedBodyFile {
-    pub(super) fn new(spool: ObservedBodySpool) -> Self {
+    pub(super) fn new(spool: SpoolFile<TokioFile>) -> Self {
         Self { spool }
     }
 

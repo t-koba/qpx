@@ -297,35 +297,42 @@ fast_checks = (
 failures = []
 marginals = []
 
-# Lane measurement noise comes from qpx's own observed sample spread
-# (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh,
-# check-http2-performance.sh). Every objective is judged against the spread of
-# the metric it measures: time and CPU-rate objectives use the lane's
-# total-time and CPU-rate spread, and the tail objectives use the spread of
-# their own metric, which is wider than the lane spread because a tail
-# statistic moves more between samples. A miss inside the band is noise, a
-# miss beyond it is decisive. Reference spreads never widen the band:
-# competitor instability must not excuse a qpx miss; spread-cap breaches still
-# fail as invalid below.
+# Measurement noise comes from qpx's own observed sample spread. Every
+# objective is judged against the spread of the metric it measures: time and
+# CPU-rate objectives use the lane's total-time and CPU-rate spread, and the
+# tail objectives use the spread of their own metric, which is wider than the
+# lane spread because a tail statistic moves more between samples. A miss
+# inside the band is noise, a miss beyond it is decisive. Reference spreads
+# never widen the band: competitor instability must not excuse a qpx miss;
+# spread-cap breaches still fail as invalid below.
 #
-# The tail band is capped by stability.max_tail_noise_multiplier, so the
-# effective limit of a tail objective is its documented cap times at most that
-# multiplier. The bound is what keeps the gate's teeth: the band comes from
-# the subject's own measurement, so without it a subject whose regression also
-# inflates its measurement noise would widen the band far enough to excuse the
-# miss it caused, and the effective limit would be data-dependent instead of
-# the documented cap. The time and CPU-rate objectives keep the lane band,
-# which the existing total-spread cap already bounds.
+# Every band is capped by a named policy multiplier, so the effective limit of
+# an objective is its documented cap times at most that multiplier. The bound
+# is what keeps the gate's teeth: the band comes from the subject's own
+# measurement, so without it a subject whose regression also inflates its
+# measurement noise would widen the band far enough to excuse the miss it
+# caused, and the effective limit would be data-dependent instead of the
+# documented cap. The two multipliers differ because the metric families
+# differ in how much they move between samples: the tail objectives are
+# measured against their own spread and need the wider allowance.
 stability_objectives = objectives.get("stability", {})
+lane_noise_multiplier = ratio_limit(
+    stability_objectives, "max_lane_noise_multiplier"
+)
 tail_noise_multiplier = ratio_limit(
     stability_objectives, "max_tail_noise_multiplier"
 )
 
 
+def lane_band(lane_noise):
+    """The measurement band of a time or CPU-rate objective."""
+    return max(min(lane_noise, lane_noise_multiplier), 1.05)
+
+
 def tail_band(lane_effective, own_spread):
     """The measurement band of a tail objective.
 
-    The band is the wider of the lane noise and the metric's own measured
+    The band is the wider of the lane band and the metric's own measured
     spread, capped by the policy multiplier.
     """
     return max(min(max(lane_effective, own_spread), tail_noise_multiplier), 1.05)
@@ -334,7 +341,7 @@ def tail_band(lane_effective, own_spread):
 fast_lane_noise = 1.0
 for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
     fast_lane_noise = max(fast_lane_noise, nested_number(qpx_fast, "sample_spread", field))
-fast_effective = max(fast_lane_noise, 1.05)
+fast_effective = lane_band(fast_lane_noise)
 fast_objective_noise = {
     "p99 gap ratio": tail_band(
         fast_effective,
@@ -396,7 +403,9 @@ for key in (("fast", "qpxd"), ("slow", "qpxd")):
                 f"> objective {metric_spread_cap:.6f}"
             )
 for name, current, objective, direction in fast_checks:
-    noise = fast_objective_noise.get(name, fast_lane_noise)
+    # The time and CPU-rate objectives use the bounded lane band; the tail
+    # objectives use the band of their own metric.
+    noise = fast_objective_noise.get(name, fast_effective)
     effective = max(noise, 1.05)
     if direction == "min" and current + 1e-12 < objective:
         decisive_bar = objective / effective
@@ -449,7 +458,7 @@ slow_objectives = objectives.get("slow", {})
 slow_lane_noise = 1.0
 for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
     slow_lane_noise = max(slow_lane_noise, nested_number(qpx_slow, "sample_spread", field))
-slow_effective = max(slow_lane_noise, 1.05)
+slow_effective = lane_band(slow_lane_noise)
 slow_objective_noise = {
     "max_p99_gap_ratio": tail_band(
         slow_effective,
@@ -464,7 +473,9 @@ slow_objective_noise = {
 }
 for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)
-    noise = slow_objective_noise.get(field, slow_lane_noise)
+    # The time and CPU-rate objectives use the bounded lane band; the tail
+    # objectives use the band of their own metric.
+    noise = slow_objective_noise.get(field, slow_effective)
     effective = max(noise, 1.05)
     if current > objective + 1e-12:
         decisive_bar = objective * effective

@@ -4,6 +4,7 @@ use bytes::Bytes;
 use http::HeaderMap;
 use http_body::{Body as _, Frame};
 use hyper::{Request, Response};
+use qpx_http::body::spool::SpoolFile;
 use qpx_http::body::{Body, BodyError};
 use std::fmt;
 use std::pin::Pin;
@@ -19,7 +20,7 @@ mod storage;
 use self::io::{parse_content_length, read_body_data, read_body_trailers};
 pub(crate) use self::storage::ObservedBodyReader;
 use self::storage::{
-    ObservedBodyBytes, ObservedBodyFile, ObservedBodySize, ObservedBodySpool, ObservedBodyStorage,
+    ObservedBodyBytes, ObservedBodyFile, ObservedBodySize, ObservedBodyStorage,
     ObservedBodyTrailers, feed_rpc_summary_observer, finish_rpc_summary_observer,
     should_precompute_rpc_summary,
 };
@@ -468,7 +469,7 @@ async fn collect_observed_body(
     Option<PrecomputedRpcBodySummary>,
 )> {
     let mut chunks = Vec::new();
-    let mut file: Option<(TokioFile, ObservedBodySpool)> = None;
+    let mut file: Option<SpoolFile<TokioFile>> = None;
     let mut size = 0usize;
     while let Some(chunk) = read_body_data(&mut body, read_timeout).await? {
         let chunk = chunk?;
@@ -488,23 +489,25 @@ async fn collect_observed_body(
             continue;
         }
         if file.is_none() {
-            let (mut spool, guard) = create_observed_body_spool(direction, reason)?;
+            let mut spool = create_observed_body_spool(direction, reason)?;
             for existing in chunks.drain(..) {
-                write_observed_body_spool(&mut spool, existing.as_ref(), direction, reason).await?;
+                write_observed_body_spool(spool.handle_mut(), existing.as_ref(), direction, reason)
+                    .await?;
             }
-            file = Some((spool, guard));
+            file = Some(spool);
         }
-        if let Some((spool, _)) = file.as_mut() {
-            write_observed_body_spool(spool, chunk.as_ref(), direction, reason).await?;
+        if let Some(spool) = file.as_mut() {
+            write_observed_body_spool(spool.handle_mut(), chunk.as_ref(), direction, reason)
+                .await?;
         }
     }
     let trailers = read_body_trailers(&mut body, read_timeout).await?;
     let mut spooled = 0usize;
-    let storage = if let Some((mut spool, guard)) = file {
-        flush_observed_body_spool(&mut spool, direction, reason).await?;
-        drop(spool);
+    let storage = if let Some(mut spool) = file {
+        flush_observed_body_spool(spool.handle_mut(), direction, reason).await?;
+        spool.close();
         spooled = size;
-        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(guard)))
+        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(spool)))
     } else {
         ObservedBodyStorage::Memory(Arc::from(chunks))
     };
@@ -528,7 +531,7 @@ async fn collect_observed_body_for_size(
     reason: &'static str,
 ) -> Result<(ObservedBodyBytes, Option<HeaderMap>)> {
     let mut chunks = Vec::new();
-    let mut file: Option<(TokioFile, ObservedBodySpool)> = None;
+    let mut file: Option<SpoolFile<TokioFile>> = None;
     let mut size = 0usize;
     while let Some(chunk) = read_body_data(&mut body, read_timeout).await? {
         let chunk = chunk?;
@@ -547,23 +550,25 @@ async fn collect_observed_body_for_size(
             continue;
         }
         if file.is_none() {
-            let (mut spool, guard) = create_observed_body_spool(direction, reason)?;
+            let mut spool = create_observed_body_spool(direction, reason)?;
             for existing in chunks.drain(..) {
-                write_observed_body_spool(&mut spool, existing.as_ref(), direction, reason).await?;
+                write_observed_body_spool(spool.handle_mut(), existing.as_ref(), direction, reason)
+                    .await?;
             }
-            file = Some((spool, guard));
+            file = Some(spool);
         }
-        if let Some((spool, _)) = file.as_mut() {
-            write_observed_body_spool(spool, chunk.as_ref(), direction, reason).await?;
+        if let Some(spool) = file.as_mut() {
+            write_observed_body_spool(spool.handle_mut(), chunk.as_ref(), direction, reason)
+                .await?;
         }
     }
     let trailers = read_body_trailers(&mut body, read_timeout).await?;
     let mut spooled = 0usize;
-    let storage = if let Some((mut spool, guard)) = file {
-        flush_observed_body_spool(&mut spool, direction, reason).await?;
-        drop(spool);
+    let storage = if let Some(mut spool) = file {
+        flush_observed_body_spool(spool.handle_mut(), direction, reason).await?;
+        spool.close();
         spooled = size;
-        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(guard)))
+        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(spool)))
     } else {
         ObservedBodyStorage::Memory(Arc::from(chunks))
     };
@@ -635,7 +640,7 @@ async fn flush_observed_body_spool(
 fn create_observed_body_spool(
     direction: &'static str,
     reason: &'static str,
-) -> Result<(TokioFile, ObservedBodySpool)> {
+) -> Result<SpoolFile<TokioFile>> {
     let (file, path) = qpx_core::secure_file::create_secure_temp_file("qpx-observed-body", ".body")
         .map_err(|source| {
             record_body_spool_error(direction, reason, "create");
@@ -647,7 +652,11 @@ fn create_observed_body_spool(
         })?;
     #[cfg(test)]
     spool_registry::record(&path);
-    Ok((TokioFile::from_std(file), ObservedBodySpool::new(path)))
+    Ok(SpoolFile::new(
+        TokioFile::from_std(file),
+        path,
+        "observed_body",
+    ))
 }
 
 /// Records the spool files a collection creates, so that a test can observe

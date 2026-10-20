@@ -33,11 +33,11 @@ pub fn spool_error(direction: &'static str, reason: &'static str, error: &'stati
     .increment(1);
 }
 
-pub fn spool_cleanup_error() {
+pub fn spool_cleanup_error(reason: &'static str) {
     counter!(
         "qpx_body_spool_cleanup_errors_total",
         "direction" => "unknown",
-        "reason" => "observed_body",
+        "reason" => reason,
         "error" => "remove"
     )
     .increment(1);

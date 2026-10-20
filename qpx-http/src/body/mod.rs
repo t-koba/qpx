@@ -1,4 +1,5 @@
 pub mod metrics;
+pub mod spool;
 pub mod tee;
 
 use bytes::Bytes;

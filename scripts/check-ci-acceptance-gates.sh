@@ -723,6 +723,8 @@ require_json_number_at_most perf/streaming-performance-objectives.json slow.max_
 require_json_number_at_most perf/streaming-performance-objectives.json stability.max_qpx_metric_sample_spread_ratio 3.0
 require_json_number_at_most perf/streaming-performance-objectives.json stability.max_tail_noise_multiplier 1.5
 require scripts/check-streaming-performance.sh 'max_tail_noise_multiplier'
+require_json_number_at_most perf/streaming-performance-objectives.json stability.max_lane_noise_multiplier 1.25
+require scripts/check-streaming-performance.sh 'max_lane_noise_multiplier'
 require scripts/perf-audit-allocation-profile.sh '"qpxd_allocation_profile_http1_reverse"'
 require scripts/perf-audit-allocation-profile.sh '--tool=dhat'
 require scripts/perf-audit-allocation-profile.sh 'while [ "$tries" -lt 600 ]'

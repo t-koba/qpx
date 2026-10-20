@@ -1,5 +1,5 @@
 use super::*;
-use crate::types::CacheBodySpool;
+use qpx_http::body::spool::SpoolFile;
 
 #[tokio::test]
 async fn cache_backend_default_put_object_rejects_file_backed_body() {
@@ -16,7 +16,13 @@ async fn cache_backend_default_put_object_rejects_file_backed_body() {
     file.flush().expect("flush body");
     drop(file);
 
-    let body = CachedBody::from_spooled_file(CacheBodySpool::new(path.clone()), 7);
+    let handle = tokio::fs::File::from_std(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open the test file"),
+    );
+    let body = CachedBody::from_spooled_file(SpoolFile::new(handle, path.clone(), "cache_body"), 7);
     let backend = DefaultPutObjectBackend;
     let err = CacheBackend::put_object(&backend, "ns", "key", &body, 60)
         .await

@@ -3,7 +3,7 @@ use bytes::{Bytes, BytesMut};
 use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{Request, Uri};
 use qpx_http::body::Body;
-use std::path::{Path, PathBuf};
+use qpx_http::body::spool::SpoolFile;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File as TokioFile;
@@ -30,34 +30,7 @@ enum ReverseRequestTemplateBody {
 }
 
 struct SpooledTemplateFile {
-    guard: SpoolGuard,
-}
-
-/// Owns a spool path and unlinks it on drop.
-///
-/// The recorder holds this guard from spool creation, so every failure path —
-/// initial writes, later chunks, flush, relay errors, timeouts, cancellation —
-/// drops the file. Successful completion moves the guard into
-/// [`SpooledTemplateFile`], which therefore unlinks the file at the end of
-/// its own lifetime with no disarm step.
-struct SpoolGuard {
-    path: PathBuf,
-}
-
-impl SpoolGuard {
-    fn new(path: PathBuf) -> Self {
-        Self { path }
-    }
-
-    fn path(&self) -> &Path {
-        &self.path
-    }
-}
-
-impl Drop for SpoolGuard {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
-    }
+    guard: SpoolFile<TokioFile>,
 }
 
 #[derive(Clone)]
@@ -186,7 +159,7 @@ impl ReverseRequestTemplateBody {
 
 struct TemplateBodyRecorder {
     chunks: Vec<Bytes>,
-    file: Option<(TokioFile, SpoolGuard)>,
+    file: Option<SpoolFile<TokioFile>>,
     seen: usize,
     max_body_bytes: usize,
 }
@@ -218,27 +191,26 @@ impl TemplateBodyRecorder {
             return Ok(());
         }
         if self.file.is_none() {
-            let (mut spool, path) = create_template_spool().await?;
-            let guard = SpoolGuard::new(path);
-            // A write failure below drops the still-local guard, which
-            // unlinks the file.
+            // The guard exists from the moment the spool file is created, so a
+            // write failure below drops it and unlinks the file.
+            let mut spool = create_template_spool().await?;
             for existing in self.chunks.drain(..) {
-                spool.write_all(existing.as_ref()).await?;
+                spool.handle_mut().write_all(existing.as_ref()).await?;
             }
-            self.file = Some((spool, guard));
+            self.file = Some(spool);
         }
-        if let Some((spool, _)) = self.file.as_mut() {
-            spool.write_all(chunk.as_ref()).await?;
+        if let Some(spool) = self.file.as_mut() {
+            spool.handle_mut().write_all(chunk.as_ref()).await?;
         }
         Ok(())
     }
 
     async fn finish(self) -> Result<ReverseRequestTemplateBody> {
-        if let Some((mut spool, guard)) = self.file {
-            spool.flush().await?;
-            drop(spool);
+        if let Some(mut spool) = self.file {
+            spool.handle_mut().flush().await?;
+            spool.close();
             return Ok(ReverseRequestTemplateBody::File {
-                file: Arc::new(SpooledTemplateFile { guard }),
+                file: Arc::new(SpooledTemplateFile { guard: spool }),
             });
         }
         Ok(ReverseRequestTemplateBody::Memory {
@@ -396,7 +368,7 @@ async fn collect_body_template(
     body_read_timeout: Duration,
 ) -> Result<ReverseRequestTemplateBody> {
     let mut chunks = Vec::new();
-    let mut file: Option<(TokioFile, SpoolGuard)> = None;
+    let mut file: Option<SpoolFile<TokioFile>> = None;
     let mut seen = 0usize;
     while let Some(frame) = timeout(body_read_timeout, body.data())
         .await
@@ -418,22 +390,21 @@ async fn collect_body_template(
             continue;
         }
         if file.is_none() {
-            let (mut spool, path) = create_template_spool().await?;
-            let guard = SpoolGuard::new(path);
+            let mut spool = create_template_spool().await?;
             for existing in chunks.drain(..) {
-                spool.write_all(existing.as_ref()).await?;
+                spool.handle_mut().write_all(existing.as_ref()).await?;
             }
-            file = Some((spool, guard));
+            file = Some(spool);
         }
-        if let Some((spool, _)) = file.as_mut() {
-            spool.write_all(chunk.as_ref()).await?;
+        if let Some(spool) = file.as_mut() {
+            spool.handle_mut().write_all(chunk.as_ref()).await?;
         }
     }
-    if let Some((mut spool, guard)) = file {
-        spool.flush().await?;
-        drop(spool);
+    if let Some(mut spool) = file {
+        spool.handle_mut().flush().await?;
+        spool.close();
         return Ok(ReverseRequestTemplateBody::File {
-            file: Arc::new(SpooledTemplateFile { guard }),
+            file: Arc::new(SpooledTemplateFile { guard: spool }),
         });
     }
     Ok(ReverseRequestTemplateBody::Memory {
@@ -441,10 +412,14 @@ async fn collect_body_template(
     })
 }
 
-async fn create_template_spool() -> Result<(TokioFile, PathBuf)> {
+async fn create_template_spool() -> Result<SpoolFile<TokioFile>> {
     let (file, path) =
         qpx_core::secure_file::create_secure_temp_file("qpx-retry-template", ".body")?;
-    Ok((TokioFile::from_std(file), path))
+    Ok(SpoolFile::new(
+        TokioFile::from_std(file),
+        path,
+        "retry_template",
+    ))
 }
 
 #[cfg(test)]
@@ -614,38 +589,42 @@ mod spool_guard_tests {
 
     /// A plain temp file for guard tests. Secure spool creation is
     /// owner-permission based and unavailable on some platforms; the guard
-    /// itself only needs a path.
-    fn plain_guarded_file(tag: &str) -> PathBuf {
+    /// itself only needs a path and a handle.
+    fn plain_guarded_file(tag: &str) -> (std::path::PathBuf, SpoolFile<TokioFile>) {
         let id = GUARD_TEST_COUNTER.fetch_add(1, Ordering::Relaxed);
         let path = std::env::temp_dir().join(format!(
             "qpx-spool-guard-test-{}-{tag}-{id}",
             std::process::id()
         ));
         std::fs::write(&path, b"guarded").expect("test file");
-        path
+        let handle = TokioFile::from_std(
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&path)
+                .expect("open the test file"),
+        );
+        (path.clone(), SpoolFile::new(handle, path, "retry_template"))
     }
 
     #[test]
     fn spool_guard_unlinks_on_drop() {
-        let path = plain_guarded_file("drop");
+        let (path, guard) = plain_guarded_file("drop");
         assert!(path.exists());
-        drop(SpoolGuard::new(path.clone()));
+        drop(guard);
         assert!(!path.exists());
     }
 
     #[test]
     fn completed_template_keeps_unlink_on_drop() {
-        let path = plain_guarded_file("transfer");
-        let template = SpooledTemplateFile {
-            guard: SpoolGuard::new(path.clone()),
-        };
+        let (path, guard) = plain_guarded_file("transfer");
+        let template = SpooledTemplateFile { guard };
         assert!(path.exists());
         drop(template);
         assert!(!path.exists());
     }
 
     #[cfg(unix)]
-    fn retry_template_spool_files() -> std::collections::BTreeSet<PathBuf> {
+    fn retry_template_spool_files() -> std::collections::BTreeSet<std::path::PathBuf> {
         std::fs::read_dir(std::env::temp_dir())
             .expect("temp dir is readable")
             .filter_map(Result::ok)

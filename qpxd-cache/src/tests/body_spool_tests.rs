@@ -1,7 +1,8 @@
-use super::super::types::{CacheBodySpool, created_spool_paths};
+use super::super::types::created_spool_paths;
 use crate::CachedBody;
 use bytes::Bytes;
 use qpx_http::body::Body;
+use qpx_http::body::spool::SpoolFile;
 use std::time::Duration;
 
 /// A body chunk that is large enough to leave the in-memory buffer.
@@ -126,7 +127,13 @@ async fn the_cache_body_spool_guard_unlinks_its_file_when_dropped() {
         std::thread::current().id()
     ));
     std::fs::write(&path, b"guarded").expect("write the guarded file");
+    let handle = tokio::fs::File::from_std(
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .expect("open the guarded file"),
+    );
     assert!(path.exists());
-    drop(CacheBodySpool::new(path.clone()));
+    drop(SpoolFile::new(handle, path.clone(), "cache_body"));
     assert!(!path.exists(), "spool file left behind: {path:?}");
 }

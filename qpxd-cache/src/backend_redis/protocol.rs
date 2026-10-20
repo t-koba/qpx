@@ -1,7 +1,7 @@
 use super::{CachedBody, REDIS_CACHE_MAX_IDLE_CONNECTIONS, RedisConnection};
-use crate::types::CacheBodySpool;
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
+use qpx_http::body::spool::SpoolFile;
 use std::collections::VecDeque;
 use std::io::IoSlice;
 use std::sync::Arc;
@@ -210,14 +210,13 @@ pub async fn read_bulk_cached_body(
     }
 
     let (file, path) = qpx_core::secure_file::create_secure_temp_file("qpx-cache-redis", ".body")?;
-    let guard = CacheBodySpool::new(path);
-    let mut file = tokio::fs::File::from_std(file);
+    let mut spool = SpoolFile::new(tokio::fs::File::from_std(file), path, "cache_redis");
     let mut remaining = len;
     let mut buf = vec![0u8; 64 * 1024];
     while remaining > 0 {
         let want = remaining.min(buf.len());
         read_exact_buffered(conn, timeout_dur, &mut buf[..want]).await?;
-        file.write_all(&buf[..want]).await?;
+        spool.handle_mut().write_all(&buf[..want]).await?;
         remaining -= want;
     }
     let mut terminator = [0u8; 2];
@@ -225,9 +224,9 @@ pub async fn read_bulk_cached_body(
     if terminator != *b"\r\n" {
         return Err(anyhow!("invalid redis bulk terminator"));
     }
-    file.flush().await?;
-    drop(file);
-    Ok(Some(CachedBody::from_spooled_file(guard, len as u64)))
+    spool.handle_mut().flush().await?;
+    spool.close();
+    Ok(Some(CachedBody::from_spooled_file(spool, len as u64)))
 }
 
 pub async fn stream_redis_bulk_to_body(

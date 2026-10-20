@@ -417,6 +417,29 @@ class StreamingGateTest(unittest.TestCase):
         # The band is the policy multiplier, not the measured spread.
         self.assertNotIn("within measurement noise", result.stdout)
 
+    def test_time_objective_band_is_bounded_by_the_policy_multiplier(self):
+        """A wide lane spread must not widen the time band past the policy limit.
+
+        The band comes from the subject's own measurement, so without a bound
+        a subject whose regression also inflates its measurement noise would
+        excuse the miss it caused.
+        """
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={
+                    # Slower than the leader, and slower than the direct backend.
+                    "total_ms": 700.0,
+                    "sample_spread": {"total_ms_ratio": 2.4},
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fast streaming throughput ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+        # The throughput miss is no longer excused by the subject's own noise.
+        self.assertNotIn("fast streaming throughput ratio marginal", result.stdout)
+
     def test_tail_band_still_follows_a_measured_spread_below_the_policy_limit(self):
         """Below the policy bound, the measured spread still sets the band."""
         result = self.run_gate(
