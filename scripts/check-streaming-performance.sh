@@ -119,7 +119,7 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 5:
+        if nonnegative_int(record, "benchmark_schema_version") != 6:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"streaming performance record for {key} uses an unsupported resource measurement")
@@ -222,6 +222,7 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "requests_per_cpu_second_ratio",
             "requests_per_total_cpu_second_ratio",
             "p99_chunk_gap_ms_ratio",
+            "scheduler_queue_delay_us_per_transfer_ratio",
         ):
             if nested_number(record, "sample_spread", field) < 1.0:
                 fail(f"streaming performance record for {key} has an invalid {field}")

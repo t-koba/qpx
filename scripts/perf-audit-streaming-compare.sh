@@ -795,6 +795,11 @@ def spread(records, field):
     ordered = [value for value in values(records, field) if value > 0]
     return None if not ordered else ordered[-1] / ordered[0]
 
+def spread_or_one(records, field):
+    """Observed spread, or 1.0 when the metric was never positive."""
+    value = spread(records, field)
+    return 1.0 if value is None else value
+
 aggregated = []
 for key in sorted(expected):
     records = groups.get(key, [])
@@ -890,7 +895,7 @@ for key in sorted(expected):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 5,
+        "benchmark_schema_version": 6,
         "resource_measurement": "sampled_workload_peak_v1",
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",
@@ -901,6 +906,9 @@ for key in sorted(expected):
                 records, "requests_per_total_cpu_second"
             ),
             "p99_chunk_gap_ms_ratio": spread(records, "p99_chunk_gap_ms"),
+            "scheduler_queue_delay_us_per_transfer_ratio": spread_or_one(
+                records, "scheduler_queue_delay_us_per_transfer"
+            ),
         },
         "valid_samples": len(records),
     })
