@@ -6,7 +6,6 @@ use http_body::{Body as _, Frame};
 use hyper::{Request, Response};
 use qpx_http::body::{Body, BodyError};
 use std::fmt;
-use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll};
@@ -20,7 +19,7 @@ mod storage;
 use self::io::{parse_content_length, read_body_data, read_body_trailers};
 pub(crate) use self::storage::ObservedBodyReader;
 use self::storage::{
-    ObservedBodyBytes, ObservedBodyFile, ObservedBodySize, ObservedBodyStorage,
+    ObservedBodyBytes, ObservedBodyFile, ObservedBodySize, ObservedBodySpool, ObservedBodyStorage,
     ObservedBodyTrailers, feed_rpc_summary_observer, finish_rpc_summary_observer,
     should_precompute_rpc_summary,
 };
@@ -469,7 +468,7 @@ async fn collect_observed_body(
     Option<PrecomputedRpcBodySummary>,
 )> {
     let mut chunks = Vec::new();
-    let mut file: Option<(TokioFile, PathBuf)> = None;
+    let mut file: Option<(TokioFile, ObservedBodySpool)> = None;
     let mut size = 0usize;
     while let Some(chunk) = read_body_data(&mut body, read_timeout).await? {
         let chunk = chunk?;
@@ -489,11 +488,11 @@ async fn collect_observed_body(
             continue;
         }
         if file.is_none() {
-            let (mut spool, path) = create_observed_body_spool(direction, reason)?;
+            let (mut spool, guard) = create_observed_body_spool(direction, reason)?;
             for existing in chunks.drain(..) {
                 write_observed_body_spool(&mut spool, existing.as_ref(), direction, reason).await?;
             }
-            file = Some((spool, path));
+            file = Some((spool, guard));
         }
         if let Some((spool, _)) = file.as_mut() {
             write_observed_body_spool(spool, chunk.as_ref(), direction, reason).await?;
@@ -501,11 +500,11 @@ async fn collect_observed_body(
     }
     let trailers = read_body_trailers(&mut body, read_timeout).await?;
     let mut spooled = 0usize;
-    let storage = if let Some((mut spool, path)) = file {
+    let storage = if let Some((mut spool, guard)) = file {
         flush_observed_body_spool(&mut spool, direction, reason).await?;
         drop(spool);
         spooled = size;
-        ObservedBodyStorage::File(Arc::new(ObservedBodyFile { path }))
+        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(guard)))
     } else {
         ObservedBodyStorage::Memory(Arc::from(chunks))
     };
@@ -529,7 +528,7 @@ async fn collect_observed_body_for_size(
     reason: &'static str,
 ) -> Result<(ObservedBodyBytes, Option<HeaderMap>)> {
     let mut chunks = Vec::new();
-    let mut file: Option<(TokioFile, PathBuf)> = None;
+    let mut file: Option<(TokioFile, ObservedBodySpool)> = None;
     let mut size = 0usize;
     while let Some(chunk) = read_body_data(&mut body, read_timeout).await? {
         let chunk = chunk?;
@@ -548,11 +547,11 @@ async fn collect_observed_body_for_size(
             continue;
         }
         if file.is_none() {
-            let (mut spool, path) = create_observed_body_spool(direction, reason)?;
+            let (mut spool, guard) = create_observed_body_spool(direction, reason)?;
             for existing in chunks.drain(..) {
                 write_observed_body_spool(&mut spool, existing.as_ref(), direction, reason).await?;
             }
-            file = Some((spool, path));
+            file = Some((spool, guard));
         }
         if let Some((spool, _)) = file.as_mut() {
             write_observed_body_spool(spool, chunk.as_ref(), direction, reason).await?;
@@ -560,11 +559,11 @@ async fn collect_observed_body_for_size(
     }
     let trailers = read_body_trailers(&mut body, read_timeout).await?;
     let mut spooled = 0usize;
-    let storage = if let Some((mut spool, path)) = file {
+    let storage = if let Some((mut spool, guard)) = file {
         flush_observed_body_spool(&mut spool, direction, reason).await?;
         drop(spool);
         spooled = size;
-        ObservedBodyStorage::File(Arc::new(ObservedBodyFile { path }))
+        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(guard)))
     } else {
         ObservedBodyStorage::Memory(Arc::from(chunks))
     };
@@ -626,10 +625,17 @@ async fn flush_observed_body_spool(
     Ok(())
 }
 
+/// Creates a spool file and the guard that unlinks it.
+///
+/// The guard exists from the moment the file is created, so every later
+/// failure - limit exceeded, read or trailer timeout, write or flush error,
+/// cancellation - removes the file. The file handle is held next to the
+/// guard and is dropped first, which keeps the cleanup valid on platforms
+/// that refuse to unlink an open file.
 fn create_observed_body_spool(
     direction: &'static str,
     reason: &'static str,
-) -> Result<(TokioFile, PathBuf)> {
+) -> Result<(TokioFile, ObservedBodySpool)> {
     let (file, path) = qpx_core::secure_file::create_secure_temp_file("qpx-observed-body", ".body")
         .map_err(|source| {
             record_body_spool_error(direction, reason, "create");
@@ -639,7 +645,41 @@ fn create_observed_body_spool(
                 source,
             }
         })?;
-    Ok((TokioFile::from_std(file), path))
+    #[cfg(test)]
+    spool_registry::record(&path);
+    Ok((TokioFile::from_std(file), ObservedBodySpool::new(path)))
+}
+
+/// Records the spool files a collection creates, so that a test can observe
+/// exactly the files of its own collection.
+#[cfg(test)]
+mod spool_registry {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static CREATED_SPOOL_PATHS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(super) fn record(path: &Path) {
+        CREATED_SPOOL_PATHS.with(|paths| {
+            paths.borrow_mut().push(path.to_path_buf());
+        });
+    }
+
+    /// The spool files created on this thread so far, in creation order.
+    pub(super) fn created() -> Vec<PathBuf> {
+        CREATED_SPOOL_PATHS.with(|paths| paths.borrow().clone())
+    }
+}
+
+/// The spool files created on this thread so far, in creation order.
+///
+/// The registry is thread-local so that a test observes exactly the spool
+/// files of its own collection, even when other tests run concurrently.
+#[cfg(test)]
+pub(crate) fn created_spool_paths() -> Vec<std::path::PathBuf> {
+    spool_registry::created()
 }
 
 #[cfg(test)]

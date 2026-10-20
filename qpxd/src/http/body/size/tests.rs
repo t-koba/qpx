@@ -183,7 +183,7 @@ async fn buffer_request_body_spools_large_observed_body() {
         .get::<ObservedBodyBytes>()
         .expect("observed body");
     let path = match &observed.storage {
-        ObservedBodyStorage::File(file) => file.path.clone(),
+        ObservedBodyStorage::File(file) => file.path().to_path_buf(),
         ObservedBodyStorage::Memory(_) => panic!("large observed body should spool"),
     };
     assert!(path.exists());
@@ -199,4 +199,135 @@ async fn buffer_request_body_spools_large_observed_body() {
         .expect("replayed body");
     assert_eq!(replayed.as_ref(), payload.as_slice());
     assert!(!path.exists());
+}
+
+/// The number of spool files this thread's collections have created so far.
+fn created_spool_count() -> usize {
+    created_spool_paths().len()
+}
+
+/// Waits until this thread's collections created a spool file.
+///
+/// The wait observes the collection itself, so it never depends on how long
+/// the write to the spool file takes.
+async fn wait_for_created_spool_file(before: usize) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while created_spool_count() <= before {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the body never spilled to a spool file"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+}
+
+/// A body chunk that is large enough to leave the in-memory buffer.
+fn spilling_chunk() -> Bytes {
+    Bytes::from(vec![b'x'; OBSERVED_BODY_MEMORY_BYTES + 1])
+}
+
+#[tokio::test]
+async fn failed_request_body_collection_after_spill_removes_the_spool_file() {
+    let before = created_spool_count();
+    let chunk = spilling_chunk();
+    let body = Body::replay_chunks(vec![chunk.clone(), Bytes::from_static(b"!")], None);
+    let req = Request::builder().body(body).expect("request");
+
+    let err = buffer_request_body(req, chunk.len(), Duration::from_secs(1))
+        .await
+        .expect_err("body over cap must fail");
+
+    assert!(is_observed_body_limit_exceeded(&err));
+    let created = created_spool_paths();
+    assert_eq!(
+        created.len(),
+        before + 1,
+        "the body must have spilled to exactly one spool file"
+    );
+    for path in &created[before..] {
+        assert!(!path.exists(), "spool file left behind: {path:?}");
+    }
+}
+
+#[tokio::test]
+async fn failed_request_body_size_collection_after_spill_removes_the_spool_file() {
+    let before = created_spool_count();
+    let chunk = spilling_chunk();
+    let body = Body::replay_chunks(vec![chunk.clone(), Bytes::from_static(b"!")], None);
+    let req = Request::builder().body(body).expect("request");
+
+    let err = observe_request_body_size(req, chunk.len(), Duration::from_secs(1))
+        .await
+        .expect_err("body over cap must fail");
+
+    assert!(is_observed_body_limit_exceeded(&err));
+    let created = created_spool_paths();
+    assert_eq!(
+        created.len(),
+        before + 1,
+        "the body must have spilled to exactly one spool file"
+    );
+    for path in &created[before..] {
+        assert!(!path.exists(), "spool file left behind: {path:?}");
+    }
+}
+
+#[tokio::test]
+async fn cancelled_request_body_collection_after_spill_removes_the_spool_file() {
+    let before = created_spool_count();
+    let (mut sender, body) = Body::channel();
+    let req = Request::builder().body(body).expect("request");
+    sender
+        .send_data(spilling_chunk())
+        .await
+        .expect("send the chunk that spills to disk");
+
+    tokio::select! {
+        biased;
+        () = wait_for_created_spool_file(before) => {}
+        result = buffer_request_body(req, 1024 * 1024, Duration::from_secs(30)) => {
+            let _ = result;
+            panic!("the collection must not finish before it is cancelled");
+        }
+    }
+
+    let created = created_spool_paths();
+    assert_eq!(
+        created.len(),
+        before + 1,
+        "the body must have spilled to exactly one spool file"
+    );
+    for path in &created[before..] {
+        assert!(!path.exists(), "spool file left behind: {path:?}");
+    }
+}
+
+#[tokio::test]
+async fn cancelled_request_body_size_collection_after_spill_removes_the_spool_file() {
+    let before = created_spool_count();
+    let (mut sender, body) = Body::channel();
+    let req = Request::builder().body(body).expect("request");
+    sender
+        .send_data(spilling_chunk())
+        .await
+        .expect("send the chunk that spills to disk");
+
+    tokio::select! {
+        biased;
+        () = wait_for_created_spool_file(before) => {}
+        result = observe_request_body_size(req, 1024 * 1024, Duration::from_secs(30)) => {
+            let _ = result;
+            panic!("the collection must not finish before it is cancelled");
+        }
+    }
+
+    let created = created_spool_paths();
+    assert_eq!(
+        created.len(),
+        before + 1,
+        "the body must have spilled to exactly one spool file"
+    );
+    for path in &created[before..] {
+        assert!(!path.exists(), "spool file left behind: {path:?}");
+    }
 }

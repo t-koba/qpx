@@ -7,7 +7,7 @@ use bytes::{Bytes, BytesMut};
 use http::HeaderMap;
 #[cfg(test)]
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncReadExt;
@@ -32,15 +32,29 @@ pub(super) enum ObservedBodyStorage {
     File(Arc<ObservedBodyFile>),
 }
 
+/// Owns the spool path and unlinks the file when dropped.
+///
+/// The guard is created together with the spool file, before any write, so
+/// every failure path - limit exceeded, read or trailer timeout, write or
+/// flush error, cancellation - removes the file. A completed collection
+/// transfers the guard into [`ObservedBodyFile`], which therefore unlinks the
+/// file at the end of its own lifetime with no disarm step.
 #[derive(Debug)]
-pub(super) struct ObservedBodyFile {
-    pub(super) path: PathBuf,
+pub(super) struct ObservedBodySpool {
+    path: PathBuf,
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct ObservedBodyTrailers(pub(super) HeaderMap);
+impl ObservedBodySpool {
+    pub(super) fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
 
-impl Drop for ObservedBodyFile {
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for ObservedBodySpool {
     fn drop(&mut self) {
         match std::fs::remove_file(&self.path) {
             Ok(()) => {}
@@ -52,12 +66,35 @@ impl Drop for ObservedBodyFile {
     }
 }
 
+#[derive(Debug)]
+pub(super) struct ObservedBodyFile {
+    spool: ObservedBodySpool,
+}
+
+impl ObservedBodyFile {
+    pub(super) fn new(spool: ObservedBodySpool) -> Self {
+        Self { spool }
+    }
+
+    pub(super) fn path(&self) -> &Path {
+        self.spool.path()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ObservedBodyTrailers(pub(super) HeaderMap);
+
 impl ObservedBodyBytes {
     pub(super) async fn read_prefix_async(&self, max_bytes: usize) -> Result<Bytes> {
         match &self.storage {
             ObservedBodyStorage::Memory(chunks) => Ok(bytes_prefix_from_chunks(chunks, max_bytes)),
             ObservedBodyStorage::File(file) => {
-                read_observed_body_spool_prefix_async(file.path.clone(), self.len, max_bytes).await
+                read_observed_body_spool_prefix_async(
+                    file.path().to_path_buf(),
+                    self.len,
+                    max_bytes,
+                )
+                .await
             }
         }
     }
@@ -66,9 +103,12 @@ impl ObservedBodyBytes {
         match &self.storage {
             ObservedBodyStorage::Memory(chunks) => Ok(bytes_prefix_chunks(chunks, max_bytes)),
             ObservedBodyStorage::File(file) => {
-                let prefix =
-                    read_observed_body_spool_prefix_async(file.path.clone(), self.len, max_bytes)
-                        .await?;
+                let prefix = read_observed_body_spool_prefix_async(
+                    file.path().to_path_buf(),
+                    self.len,
+                    max_bytes,
+                )
+                .await?;
                 Ok(if prefix.is_empty() {
                     Vec::new()
                 } else {
@@ -83,7 +123,7 @@ impl ObservedBodyBytes {
         match &self.storage {
             ObservedBodyStorage::Memory(chunks) => Ok(bytes_from_chunks(chunks)),
             ObservedBodyStorage::File(file) => {
-                read_observed_body_spool(file.path.clone(), self.len)
+                read_observed_body_spool(file.path().to_path_buf(), self.len)
             }
         }
     }
@@ -140,7 +180,7 @@ impl ObservedBodyReader {
                 Ok(())
             }
             ObservedBodyStorage::File(file) => {
-                let mut input = TokioFile::open(&file.path).await?;
+                let mut input = TokioFile::open(file.path()).await?;
                 let mut buf = vec![0u8; OBSERVED_BODY_FILE_CHUNK_BYTES];
                 loop {
                     let read = input.read(&mut buf).await?;
@@ -165,7 +205,7 @@ impl ObservedBodyReader {
                 f(&mut reader)
             }
             ObservedBodyStorage::File(file) => {
-                let mut input = std::fs::File::open(&file.path)?;
+                let mut input = std::fs::File::open(file.path())?;
                 f(&mut input)
             }
         })
@@ -217,7 +257,7 @@ impl ObservedBodyFile {
         let file_ref = self.clone();
         tokio::spawn(async move {
             let result = async {
-                let mut file = TokioFile::open(&file_ref.path).await?;
+                let mut file = TokioFile::open(file_ref.path()).await?;
                 let mut buf = BytesMut::with_capacity(OBSERVED_BODY_FILE_CHUNK_BYTES);
                 loop {
                     buf.clear();
