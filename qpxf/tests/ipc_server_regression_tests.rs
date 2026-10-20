@@ -6,6 +6,7 @@ mod regression {
     use std::io::Write;
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::{TcpListener, TcpStream};
@@ -14,13 +15,14 @@ mod regression {
     use tracing::warn;
 
     fn tempdir(prefix: &str) -> std::path::PathBuf {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos();
-        let dir = std::env::temp_dir().join(format!("{prefix}-{}-{nonce}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir
+        // Timestamp resolution does not guarantee uniqueness across parallel tests.
+        // Exclusive creation prevents one test from overwriting/removing another's CGI scripts.
+        tempfile::Builder::new()
+            .prefix(prefix)
+            .permissions(std::fs::Permissions::from_mode(0o700))
+            .tempdir()
+            .unwrap()
+            .keep()
     }
 
     // Writes the script from a helper process. A script left open for
@@ -273,6 +275,8 @@ handlers:
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        static NEXT_RING: AtomicU64 = AtomicU64::new(0);
+        let nonce = format!("{nonce}_{}", NEXT_RING.fetch_add(1, Ordering::Relaxed));
         let req_token = format!("ipc_req_regression_{}_{}.shm", std::process::id(), nonce);
         let res_token = format!("ipc_res_regression_{}_{}.shm", std::process::id(), nonce);
         let req_path = shm_dir.join(&req_token);
@@ -334,6 +338,8 @@ handlers:
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_nanos();
+        static NEXT_RING: AtomicU64 = AtomicU64::new(0);
+        let nonce = format!("{nonce}_{}", NEXT_RING.fetch_add(1, Ordering::Relaxed));
         let req_token = format!(
             "ipc_req_body_regression_{}_{}.shm",
             std::process::id(),

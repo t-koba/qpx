@@ -40,6 +40,8 @@ mod tests {
 
     #[tokio::test]
     async fn silent_peer_preview_times_out_and_releases_stream() {
+        #[cfg(feature = "tls-rustls")]
+        qpx_core::tls::init_rustls_crypto_provider().expect("crypto provider");
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
         let addr = listener.local_addr().expect("local addr");
         let server = tokio::spawn(async move {
