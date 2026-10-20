@@ -514,13 +514,14 @@ configured inconsistently.
 
 The band is a multiplicative slack, so the direction of the objective decides
 how it moves the effective limit. For a maximum-direction objective the
-effective limit is the cap times the band, so a band of 1.25 makes the cap
-1.25 times stricter. For a minimum-direction objective the cap is divided by
-the band, so the same band makes the cap 1.25 times stricter in the other
-direction: with the lane band at its maximum of 1.25, the fast throughput
-objective's cap of 1.1 has a decisive bar of 1.1 / 1.25 = 0.88. Within the
-bound the measured spread still sets the band, so the same miss on a stable
-measurement is still reported against the cap.
+decisive threshold is the cap times the band, so a band of 1.25 lets the
+measurement exceed the documented cap by 25% before the miss is decisive. For
+a minimum-direction objective the decisive threshold is the cap divided by the
+band, so the same band lets the measurement fall 20% below the cap before the
+miss is decisive: with the lane band at its maximum of 1.25, the fast
+throughput objective's cap of 1.1 has a decisive bar of 1.1 / 1.25 = 0.88.
+Within the bound the measured spread still sets the band, so the same miss on
+a stable measurement is still reported against the cap.
 `scripts/test-streaming-performance.py` exercises both sides of both bounds
 against synthetic lanes so the noise model is checked without running the
 benchmark.
