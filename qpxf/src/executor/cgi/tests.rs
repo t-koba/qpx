@@ -7,7 +7,7 @@ use std::io::Write;
 use std::sync::Arc;
 #[cfg(unix)]
 use std::sync::atomic::{AtomicUsize, Ordering};
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 use tokio::io::AsyncReadExt;
 
 #[test]
@@ -295,7 +295,7 @@ fn write_script(path: &Path, contents: &[u8]) {
 // A helper process that keeps the CGI script open for writing, so the script
 // cannot be executed while the holder runs (ETXTBSY). The holder releases the
 // script when the release marker appears and records that it did so.
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 struct BusyScriptHolder {
     _child: std::process::Child,
     ready_path: PathBuf,
@@ -303,7 +303,7 @@ struct BusyScriptHolder {
     released_path: PathBuf,
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl BusyScriptHolder {
     fn start(script: &Path, root: &Path) -> Self {
         let ready_path = root.join("holder.ready");
@@ -361,17 +361,24 @@ impl BusyScriptHolder {
     }
 }
 
-#[cfg(unix)]
+// The ETXTBSY-on-exec behavior the two tests below observe is Linux's. The
+// product executes the script itself, through /proc/self/fd/N, so the kernel
+// refuses the exec while another process holds the script open for writing.
+// macOS hands the script to the interpreter through a descriptor instead of
+// executing it, so the kernel never reports ETXTBSY for it.
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn etxtbsy_spawn_is_retried_until_the_script_is_released() {
     let root = temp_cgi_root();
-    let script = root.join("app");
+    let executor = test_executor(&root);
+    // The script path must be the canonical one: the executor validates the
+    // script's parent against its canonical root.
+    let script = executor.canonical_root.join("app");
     create_script(&script);
     write_script(&script, b"#!/bin/sh\nprintf busy-ok\n");
 
     let holder = BusyScriptHolder::start(&script, &root);
 
-    let executor = test_executor(&root);
     let req = test_request("/app", "", None);
     let env = executor.build_env(&req);
     let prepared =
@@ -419,7 +426,7 @@ async fn etxtbsy_spawn_is_retried_until_the_script_is_released() {
     let _ = std::fs::remove_dir_all(root);
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn a_persistent_etxtbsy_fails_with_the_spawn_error_after_the_retry_budget() {
     let root = temp_cgi_root();
@@ -444,6 +451,36 @@ async fn a_persistent_etxtbsy_fails_with_the_spawn_error_after_the_retry_budget(
     );
     assert!(
         message.contains(&format!("os error {}", libc::ETXTBSY)),
+        "{message}"
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
+// The spawn failure a caller sees does not depend on the platform's exec
+// behavior: a script whose interpreter does not exist fails to spawn with
+// the same error everywhere. The kernel resolves the shebang on Linux, and
+// the executor reads the shebang itself on macOS.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_missing_interpreter_fails_the_spawn_with_the_script_spawn_error() {
+    let root = temp_cgi_root();
+    let script = root.join("app");
+    create_script(&script);
+    write_script(&script, b"#!/nonexistent/qpxf-missing-interpreter\n");
+
+    let executor = test_executor(&root);
+    let err = executor
+        .start(test_request("/app", "", None))
+        .await
+        .err()
+        .expect("a missing interpreter must fail the spawn");
+    let message = err.to_string();
+    assert!(
+        message.starts_with("failed to spawn CGI script:"),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("os error {}", libc::ENOENT)),
         "{message}"
     );
     let _ = std::fs::remove_dir_all(root);
