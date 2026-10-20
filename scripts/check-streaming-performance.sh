@@ -307,23 +307,51 @@ marginals = []
 # miss beyond it is decisive. Reference spreads never widen the band:
 # competitor instability must not excuse a qpx miss; spread-cap breaches still
 # fail as invalid below.
+#
+# The tail band is capped by stability.max_tail_noise_multiplier, so the
+# effective limit of a tail objective is its documented cap times at most that
+# multiplier. Without the cap the effective limit would be data-dependent and
+# could reach three times the documented cap, and a subject whose regression
+# also inflates its own measurement noise would excuse the miss it caused.
+# The time and CPU-rate objectives keep the lane band, which the existing
+# total-spread cap already bounds.
+stability_objectives = objectives.get("stability", {})
+# The tail objectives are judged against the noise of the metric they measure,
+# but the band is bounded by the policy multiplier. The bound is what keeps the
+# gate's teeth: the band comes from the subject's own measurement, so without
+# it a subject whose regression also inflates its measurement noise would widen
+# the band far enough to excuse the miss it caused, and the effective limit
+# would be data-dependent instead of the documented cap.
+tail_noise_multiplier = ratio_limit(
+    stability_objectives, "max_tail_noise_multiplier"
+)
+
+
+def tail_band(lane_effective, own_spread):
+    """The measurement band of a tail objective.
+
+    The band is the wider of the lane noise and the metric's own measured
+    spread, capped by the policy multiplier.
+    """
+    return max(min(max(lane_effective, own_spread), tail_noise_multiplier), 1.05)
+
+
 fast_lane_noise = 1.0
 for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
     fast_lane_noise = max(fast_lane_noise, nested_number(qpx_fast, "sample_spread", field))
 fast_effective = max(fast_lane_noise, 1.05)
 fast_objective_noise = {
-    "p99 gap ratio": max(
+    "p99 gap ratio": tail_band(
         fast_effective,
         nested_number(qpx_fast, "sample_spread", "p99_chunk_gap_ms_ratio"),
     ),
-    "scheduler queue-delay ratio": max(
+    "scheduler queue-delay ratio": tail_band(
         fast_effective,
         nested_number(
             qpx_fast, "sample_spread", "scheduler_queue_delay_us_per_transfer_ratio"
         ),
     ),
 }
-stability_objectives = objectives.get("stability", {})
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
 stability_records = {
     ("fast", "qpxd"),
@@ -428,11 +456,11 @@ for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
     slow_lane_noise = max(slow_lane_noise, nested_number(qpx_slow, "sample_spread", field))
 slow_effective = max(slow_lane_noise, 1.05)
 slow_objective_noise = {
-    "max_p99_gap_ratio": max(
+    "max_p99_gap_ratio": tail_band(
         slow_effective,
         nested_number(qpx_slow, "sample_spread", "p99_chunk_gap_ms_ratio"),
     ),
-    "max_scheduler_queue_delay_ratio": max(
+    "max_scheduler_queue_delay_ratio": tail_band(
         slow_effective,
         nested_number(
             qpx_slow, "sample_spread", "scheduler_queue_delay_us_per_transfer_ratio"

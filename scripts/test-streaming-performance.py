@@ -388,6 +388,64 @@ class StreamingGateTest(unittest.TestCase):
         self.assertIn("fast streaming p99 gap ratio marginal", result.stdout)
         self.assertIn("fast streaming scheduler queue-delay ratio marginal", result.stdout)
 
+    def test_tail_noise_band_is_bounded_by_the_policy_multiplier(self):
+        """A wide measured spread must not widen the band past the policy limit.
+
+        The band comes from the subject's own measurement, so without a bound
+        a subject whose regression also inflates its noise could excuse the
+        miss it caused. The policy multiplier is that bound.
+        """
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={
+                    # Twice the leader's gap and delay, and twice both caps.
+                    "p99_chunk_gap_ms": 0.045 * 2.0 * 3.2,
+                    "scheduler_queue_delay_us_per_transfer": 3943.0 * 2.0 * 6.0,
+                    "sample_spread": {
+                        "p99_chunk_gap_ms_ratio": 2.0,
+                        "scheduler_queue_delay_us_per_transfer_ratio": 2.0,
+                    },
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fast streaming p99 gap ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+        self.assertIn("fast streaming scheduler queue-delay ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+        # The band is the policy multiplier, not the measured spread.
+        self.assertNotIn("within measurement noise", result.stdout)
+
+    def test_tail_band_still_follows_a_measured_spread_below_the_policy_limit(self):
+        """Below the policy bound, the measured spread still sets the band."""
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={
+                    "p99_chunk_gap_ms": 0.045 * 3.2 * 1.15,
+                    "sample_spread": {"p99_chunk_gap_ms_ratio": 1.2},
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fast streaming p99 gap ratio marginal", result.stdout)
+
+    def test_a_tail_miss_beyond_the_policy_multiplier_fails(self):
+        """A miss past the policy band is decisive however noisy the spread is."""
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={
+                    "p99_chunk_gap_ms": 0.045 * 3.2 * 1.6,
+                    "sample_spread": {"p99_chunk_gap_ms_ratio": 2.5},
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fast streaming p99 gap ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+
     def test_stable_tail_measurement_still_fails(self):
         """The same miss on a stable measurement stays a decisive failure."""
         result = self.run_gate(

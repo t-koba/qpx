@@ -448,10 +448,21 @@ delay) use the spread of their own metric, because a tail statistic moves
 further between samples than a total does. A miss inside that band is reported
 as a marginal objective and stays visible for trend review; a miss beyond it is
 a decisive failure. Reference spreads never widen the band, because competitor
-instability must not excuse a qpx miss. The caps are unchanged: the same miss
-on a stable measurement still fails the gate, and
-`scripts/test-streaming-performance.py` exercises both cases against synthetic
-lanes so the noise model is checked without running the benchmark.
+instability must not excuse a qpx miss.
+
+The tail band is bounded by `stability.max_tail_noise_multiplier` (1.5), so a
+tail objective's effective limit is its documented cap times at most that
+multiplier: 4.8 for the fast p99 gap ratio and 9.0 for the fast queue-delay
+ratio, instead of the three times the documented cap an unbounded band would
+allow. The bound matters because the band comes from the subject's own
+measurement: without it, a subject whose regression also inflates its
+measurement noise would widen the band far enough to excuse the miss it
+caused, and the effective limit would be data-dependent rather than the
+documented cap. Within the bound the measured spread still sets the band, so
+the same miss on a stable measurement still fails the gate.
+`scripts/test-streaming-performance.py` exercises both sides of the bound
+against synthetic lanes so the noise model is checked without running the
+benchmark.
 
 ## Allocation gate
 
