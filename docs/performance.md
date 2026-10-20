@@ -240,6 +240,36 @@ exchange and connection setup from dominating what is reported as an HTTP/2
 request-path profile. The measured batch still uses the production TLS and
 HTTP/2 implementation; only the location of the profiling window changes.
 
+### Matched-source comparison for the reverse HTTP/1 path
+
+The streaming lane reports one ratio per run, so comparing the ratio of one
+run with the ratio of another run compares two noisy statistics, not two
+implementations. Two qpxd builds measured against the same origin in the same
+round, alternating which build is measured first, isolate the build
+difference from runner and origin load.
+
+Applied to the reverse HTTP/1 path, comparing the last green streaming run
+`5ecb4d1` with the current tree over 30 rounds of the streaming lane's own
+workload:
+
+- The paired current-minus-green difference in the qpx-versus-origin ratio
+  has median `-0.020` and a bootstrap 95% interval of `-0.099` to `+0.025`.
+  The step seen across CI runs was `+0.39`, from `1.03x` to `1.42x`, which
+  lies far outside that interval.
+- Bootstrapping the lane's own median-of-three statistic from the same
+  measurements gives a 2.5th percentile of `0.957` and a 97.5th percentile of
+  `1.798`. A single run's median-of-three lands at or below `1.03` about 12%
+  of the time and at or above `1.42` about 38% of the time, so one run's value
+  cannot by itself establish a change.
+- In the 1 MiB reverse lane, the current build's requests per CPU second
+  exceed the green build's by a median of `+41.6`, with a bootstrap 95%
+  interval of `+23.1` to `+109.4`. The ratio seen across CI runs fell from
+  `6.73` to `3.48`, which this measurement does not reproduce.
+
+The reverse HTTP/1 path therefore shows no regression between the two
+builds. Performance questions about this path are settled by a matched-source
+comparison against one origin, not by comparing ratios from separate runs.
+
 ### Shared-runner validity and paired-regression contract
 
 The proxy and HTTP/2 CI jobs use `scripts/perf-audit-policy.py run`, not a
