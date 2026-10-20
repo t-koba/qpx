@@ -315,6 +315,14 @@ marginals = []
 # documented cap. The two multipliers differ because the metric families
 # differ in how much they move between samples: the tail objectives are
 # measured against their own spread and need the wider allowance.
+#
+# The band also has a floor, stability.min_measurement_noise_multiplier. A
+# shared CI runner varies more between runs than one interleaved lane spread
+# shows, so a perfectly stable measurement can still miss a cap by a few
+# percent for no product reason. The floor keeps that run-to-run variation
+# from being reported as a regression, and it is a policy value like the
+# multipliers, so the documented effective limit is never more than the floor
+# above the cap.
 stability_objectives = objectives.get("stability", {})
 lane_noise_multiplier = ratio_limit(
     stability_objectives, "max_lane_noise_multiplier"
@@ -322,20 +330,25 @@ lane_noise_multiplier = ratio_limit(
 tail_noise_multiplier = ratio_limit(
     stability_objectives, "max_tail_noise_multiplier"
 )
+noise_floor = ratio_limit(stability_objectives, "min_measurement_noise_multiplier")
 
 
 def lane_band(lane_noise):
-    """The measurement band of a time or CPU-rate objective."""
-    return max(min(lane_noise, lane_noise_multiplier), 1.05)
+    """The measurement band of a time or CPU-rate objective.
+
+    The floor is the band's lower bound and the policy multiplier its upper
+    bound, so the multiplier stays the authority on the band.
+    """
+    return min(max(lane_noise, noise_floor), lane_noise_multiplier)
 
 
 def tail_band(lane_effective, own_spread):
     """The measurement band of a tail objective.
 
     The band is the wider of the lane band and the metric's own measured
-    spread, capped by the policy multiplier.
+    spread, between the floor and the policy multiplier.
     """
-    return max(min(max(lane_effective, own_spread), tail_noise_multiplier), 1.05)
+    return min(max(max(lane_effective, own_spread), noise_floor), tail_noise_multiplier)
 
 
 fast_lane_noise = 1.0
@@ -409,7 +422,7 @@ for name, current, objective, direction in fast_checks:
     # The time and CPU-rate objectives use the bounded lane band; the tail
     # objectives use the band of their own metric.
     noise = fast_objective_noise.get(name, fast_effective)
-    effective = max(noise, 1.05)
+    effective = max(noise, noise_floor)
     if direction == "min" and current + 1e-12 < objective:
         decisive_bar = objective / effective
         if current + 1e-12 < decisive_bar:
@@ -479,7 +492,7 @@ for field, current in slow_ratios.items():
     # The time and CPU-rate objectives use the bounded lane band; the tail
     # objectives use the band of their own metric.
     noise = slow_objective_noise.get(field, slow_effective)
-    effective = max(noise, 1.05)
+    effective = max(noise, noise_floor)
     if current > objective + 1e-12:
         decisive_bar = objective * effective
         if current > decisive_bar + 1e-12:

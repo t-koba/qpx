@@ -476,6 +476,39 @@ class StreamingGateTest(unittest.TestCase):
             "fast streaming total CPU efficiency ratio", result.stderr
         )
 
+    def test_a_stable_measurement_is_excused_only_within_the_noise_floor(self):
+        """A stable measurement may exceed the cap by no more than the floor.
+
+        A shared CI runner varies more between runs than one interleaved lane
+        spread shows, so a perfectly stable measurement can still miss a cap
+        by a few percent for no product reason. The floor is that allowance,
+        and it is the only slack a stable measurement gets.
+        """
+        leader_p99 = FAST_LANE["lighttpd"]["p99_chunk_gap_ms"]
+        cap = 3.2
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={"p99_chunk_gap_ms": leader_p99 * cap * 1.02},
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("fast streaming p99 gap ratio marginal", result.stdout)
+
+    def test_a_stable_measurement_beyond_the_noise_floor_fails(self):
+        """Past the floor, a stable measurement's miss is decisive."""
+        leader_p99 = FAST_LANE["lighttpd"]["p99_chunk_gap_ms"]
+        cap = 3.2
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={"p99_chunk_gap_ms": leader_p99 * cap * 1.06},
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fast streaming p99 gap ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+
     def test_tail_band_still_follows_a_measured_spread_below_the_policy_limit(self):
         """Below the policy bound, the measured spread still sets the band."""
         result = self.run_gate(

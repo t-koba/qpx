@@ -722,6 +722,10 @@ require_json_number_at_most perf/streaming-performance-objectives.json fast.max_
 require_json_number_at_most perf/streaming-performance-objectives.json slow.max_p99_gap_ratio 1.5
 require_json_number_at_most perf/streaming-performance-objectives.json stability.max_qpx_metric_sample_spread_ratio 3.0
 require_json_number_at_most perf/streaming-performance-objectives.json stability.max_tail_noise_multiplier 1.5
+require_json_number_at_most perf/streaming-performance-objectives.json stability.min_measurement_noise_multiplier 1.05
+require_json_number_at_least perf/streaming-performance-objectives.json stability.max_lane_noise_multiplier 1.05
+require_json_number_at_least perf/streaming-performance-objectives.json stability.max_tail_noise_multiplier 1.05
+require scripts/check-streaming-performance.sh 'min_measurement_noise_multiplier'
 require scripts/check-streaming-performance.sh 'max_tail_noise_multiplier'
 require_json_number_at_most perf/streaming-performance-objectives.json stability.max_lane_noise_multiplier 1.25
 require scripts/check-streaming-performance.sh 'max_lane_noise_multiplier'

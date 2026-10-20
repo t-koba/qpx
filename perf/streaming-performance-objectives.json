@@ -34,6 +34,7 @@
     "max_qpx_metric_sample_spread_ratio": 3.0,
     "max_qpx_total_sample_spread_ratio": 2.5,
     "max_reference_total_sample_spread_ratio": 1.5,
-    "max_tail_noise_multiplier": 1.5
+    "max_tail_noise_multiplier": 1.5,
+    "min_measurement_noise_multiplier": 1.05
   }
 }

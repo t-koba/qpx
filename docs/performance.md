@@ -491,8 +491,16 @@ does. The bound matters because the band comes from the subject's own
 measurement: without it, a subject whose regression also inflates its
 measurement noise would widen the band far enough to excuse the miss it
 caused, and the effective limit would be data-dependent rather than the
-documented cap. Within the bound the measured spread still sets the band, so
-the same miss on a stable measurement still fails the gate.
+documented cap. The band also has a floor, `stability.min_measurement_noise_multiplier`
+(1.05). A shared CI runner varies more between runs than one interleaved
+lane spread shows, so a perfectly stable measurement can still miss a cap by
+a few percent for no product reason; that miss is reported as marginal
+rather than failing the gate. The floor is the band's lower bound and the
+multiplier its upper bound, so an objective's effective limit lies between the
+cap times 1.05 and the cap times its multiplier, and the multiplier wins if
+the two are ever configured inconsistently. Within the bound the measured
+spread still sets the band, so the same miss on a stable measurement is still
+reported against the cap.
 `scripts/test-streaming-performance.py` exercises both sides of both bounds
 against synthetic lanes so the noise model is checked without running the
 benchmark.
