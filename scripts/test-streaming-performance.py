@@ -347,7 +347,7 @@ def lane(base, **overrides):
 
 
 class StreamingGateTest(unittest.TestCase):
-    def run_gate(self, fast=None, slow=None):
+    def run_gate(self, fast=None, slow=None, objectives=None):
         fast = FAST_LANE if fast is None else fast
         slow = SLOW_LANE if slow is None else slow
         with tempfile.TemporaryDirectory() as directory:
@@ -357,11 +357,20 @@ class StreamingGateTest(unittest.TestCase):
                 for record in records:
                     handle.write(json.dumps(record, sort_keys=True) + "\n")
             return subprocess.run(
-                [str(CHECKER), str(path), str(OBJECTIVES)],
+                [str(CHECKER), str(path), str(objectives or OBJECTIVES)],
                 capture_output=True,
                 text=True,
                 check=False,
             )
+
+    def run_gate_with_policy(self, stability, fast=None, slow=None):
+        """Runs the gate against a copy of the policy with `stability` replaced."""
+        with tempfile.TemporaryDirectory() as directory:
+            policy = json.loads(OBJECTIVES.read_text(encoding="utf-8"))
+            policy["stability"].update(stability)
+            path = Path(directory) / "objectives.json"
+            path.write_text(json.dumps(policy), encoding="utf-8")
+            return self.run_gate(fast=fast, slow=slow, objectives=path)
 
     def test_healthy_lane_passes_without_marginals(self):
         result = self.run_gate()
@@ -494,6 +503,26 @@ class StreamingGateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("fast streaming p99 gap ratio marginal", result.stdout)
+
+    def test_the_policy_multiplier_wins_over_the_noise_floor(self):
+        """The multiplier is the band's upper bound, even above the floor.
+
+        The floor is a lower bound on the band, so a policy whose floor
+        exceeds the multiplier must not let the floor decide the verdict.
+        """
+        # The slow lane's qpxd total time is 1.4x the direct backend's, so
+        # max_total_time_ratio is 1.400 against the objective 1.03.
+        slow = lane(SLOW_LANE, qpxd={"total_ms": SLOW_LANE["direct-backend"]["total_ms"] * 1.4})
+        result = self.run_gate_with_policy(
+            {"min_measurement_noise_multiplier": 1.5},
+            slow=slow,
+        )
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertIn("slow streaming max_total_time_ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+        # The band that decided the verdict is the multiplier, so that is what
+        # the message reports.
+        self.assertIn("measurement noise 1.250000", result.stderr)
 
     def test_a_stable_measurement_beyond_the_noise_floor_fails(self):
         """Past the floor, a stable measurement's miss is decisive."""

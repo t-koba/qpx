@@ -246,14 +246,17 @@ The streaming lane reports one ratio per run, so comparing the ratio of one
 run with the ratio of another run compares two noisy statistics, not two
 implementations. Two qpxd builds measured against the same origin in the same
 round, alternating which build is measured first, isolate the build
-difference from runner and origin load.
+difference from runner and origin load. The paired policy lanes already work
+this way: `scripts/perf-audit-policy.py` measures the current build and the
+pinned previous release against one origin, alternating the order within each
+round and publishing the per-round deltas.
 
-Applied to the reverse HTTP/1 path, comparing the last green streaming run
-`5ecb4d1` with the current tree over 30 rounds of the streaming lane's own
-workload:
+Applied to the reverse HTTP/1 path, the last green streaming run `5ecb4d1` was
+compared with the current tree over 30 rounds of the streaming lane's own
+workload, using that lane's own backend, client and qpxd configuration:
 
 - The paired current-minus-green difference in the qpx-versus-origin ratio
-  has median `-0.020` and a bootstrap 95% interval of `-0.099` to `+0.025`.
+  has median `-0.020` with a bootstrap 95% interval of `-0.099` to `+0.025`.
   The step seen across CI runs was `+0.39`, from `1.03x` to `1.42x`, which
   lies far outside that interval.
 - Bootstrapping the lane's own median-of-three statistic from the same
@@ -267,8 +270,18 @@ workload:
   `6.73` to `3.48`, which this measurement does not reproduce.
 
 The reverse HTTP/1 path therefore shows no regression between the two
-builds. Performance questions about this path are settled by a matched-source
-comparison against one origin, not by comparing ratios from separate runs.
+builds.
+
+These figures come from a one-off measurement of that pair of builds, and
+the repository does not yet ship a harness that reproduces them: the bootstrap
+interval and the median-of-three quantiles above were computed from the
+recorded per-round samples, and the paired policy lanes report per-round
+deltas rather than a bootstrap interval. Until such a harness exists, treat
+these numbers as the record of that measurement rather than as a result the
+product's tooling regenerates. The conclusion does not depend on the tooling:
+a question about whether one build regressed against another is answered by
+measuring both against one origin in the same round, as the paired policy
+lanes do, and not by comparing ratios taken from separate runs.
 
 ### Shared-runner validity and paired-regression contract
 
@@ -483,7 +496,7 @@ Reference spreads never widen the band, because competitor instability must not
 excuse a qpx miss.
 
 Every band is bounded by a named policy multiplier, so an objective's
-effective limit is its documented cap times at most that multiplier: the
+effective limit stays within a bounded factor of its documented cap: the
 time and CPU-rate objectives use `stability.max_lane_noise_multiplier` (1.25),
 and the tail objectives use `stability.max_tail_noise_multiplier` (1.5), which
 is wider because a tail statistic moves further between samples than a total
@@ -496,11 +509,18 @@ documented cap. The band also has a floor, `stability.min_measurement_noise_mult
 lane spread shows, so a perfectly stable measurement can still miss a cap by
 a few percent for no product reason; that miss is reported as marginal
 rather than failing the gate. The floor is the band's lower bound and the
-multiplier its upper bound, so an objective's effective limit lies between the
-cap times 1.05 and the cap times its multiplier, and the multiplier wins if
-the two are ever configured inconsistently. Within the bound the measured
-spread still sets the band, so the same miss on a stable measurement is still
-reported against the cap.
+multiplier its upper bound, and the multiplier wins if the two are ever
+configured inconsistently.
+
+The band is a multiplicative slack, so the direction of the objective decides
+how it moves the effective limit. For a maximum-direction objective the
+effective limit is the cap times the band, so a band of 1.25 makes the cap
+1.25 times stricter. For a minimum-direction objective the cap is divided by
+the band, so the same band makes the cap 1.25 times stricter in the other
+direction: with the lane band at its maximum of 1.25, the fast throughput
+objective's cap of 1.1 has a decisive bar of 1.1 / 1.25 = 0.88. Within the
+bound the measured spread still sets the band, so the same miss on a stable
+measurement is still reported against the cap.
 `scripts/test-streaming-performance.py` exercises both sides of both bounds
 against synthetic lanes so the noise model is checked without running the
 benchmark.

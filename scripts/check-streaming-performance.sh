@@ -421,8 +421,12 @@ for key in (("fast", "qpxd"), ("slow", "qpxd")):
 for name, current, objective, direction in fast_checks:
     # The time and CPU-rate objectives use the bounded lane band; the tail
     # objectives use the band of their own metric.
+    # The band functions already apply the floor as the lower bound and the
+    # policy multiplier as the upper bound, so the band here is the one that
+    # decided the verdict. Re-applying the floor here would make the floor
+    # the outer bound and let it override the multiplier.
     noise = fast_objective_noise.get(name, fast_effective)
-    effective = max(noise, noise_floor)
+    effective = noise
     if direction == "min" and current + 1e-12 < objective:
         decisive_bar = objective / effective
         if current + 1e-12 < decisive_bar:
@@ -491,8 +495,12 @@ for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)
     # The time and CPU-rate objectives use the bounded lane band; the tail
     # objectives use the band of their own metric.
+    # The band functions already apply the floor as the lower bound and the
+    # policy multiplier as the upper bound, so the band here is the one that
+    # decided the verdict. Re-applying the floor here would make the floor
+    # the outer bound and let it override the multiplier.
     noise = slow_objective_noise.get(field, slow_effective)
-    effective = max(noise, noise_floor)
+    effective = noise
     if current > objective + 1e-12:
         decisive_bar = objective * effective
         if current > decisive_bar + 1e-12:
