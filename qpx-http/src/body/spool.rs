@@ -64,3 +64,6 @@ impl<H> Drop for SpoolFile<H> {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;

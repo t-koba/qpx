@@ -440,6 +440,42 @@ class StreamingGateTest(unittest.TestCase):
         # The throughput miss is no longer excused by the subject's own noise.
         self.assertNotIn("fast streaming throughput ratio marginal", result.stdout)
 
+    def test_cpu_rate_spread_cannot_widen_the_lane_band_past_the_policy_limit(self):
+        """A wide CPU-rate spread must not widen the band of a lane objective.
+
+        The lane band takes the wider of the total-time and CPU-rate spreads,
+        so the CPU-rate input can widen it just as the total-time input can.
+        The bound has to hold for both, otherwise a subject whose regression
+        inflates its CPU-rate measurement excuses the miss it caused.
+        """
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={
+                    # Slower than the leader and than the direct backend, so
+                    # the throughput and CPU-efficiency objectives both miss.
+                    "total_ms": 700.0,
+                    "requests_per_total_cpu_second": 5.0,
+                    "sample_spread": {
+                        # Only the CPU-rate spread is wide; the total-time
+                        # spread stays stable, so the CPU-rate input is the
+                        # only thing that could widen the band.
+                        "requests_per_total_cpu_second_ratio": 2.4,
+                    },
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("fast streaming throughput ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+        # The CPU-rate miss is no longer excused by the subject's own noise.
+        self.assertNotIn(
+            "fast streaming total CPU efficiency ratio marginal", result.stdout
+        )
+        self.assertIn(
+            "fast streaming total CPU efficiency ratio", result.stderr
+        )
+
     def test_tail_band_still_follows_a_measured_spread_below_the_policy_limit(self):
         """Below the policy bound, the measured spread still sets the band."""
         result = self.run_gate(
