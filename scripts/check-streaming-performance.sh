@@ -299,15 +299,30 @@ marginals = []
 
 # Lane measurement noise comes from qpx's own observed sample spread
 # (precedent: compare-proxy-baseline.sh, check-origin-cache-performance.sh,
-# check-http2-performance.sh). Throughput uses total-time spread as its proxy;
-# gap spread is excluded so the wide gap caps keep their teeth. A miss inside
-# the band is noise, a miss beyond it is decisive. Reference spreads never
-# widen the band: competitor instability must not excuse a qpx miss;
-# spread-cap breaches still fail as invalid below.
+# check-http2-performance.sh). Every objective is judged against the spread of
+# the metric it measures: time and CPU-rate objectives use the lane's
+# total-time and CPU-rate spread, and the tail objectives use the spread of
+# their own metric, which is wider than the lane spread because a tail
+# statistic moves more between samples. A miss inside the band is noise, a
+# miss beyond it is decisive. Reference spreads never widen the band:
+# competitor instability must not excuse a qpx miss; spread-cap breaches still
+# fail as invalid below.
 fast_lane_noise = 1.0
 for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
     fast_lane_noise = max(fast_lane_noise, nested_number(qpx_fast, "sample_spread", field))
 fast_effective = max(fast_lane_noise, 1.05)
+fast_objective_noise = {
+    "p99 gap ratio": max(
+        fast_effective,
+        nested_number(qpx_fast, "sample_spread", "p99_chunk_gap_ms_ratio"),
+    ),
+    "scheduler queue-delay ratio": max(
+        fast_effective,
+        nested_number(
+            qpx_fast, "sample_spread", "scheduler_queue_delay_us_per_transfer_ratio"
+        ),
+    ),
+}
 stability_objectives = objectives.get("stability", {})
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
 stability_records = {
@@ -338,32 +353,53 @@ for key in sorted(stability_records):
             f"streaming {key} total-time sample spread {total_spread:.6f} "
             f"> objective {max_total_sample_spread_ratio:.6f}"
         )
+# The metric-matched bands above are only meaningful while qpx's own tail
+# measurements stay stable. A spread beyond the cap makes those metrics
+# unjudgeable rather than merely noisy, so the run fails as invalid instead of
+# excusing the miss.
+metric_spread_cap = ratio_limit(
+    stability_objectives, "max_qpx_metric_sample_spread_ratio"
+)
+for key in (("fast", "qpxd"), ("slow", "qpxd")):
+    record = records[key]
+    for field in (
+        "p99_chunk_gap_ms_ratio",
+        "scheduler_queue_delay_us_per_transfer_ratio",
+    ):
+        metric_spread = nested_number(record, "sample_spread", field)
+        if metric_spread > metric_spread_cap + 1e-12:
+            failures.append(
+                f"streaming {key} {field} sample spread {metric_spread:.6f} "
+                f"> objective {metric_spread_cap:.6f}"
+            )
 for name, current, objective, direction in fast_checks:
+    noise = fast_objective_noise.get(name, fast_lane_noise)
+    effective = max(noise, 1.05)
     if direction == "min" and current + 1e-12 < objective:
-        decisive_bar = objective / fast_effective
+        decisive_bar = objective / effective
         if current + 1e-12 < decisive_bar:
             failures.append(
                 f"fast streaming {name} {current:.6f} < objective {objective:.6f} "
-                f"(decisive: miss exceeds lane noise {fast_lane_noise:.6f})"
+                f"(decisive: miss exceeds measurement noise {noise:.6f})"
             )
         else:
             marginals.append(
                 f"fast streaming {name} marginal: {current:.6f} "
-                f"< objective {objective:.6f} but within lane noise "
-                f"{fast_lane_noise:.6f}; not a regression signal"
+                f"< objective {objective:.6f} but within measurement noise "
+                f"{noise:.6f}; not a regression signal"
             )
     if direction == "max" and current > objective + 1e-12:
-        decisive_bar = objective * fast_effective
+        decisive_bar = objective * effective
         if current > decisive_bar + 1e-12:
             failures.append(
                 f"fast streaming {name} {current:.6f} > objective {objective:.6f} "
-                f"(decisive: miss exceeds lane noise {fast_lane_noise:.6f})"
+                f"(decisive: miss exceeds measurement noise {noise:.6f})"
             )
         else:
             marginals.append(
                 f"fast streaming {name} marginal: {current:.6f} "
-                f"> objective {objective:.6f} but within lane noise "
-                f"{fast_lane_noise:.6f}; not a regression signal"
+                f"> objective {objective:.6f} but within measurement noise "
+                f"{noise:.6f}; not a regression signal"
             )
 
 qpx_slow = slow["qpxd"]
@@ -391,20 +427,34 @@ slow_lane_noise = 1.0
 for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
     slow_lane_noise = max(slow_lane_noise, nested_number(qpx_slow, "sample_spread", field))
 slow_effective = max(slow_lane_noise, 1.05)
+slow_objective_noise = {
+    "max_p99_gap_ratio": max(
+        slow_effective,
+        nested_number(qpx_slow, "sample_spread", "p99_chunk_gap_ms_ratio"),
+    ),
+    "max_scheduler_queue_delay_ratio": max(
+        slow_effective,
+        nested_number(
+            qpx_slow, "sample_spread", "scheduler_queue_delay_us_per_transfer_ratio"
+        ),
+    ),
+}
 for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)
+    noise = slow_objective_noise.get(field, slow_lane_noise)
+    effective = max(noise, 1.05)
     if current > objective + 1e-12:
-        decisive_bar = objective * slow_effective
+        decisive_bar = objective * effective
         if current > decisive_bar + 1e-12:
             failures.append(
                 f"slow streaming {field} {current:.6f} > objective {objective:.6f} "
-                f"(decisive: miss exceeds lane noise {slow_lane_noise:.6f})"
+                f"(decisive: miss exceeds measurement noise {noise:.6f})"
             )
         else:
             marginals.append(
                 f"slow streaming {field} marginal: {current:.6f} "
-                f"> objective {objective:.6f} but within lane noise "
-                f"{slow_lane_noise:.6f}; not a regression signal"
+                f"> objective {objective:.6f} but within measurement noise "
+                f"{noise:.6f}; not a regression signal"
             )
 
 print(

@@ -422,7 +422,10 @@ timer quantization cannot dominate CPU accounting. CPU efficiency includes both
 the proxy and the shared backend. Stability is mandatory for qpx, the direct
 backend, the winning external proxy, and every external proxy within 25% of the
 leader. A distant unstable implementation remains visible in the artifact but
-cannot invalidate an otherwise stable competitive comparison.
+cannot invalidate an otherwise stable competitive comparison. qpx's own p99
+gap and scheduler queue-delay sample spreads must also stay within the tracked
+stability cap: a wider spread makes those metrics unjudgeable rather than
+merely noisy, and the run fails as invalid.
 
 `scripts/check-streaming-performance.sh` enforces the tracked objectives in
 `perf/streaming-performance-objectives.json`. For a fast reader, qpx must:
@@ -437,6 +440,18 @@ cannot invalidate an otherwise stable competitive comparison.
 For a slow reader, total time, first byte, p99 gap, and maximum gap are bounded
 relative to the direct backend. This independently detects lost backpressure or
 event-loop starvation even when bulk throughput remains high.
+
+Every objective is judged against the measurement noise of the metric it
+measures. Time and CPU-rate objectives use the lane's observed total-time and
+CPU-rate sample spread; the tail objectives (p99 chunk gap and scheduler queue
+delay) use the spread of their own metric, because a tail statistic moves
+further between samples than a total does. A miss inside that band is reported
+as a marginal objective and stays visible for trend review; a miss beyond it is
+a decisive failure. Reference spreads never widen the band, because competitor
+instability must not excuse a qpx miss. The caps are unchanged: the same miss
+on a stable measurement still fails the gate, and
+`scripts/test-streaming-performance.py` exercises both cases against synthetic
+lanes so the noise model is checked without running the benchmark.
 
 ## Allocation gate
 

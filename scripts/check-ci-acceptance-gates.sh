@@ -690,6 +690,7 @@ require scripts/perf-audit-streaming-compare.sh '"resource_measurement": "sample
 require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_transfer'
 require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_transfer_ratio'
 require scripts/check-streaming-performance.sh 'scheduler_queue_delay_us_per_transfer_ratio'
+require scripts/check-streaming-performance.sh 'max_qpx_metric_sample_spread_ratio'
 require scripts/check-streaming-performance.sh 'growth != peak - baseline'
 require scripts/check-streaming-performance.sh 'inconsistent total_rss_growth_kb'
 require scripts/check-streaming-performance.sh 'inconsistent total_fd_growth'
@@ -709,13 +710,16 @@ require scripts/check-streaming-performance.sh 'max_p99_gap_ratio'
 require scripts/check-streaming-performance.sh 'max_total_time_ratio'
 require scripts/check-streaming-performance.sh 'lane_noise'
 require scripts/check-streaming-performance.sh 'not a regression signal'
-require scripts/check-streaming-performance.sh 'decisive: miss exceeds lane noise'
+require scripts/check-streaming-performance.sh 'decisive: miss exceeds measurement noise'
 require scripts/check-streaming-performance.sh 'competitive_frontier_total_ratio'
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_throughput_ratio 1.1
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_dominance_score 1.25
 require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_rss_peak_ratio 1.7
 require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_fd_peak_ratio 1.2
 require_json_number_at_most perf/streaming-performance-objectives.json fast.max_scheduler_queue_delay_ratio 6.0
+require_json_number_at_most perf/streaming-performance-objectives.json fast.max_p99_gap_ratio 3.2
+require_json_number_at_most perf/streaming-performance-objectives.json slow.max_p99_gap_ratio 1.5
+require_json_number_at_most perf/streaming-performance-objectives.json stability.max_qpx_metric_sample_spread_ratio 3.0
 require scripts/perf-audit-allocation-profile.sh '"qpxd_allocation_profile_http1_reverse"'
 require scripts/perf-audit-allocation-profile.sh '--tool=dhat'
 require scripts/perf-audit-allocation-profile.sh 'while [ "$tries" -lt 600 ]'
