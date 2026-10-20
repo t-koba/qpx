@@ -1,4 +1,5 @@
 use super::{CachedBody, REDIS_CACHE_MAX_IDLE_CONNECTIONS, RedisConnection};
+use crate::types::CacheBodySpool;
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use std::collections::VecDeque;
@@ -209,6 +210,7 @@ pub async fn read_bulk_cached_body(
     }
 
     let (file, path) = qpx_core::secure_file::create_secure_temp_file("qpx-cache-redis", ".body")?;
+    let guard = CacheBodySpool::new(path);
     let mut file = tokio::fs::File::from_std(file);
     let mut remaining = len;
     let mut buf = vec![0u8; 64 * 1024];
@@ -225,7 +227,7 @@ pub async fn read_bulk_cached_body(
     }
     file.flush().await?;
     drop(file);
-    Ok(Some(CachedBody::from_spooled_file(path, len as u64)))
+    Ok(Some(CachedBody::from_spooled_file(guard, len as u64)))
 }
 
 pub async fn stream_redis_bulk_to_body(

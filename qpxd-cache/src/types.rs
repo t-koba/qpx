@@ -417,7 +417,10 @@ impl CachedResponseEnvelope {
 
 mod body;
 
+pub(crate) use self::body::CacheBodySpool;
 pub(crate) use self::body::bounded_cache_body_stream;
+#[cfg(test)]
+pub(crate) use self::body::spool_registry::created as created_spool_paths;
 pub use self::body::{CachedBody, CachedBodyStream};
 
 #[derive(Debug, Serialize, Deserialize)]

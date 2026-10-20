@@ -305,6 +305,7 @@ fn test_writeback_admission() -> crate::CacheWritebackAdmission {
 
 mod backend_tests;
 mod body_length_tests;
+mod body_spool_tests;
 mod directive_tests;
 mod freshness_tests;
 mod index_metadata_tests;

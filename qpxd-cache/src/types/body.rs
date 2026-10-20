@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use qpx_http::body::Body;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs::File as TokioFile;
@@ -31,16 +31,38 @@ pub enum CachedBody {
     File(Arc<CachedBodyFile>),
 }
 
+/// Owns a spool path and unlinks the file when dropped.
+///
+/// The guard exists from the moment the spool file is created, so every later
+/// failure (limit exceeded, read timeout, write or flush error, cancellation)
+/// removes the file. A completed collection transfers the guard into
+/// `CachedBodyFile`, which therefore unlinks the file at the end of its own
+/// lifetime with no disarm step.
 #[derive(Debug)]
-pub struct CachedBodyFile {
+pub struct CacheBodySpool {
     path: PathBuf,
-    len: u64,
 }
 
-impl Drop for CachedBodyFile {
+impl CacheBodySpool {
+    pub(crate) fn new(path: PathBuf) -> Self {
+        Self { path }
+    }
+
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for CacheBodySpool {
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
     }
+}
+
+#[derive(Debug)]
+pub struct CachedBodyFile {
+    spool: CacheBodySpool,
+    len: u64,
 }
 
 impl Default for CachedBody {
@@ -54,8 +76,8 @@ impl CachedBody {
         Self::Memory(bytes)
     }
 
-    pub(crate) fn from_spooled_file(path: PathBuf, len: u64) -> Self {
-        Self::File(Arc::new(CachedBodyFile { path, len }))
+    pub(crate) fn from_spooled_file(spool: CacheBodySpool, len: u64) -> Self {
+        Self::File(Arc::new(CachedBodyFile { spool, len }))
     }
 
     pub(crate) fn len(&self) -> u64 {
@@ -91,7 +113,7 @@ impl CachedBody {
         body_read_timeout: Duration,
     ) -> Result<Self> {
         let mut chunks = Vec::new();
-        let mut file: Option<(TokioFile, PathBuf)> = None;
+        let mut file: Option<(TokioFile, CacheBodySpool)> = None;
         let mut size = 0usize;
         while let Some(chunk) = timeout(body_read_timeout, body.data())
             .await
@@ -113,21 +135,21 @@ impl CachedBody {
                 continue;
             }
             if file.is_none() {
-                let (mut spool, path) = create_cache_body_spool()?;
+                let (mut spool, guard) = create_cache_body_spool()?;
                 for existing in chunks.drain(..) {
                     spool.write_all(existing.as_ref()).await?;
                 }
-                file = Some((spool, path));
+                file = Some((spool, guard));
             }
             if let Some((spool, _)) = file.as_mut() {
                 spool.write_all(chunk.as_ref()).await?;
             }
         }
-        if let Some((mut spool, path)) = file {
+        if let Some((mut spool, guard)) = file {
             spool.flush().await?;
             drop(spool);
             return Ok(Self::File(Arc::new(CachedBodyFile {
-                path,
+                spool: guard,
                 len: size as u64,
             })));
         }
@@ -145,7 +167,7 @@ impl CachedBodyFile {
         let file_ref = self.clone();
         tokio::spawn(async move {
             let result = async {
-                let mut file = TokioFile::open(&file_ref.path).await?;
+                let mut file = TokioFile::open(file_ref.spool.path()).await?;
                 let mut remaining = match range {
                     Some((start, end)) => {
                         use tokio::io::AsyncSeekExt;
@@ -222,9 +244,11 @@ pub(crate) fn bounded_cache_body_stream(
     (body, rx)
 }
 
-fn create_cache_body_spool() -> Result<(TokioFile, PathBuf)> {
+fn create_cache_body_spool() -> Result<(TokioFile, CacheBodySpool)> {
     let (file, path) = qpx_core::secure_file::create_secure_temp_file("qpx-cache-body", ".body")?;
-    Ok((TokioFile::from_std(file), path))
+    #[cfg(test)]
+    spool_registry::record(&path);
+    Ok((TokioFile::from_std(file), CacheBodySpool::new(path)))
 }
 
 fn bytes_from_chunks(chunks: Vec<Bytes>) -> Bytes {
@@ -240,4 +264,27 @@ fn bytes_from_chunks(chunks: Vec<Bytes>) -> Bytes {
         out.extend_from_slice(chunk.as_ref());
     }
     Bytes::from(out)
+}
+
+/// Records the spool files a collection creates, so that a test can observe
+/// exactly the files of its own collection.
+#[cfg(test)]
+pub(crate) mod spool_registry {
+    use std::cell::RefCell;
+    use std::path::{Path, PathBuf};
+
+    thread_local! {
+        static CREATED_SPOOL_PATHS: RefCell<Vec<PathBuf>> = const { RefCell::new(Vec::new()) };
+    }
+
+    pub(crate) fn record(path: &Path) {
+        CREATED_SPOOL_PATHS.with(|paths| {
+            paths.borrow_mut().push(path.to_path_buf());
+        });
+    }
+
+    /// The spool files created on this thread so far, in creation order.
+    pub(crate) fn created() -> Vec<PathBuf> {
+        CREATED_SPOOL_PATHS.with(|paths| paths.borrow().clone())
+    }
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::CacheBodySpool;
 
 #[tokio::test]
 async fn cache_backend_default_put_object_rejects_file_backed_body() {
@@ -15,7 +16,7 @@ async fn cache_backend_default_put_object_rejects_file_backed_body() {
     file.flush().expect("flush body");
     drop(file);
 
-    let body = CachedBody::from_spooled_file(path.clone(), 7);
+    let body = CachedBody::from_spooled_file(CacheBodySpool::new(path.clone()), 7);
     let backend = DefaultPutObjectBackend;
     let err = CacheBackend::put_object(&backend, "ns", "key", &body, 60)
         .await

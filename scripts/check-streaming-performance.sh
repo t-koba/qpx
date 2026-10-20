@@ -310,18 +310,13 @@ marginals = []
 #
 # The tail band is capped by stability.max_tail_noise_multiplier, so the
 # effective limit of a tail objective is its documented cap times at most that
-# multiplier. Without the cap the effective limit would be data-dependent and
-# could reach three times the documented cap, and a subject whose regression
-# also inflates its own measurement noise would excuse the miss it caused.
-# The time and CPU-rate objectives keep the lane band, which the existing
-# total-spread cap already bounds.
+# multiplier. The bound is what keeps the gate's teeth: the band comes from
+# the subject's own measurement, so without it a subject whose regression also
+# inflates its measurement noise would widen the band far enough to excuse the
+# miss it caused, and the effective limit would be data-dependent instead of
+# the documented cap. The time and CPU-rate objectives keep the lane band,
+# which the existing total-spread cap already bounds.
 stability_objectives = objectives.get("stability", {})
-# The tail objectives are judged against the noise of the metric they measure,
-# but the band is bounded by the policy multiplier. The bound is what keeps the
-# gate's teeth: the band comes from the subject's own measurement, so without
-# it a subject whose regression also inflates its measurement noise would widen
-# the band far enough to excuse the miss it caused, and the effective limit
-# would be data-dependent instead of the documented cap.
 tail_noise_multiplier = ratio_limit(
     stability_objectives, "max_tail_noise_multiplier"
 )
