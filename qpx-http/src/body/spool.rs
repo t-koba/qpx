@@ -14,19 +14,22 @@ use std::path::{Path, PathBuf};
 pub struct SpoolFile<H> {
     handle: Option<H>,
     path: PathBuf,
-    reason: &'static str,
+    direction: &'static str,
+    site: &'static str,
 }
 
 impl<H> SpoolFile<H> {
     /// Takes ownership of a spool file and of the handle that writes it.
     ///
-    /// `reason` labels the cleanup-failure metric, so a removal that fails is
-    /// attributable to the spool it belongs to.
-    pub fn new(handle: H, path: PathBuf, reason: &'static str) -> Self {
+    /// `direction` and `site` label the cleanup-failure metric, so a removal
+    /// that fails is attributable both to the side of the exchange the spooled
+    /// body came from and to the spool it belongs to.
+    pub fn new(handle: H, path: PathBuf, direction: &'static str, site: &'static str) -> Self {
         Self {
             handle: Some(handle),
             path,
-            reason,
+            direction,
+            site,
         }
     }
 
@@ -60,7 +63,7 @@ impl<H> Drop for SpoolFile<H> {
         match std::fs::remove_file(&self.path) {
             Ok(()) => {}
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-            Err(_) => metrics::spool_cleanup_error(self.reason),
+            Err(_) => metrics::spool_cleanup_error(self.direction, self.site),
         }
     }
 }

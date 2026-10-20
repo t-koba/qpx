@@ -22,7 +22,10 @@ async fn cache_backend_default_put_object_rejects_file_backed_body() {
             .open(&path)
             .expect("open the test file"),
     );
-    let body = CachedBody::from_spooled_file(SpoolFile::new(handle, path.clone(), "cache_body"), 7);
+    let body = CachedBody::from_spooled_file(
+        SpoolFile::new(handle, path.clone(), "response", "cache_body"),
+        7,
+    );
     let backend = DefaultPutObjectBackend;
     let err = CacheBackend::put_object(&backend, "ns", "key", &body, 60)
         .await

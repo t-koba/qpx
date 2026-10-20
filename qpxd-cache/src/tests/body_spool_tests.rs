@@ -134,6 +134,11 @@ async fn the_cache_body_spool_guard_unlinks_its_file_when_dropped() {
             .expect("open the guarded file"),
     );
     assert!(path.exists());
-    drop(SpoolFile::new(handle, path.clone(), "cache_body"));
+    drop(SpoolFile::new(
+        handle,
+        path.clone(),
+        "response",
+        "cache_body",
+    ));
     assert!(!path.exists(), "spool file left behind: {path:?}");
 }

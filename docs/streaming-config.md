@@ -207,9 +207,14 @@ Body buffering observability emits:
 - `qpx_cache_writeback_body_bytes_total`
 - `qpx_cache_writeback_admission_rejections_total`
 
-The `reason` label matches the `qpxd explain` cost vocabulary, for example
-`rpc.body`, `request.size_exact_unknown`, `response.size_exact_unknown`,
-or `http_guard.body`.
+The `reason` label of the buffering and spool-error counters matches the
+`qpxd explain` cost vocabulary, for example `rpc.body`,
+`request.size_exact_unknown`, `response.size_exact_unknown`, or
+`http_guard.body`. The spool-cleanup counter is different: a cleanup failure is
+a property of the spool file rather than of the request that caused the body to
+be observed, so its `reason` names the spool that owns the file
+(`observed_body`, `retry_template`, `cache_body`, `cache_redis`) and its
+`direction` is the side of the exchange the spooled body came from.
 
 Cache writeback uses a lossy mirror so downstream response streaming is not
 blocked by a slow cache backend. Dropped writeback mirror chunks increment

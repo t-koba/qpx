@@ -223,6 +223,7 @@ fn create_cache_body_spool() -> Result<SpoolFile<TokioFile>> {
     Ok(SpoolFile::new(
         TokioFile::from_std(file),
         path,
+        "response",
         "cache_body",
     ))
 }

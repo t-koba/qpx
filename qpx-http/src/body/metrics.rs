@@ -33,11 +33,18 @@ pub fn spool_error(direction: &'static str, reason: &'static str, error: &'stati
     .increment(1);
 }
 
-pub fn spool_cleanup_error(reason: &'static str) {
+/// Records that a spool file could not be removed.
+///
+/// `direction` is the side of the exchange the spooled body came from, and
+/// `site` names the spool that owns the file. The site is emitted as the
+/// `reason` label, which for this counter identifies the spool rather than a
+/// body-observation cost: a cleanup failure is a property of the spool file,
+/// not of the request that caused the body to be observed.
+pub fn spool_cleanup_error(direction: &'static str, site: &'static str) {
     counter!(
         "qpx_body_spool_cleanup_errors_total",
-        "direction" => "unknown",
-        "reason" => reason,
+        "direction" => direction,
+        "reason" => site,
         "error" => "remove"
     )
     .increment(1);

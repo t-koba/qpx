@@ -210,7 +210,12 @@ pub async fn read_bulk_cached_body(
     }
 
     let (file, path) = qpx_core::secure_file::create_secure_temp_file("qpx-cache-redis", ".body")?;
-    let mut spool = SpoolFile::new(tokio::fs::File::from_std(file), path, "cache_redis");
+    let mut spool = SpoolFile::new(
+        tokio::fs::File::from_std(file),
+        path,
+        "response",
+        "cache_redis",
+    );
     let mut remaining = len;
     let mut buf = vec![0u8; 64 * 1024];
     while remaining > 0 {

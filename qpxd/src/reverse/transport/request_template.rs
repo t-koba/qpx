@@ -418,6 +418,7 @@ async fn create_template_spool() -> Result<SpoolFile<TokioFile>> {
     Ok(SpoolFile::new(
         TokioFile::from_std(file),
         path,
+        "request",
         "retry_template",
     ))
 }
@@ -603,7 +604,10 @@ mod spool_guard_tests {
                 .open(&path)
                 .expect("open the test file"),
         );
-        (path.clone(), SpoolFile::new(handle, path, "retry_template"))
+        (
+            path.clone(),
+            SpoolFile::new(handle, path, "request", "retry_template"),
+        )
     }
 
     #[test]

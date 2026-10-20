@@ -655,6 +655,7 @@ fn create_observed_body_spool(
     Ok(SpoolFile::new(
         TokioFile::from_std(file),
         path,
+        direction,
         "observed_body",
     ))
 }

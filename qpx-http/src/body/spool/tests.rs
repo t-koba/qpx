@@ -23,6 +23,10 @@ const CLEANUP_ERROR_COUNTER: &str = "qpx_body_spool_cleanup_errors_total";
 /// label is caught.
 const REASON: &str = "spool_cleanup_test";
 
+/// The direction of the site under test, so a report that loses the body's
+/// side of the exchange is caught.
+const DIRECTION: &str = "response";
+
 /// The identity of a counter: its name and its labels.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 struct CounterKey {
@@ -177,7 +181,7 @@ fn failed_spool_removal_is_reported_with_the_site_reason() {
     let path = undeletable_spool_path(&directory.path);
 
     metrics::with_local_recorder(&recorder, || {
-        let guard = SpoolFile::new(handle, path.clone(), REASON);
+        let guard = SpoolFile::new(handle, path.clone(), DIRECTION, REASON);
         assert_eq!(guard.path(), path.as_path());
         drop(guard);
     });
@@ -191,6 +195,7 @@ fn failed_spool_removal_is_reported_with_the_site_reason() {
     let (key, value) = &reported[0];
     assert_eq!(*value, 1, "the cleanup failure is counted once");
     assert_eq!(key.label("reason"), Some(REASON));
+    assert_eq!(key.label("direction"), Some(DIRECTION));
 }
 
 /// A removal that succeeds is not reported.
@@ -203,7 +208,7 @@ fn successful_spool_removal_is_not_reported() {
     let handle = std::fs::File::open(&path).expect("open the spool file");
 
     metrics::with_local_recorder(&recorder, || {
-        let guard = SpoolFile::new(handle, path.clone(), REASON);
+        let guard = SpoolFile::new(handle, path.clone(), DIRECTION, REASON);
         drop(guard);
     });
 
@@ -225,7 +230,7 @@ fn missing_spool_file_is_not_reported() {
     let path = directory.join("spool.bin");
 
     metrics::with_local_recorder(&recorder, || {
-        let guard = SpoolFile::new(handle, path.clone(), REASON);
+        let guard = SpoolFile::new(handle, path.clone(), DIRECTION, REASON);
         drop(guard);
     });
 
