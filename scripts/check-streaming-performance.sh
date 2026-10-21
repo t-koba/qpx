@@ -449,85 +449,6 @@ for key in sorted(stability_records):
 # excusing the miss. The CPU-rate spread belongs here with the tail metrics:
 # it is the measurement noise of the CPU-efficiency objectives, so an
 # unstable CPU-rate measurement makes those objectives unjudgeable too.
-metric_spread_cap = ratio_limit(
-    stability_objectives, "max_qpx_metric_sample_spread_ratio"
-)
-# The tail objectives are ratios against a reference, so the instability of
-# the metric behind one of them matters only when it can change the
-# verdict. The worst end of the objective - the subject's largest observed
-# value against the reference's smallest - is the verdict the instability
-# could produce; while that end still meets the objective, the instability
-# cannot excuse a miss and the measurement stays judgeable. The CPU rate
-# keeps the spread cap: no objective judges it against a reference, so its
-# own spread is what that cap is about.
-#
-# The rule is deliberately one-sided. It only ever keeps a run that the
-# spread cap would have failed, and only when the movement cannot change
-# the verdict; a run whose worst end misses keeps failing as unjudgeable.
-tail_objectives = (
-    (
-        "fast",
-        "p99_chunk_gap_ms",
-        qpx_fast,
-        leader,
-        ratio_limit(fast_objectives, "max_p99_gap_ratio"),
-        False,
-    ),
-    (
-        "fast",
-        "scheduler_queue_delay_us_per_transfer",
-        qpx_fast,
-        leader,
-        ratio_limit(fast_objectives, "max_scheduler_queue_delay_ratio"),
-        True,
-    ),
-    (
-        "slow",
-        "p99_chunk_gap_ms",
-        qpx_slow,
-        direct_slow,
-        ratio_limit(slow_objectives, "max_p99_gap_ratio"),
-        False,
-    ),
-    (
-        "slow",
-        "scheduler_queue_delay_us_per_transfer",
-        qpx_slow,
-        slow_resource_leader,
-        ratio_limit(slow_objectives, "max_scheduler_queue_delay_ratio"),
-        True,
-    ),
-)
-for lane, metric, subject, reference, cap, lower_is_better in tail_objectives:
-    record = records[(lane, "qpxd")]
-    spread_field = f"{metric}_ratio"
-    metric_spread = nested_number(record, "sample_spread", spread_field)
-    if metric_spread <= metric_spread_cap + 1e-12:
-        continue
-    subject_max = validated_extremes(subject, metric)[1]
-    reference_min = validated_extremes(reference, metric)[0]
-    if lower_is_better:
-        worst_end = lower_is_better_ratio(subject_max, reference_min)
-    elif reference_min == 0:
-        worst_end = math.inf if subject_max > 0 else 1.0
-    else:
-        worst_end = subject_max / reference_min
-    if worst_end <= cap + 1e-12:
-        continue
-    failures.append(
-        f"streaming {lane} {spread_field} sample spread {metric_spread:.6f} "
-        f"> stability cap {metric_spread_cap:.6f}: the measurement "
-        f"is unjudgeable"
-    )
-for key in (("fast", "qpxd"), ("slow", "qpxd")):
-    record = records[key]
-    metric_spread = nested_number(record, "sample_spread", "requests_per_total_cpu_second_ratio")
-    if metric_spread > metric_spread_cap + 1e-12:
-        failures.append(
-            f"streaming {key} requests_per_total_cpu_second_ratio sample spread "
-            f"{metric_spread:.6f} > stability cap {metric_spread_cap:.6f}: "
-            f"the measurement is unjudgeable"
-        )
 for name, current, objective, direction in fast_checks:
     # The time and CPU-rate objectives use the bounded lane band; the tail
     # objectives use the band of their own metric.
@@ -598,6 +519,103 @@ slow_objective_noise = {
         ),
     ),
 }
+metric_spread_cap = ratio_limit(
+    stability_objectives, "max_qpx_metric_sample_spread_ratio"
+)
+# The tail objectives are ratios against a reference, so the instability of
+# the metric behind one of them matters only when it can change the verdict.
+# The worst end of the objective - the subject's largest observed value
+# against the reference's smallest - is the verdict the instability could
+# produce, and it is compared with the same decisive bar the objective check
+# uses: the objective times the band of that metric, which is bounded by the
+# policy multiplier and the floor. So the run fails as unjudgeable exactly
+# when the movement could turn the objective's verdict into a failure, and a
+# movement that only reaches a marginal verdict leaves the run judgeable.
+#
+# The CPU rate keeps the spread cap. Its objective is a ratio against the
+# leader like the tail metrics', but the lane publishes no observed range
+# for the CPU rate, so the cap stays the stricter policy for that metric: a
+# wide CPU-rate spread makes the CPU-efficiency objective unjudgeable rather
+# than merely noisy.
+#
+# The rule is deliberately one-sided. It only ever keeps a run that the
+# spread cap would have failed, and only when the movement cannot change
+# the verdict; a run whose worst end reaches the decisive bar keeps failing
+# as unjudgeable.
+tail_objectives = (
+    (
+        "fast",
+        "p99 gap ratio",
+        "p99_chunk_gap_ms",
+        qpx_fast,
+        leader,
+        ratio_limit(fast_objectives, "max_p99_gap_ratio"),
+        fast_objective_noise["p99 gap ratio"],
+        False,
+    ),
+    (
+        "fast",
+        "scheduler queue-delay ratio",
+        "scheduler_queue_delay_us_per_transfer",
+        qpx_fast,
+        leader,
+        ratio_limit(fast_objectives, "max_scheduler_queue_delay_ratio"),
+        fast_objective_noise["scheduler queue-delay ratio"],
+        True,
+    ),
+    (
+        "slow",
+        "max_p99_gap_ratio",
+        "p99_chunk_gap_ms",
+        qpx_slow,
+        direct_slow,
+        ratio_limit(slow_objectives, "max_p99_gap_ratio"),
+        slow_objective_noise["max_p99_gap_ratio"],
+        False,
+    ),
+    (
+        "slow",
+        "max_scheduler_queue_delay_ratio",
+        "scheduler_queue_delay_us_per_transfer",
+        qpx_slow,
+        slow_resource_leader,
+        ratio_limit(slow_objectives, "max_scheduler_queue_delay_ratio"),
+        slow_objective_noise["max_scheduler_queue_delay_ratio"],
+        True,
+    ),
+)
+for lane, _name, metric, subject, reference, cap, band, lower_is_better in tail_objectives:
+    record = records[(lane, "qpxd")]
+    spread_field = f"{metric}_ratio"
+    metric_spread = nested_number(record, "sample_spread", spread_field)
+    if metric_spread <= metric_spread_cap + 1e-12:
+        continue
+    subject_max = validated_extremes(subject, metric)[1]
+    reference_min = validated_extremes(reference, metric)[0]
+    if lower_is_better:
+        worst_end = lower_is_better_ratio(subject_max, reference_min)
+    elif reference_min == 0:
+        worst_end = math.inf if subject_max > 0 else 1.0
+    else:
+        worst_end = subject_max / reference_min
+    decisive_bar = cap * band
+    if worst_end <= decisive_bar + 1e-12:
+        continue
+    failures.append(
+        f"streaming {lane} {spread_field} sample spread {metric_spread:.6f} "
+        f"> stability cap {metric_spread_cap:.6f}: the measurement "
+        f"is unjudgeable"
+    )
+for key in (("fast", "qpxd"), ("slow", "qpxd")):
+    record = records[key]
+    metric_spread = nested_number(record, "sample_spread", "requests_per_total_cpu_second_ratio")
+    if metric_spread > metric_spread_cap + 1e-12:
+        failures.append(
+            f"streaming {key} requests_per_total_cpu_second_ratio sample spread "
+            f"{metric_spread:.6f} > stability cap {metric_spread_cap:.6f}: "
+            f"the measurement is unjudgeable"
+        )
+
 for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)
     # The time and CPU-rate objectives use the bounded lane band; the tail

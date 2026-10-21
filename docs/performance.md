@@ -476,12 +476,19 @@ leader. A distant unstable implementation remains visible in the artifact but
 cannot invalidate an otherwise stable competitive comparison. qpx's own CPU-rate
 sample spread must stay within the tracked stability cap: a wider spread makes
 that metric unjudgeable rather than merely noisy, and the run fails as invalid.
-The p99 gap and scheduler queue-delay spreads are judged against the range the
-lane published for them beside their spread. Their objectives are ratios
-against a reference, so the movement only makes the measurement unjudgeable
-when it can change the verdict, which is when the worst end of the objective -
-qpx's largest observed value against the reference's smallest - misses the
-objective. While that end still meets the objective, the movement cannot
+Its objective is a ratio against the leader like the tail objectives', but the
+lane publishes no observed range for the CPU rate, so the cap stays the
+stricter policy for that metric.
+
+The p99 gap and scheduler queue-delay spreads are judged against the observed
+range the lane publishes for them beside their spread: the `sample_extremes`
+field of the record, which the record schema version 7 introduced. Their
+objectives are ratios against a reference, so the movement only makes the
+measurement unjudgeable when it can change the verdict. The worst end of the
+objective - qpx's largest observed value against the reference's smallest - is
+compared with the objective's decisive bar, the objective times the band of
+that metric. While the worst end stays inside the decisive bar, no observed
+end of the metric could have produced a failure, so the movement cannot
 excuse a miss and the run stays judgeable.
 
 `scripts/check-streaming-performance.sh` enforces the tracked objectives in

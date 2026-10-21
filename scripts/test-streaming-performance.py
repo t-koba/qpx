@@ -656,11 +656,27 @@ class StreamingGateTest(unittest.TestCase):
         self.assertIn("decisive", result.stderr)
 
     def test_unstable_tail_measurement_is_invalid(self):
+        """A worst end that reaches the decisive bar makes the run invalid."""
         result = self.run_gate(
-            lane(FAST_LANE, qpxd={"sample_spread": {"p99_chunk_gap_ms_ratio": 3.5}})
+            lane(FAST_LANE, qpxd={"sample_spread": {"p99_chunk_gap_ms_ratio": 5.0}})
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("p99_chunk_gap_ms_ratio sample spread", result.stderr)
+
+    def test_an_unstable_tail_measurement_that_only_reaches_a_marginal_stays_valid(self):
+        """A worst end inside the decisive bar cannot turn the verdict into a
+        failure, so the measurement stays judgeable.
+
+        The slow p99 gap moves three-fold, so its worst end is 2.07 against an
+        objective of 1.5, but the decisive bar of that objective is 2.25: no
+        observed end of the metric could have produced a failure, so the run
+        is not invalid.
+        """
+        result = self.run_gate(
+            slow=lane(SLOW_LANE, qpxd={"sample_spread": {"p99_chunk_gap_ms_ratio": 3.2}})
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("unjudgeable", result.stderr)
 
     def test_an_unstable_tail_measurement_that_cannot_miss_stays_valid(self):
         """An unstable metric whose worst end still meets the objective is
