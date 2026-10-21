@@ -20,6 +20,8 @@ jobs:
         run: bash ./scripts/check-ci-acceptance-gates.sh
       - name: CI runner-minute fixture checks
         run: python3 ./scripts/test-ci-runner-minutes.py
+      - name: streaming pairing fixture checks
+        run: python3 ./scripts/test-streaming-pair.py
       - name: structure checks
         run: cargo xtask structure
       - name: loc budget checks

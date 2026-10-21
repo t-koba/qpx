@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$ROOT_DIR/scripts/lib/temp-dir.sh"
+source "$ROOT_DIR/scripts/lib/streaming_pair.sh"
 OUT_JSON="${1:-${QPX_STREAMING_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-streaming-compare.jsonl}}"
 LOG_ARTIFACT_DIR="${QPX_STREAMING_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/streaming-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
@@ -425,6 +426,7 @@ run_one() {
   local port="$2"
   local resource_pid="$3"
   local read_mode="$4"
+  local sample_round="$5"
   local delay_ms="0"
   local cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
   local backend_cpu_ms total_cpu_ms metrics commit
@@ -440,7 +442,11 @@ run_one() {
   if [ "$read_mode" = "slow" ]; then
     delay_ms="$SLOW_READ_DELAY_MS"
   fi
-  local artifact="streaming.${proxy}.${read_mode}.round-${CURRENT_SAMPLE_ROUND:-0}"
+  if ! [[ "$sample_round" =~ ^[1-9][0-9]*$ ]]; then
+    echo "invalid sample round: ${sample_round}" >&2
+    exit 1
+  fi
+  local artifact="streaming.${proxy}.${read_mode}.round-${sample_round}"
   samples_file="$TMP_DIR/${artifact}.valid-samples.jsonl"
   : >"$samples_file"
   attempt=1
@@ -677,25 +683,9 @@ print(json.dumps(records[len(records) // 2], sort_keys=True, separators=(",", ":
 PY
 )"
   commit="${GITHUB_SHA:-unknown}"
-  python3 - "$OUT_JSON" "$selected_sample" "$STREAM_BYTES" "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit" "${CURRENT_SAMPLE_ROUND:-0}" <<'PY'
-import json
-import sys
-
-out, sample, stream_bytes, chunk_bytes, attempts, valid_samples, commit, sample_round = sys.argv[1:9]
-record = json.loads(sample)
-record.update({
-    "bench": "proxy_compare_http1_streaming_reverse",
-    "stream_bytes": int(stream_bytes),
-    "chunk_bytes": int(chunk_bytes),
-    "sample_attempts": int(attempts),
-    "valid_samples": int(valid_samples),
-    "aggregation": "single_sample",
-    "sample_round": int(sample_round),
-    "commit": commit,
-})
-with open(out, "a", encoding="utf-8") as handle:
-    handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
-PY
+  python3 "$ROOT_DIR/scripts/lib/streaming_records.py" "$OUT_JSON" "$selected_sample" \
+    "$STREAM_BYTES" "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit" \
+    "$sample_round"
 }
 
 require_cmd curl
@@ -770,33 +760,16 @@ SAMPLE_ATTEMPTS=1
 MIN_VALID_SAMPLES=1
 : >"$OUT_JSON"
 
-# The current build and the reference build are measured next to each other in
-# the same round, and the order inside the pair alternates between rounds, so
-# that neither build can gain from a fixed position in the round.
-run_qpxd_pair() {
-  local read_mode="$1"
-  if [ "$PREVIOUS_REFERENCE_AVAILABLE" != "true" ]; then
-    run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode"
-    return
-  fi
-  if [ $(( ${CURRENT_SAMPLE_ROUND:-0} % 2 )) -eq 1 ]; then
-    run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode"
-    run_one "qpxd-previous" "$PREVIOUS_PORT" "$PREVIOUS_QPXD_PID" "$read_mode"
-  else
-    run_one "qpxd-previous" "$PREVIOUS_PORT" "$PREVIOUS_QPXD_PID" "$read_mode"
-    run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode"
-  fi
-}
-
 run_streaming_proxy_by_index() {
   local index="$1"
   local read_mode="$2"
+  local round="${CURRENT_SAMPLE_ROUND:-0}"
   case "$index" in
-    0) run_one "direct-backend" "$BACKEND_PORT" "$BACKEND_PID" "$read_mode" ;;
+    0) run_one "direct-backend" "$BACKEND_PORT" "$BACKEND_PID" "$read_mode" "$round" ;;
     1) run_qpxd_pair "$read_mode" ;;
-    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$read_mode" ;;
-    3) run_one "apache" "$APACHE_PORT" "$APACHE_PID" "$read_mode" ;;
-    4) run_one "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$read_mode" ;;
+    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$read_mode" "$round" ;;
+    3) run_one "apache" "$APACHE_PORT" "$APACHE_PID" "$read_mode" "$round" ;;
+    4) run_one "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$read_mode" "$round" ;;
     *) echo "invalid streaming benchmark index: ${index}" >&2; exit 1 ;;
   esac
 }

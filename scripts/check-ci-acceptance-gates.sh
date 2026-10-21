@@ -462,6 +462,7 @@ require .github/workflows/ci.yml 'python3 ./scripts/ci-runner-minutes.py collect
 require .github/workflows/ci.yml 'python3 ./scripts/ci-runner-minutes.py report'
 require .github/workflows/ci.yml 'actions: read'
 require .github/workflows/structure.yml 'python3 ./scripts/test-ci-runner-minutes.py'
+require .github/workflows/structure.yml 'python3 ./scripts/test-streaming-pair.py'
 require .github/workflows/ci.yml 'checkout pinned previous release'
 require .github/workflows/ci.yml 'd67a148e7ccbbd272750415213601005af0f38c5'
 require .github/workflows/ci.yml 'python3 scripts/perf-audit-policy.py run proxy'
@@ -672,7 +673,7 @@ require_json_number_at_least perf/http2-performance-objectives.json defaults.min
 require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_total_rss_peak_ratio 1.0
 require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_total_fd_peak_ratio 1.0
 require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_scheduler_queue_delay_ratio 1.0
-require scripts/perf-audit-streaming-compare.sh '"proxy_compare_http1_streaming_reverse"'
+require scripts/lib/streaming_records.py '"proxy_compare_http1_streaming_reverse"'
 require scripts/perf-audit-streaming-compare.sh 'STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"'
 require scripts/perf-audit-streaming-compare.sh 'FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"'
 require scripts/perf-audit-streaming-compare.sh 'SAMPLE_ATTEMPTS="${QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS:-3}"'
@@ -696,6 +697,11 @@ require scripts/perf-audit-streaming-compare.sh 'total_fd_growth'
 require scripts/perf-audit-streaming-compare.sh '"resource_measurement": "sampled_workload_peak_v1"'
 require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_transfer'
 require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_transfer_ratio'
+require scripts/perf-audit-streaming-compare.sh 'source "$ROOT_DIR/scripts/lib/streaming_pair.sh"'
+require scripts/perf-audit-streaming-compare.sh 'scripts/lib/streaming_records.py'
+require scripts/perf-audit-streaming-compare.sh 'QPX_PREVIOUS_BIN'
+require scripts/lib/streaming_pair.py '"qpxd-previous"'
+require scripts/lib/streaming_records.py '"sample_round"'
 require scripts/check-streaming-performance.sh 'scheduler_queue_delay_us_per_transfer_ratio'
 require scripts/check-streaming-performance.sh 'max_qpx_metric_sample_spread_ratio'
 require scripts/check-streaming-performance.sh 'growth != peak - baseline'
