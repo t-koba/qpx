@@ -1,5 +1,6 @@
 use hyper_util::rt::TokioIo;
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::{header_values_contain_token, is_http_token};
 use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;
@@ -77,30 +78,6 @@ fn parse_websocket_subprotocol_offers(headers: &http::HeaderMap) -> anyhow::Resu
         }
     }
     Ok(protocols)
-}
-
-fn is_http_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 pub(crate) fn websocket_response_expectation(
@@ -227,19 +204,6 @@ pub(crate) fn validate_websocket_switching_response(
         }
     }
     Ok(())
-}
-
-fn header_values_contain_token(
-    headers: &http::HeaderMap,
-    name: http::header::HeaderName,
-    token: &str,
-) -> bool {
-    headers
-        .get_all(name)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|raw| raw.split(','))
-        .any(|part| part.trim().eq_ignore_ascii_case(token))
 }
 
 pub(crate) fn spawn_upgrade_tunnel<F, I, E>(

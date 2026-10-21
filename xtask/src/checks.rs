@@ -778,7 +778,7 @@ pub(crate) fn check_dispatch_dependency_direction(root: &Path) -> Result<()> {
         );
     }
     let acceptance = fs::read_to_string(root.join("scripts/check-ci-acceptance-gates.sh"))?;
-    for needle in "fn policy_id(&self) -> Option<&str>;fn policy_tags(&self) -> &[String];build_dispatch_audit_context;apply_decision_service_http_access;apply_dispatch_response_policy;dispatch_cache_collapse_continue;finalize_dispatch_collapsed_cache_decision;check_dispatch_limit_response_commonality;check_dispatch_annotated_local_response_commonality;check_response_capture_after_finalize;check_proxy_authorization_header_boundary;check_reverse_response_rules_dispatch_boundary;check_h3_origin_pool_load_semantics;check_qpxf_cgi_header_parser_zero_copy;check_qpx_h3_static_response_boundary;check_rpc_frame_boundary_tests;finalize_response_headers_common;finalize_response_with_headers_in_place;set_proxy_authorization_header;trait HeaderTransform;trait ResponseTransform;MIRROR_MAX_INFLIGHT_PER_ENDPOINT;collect_decision_service_response_body;request_side_fail_closed;send_prefixed_datagram;validate_secure_file_handle".split(';') {
+    for needle in "fn policy_id(&self) -> Option<&str>;fn policy_tags(&self) -> &[String];build_dispatch_audit_context;apply_decision_service_http_access;apply_dispatch_response_policy;dispatch_cache_collapse_continue;finalize_dispatch_collapsed_cache_decision;check_dispatch_limit_response_commonality;check_http_token_vocabulary_single_owner;check_dispatch_annotated_local_response_commonality;check_response_capture_after_finalize;check_proxy_authorization_header_boundary;check_reverse_response_rules_dispatch_boundary;check_h3_origin_pool_load_semantics;check_qpxf_cgi_header_parser_zero_copy;check_qpx_h3_static_response_boundary;check_rpc_frame_boundary_tests;finalize_response_headers_common;finalize_response_with_headers_in_place;set_proxy_authorization_header;trait HeaderTransform;trait ResponseTransform;MIRROR_MAX_INFLIGHT_PER_ENDPOINT;collect_decision_service_response_body;request_side_fail_closed;send_prefixed_datagram;validate_secure_file_handle".split(';') {
         if !acceptance.contains(needle) {
             bail!("CI acceptance gate is missing required check: {needle}");
         }
@@ -816,6 +816,7 @@ pub(crate) fn check_architecture_baselines(root: &Path) -> Result<()> {
     check_qpx_h3_static_response_boundary(root)?;
     check_dispatch_cache_collapse_commonality(root)?;
     check_dispatch_limit_response_commonality(root)?;
+    check_http_token_vocabulary_single_owner(root)?;
     check_http_response_body_hard_cap(root)?;
     check_dispatch_annotated_local_response_commonality(root)?;
     check_dispatch_max_forwards_response_commonality(root)?;
@@ -1126,6 +1127,46 @@ fn dispatch_limit_response_commonality_violations(content: &str) -> Vec<&'static
         "too_many_requests_response(",
         "DispatchOutcome::RateLimited",
         "DispatchOutcome::ConcurrencyLimited",
+    ] {
+        if content.contains(forbidden) {
+            violations.push(forbidden);
+        }
+    }
+    violations
+}
+
+/// The HTTP token grammar and the comma-separated header token search have
+/// one owner: `qpx-http`. A second copy in `qpxd` would let the two drift
+/// apart, and the Forwarded element names, the WebSocket subprotocol names
+/// and the Connection tokens would then disagree about what a token is.
+fn check_http_token_vocabulary_single_owner(root: &Path) -> Result<()> {
+    let mut violations = Vec::new();
+    for path in rust_files_under(&root.join("qpxd/src"))? {
+        let rel_path = rel_path(root, &path);
+        let content = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        violations.extend(
+            http_token_vocabulary_violations(&content)
+                .into_iter()
+                .map(|violation| format!("{rel_path}: {violation}")),
+        );
+    }
+    if !violations.is_empty() {
+        bail!(
+            "HTTP token vocabulary must have one owner:\n{}",
+            violations.join("\n")
+        );
+    }
+    Ok(())
+}
+
+fn http_token_vocabulary_violations(content: &str) -> Vec<&'static str> {
+    let mut violations = Vec::new();
+    for forbidden in [
+        "fn is_http_token(",
+        "fn is_forwarded_token(",
+        "fn has_connection_token(",
+        "fn header_values_contain_token(",
     ] {
         if content.contains(forbidden) {
             violations.push(forbidden);
@@ -3901,6 +3942,36 @@ fn path_is_anyhow_name(path: &syn::Path, name: &str, imports_anyhow_name: bool) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn http_token_vocabulary_violations_flag_a_local_definition() {
+        assert_eq!(
+            http_token_vocabulary_violations("fn is_http_token(value: &str) -> bool {"),
+            vec!["fn is_http_token("]
+        );
+        assert_eq!(
+            http_token_vocabulary_violations(
+                "fn has_connection_token(headers: &HeaderMap) -> bool {"
+            ),
+            vec!["fn has_connection_token("]
+        );
+    }
+
+    #[test]
+    fn http_token_vocabulary_violations_accept_the_shared_owner() {
+        assert!(
+            http_token_vocabulary_violations(
+                "use qpx_http::protocol::semantics::{header_values_contain_token, is_http_token};"
+            )
+            .is_empty()
+        );
+        assert!(
+            http_token_vocabulary_violations(
+                "let upgrade = qpx_http::protocol::semantics::header_values_contain_token(headers, CONNECTION, \"upgrade\");"
+            )
+            .is_empty()
+        );
+    }
 
     const TEST_HELPERS: &[&str] = &["spawn_qpxd", "wait_for_qpxd"];
 

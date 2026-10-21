@@ -1,5 +1,5 @@
 use crate::http::codec::h1_common::{
-    MAX_HEADER_BYTES, has_connection_token, has_only_chunked_transfer_encoding, parse_header_map,
+    MAX_HEADER_BYTES, has_only_chunked_transfer_encoding, parse_header_map,
     parse_header_map_recycled, parse_version, request_keep_alive,
 };
 use crate::http::codec::h1_request_body::{
@@ -560,7 +560,12 @@ pub(crate) fn fuzz_parse_http1_request_head(bytes: &[u8]) {
 }
 
 fn request_has_upgrade(headers: &HeaderMap) -> bool {
-    headers.contains_key(hyper::header::UPGRADE) && has_connection_token(headers, "upgrade")
+    headers.contains_key(hyper::header::UPGRADE)
+        && qpx_http::protocol::semantics::header_values_contain_token(
+            headers,
+            hyper::header::CONNECTION,
+            "upgrade",
+        )
 }
 
 fn expect_continue(headers: &HeaderMap) -> bool {

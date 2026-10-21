@@ -45,9 +45,9 @@ qpxd/src/http/dispatch/connect_policy.rs	59	r
 qpxd/src/http/dispatch/prepare.rs	120	r
 qpxd/src/http/dispatch/response_policy.rs	145	r
 qpxd/src/http/dispatch/websocket.rs	68	r
-qpxd/src/http/codec/h1.rs	371	r
+qpxd/src/http/codec/h1.rs	587	r
 qpxd/src/http/codec/h1_request_body.rs	256	r
-qpxd/src/http/codec/h1_common.rs	69	r
+qpxd/src/http/codec/h1_common.rs	205	r
 qpxd/src/reverse/h3/passthrough.rs	554	r
 qpxd/src/reverse/h3/passthrough/index/shared.rs	461	r
 qpxd/src/reverse/h3/terminate_qpx.rs	433	r
@@ -104,3 +104,8 @@ qpxd/src/http3/listener.rs	509	r
 qpx-h3/src/qpack/mod.rs	45	r
 qpx-h3/src/response.rs	144	r
 qpx-h3/src/qpack_fields.rs	130	r
+qpx-http/src/protocol/semantics.rs	738	r
+qpx-http/src/protocol/semantics/tests.rs	797	r
+qpxd/src/http/protocol/forwarded.rs	173	r
+qpxd/src/http/protocol/websocket.rs	244	r
+qpxd/src/upstream/raw_http1/io.rs	205	r

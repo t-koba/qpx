@@ -160,7 +160,7 @@ fn push_forwarded_node(output: &mut String, ip: IpAddr) {
 }
 
 fn push_forwarded_value(output: &mut String, value: &str) {
-    if is_forwarded_token(value) {
+    if qpx_http::protocol::semantics::is_http_token(value) {
         output.push_str(value);
         return;
     }
@@ -172,30 +172,6 @@ fn push_forwarded_value(output: &mut String, value: &str) {
         output.push(character);
     }
     output.push('"');
-}
-
-fn is_forwarded_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 fn format_forwarded_node(ip: IpAddr) -> String {

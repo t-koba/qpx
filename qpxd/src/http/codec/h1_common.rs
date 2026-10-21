@@ -13,18 +13,15 @@ pub(crate) const MAX_HEADER_BYTES: usize = 128 * 1024;
 
 pub(crate) fn request_keep_alive(version: Version, headers: &HeaderMap) -> bool {
     match version {
-        Version::HTTP_10 => has_connection_token(headers, "keep-alive"),
-        _ => !has_connection_token(headers, "close"),
+        Version::HTTP_10 => qpx_http::protocol::semantics::header_values_contain_token(
+            headers,
+            CONNECTION,
+            "keep-alive",
+        ),
+        _ => !qpx_http::protocol::semantics::header_values_contain_token(
+            headers, CONNECTION, "close",
+        ),
     }
-}
-
-pub(crate) fn has_connection_token(headers: &HeaderMap, token: &str) -> bool {
-    headers
-        .get_all(CONNECTION)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|raw| raw.split(','))
-        .any(|part| part.trim().eq_ignore_ascii_case(token))
 }
 
 pub(crate) fn raw_has_connection_token(headers: &[httparse::Header<'_>], expected: &[u8]) -> bool {

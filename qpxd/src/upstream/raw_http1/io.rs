@@ -1,9 +1,9 @@
 #[cfg(test)]
 use super::MAX_HEADER_BYTES;
 use super::{UpstreamConnectionClosed, parse_declared_content_length, response::ResponseBodyKind};
+use crate::http::codec::h1_common::has_only_chunked_transfer_encoding;
 #[cfg(test)]
 use crate::http::codec::h1_common::{find_crlf, parse_header_map};
-use crate::http::codec::h1_common::{has_connection_token, has_only_chunked_transfer_encoding};
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use anyhow::{Result, anyhow};
 #[cfg(test)]
@@ -11,6 +11,7 @@ use bytes::Buf;
 use bytes::BytesMut;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode, Version};
+use qpx_http::protocol::semantics::header_values_contain_token;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Duration;
 
@@ -214,7 +215,9 @@ pub(super) fn response_body_allows_reuse(kind: ResponseBodyKind) -> bool {
 
 pub(super) fn response_keep_alive(version: Version, headers: &HeaderMap) -> bool {
     match version {
-        Version::HTTP_10 => has_connection_token(headers, "keep-alive"),
-        _ => !has_connection_token(headers, "close"),
+        Version::HTTP_10 => {
+            header_values_contain_token(headers, http::header::CONNECTION, "keep-alive")
+        }
+        _ => !header_values_contain_token(headers, http::header::CONNECTION, "close"),
     }
 }

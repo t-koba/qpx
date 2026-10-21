@@ -599,6 +599,48 @@ pub fn sanitize_interim_response_headers(headers: &mut HeaderMap) {
     strip_message_body_headers(headers);
 }
 
+/// Whether the value is an RFC 9110 token.
+///
+/// The token grammar is the shared vocabulary of the header syntax: the
+/// Forwarded header's element names, the WebSocket subprotocol names and
+/// every other comma-separated header token are spelled with it.
+pub fn is_http_token(value: &str) -> bool {
+    !value.is_empty()
+        && value.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric()
+                || matches!(
+                    byte,
+                    b'!' | b'#'
+                        | b'$'
+                        | b'%'
+                        | b'&'
+                        | b'\''
+                        | b'*'
+                        | b'+'
+                        | b'-'
+                        | b'.'
+                        | b'^'
+                        | b'_'
+                        | b'`'
+                        | b'|'
+                        | b'~'
+                )
+        })
+}
+
+/// Whether any value of the named header carries the comma-separated token.
+///
+/// The comparison ignores the whitespace around each member and the case of
+/// the token, as the comma-separated header token syntax requires.
+pub fn header_values_contain_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
+    headers
+        .get_all(name)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|raw| raw.split(','))
+        .any(|part| part.trim().eq_ignore_ascii_case(token))
+}
+
 pub fn is_hop_by_hop_header_name(name: &str) -> bool {
     matches!(
         name,
