@@ -396,6 +396,29 @@ fn decision_service_content_length_is_rejected_before_body_read() {
     assert!(err.to_string().contains("exceeds hard cap"));
 }
 
+#[test]
+fn decision_service_reads_the_declared_length_through_the_owner() {
+    // A comma list of equal members is one length, so a response that
+    // declares a length over the cap is refused before its body is read.
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        http::header::CONTENT_LENGTH,
+        "65, 65".parse().expect("header"),
+    );
+
+    let err = validate_decision_service_content_length(&headers, 64)
+        .expect_err("content-length above cap should fail");
+    assert!(err.to_string().contains("exceeds hard cap"));
+
+    // A declaration the owner refuses names no length, so the body is read
+    // under the cap instead; the cap holds either way.
+    let mut headers = HeaderMap::new();
+    headers.insert(http::header::CONTENT_LENGTH, "+65".parse().expect("header"));
+
+    validate_decision_service_content_length(&headers, 64)
+        .expect("a declaration that names no length is not over the cap");
+}
+
 #[tokio::test]
 async fn decision_service_response_bounded_collect_enforces_cap() {
     let err = parse_decision_service_response_body(Body::from(r#"{"decision":"allow"}"#), 8)

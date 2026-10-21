@@ -13,6 +13,7 @@ use qpx_core::config::{
     DecisionServiceMappingTargetDocument, HeaderControl, LocalResponseConfig,
     OAuth2ClientAuthMethod, UpstreamTlsTrustConfig,
 };
+use qpx_core::http_content_length::declared_content_length;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
@@ -1447,16 +1448,10 @@ fn unescape_json_pointer_token(token: &str) -> Result<String> {
 }
 
 fn validate_decision_service_content_length(headers: &HeaderMap, max_bytes: usize) -> Result<()> {
-    let Some(value) = headers.get(http::header::CONTENT_LENGTH) else {
+    let Some(len) = declared_content_length(headers).ok().flatten() else {
         return Ok(());
     };
-    let len = value
-        .to_str()
-        .ok()
-        .and_then(|value| value.parse::<usize>().ok());
-    if let Some(len) = len
-        && len > max_bytes
-    {
+    if len > max_bytes as u64 {
         return Err(anyhow!(
             "decision_service response body exceeds hard cap of {} bytes",
             max_bytes

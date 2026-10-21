@@ -121,6 +121,14 @@ pub enum ContentLengthError {
 /// response is cut to the limit rather than refused; the body is limited
 /// either way.
 ///
+/// The decision service reads the declaration through the owner as well:
+/// `qpxd/src/policy_context/decision_service/mod.rs` hands the header map
+/// to it, so the length that says whether the response is over the hard cap
+/// is the length the field declares. A comma list of equal members is one
+/// length there now, so such a response is refused before its body is read,
+/// and a declaration the owner refuses names no length, so the body is read
+/// under the cap instead; the cap holds either way.
+///
 /// The HTTP/3 path reads the declaration through the owner as well:
 /// `qpx-h3/src/response.rs` hands the header map to it, so the HTTP/3 server
 /// and client frame a body from the same length the HTTP/1 and HTTP/2 paths
@@ -167,9 +175,7 @@ pub enum ContentLengthError {
 /// Those sites are named here as well, so that the record of the sites that
 /// read the declaration is complete:
 /// `qpxd/src/http/modules/response_compression.rs`
-/// reads the declared length to decide whether the body is compressed, and
-/// `qpxd/src/policy_context/decision_service/mod.rs` parses it to enforce a
-/// hard cap.
+/// reads the declared length to decide whether the body is compressed.
 ///
 /// The access log reads the declaration through the owner as well:
 /// `qpxd/src/reverse/listener/raw_http1.rs` hands the header map to it, so
