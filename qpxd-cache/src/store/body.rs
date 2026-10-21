@@ -11,7 +11,7 @@ pub(super) fn expected_body_length(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Result<Option<u64>> {
-    let declared = qpx_http::protocol::semantics::declared_content_length(headers)
+    let declared = qpx_core::http_content_length::declared_content_length(headers)
         .map_err(|err| anyhow!("cache response Content-Length: {err}"))?;
     // Match qpx_http's no-body response normalization. HEAD's length describes
     // the corresponding GET representation, not bytes in this stream.

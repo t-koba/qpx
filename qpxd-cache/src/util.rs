@@ -35,7 +35,7 @@ pub fn cacheable_content_length(headers: &http::HeaderMap) -> Option<u64> {
     if headers.contains_key(TRANSFER_ENCODING) {
         return None;
     }
-    qpx_http::protocol::semantics::declared_content_length(headers)
+    qpx_core::http_content_length::declared_content_length(headers)
         .ok()
         .flatten()
 }

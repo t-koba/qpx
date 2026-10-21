@@ -608,7 +608,7 @@ fn http_headers_into_h1(src: http::HeaderMap) -> ::http::HeaderMap {
 }
 
 pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
-    qpx_http::protocol::semantics::declared_content_length(headers).map_err(anyhow::Error::new)
+    qpx_core::http_content_length::declared_content_length(headers).map_err(anyhow::Error::new)
 }
 
 #[derive(Debug, thiserror::Error)]

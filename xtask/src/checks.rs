@@ -1212,7 +1212,7 @@ fn check_http_token_vocabulary_single_owner(root: &Path) -> Result<()> {
 }
 
 /// The owner of a header set's declared Content-Length.
-const CONTENT_LENGTH_OWNER: &str = "qpx-http/src/protocol/semantics.rs";
+const CONTENT_LENGTH_OWNER: &str = "qpx-core/src/http_content_length.rs";
 
 /// The names the workspace has used for a function that reads a header set's
 /// declared Content-Length.

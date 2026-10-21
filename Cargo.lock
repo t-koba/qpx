@@ -2760,6 +2760,7 @@ dependencies = [
  "http",
  "httpdate",
  "metrics",
+ "qpx-core",
  "qpx-http",
  "quinn",
  "rcgen",

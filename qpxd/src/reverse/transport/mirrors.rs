@@ -123,7 +123,7 @@ pub(super) fn request_is_templateable(req: &Request<Body>, max_body_bytes: usize
     if req.headers().contains_key(TRANSFER_ENCODING) {
         return false;
     }
-    match qpx_http::protocol::semantics::declared_content_length(req.headers()) {
+    match qpx_core::http_content_length::declared_content_length(req.headers()) {
         Ok(Some(length)) => usize::try_from(length).is_ok_and(|length| length <= max_body_bytes),
         // HTTP/1.1 without Content-Length/Transfer-Encoding cannot have a body.
         Ok(None) => req.version() == http::Version::HTTP_11,

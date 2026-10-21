@@ -324,7 +324,7 @@ fn parse_content_length(headers: &[httparse::Header<'_>]) -> Result<Option<u64>>
             .map_err(|_| anyhow!("invalid content-length header"))?;
         values.push(raw);
     }
-    qpx_http::protocol::semantics::declared_content_length_in_values(values)
+    qpx_core::http_content_length::declared_content_length_in_values(values)
         .map_err(anyhow::Error::new)
 }
 

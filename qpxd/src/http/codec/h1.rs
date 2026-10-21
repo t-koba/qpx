@@ -598,7 +598,7 @@ fn has_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
 }
 
 fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
-    qpx_http::protocol::semantics::declared_content_length(headers).map_err(anyhow::Error::new)
+    qpx_core::http_content_length::declared_content_length(headers).map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]

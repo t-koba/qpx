@@ -65,7 +65,7 @@ pub(crate) fn sanitize_streaming_response_head_for_h3(
 /// refused. A leading plus sign is not field syntax, so it is refused here
 /// too.
 pub(crate) fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
-    qpx_http::protocol::semantics::declared_content_length(headers)
+    qpx_core::http_content_length::declared_content_length(headers)
         .map_err(|err| anyhow!("invalid Content-Length: {err}").into())
 }
 

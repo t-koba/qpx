@@ -939,17 +939,17 @@ fn request_has_body_or_expect(headers: &[httparse::Header<'_>]) -> bool {
 /// not a digit sequence is refused here as it is everywhere else.
 fn raw_declared_content_length(
     headers: &[httparse::Header<'_>],
-) -> Result<Option<u64>, qpx_http::protocol::semantics::ContentLengthError> {
+) -> Result<Option<u64>, qpx_core::http_content_length::ContentLengthError> {
     let mut values = Vec::new();
     for header in headers {
         if !header.name.eq_ignore_ascii_case("content-length") {
             continue;
         }
         let raw = std::str::from_utf8(header.value)
-            .map_err(|_| qpx_http::protocol::semantics::ContentLengthError::InvalidHeader)?;
+            .map_err(|_| qpx_core::http_content_length::ContentLengthError::InvalidHeader)?;
         values.push(raw);
     }
-    qpx_http::protocol::semantics::declared_content_length_in_values(values)
+    qpx_core::http_content_length::declared_content_length_in_values(values)
 }
 
 fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {

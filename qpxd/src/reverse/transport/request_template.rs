@@ -329,7 +329,7 @@ pub(super) fn request_may_have_body(req: &Request<Body>) -> bool {
     if req.headers().contains_key(TRANSFER_ENCODING) {
         return true;
     }
-    match qpx_http::protocol::semantics::declared_content_length(req.headers()) {
+    match qpx_core::http_content_length::declared_content_length(req.headers()) {
         Ok(Some(length)) => length > 0,
         Ok(None) => false,
         // A declaration the grammar does not have names no length, so the
@@ -342,7 +342,7 @@ fn content_length(req: &Request<Body>) -> Option<u64> {
     if req.headers().contains_key(TRANSFER_ENCODING) {
         return None;
     }
-    qpx_http::protocol::semantics::declared_content_length(req.headers())
+    qpx_core::http_content_length::declared_content_length(req.headers())
         .ok()
         .flatten()
 }

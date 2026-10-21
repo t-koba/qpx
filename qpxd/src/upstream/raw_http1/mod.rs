@@ -501,5 +501,5 @@ where
 /// value that is not text, a member that is not a digit sequence and two
 /// members that declare different lengths are the three failures it is.
 fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
-    qpx_http::protocol::semantics::declared_content_length(headers).map_err(anyhow::Error::new)
+    qpx_core::http_content_length::declared_content_length(headers).map_err(anyhow::Error::new)
 }

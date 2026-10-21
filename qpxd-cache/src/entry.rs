@@ -330,7 +330,7 @@ fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
         .map(|(_, value)| value.as_str());
-    qpx_http::protocol::semantics::declared_content_length_in_values(values)
+    qpx_core::http_content_length::declared_content_length_in_values(values)
         .ok()
         .flatten()
 }

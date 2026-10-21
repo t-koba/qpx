@@ -494,7 +494,7 @@ async fn handle_stream<H: H3RequestHandler>(
 mod tests;
 
 fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u64>, String> {
-    qpx_http::protocol::semantics::declared_content_length(headers).map_err(|err| err.to_string())
+    qpx_core::http_content_length::declared_content_length(headers).map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Clone, Copy)]
