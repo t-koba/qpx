@@ -58,7 +58,7 @@ pub(crate) fn sanitize_streaming_response_head_for_h3(
 
 /// The Content-Length that a header set declares.
 ///
-/// The declared Content-Length has one owner, in `qpx-http`, so the HTTP/3
+/// The declared Content-Length has one owner, in `qpx-core`, so the HTTP/3
 /// path reads the field with the same member grammar and the same conflict
 /// rule as the HTTP/1 and HTTP/2 paths: every member of every value declares
 /// the same length, and a member that is not a `1*DIGIT` sequence is
