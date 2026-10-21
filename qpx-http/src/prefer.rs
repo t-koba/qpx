@@ -1,6 +1,7 @@
 //! RFC 7240 Prefer and Preference-Applied field codec.
 
 use http::HeaderValue;
+use qpx_core::http_token::is_http_token;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -65,7 +66,7 @@ pub fn serialize_preference_applied(
     }
     let mut members = Vec::with_capacity(preferences.len());
     for preference in preferences {
-        if !is_token(&preference.token) || !preference.parameters.is_empty() {
+        if !is_http_token(&preference.token) || !preference.parameters.is_empty() {
             return Err(PreferError::InvalidPreference);
         }
         let mut member = preference.token.to_ascii_lowercase();
@@ -83,7 +84,7 @@ fn parse_pair(value: &str) -> Result<(&str, Option<String>), PreferError> {
         Some((name, value)) => (name.trim(), Some(decode_value(value.trim())?)),
         None => (value.trim(), None),
     };
-    if !is_token(name) {
+    if !is_http_token(name) {
         return Err(PreferError::InvalidPreference);
     }
     Ok((name, value))
@@ -112,7 +113,7 @@ fn decode_value(value: &str) -> Result<String, PreferError> {
             return Err(PreferError::InvalidPreference);
         }
         Ok(output)
-    } else if is_token(value) {
+    } else if is_http_token(value) {
         Ok(value.to_string())
     } else {
         Err(PreferError::InvalidPreference)
@@ -120,7 +121,7 @@ fn decode_value(value: &str) -> Result<String, PreferError> {
 }
 
 fn encode_value(value: &str) -> String {
-    if is_token(value) {
+    if is_http_token(value) {
         value.to_string()
     } else {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
@@ -149,30 +150,6 @@ fn split_quoted(value: &str, separator: char) -> Result<Vec<&str>, PreferError> 
     }
     output.push(&value[start..]);
     Ok(output)
-}
-
-fn is_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 #[cfg(test)]

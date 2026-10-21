@@ -1,6 +1,7 @@
 //! RFC 6266 Content-Disposition field codec.
 
 use http::HeaderValue;
+use qpx_core::http_token::is_http_token;
 use std::collections::BTreeMap;
 use thiserror::Error;
 
@@ -35,7 +36,7 @@ impl ContentDisposition {
         let disposition = parts
             .first()
             .map(|value| value.trim().to_ascii_lowercase())
-            .filter(|value| is_token(value))
+            .filter(|value| is_http_token(value))
             .ok_or(ContentDispositionError::InvalidDisposition)?;
         let mut parameters = BTreeMap::new();
         for part in parts.iter().skip(1) {
@@ -43,7 +44,7 @@ impl ContentDisposition {
                 .split_once('=')
                 .ok_or(ContentDispositionError::InvalidParameter)?;
             let name = name.trim().to_ascii_lowercase();
-            if !is_token(&name) {
+            if !is_http_token(&name) {
                 return Err(ContentDispositionError::InvalidParameter);
             }
             let decoded = if name.ends_with('*') {
@@ -69,12 +70,12 @@ impl ContentDisposition {
     }
 
     pub fn to_header_value(&self) -> Result<HeaderValue, ContentDispositionError> {
-        if !is_token(&self.disposition) {
+        if !is_http_token(&self.disposition) {
             return Err(ContentDispositionError::InvalidDisposition);
         }
         let mut output = self.disposition.to_ascii_lowercase();
         for (name, value) in &self.parameters {
-            if !is_token(name) || name.ends_with('*') {
+            if !is_http_token(name) || name.ends_with('*') {
                 return Err(ContentDispositionError::InvalidParameter);
             }
             output.push_str("; ");
@@ -162,7 +163,7 @@ fn decode_value(value: &str) -> Result<String, ContentDispositionError> {
             return Err(ContentDispositionError::InvalidParameter);
         }
         Ok(output)
-    } else if is_token(value) {
+    } else if is_http_token(value) {
         Ok(value.to_string())
     } else {
         Err(ContentDispositionError::InvalidParameter)
@@ -191,30 +192,6 @@ fn split_quoted(value: &str, separator: char) -> Result<Vec<&str>, ContentDispos
     }
     parts.push(&value[start..]);
     Ok(parts)
-}
-
-fn is_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 #[cfg(test)]

@@ -455,7 +455,7 @@ fn strip_stale_digests(headers: &mut HeaderMap) {
 }
 
 fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
-    if qpx_core::http_token::header_values_contain_token(headers, VARY.clone(), token) {
+    if qpx_core::http_token::header_values_contain_token(headers, &VARY, token) {
         return Ok(());
     }
     let existing = headers

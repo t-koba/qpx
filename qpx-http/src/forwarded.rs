@@ -1,6 +1,7 @@
 //! RFC 7239 `Forwarded` field codec.
 
 use http::{HeaderMap, HeaderValue, header::HeaderName};
+use qpx_core::http_token::is_http_token;
 use std::collections::HashSet;
 use thiserror::Error;
 
@@ -69,7 +70,7 @@ pub fn parse_forwarded(headers: &HeaderMap) -> Result<Vec<ForwardedElement>, For
                     .split_once('=')
                     .ok_or(ForwardedError::MissingEquals)?;
                 let name = name.trim().to_ascii_lowercase();
-                if !is_token(&name) {
+                if !is_http_token(&name) {
                     return Err(ForwardedError::InvalidName(name));
                 }
                 let value = parse_value(raw_value.trim())?;
@@ -101,7 +102,7 @@ pub fn serialize_forwarded(elements: &[ForwardedElement]) -> Result<HeaderValue,
             }
             output.push_str(&name.to_ascii_lowercase());
             output.push('=');
-            if is_token(value) {
+            if is_http_token(value) {
                 output.push_str(value);
             } else {
                 output.push('"');
@@ -121,7 +122,7 @@ pub fn serialize_forwarded(elements: &[ForwardedElement]) -> Result<HeaderValue,
 fn validate_parameters(parameters: &[(String, String)]) -> Result<(), ForwardedError> {
     let mut names = HashSet::new();
     for (name, value) in parameters {
-        if !is_token(name) {
+        if !is_http_token(name) {
             return Err(ForwardedError::InvalidName(name.clone()));
         }
         let normalized = name.to_ascii_lowercase();
@@ -139,7 +140,7 @@ fn validate_parameters(parameters: &[(String, String)]) -> Result<(), ForwardedE
 }
 
 fn parse_value(raw: &str) -> Result<String, ForwardedError> {
-    if is_token(raw) {
+    if is_http_token(raw) {
         return Ok(raw.to_string());
     }
     let bytes = raw.as_bytes();
@@ -198,30 +199,6 @@ fn split_quoted(value: &str, separator: u8) -> Result<Vec<&str>, ForwardedError>
     }
     parts.push(&value[start..]);
     Ok(parts)
-}
-
-fn is_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 #[cfg(test)]

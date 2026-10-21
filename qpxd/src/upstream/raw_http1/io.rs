@@ -216,8 +216,8 @@ pub(super) fn response_body_allows_reuse(kind: ResponseBodyKind) -> bool {
 pub(super) fn response_keep_alive(version: Version, headers: &HeaderMap) -> bool {
     match version {
         Version::HTTP_10 => {
-            header_values_contain_token(headers, http::header::CONNECTION, "keep-alive")
+            header_values_contain_token(headers, &http::header::CONNECTION, "keep-alive")
         }
-        _ => !header_values_contain_token(headers, http::header::CONNECTION, "close"),
+        _ => !header_values_contain_token(headers, &http::header::CONNECTION, "close"),
     }
 }

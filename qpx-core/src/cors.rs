@@ -625,14 +625,10 @@ fn remove_cors_response_fields(headers: &mut HeaderMap) {
 }
 
 fn append_vary(headers: &mut HeaderMap, token: &'static str) {
-    let present = headers.get_all(VARY).iter().any(|value| {
-        value.to_str().is_ok_and(|value| {
-            value
-                .split(',')
-                .map(str::trim)
-                .any(|existing| existing == "*" || existing.eq_ignore_ascii_case(token))
-        })
-    });
+    // The wildcard member forbids reuse without revalidation, so it counts as
+    // present as well as the token itself.
+    let present = crate::http_token::header_values_contain_token(headers, &VARY, token)
+        || crate::http_token::header_value_members(headers, &VARY).any(|member| member == "*");
     if !present {
         headers.append(VARY, HeaderValue::from_static(token));
     }

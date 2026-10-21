@@ -1152,6 +1152,10 @@ fn dispatch_limit_response_commonality_violations(content: &str) -> Vec<&'static
 /// literal spelling, whose members are compared case-insensitively after
 /// trimming, within 240 bytes of the split.
 ///
+/// The other token vocabularies are not the owner's: the structured field
+/// token, the media type token and the HTTP method name each have their own
+/// rules.
+///
 /// What the text match cannot see is stated here rather than implied: a copy
 /// that renames the predicate and spells the character set differently, a
 /// copy that trims its members another way, and a copy whose comparison
@@ -1231,13 +1235,14 @@ fn workspace_member_crates(root: &Path) -> Result<Vec<String>> {
 
 /// The names the workspace has used for the token grammar and the header
 /// token search.
-const HTTP_TOKEN_VOCABULARY_NAMES: [&str; 6] = [
+const HTTP_TOKEN_VOCABULARY_NAMES: [&str; 7] = [
     "fn is_http_token(",
     "fn is_http_token_char(",
     "fn is_forwarded_token(",
     "fn has_connection_token(",
     "fn header_values_contain_token(",
     "fn is_token_char(",
+    "fn is_token(",
 ];
 
 fn http_token_vocabulary_violations(content: &str) -> Vec<&'static str> {
@@ -4051,6 +4056,10 @@ mod tests {
         assert_eq!(
             http_token_vocabulary_violations("fn is_http_token(value: &str) -> bool {"),
             vec!["fn is_http_token("]
+        );
+        assert_eq!(
+            http_token_vocabulary_violations("fn is_token(value: &str) -> bool {"),
+            vec!["fn is_token("]
         );
         assert_eq!(
             http_token_vocabulary_violations(

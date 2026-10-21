@@ -10,9 +10,9 @@ pub(crate) fn is_websocket_upgrade(
     method: &http::Method,
     headers: &http::HeaderMap,
 ) -> anyhow::Result<bool> {
-    let websocket = header_values_contain_token(headers, http::header::UPGRADE, "websocket");
+    let websocket = header_values_contain_token(headers, &http::header::UPGRADE, "websocket");
     let connection_upgrade =
-        header_values_contain_token(headers, http::header::CONNECTION, "upgrade");
+        header_values_contain_token(headers, &http::header::CONNECTION, "upgrade");
     if !websocket && !connection_upgrade {
         return Ok(false);
     }
@@ -172,8 +172,8 @@ pub(crate) fn validate_websocket_switching_response(
     if response.status() != http::StatusCode::SWITCHING_PROTOCOLS {
         return Ok(());
     }
-    if !header_values_contain_token(response.headers(), http::header::UPGRADE, "websocket")
-        || !header_values_contain_token(response.headers(), http::header::CONNECTION, "upgrade")
+    if !header_values_contain_token(response.headers(), &http::header::UPGRADE, "websocket")
+        || !header_values_contain_token(response.headers(), &http::header::CONNECTION, "upgrade")
     {
         return Err(anyhow::anyhow!(
             "WebSocket switching response is missing Upgrade fields"

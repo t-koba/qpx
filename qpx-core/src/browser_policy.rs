@@ -90,56 +90,17 @@ fn append_vary(headers: &mut HeaderMap, field: &'static str) {
     // Collect every Vary line before replacing: insert drops all but the
     // written line, so reading only the first line deletes later upstream
     // dimensions (including `*`, which forbids reuse without revalidation).
-    let mut tokens = Vec::new();
-    let mut present = false;
-    for value in headers
-        .get_all("vary")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-    {
-        for item in value.split(',') {
-            let item = item.trim();
-            if item.is_empty() {
-                continue;
-            }
-            if item.eq_ignore_ascii_case(field) {
-                present = true;
-            }
-            tokens.push(item.to_string());
-        }
-    }
+    let vary = HeaderName::from_static("vary");
+    let present = crate::http_token::header_values_contain_token(headers, &vary, field);
+    let mut tokens = crate::http_token::header_value_members(headers, &vary)
+        .filter(|member| !member.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
     if present {
         return;
     }
     tokens.push(field.to_string());
     insert_header(headers, "vary", tokens.join(", ").as_str());
-}
-
-fn is_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'0'..=b'9'
-                    | b'a'..=b'z'
-                    | b'A'..=b'Z'
-                    | b'!'
-                    | b'#'
-                    | b'$'
-                    | b'%'
-                    | b'&'
-                    | b'\''
-                    | b'*'
-                    | b'+'
-                    | b'-'
-                    | b'.'
-                    | b'^'
-                    | b'_'
-                    | b'`'
-                    | b'|'
-                    | b'~'
-            )
-        })
 }
 
 fn is_ascii_token(value: &str) -> bool {
@@ -940,7 +901,7 @@ impl CspValue {
         if is_csp_host_expression(value) {
             return Ok(Self::Host(value.to_string()));
         }
-        if !is_token(value) || value.contains('\'') {
+        if !crate::http_token::is_http_token(value) || value.contains('\'') {
             return Err(invalid(
                 CONTENT_SECURITY_POLICY,
                 "directive value is not a token",

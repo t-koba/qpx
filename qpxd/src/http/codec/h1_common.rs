@@ -14,12 +14,17 @@ pub(crate) const MAX_HEADER_BYTES: usize = 128 * 1024;
 pub(crate) fn request_keep_alive(version: Version, headers: &HeaderMap) -> bool {
     match version {
         Version::HTTP_10 => {
-            qpx_core::http_token::header_values_contain_token(headers, CONNECTION, "keep-alive")
+            qpx_core::http_token::header_values_contain_token(headers, &CONNECTION, "keep-alive")
         }
-        _ => !qpx_core::http_token::header_values_contain_token(headers, CONNECTION, "close"),
+        _ => !qpx_core::http_token::header_values_contain_token(headers, &CONNECTION, "close"),
     }
 }
 
+/// Whether the unparsed headers carry the Connection token.
+///
+/// The token search in `qpx_core::http_token` answers the same question for
+/// parsed headers; this one answers it for headers that were never parsed,
+/// which is why it keeps its own bytes.
 pub(crate) fn raw_has_connection_token(headers: &[httparse::Header<'_>], expected: &[u8]) -> bool {
     headers.iter().any(|header| {
         header.name.eq_ignore_ascii_case("connection")

@@ -563,13 +563,13 @@ fn request_has_upgrade(headers: &HeaderMap) -> bool {
     headers.contains_key(hyper::header::UPGRADE)
         && qpx_core::http_token::header_values_contain_token(
             headers,
-            hyper::header::CONNECTION,
+            &hyper::header::CONNECTION,
             "upgrade",
         )
 }
 
 fn expect_continue(headers: &HeaderMap) -> bool {
-    qpx_core::http_token::header_values_contain_token(headers, EXPECT, "100-continue")
+    qpx_core::http_token::header_values_contain_token(headers, &EXPECT, "100-continue")
 }
 
 fn determine_request_body_kind(headers: &HeaderMap) -> Result<RequestBodyKind> {

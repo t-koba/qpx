@@ -1,9 +1,11 @@
 //! The HTTP token vocabulary.
 //!
 //! The RFC 9110 token grammar and the comma-separated header token search
-//! have one owner, so the Forwarded element names, the WebSocket subprotocol
-//! names, the Connection tokens, the configuration's header names and the
-//! DPoP method claim cannot drift apart.
+//! have one owner, so the Forwarded element names, the Prefer field names,
+//! the Content-Disposition parameter names, the WebSocket subprotocol names,
+//! the Connection tokens, the configuration's header names, the CORS and
+//! browser-policy Vary dimensions and the DPoP method claim cannot drift
+//! apart.
 
 use http::header::{HeaderMap, HeaderName};
 
@@ -32,15 +34,26 @@ pub fn is_http_token(value: &str) -> bool {
         })
 }
 
-/// Whether one of the header's values carries `token` among its
-/// comma-separated members.
-pub fn header_values_contain_token(headers: &HeaderMap, name: HeaderName, token: &str) -> bool {
+/// The comma-separated members of the header's values, each trimmed.
+///
+/// A value that is not text contributes no members, as a value the caller
+/// cannot read contributes nothing to the header's meaning.
+pub fn header_value_members<'a>(
+    headers: &'a HeaderMap,
+    name: &HeaderName,
+) -> impl Iterator<Item = &'a str> + 'a {
     headers
         .get_all(name)
         .iter()
         .filter_map(|value| value.to_str().ok())
         .flat_map(|raw| raw.split(','))
-        .any(|part| part.trim().eq_ignore_ascii_case(token))
+        .map(str::trim)
+}
+
+/// Whether one of the header's values carries `token` among its
+/// comma-separated members.
+pub fn header_values_contain_token(headers: &HeaderMap, name: &HeaderName, token: &str) -> bool {
+    header_value_members(headers, name).any(|member| member.eq_ignore_ascii_case(token))
 }
 
 #[cfg(test)]
@@ -69,16 +82,29 @@ mod tests {
     }
 
     #[test]
+    fn header_members_are_the_trimmed_comma_separated_values() {
+        let mut headers = HeaderMap::new();
+        headers.append(CONNECTION, HeaderValue::from_static("keep-alive, Close"));
+        headers.append(CONNECTION, HeaderValue::from_static("upgrade"));
+        let members = header_value_members(&headers, &CONNECTION).collect::<Vec<_>>();
+        assert_eq!(members, ["keep-alive", "Close", "upgrade"]);
+    }
+
+    #[test]
     fn header_token_search_ignores_case_and_surrounding_whitespace() {
         let mut headers = HeaderMap::new();
         headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, Close"));
-        assert!(header_values_contain_token(&headers, CONNECTION, "close"));
+        assert!(header_values_contain_token(&headers, &CONNECTION, "close"));
         assert!(header_values_contain_token(
             &headers,
-            CONNECTION,
+            &CONNECTION,
             "keep-alive"
         ));
-        assert!(!header_values_contain_token(&headers, CONNECTION, "keep"));
-        assert!(!header_values_contain_token(&headers, UPGRADE, "websocket"));
+        assert!(!header_values_contain_token(&headers, &CONNECTION, "keep"));
+        assert!(!header_values_contain_token(
+            &headers,
+            &UPGRADE,
+            "websocket"
+        ));
     }
 }
