@@ -131,11 +131,14 @@ fn secure_temp_dir() -> Result<PathBuf> {
 
 /// The per-process directory that holds the secure temporary files.
 ///
-/// The directory is created once and restricted to its owner, so a file
-/// created inside it inherits an owner-only access control list from its
-/// first instant. The file is therefore never readable by another local
-/// user, not even in the window between its creation and the application of
-/// its own access control list.
+/// The directory is created once and restricted to its owner with an
+/// inheritable access control list, so a file created inside it inherits
+/// that list from its first instant. The file is therefore never readable by
+/// another local user, not even in the window between its creation and the
+/// application of its own access control list.
+///
+/// The directory outlives the files it holds: it is created once per process
+/// and the files are removed individually.
 #[cfg(windows)]
 fn owner_only_temp_dir() -> Result<PathBuf> {
     use std::sync::OnceLock;
@@ -331,12 +334,13 @@ pub(crate) fn apply_owner_only_acl(file: &File, path: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Restricts a directory to its owner.
+/// Restricts a directory to its owner and to the files created inside it.
 ///
 /// The descriptor grants full access to the local system, the administrators
-/// and the directory's owner, and nothing to anyone else. A file created
-/// inside the directory inherits that access control list, so the file is
-/// private from its first instant.
+/// and the directory's owner, and nothing to anyone else. Its entries carry
+/// the object-inherit and container-inherit flags, so a file created inside
+/// the directory inherits that access control list from its first instant,
+/// before any handle-level application.
 #[cfg(windows)]
 pub(crate) fn apply_owner_only_directory_acl(path: &Path) -> Result<()> {
     use std::os::windows::ffi::OsStrExt;
@@ -348,7 +352,14 @@ pub(crate) fn apply_owner_only_directory_acl(path: &Path) -> Result<()> {
         DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
     };
 
-    let sddl_text = concat!("D:P(A;;FA;;;SY)(A;;FA;;;", "\x42", "\x41", ")(A;;FA;;;OW)");
+    // The object-inherit and container-inherit flags make the entries
+    // inheritable, so a file created in the directory receives them.
+    let sddl_text = concat!(
+        "D:P(A;OICI;FA;;;SY)(A;OICI;FA;;;",
+        "\x42",
+        "\x41",
+        ")(A;OICI;FA;;;OW)"
+    );
     let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
     let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
     // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
