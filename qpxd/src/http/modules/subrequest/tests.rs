@@ -97,3 +97,32 @@ async fn initial_subrequest_private_ip_check_rejects_loopback_target() {
         .expect_err("loopback target should be rejected");
     assert!(err.to_string().contains("private IP"));
 }
+
+#[test]
+fn the_declared_response_length_is_read_through_the_owner() {
+    // A comma list of equal members is one length, so a response that
+    // declares a length over the limit is over it.
+    let mut headers = HeaderMap::new();
+    headers.append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("100, 100"),
+    );
+    assert!(response_exceeds_max_response_bytes(&headers, 64));
+
+    // A declaration the owner refuses names no length, so the check does
+    // not fire and the body is cut to the limit instead.
+    let mut headers = HeaderMap::new();
+    headers.append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("+100"),
+    );
+    assert!(!response_exceeds_max_response_bytes(&headers, 64));
+
+    // A declared length within the limit is not over it.
+    let mut headers = HeaderMap::new();
+    headers.append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("64"),
+    );
+    assert!(!response_exceeds_max_response_bytes(&headers, 64));
+}

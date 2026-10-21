@@ -6,13 +6,14 @@ use super::{
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
-use http::header::{CONTENT_LENGTH, LOCATION};
-use http::{HeaderName, HeaderValue, Method};
+use http::header::LOCATION;
+use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use hyper::{Request, Response};
 use qpx_core::config::{
     HeaderCaptureConfig, HttpModuleConfig, SubrequestModuleConfig, SubrequestPhase,
     SubrequestResponseMode,
 };
+use qpx_core::http_content_length::declared_content_length;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -241,13 +242,7 @@ impl SubrequestModule {
             self.validate_redirect_location(response.headers().get(LOCATION), timeout_dur)
                 .await?;
         }
-        if let Some(content_length) = response
-            .headers()
-            .get(CONTENT_LENGTH)
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<usize>().ok())
-            && content_length > self.max_response_bytes
-        {
+        if response_exceeds_max_response_bytes(response.headers(), self.max_response_bytes) {
             return Err(anyhow!(
                 "subrequest {} response exceeds max_response_bytes",
                 self.name
@@ -546,6 +541,19 @@ fn compile_header_captures(
             ))
         })
         .collect()
+}
+
+/// Whether the response declares a length that is over the module's limit.
+///
+/// The declaration is read through the owner, so a comma list of equal
+/// members is one length and a declaration the owner refuses names no
+/// length. The body is limited either way, so a response that declares no
+/// length is cut to the limit rather than refused.
+fn response_exceeds_max_response_bytes(headers: &HeaderMap, max_response_bytes: usize) -> bool {
+    declared_content_length(headers)
+        .ok()
+        .flatten()
+        .is_some_and(|len| len > max_response_bytes as u64)
 }
 
 #[cfg(test)]
