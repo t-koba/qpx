@@ -738,17 +738,34 @@ pub enum ContentLengthError {
 /// validation read the field the same way instead of each keeping its own
 /// interpretation.
 ///
-/// The sites that still read the declaration themselves are the ones that
-/// answer a different question or read a field the owner cannot see: the
-/// raw HTTP/1 upstream path, the raw HTTP/1 head reader, the reverse
-/// request template, the CGI IPC request and the HTTP/3 response head parse
-/// the value as a plain integer, so they accept a leading plus sign that the
-/// grammar does not, and the reverse request template does not split a comma
-/// list; the request guard compares the raw field values rather than the
-/// length they declare; and the sites that read one value as a size hint,
-/// the observed body size among them, are not reading a declaration at all.
-/// Folding any of the first kind changes what it accepts, so each is a
-/// decision of its own.
+/// The sites that still read the declaration themselves are named here, so
+/// the Content-Length gate can check that this list and the tree agree:
+///
+/// - `qpxd/src/reverse/transport/mirrors.rs` parses every value as a plain
+///   integer, so it accepts a leading plus sign, and it does not split a
+///   comma list.
+/// - `qpxd/src/reverse/transport/raw_http1.rs` parses every member of every
+///   raw header line as a plain integer.
+/// - `qpxd/src/reverse/transport/request_template.rs` parses every value as
+///   a plain integer and does not split a comma list.
+/// - `qpxd/src/upstream/raw_http1/mod.rs` parses every member as a plain
+///   integer.
+/// - `qpxd/src/upstream/raw_http1/raw_head.rs` parses every member of the
+///   raw header lines as a plain integer.
+/// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
+///   than a declaration.
+/// - `qpxd-cache/src/entry.rs` parses every member of the stored response's
+///   values as a plain integer.
+/// - `qpxd-cache/src/util.rs` does the same in a test helper.
+/// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
+///   plain integer.
+/// - `qpx-h3/src/response.rs` parses every member as a plain integer.
+///
+/// The request guard in `qpxd/src/http/policy/guard.rs` compares the raw
+/// field values rather than the length they declare, so it answers a
+/// different question and keeps its own reading. A plain integer accepts a
+/// leading plus sign that the grammar does not, so folding any of the named
+/// sites changes what it accepts: each is a decision of its own.
 pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
     let mut declared = None::<u64>;
     for value in headers.get_all(CONTENT_LENGTH) {

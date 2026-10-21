@@ -778,7 +778,7 @@ pub(crate) fn check_dispatch_dependency_direction(root: &Path) -> Result<()> {
         );
     }
     let acceptance = fs::read_to_string(root.join("scripts/check-ci-acceptance-gates.sh"))?;
-    for needle in "fn policy_id(&self) -> Option<&str>;fn policy_tags(&self) -> &[String];build_dispatch_audit_context;apply_decision_service_http_access;apply_dispatch_response_policy;dispatch_cache_collapse_continue;finalize_dispatch_collapsed_cache_decision;check_dispatch_limit_response_commonality;check_http_token_vocabulary_single_owner;check_dispatch_annotated_local_response_commonality;check_response_capture_after_finalize;check_proxy_authorization_header_boundary;check_reverse_response_rules_dispatch_boundary;check_h3_origin_pool_load_semantics;check_qpxf_cgi_header_parser_zero_copy;check_qpx_h3_static_response_boundary;check_rpc_frame_boundary_tests;finalize_response_headers_common;finalize_response_with_headers_in_place;set_proxy_authorization_header;trait HeaderTransform;trait ResponseTransform;MIRROR_MAX_INFLIGHT_PER_ENDPOINT;collect_decision_service_response_body;request_side_fail_closed;send_prefixed_datagram;validate_secure_file_handle".split(';') {
+    for needle in "fn policy_id(&self) -> Option<&str>;fn policy_tags(&self) -> &[String];build_dispatch_audit_context;apply_decision_service_http_access;apply_dispatch_response_policy;dispatch_cache_collapse_continue;finalize_dispatch_collapsed_cache_decision;check_dispatch_limit_response_commonality;check_http_token_vocabulary_single_owner;check_content_length_single_owner;check_dispatch_annotated_local_response_commonality;check_response_capture_after_finalize;check_proxy_authorization_header_boundary;check_reverse_response_rules_dispatch_boundary;check_h3_origin_pool_load_semantics;check_qpxf_cgi_header_parser_zero_copy;check_qpx_h3_static_response_boundary;check_rpc_frame_boundary_tests;finalize_response_headers_common;finalize_response_with_headers_in_place;set_proxy_authorization_header;trait HeaderTransform;trait ResponseTransform;MIRROR_MAX_INFLIGHT_PER_ENDPOINT;collect_decision_service_response_body;request_side_fail_closed;send_prefixed_datagram;validate_secure_file_handle".split(';') {
         if !acceptance.contains(needle) {
             bail!("CI acceptance gate is missing required check: {needle}");
         }
@@ -817,6 +817,7 @@ pub(crate) fn check_architecture_baselines(root: &Path) -> Result<()> {
     check_dispatch_cache_collapse_commonality(root)?;
     check_dispatch_limit_response_commonality(root)?;
     check_http_token_vocabulary_single_owner(root)?;
+    check_content_length_single_owner(root)?;
     check_http_response_body_hard_cap(root)?;
     check_dispatch_annotated_local_response_commonality(root)?;
     check_dispatch_max_forwards_response_commonality(root)?;
@@ -1208,6 +1209,138 @@ fn check_http_token_vocabulary_single_owner(root: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The owner of a header set's declared Content-Length.
+const CONTENT_LENGTH_OWNER: &str = "qpx-http/src/protocol/semantics.rs";
+
+/// The names the workspace has used for a function that reads a header set's
+/// declared Content-Length.
+const CONTENT_LENGTH_READER_NAMES: [&str; 10] = [
+    "fn content_length(",
+    "fn parse_content_length(",
+    "fn parse_declared_content_length(",
+    "fn parse_content_length_fields(",
+    "fn expected_body_length(",
+    "fn declared_content_length(",
+    "fn request_is_templateable(",
+    "fn request_has_body_or_expect(",
+    "fn stored_content_length(",
+    "fn cacheable_content_length(",
+];
+
+/// The qualified call a site that folds the declaration into the owner uses.
+const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length(";
+
+/// The declared Content-Length has one owner, and the owner names the sites
+/// that still read the declaration themselves.
+///
+/// A site that reads the declaration either calls the owner or is named in
+/// the owner's own list, so a new reader cannot appear without the owner
+/// saying what it does differently. The gate reads the names the workspace
+/// has used for such a function, so a reader under a name it has not seen
+/// before, and a reader that answers a different question - the request
+/// guard compares the raw field values - are beyond it.
+fn check_content_length_single_owner(root: &Path) -> Result<()> {
+    let owner_path = root.join(CONTENT_LENGTH_OWNER);
+    let owner = fs::read_to_string(&owner_path)
+        .with_context(|| format!("the Content-Length owner {CONTENT_LENGTH_OWNER} is missing"))?;
+    let mut files = Vec::new();
+    for crate_dir in workspace_member_crates(root)? {
+        // The gate's own crate names the vocabulary it looks for.
+        if crate_dir == "xtask" {
+            continue;
+        }
+        let crate_root = root.join(&crate_dir);
+        for dir in ["src", "tests"] {
+            let scan_root = crate_root.join(dir);
+            if !scan_root.is_dir() {
+                continue;
+            }
+            for path in rust_files_under(&scan_root)? {
+                let rel = rel_path(root, &path).into_owned();
+                if rel == CONTENT_LENGTH_OWNER {
+                    continue;
+                }
+                let content = fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                files.push((rel, content));
+            }
+        }
+    }
+    let violations = content_length_single_owner_violations(&owner, &files);
+    if !violations.is_empty() {
+        bail!(
+            "the declared Content-Length must have one owner ({CONTENT_LENGTH_OWNER}):\n{}",
+            violations.join("\n")
+        );
+    }
+    Ok(())
+}
+
+/// The violations of the declared Content-Length's single owner.
+fn content_length_single_owner_violations(owner: &str, files: &[(String, String)]) -> Vec<String> {
+    let listed = content_length_listed_sites(owner);
+    let mut violations = Vec::new();
+    if listed.is_empty() {
+        violations.push(format!(
+            "{CONTENT_LENGTH_OWNER}: the owner does not name the sites that read the declaration themselves"
+        ));
+    }
+    let mut readers = Vec::new();
+    for (path, content) in files {
+        if !CONTENT_LENGTH_READER_NAMES
+            .iter()
+            .any(|name| content.contains(name))
+        {
+            continue;
+        }
+        readers.push(path.clone());
+        if content.contains(CONTENT_LENGTH_OWNER_CALL) {
+            continue;
+        }
+        if listed.iter().any(|site| site == path) {
+            continue;
+        }
+        violations.push(format!(
+            "{path} reads the declared Content-Length itself and the owner does not name it"
+        ));
+    }
+    for site in &listed {
+        if !readers.iter().any(|reader| reader == site) {
+            violations.push(format!(
+                "{site} is named by the owner but does not read the declared Content-Length"
+            ));
+        }
+    }
+    violations
+}
+
+/// The sites the owner names as the ones that read the declaration
+/// themselves, read from the list items of its own comment.
+fn content_length_listed_sites(owner: &str) -> Vec<String> {
+    let mut sites = Vec::new();
+    for line in owner.lines() {
+        let Some(text) = line.trim().strip_prefix("///") else {
+            continue;
+        };
+        let Some(item) = text.trim().strip_prefix('-') else {
+            continue;
+        };
+        let mut rest = item;
+        while let Some(start) = rest.find('`') {
+            rest = &rest[start + 1..];
+            let Some(end) = rest.find('`') else {
+                break;
+            };
+            let candidate = &rest[..end];
+            if candidate.contains('/') && candidate.ends_with(".rs") {
+                sites.push(candidate.to_string());
+            }
+            rest = &rest[end + 1..];
+        }
+    }
+    sites
 }
 
 /// The workspace's member crates, read from the root manifest.
@@ -4983,6 +5116,61 @@ mod tests {
                 "effective load must not double count open queue depth",
                 "stream capacity must be capped by open queue capacity",
             ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_owner_names_the_sites_that_read_the_declaration() {
+        let owner = r#"
+/// The sites that still read the declaration themselves are named here:
+///
+/// - `qpxd/src/reverse/transport/mirrors.rs` parses every value as a plain
+///   integer.
+pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
+    Ok(None)
+}
+"#;
+        let named = (
+            "qpxd/src/reverse/transport/mirrors.rs".to_string(),
+            "fn request_is_templateable() {}\n".to_string(),
+        );
+        assert!(
+            content_length_single_owner_violations(owner, std::slice::from_ref(&named)).is_empty()
+        );
+
+        // A reader the owner does not name is a new copy of the reading.
+        let unlisted = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            "fn parse_content_length() {}\n".to_string(),
+        );
+        assert_eq!(
+            content_length_single_owner_violations(owner, &[named.clone(), unlisted]),
+            [
+                "qpxd/src/http/body/size/io.rs reads the declared Content-Length itself and the owner does not name it"
+            ]
+        );
+
+        // A site the owner names that no longer reads the declaration is a
+        // stale entry.
+        assert_eq!(
+            content_length_single_owner_violations(owner, &[]),
+            [
+                "qpxd/src/reverse/transport/mirrors.rs is named by the owner but does not read the declared Content-Length"
+            ]
+        );
+
+        // A site that reads through the owner needs no entry.
+        let folded = (
+            "qpxd/src/http/codec/h1.rs".to_string(),
+            "fn parse_declared_content_length() { qpx_http::protocol::semantics::declared_content_length(headers) }\n"
+                .to_string(),
+        );
+        let violations = content_length_single_owner_violations(owner, &[folded]);
+        assert!(
+            !violations
+                .iter()
+                .any(|violation| violation.contains("qpxd/src/http/codec/h1.rs")),
+            "{violations:?}"
         );
     }
 
