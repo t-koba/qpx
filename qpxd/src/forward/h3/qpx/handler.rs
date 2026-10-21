@@ -264,7 +264,8 @@ impl ForwardQpxHandler {
             .extensions()
             .get::<crate::http::rpc::RpcDeadlineReply>()
             .is_some();
-        let response_streaming = response_streaming_limits(&response, listener_streaming);
+        let response_streaming =
+            ResolvedStreamingLimits::from_response(&response, listener_streaming);
         let response_fut = crate::http3::qpx_stream::send_qpx_response_stream_observed_to_send(
             &mut response_stream,
             response,
@@ -499,15 +500,4 @@ pub(crate) fn h3_body_read_timeout(runtime: &Runtime) -> Duration {
             .h3_read_timeout_ms
             .max(1),
     )
-}
-
-fn response_streaming_limits(
-    response: &Response<Body>,
-    fallback: ResolvedStreamingLimits,
-) -> ResolvedStreamingLimits {
-    response
-        .extensions()
-        .get::<ResolvedStreamingLimits>()
-        .copied()
-        .unwrap_or(fallback)
 }

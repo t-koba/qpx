@@ -20,6 +20,7 @@ qpxd/src/lib.rs	212	r
 qpxd/src/server/sets.rs	499	r
 qpxd/src/server/proxy_tasks.rs	460	r
 qpxd/src/forward/h3/qpx/mod.rs	153	r
+qpxd/src/forward/h3/qpx/handler.rs	464	r
 qpxd/src/forward/h3/qpx/webtransport.rs	521	r
 qpxd/src/forward/h3/qpx/webtransport_dispatch.rs	458	r
 qpxd/src/forward/h3/qpx/response.rs	222	r
@@ -45,8 +46,10 @@ qpxd/src/http/codec/h1.rs	371	r
 qpxd/src/http/codec/h1_request_body.rs	256	r
 qpxd/src/http/codec/h1_common.rs	69	r
 qpxd/src/reverse/h3/passthrough.rs	554	r
+qpxd/src/reverse/h3/terminate_qpx.rs	433	r
 qpxd/src/udp_session_handoff/mod.rs	124	r
 qpxd/src/runtime/plan/mod.rs	12	r
+qpxd/src/runtime/plan/types.rs	565	r
 qpxd/src/transparent/tls_path.rs	404	r
 qpxd/src/forward/h3/connect/standard/handlers.rs	214	r
 qpxd/src/upstream/pool/mod.rs	15	r
@@ -89,6 +92,7 @@ qpxd/src/http3/quinn_socket/handoff.rs	329	r
 qpxd/src/http3/quinn_socket/routing.rs	12	r
 qpxd/src/http3/quinn_socket/stream.rs	178	r
 qpxd/src/http3/quinn_socket/tasks.rs	102	r
+qpxd/src/http3/listener.rs	509	r
 qpx-h3/src/qpack/mod.rs	45	r
 qpx-h3/src/response.rs	144	r
 qpx-h3/src/qpack_fields.rs	130	r

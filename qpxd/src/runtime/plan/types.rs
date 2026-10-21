@@ -115,6 +115,22 @@ impl ResolvedStreamingLimits {
         resolve_streaming_limits(runtime, None, None, None, None, None, None)
     }
 
+    /// The streaming limits a response carries, or the fallback when it
+    /// carries none.
+    ///
+    /// The dispatch attaches the limits it resolved to the response, so every
+    /// server that serves one reads them from here.
+    pub(crate) fn from_response(
+        response: &http::Response<qpx_http::body::Body>,
+        fallback: Self,
+    ) -> Self {
+        response
+            .extensions()
+            .get::<Self>()
+            .copied()
+            .unwrap_or(fallback)
+    }
+
     /// Fail-closed intersection used when more than one request-side rule
     /// contributes streaming limits: capacities and read/send timeouts take
     /// the minimum clamped to at least 1, size and duration fields take the

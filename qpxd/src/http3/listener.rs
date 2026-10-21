@@ -376,7 +376,8 @@ async fn handle_stream<H: H3RequestHandler>(
     } else {
         handler.handle_http_with_interim(req, conn_info).await
     };
-    let response_streaming = response_streaming_limits(&response.response, &limits);
+    let response_streaming =
+        ResolvedStreamingLimits::from_response(&response.response, limits.streaming);
     let mut request_summary = None;
     if let Some(body_result) = take_finished_h3_request_body(&mut request_body) {
         match body_result {
@@ -487,17 +488,6 @@ async fn handle_stream<H: H3RequestHandler>(
             }
         }
     }
-}
-
-fn response_streaming_limits(
-    response: &Response<Body>,
-    fallback: &H3Limits,
-) -> ResolvedStreamingLimits {
-    response
-        .extensions()
-        .get::<ResolvedStreamingLimits>()
-        .copied()
-        .unwrap_or(fallback.streaming)
 }
 
 #[cfg(test)]

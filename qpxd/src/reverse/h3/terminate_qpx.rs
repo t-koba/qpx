@@ -336,7 +336,7 @@ impl ReverseQpxHandler {
             .extensions()
             .get::<crate::http::rpc::RpcDeadlineReply>()
             .is_some();
-        let response_streaming = response_streaming_limits(&response, edge_streaming);
+        let response_streaming = ResolvedStreamingLimits::from_response(&response, edge_streaming);
         let response_fut = crate::http3::qpx_stream::send_qpx_response_stream_observed_to_send(
             &mut response_stream,
             response,
@@ -466,15 +466,4 @@ async fn send_reverse_qpx_interim_response(
         Duration::from_millis(streaming.body_send_timeout_ms),
     )
     .await
-}
-
-fn response_streaming_limits(
-    response: &Response<Body>,
-    fallback: ResolvedStreamingLimits,
-) -> ResolvedStreamingLimits {
-    response
-        .extensions()
-        .get::<ResolvedStreamingLimits>()
-        .copied()
-        .unwrap_or(fallback)
 }
