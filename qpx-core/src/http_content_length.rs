@@ -181,7 +181,16 @@ pub enum ContentLengthError {
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside the gate.
 /// No site reads the declaration inline today: the request guard, the last
-/// one, reads it through the owner as well.
+/// one, reads it through the owner as well, and so do the test helpers
+/// that read a raw head.
+///
+/// The test helpers read the declaration through the owner as well:
+/// `qpxd/src/test_util.rs` and `qpxd/tests/http_rfc/mod.rs` read a raw
+/// head rather than a header map, so they hand the head's Content-Length
+/// values to the owner's value-level entry point. A comma list of equal
+/// members is one length there now, so such a head declares the length of
+/// the body it carries, and a declaration the owner refuses names no
+/// length, so the helper reads no body.
 ///
 /// The access log reads the declaration through the owner as well:
 /// `qpxd/src/reverse/listener/raw_http1.rs` and

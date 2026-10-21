@@ -92,6 +92,25 @@ pub(crate) async fn spawn_http1_send_request(
     std::sync::Arc::new(tokio::sync::Mutex::new(sender))
 }
 
+/// The body length a raw request head declares.
+///
+/// The head is raw text rather than a header map, so its Content-Length
+/// values are handed to the owner, which owns the member grammar and the
+/// conflict rule. A head that declares no length, or one the owner
+/// refuses, declares no length here.
+fn declared_content_length(head: &str) -> usize {
+    let values = head.lines().filter_map(|line| {
+        line.split_once(':')
+            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+            .map(|(_, value)| value.trim())
+    });
+    qpx_core::http_content_length::declared_content_length_in_values(values)
+        .ok()
+        .flatten()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+}
+
 async fn drain_declared_request_body(
     stream: &mut tokio::net::TcpStream,
     raw: &[u8],
@@ -105,16 +124,7 @@ async fn drain_declared_request_body(
         return;
     };
     let headers = String::from_utf8_lossy(&raw[..header_end]);
-    let content_length = headers
-        .lines()
-        .find_map(|line| {
-            line.split_once(':').and_then(|(name, value)| {
-                name.eq_ignore_ascii_case("content-length")
-                    .then(|| value.trim().parse::<usize>().ok())
-                    .flatten()
-            })
-        })
-        .unwrap_or(0);
+    let content_length = declared_content_length(&headers);
     let mut received_body = raw.len().saturating_sub(header_end);
     while received_body < content_length {
         let n = stream.read(buf).await.expect("read request body");

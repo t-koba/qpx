@@ -193,6 +193,24 @@ async fn assert_status(addr: SocketAddr, req: String, expected: u16) -> Result<(
 
 type Http1Head = (u16, Vec<(String, String)>, Vec<u8>);
 
+/// The body length a response head declares.
+///
+/// The head is a list of raw header lines rather than a header map, so its
+/// Content-Length values are handed to the owner, which owns the member
+/// grammar and the conflict rule. A head that declares no length, or one
+/// the owner refuses, declares no length here.
+fn declared_content_length(headers: &[(String, String)]) -> usize {
+    let values = headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| value.as_str());
+    qpx_core::http_content_length::declared_content_length_in_values(values)
+        .ok()
+        .flatten()
+        .and_then(|length| usize::try_from(length).ok())
+        .unwrap_or(0)
+}
+
 async fn send_http1_and_read_head(addr: SocketAddr, request_bytes: &[u8]) -> Result<Http1Head> {
     let mut stream = timeout(Duration::from_secs(3), TcpStream::connect(addr))
         .await
@@ -215,11 +233,7 @@ async fn send_http1_and_read_response(addr: SocketAddr, request_bytes: &[u8]) ->
         body = read_http1_chunked_body(&mut stream, body).await?;
         return Ok((status, headers, body));
     }
-    let content_length = headers
-        .iter()
-        .find(|(name, _)| name == "content-length")
-        .and_then(|(_, value)| value.parse::<usize>().ok())
-        .unwrap_or(0);
+    let content_length = declared_content_length(&headers);
     while body.len() < content_length {
         let need = content_length - body.len();
         let mut chunk = vec![0u8; need.min(2048)];
