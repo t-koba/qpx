@@ -2,8 +2,8 @@ use super::ConnectionPool;
 use super::resolved::{EndpointConcurrencyPermit, ResolvedUpstreamProxy};
 use crate::runtime::now_millis;
 use crate::upstream::health::{
-    LATENCY_P95_DEFAULT_MIN_SAMPLES, LatencyWindow, PassiveFailureCounters, PassiveFailureKind,
-    maybe_trim_adaptive_window, reset_adaptive_stats,
+    AdaptiveEjection, LATENCY_P95_DEFAULT_MIN_SAMPLES, LatencyWindow, PassiveFailureCounters,
+    PassiveFailureKind,
 };
 use crate::upstream::http1::{UpstreamProxyEndpoint, parse_upstream_proxy_endpoint};
 use crate::upstream::origin::discover_origin_endpoints;
@@ -17,11 +17,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering}
 use tokio::time::Duration;
 use tracing::warn;
 
-const ADAPTIVE_MIN_SAMPLES: u32 = 8;
 const ADAPTIVE_MAX_SAMPLES: u32 = 32;
-const ADAPTIVE_FAILURE_RATE_NUM: u32 = 1;
-const ADAPTIVE_FAILURE_RATE_DEN: u32 = 2;
-const ADAPTIVE_LATENCY_MULTIPLIER: u64 = 2;
 const ADAPTIVE_MAX_BACKOFF_SHIFT: u32 = 5;
 
 #[derive(Debug, Clone)]
@@ -98,10 +94,7 @@ pub(super) struct ManagedUpstreamEndpoint {
     pub(super) endpoint: UpstreamProxyEndpoint,
     unhealthy_until_ms: AtomicU64,
     passive: PassiveFailureCounters,
-    adaptive_successes: AtomicU32,
-    adaptive_failures: AtomicU32,
-    adaptive_latency_total_ms: AtomicU64,
-    adaptive_latency_samples: AtomicU32,
+    adaptive: AdaptiveEjection,
     latency_window: LatencyWindow,
     ejection_backoff_shift: AtomicU32,
     pub(super) inflight: AtomicUsize,
@@ -113,10 +106,7 @@ impl ManagedUpstreamEndpoint {
             endpoint,
             unhealthy_until_ms: AtomicU64::new(0),
             passive: PassiveFailureCounters::new(),
-            adaptive_successes: AtomicU32::new(0),
-            adaptive_failures: AtomicU32::new(0),
-            adaptive_latency_total_ms: AtomicU64::new(0),
-            adaptive_latency_samples: AtomicU32::new(0),
+            adaptive: AdaptiveEjection::new(),
             latency_window: LatencyWindow::new(),
             ejection_backoff_shift: AtomicU32::new(0),
             inflight: AtomicUsize::new(0),
@@ -206,26 +196,17 @@ impl ManagedUpstreamEndpoint {
     }
 
     fn note_adaptive_success(&self) {
-        self.adaptive_successes.fetch_add(1, Ordering::Relaxed);
+        self.adaptive.note_success();
         self.ejection_backoff_shift.store(0, Ordering::Relaxed);
-        self.maybe_trim_adaptive_window();
+        self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
     }
 
     fn note_adaptive_failure(&self, max_ejection: Duration) {
-        let failures = self
-            .adaptive_failures
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        let successes = self.adaptive_successes.load(Ordering::Relaxed);
-        let total = successes.saturating_add(failures);
-        if total >= ADAPTIVE_MIN_SAMPLES
-            && failures.saturating_mul(ADAPTIVE_FAILURE_RATE_DEN)
-                >= total.saturating_mul(ADAPTIVE_FAILURE_RATE_NUM)
-        {
+        if self.adaptive.note_failure() {
             self.eject(max_ejection, EjectionReason::SuccessRate);
-            return;
+        } else {
+            self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
         }
-        self.maybe_trim_adaptive_window();
     }
 
     fn note_adaptive_latency(
@@ -234,44 +215,15 @@ impl ManagedUpstreamEndpoint {
         threshold: Duration,
         elapsed: Duration,
     ) {
-        let sample = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
-        let samples = self
-            .adaptive_latency_samples
-            .fetch_add(1, Ordering::Relaxed)
-            .saturating_add(1);
-        self.adaptive_latency_total_ms
-            .fetch_add(sample, Ordering::Relaxed);
-        if samples < ADAPTIVE_MIN_SAMPLES {
-            self.maybe_trim_adaptive_window();
-            return;
-        }
-        let total_ms = self.adaptive_latency_total_ms.load(Ordering::Relaxed);
-        let avg_ms = total_ms / u64::from(samples.max(1));
-        let threshold_ms = threshold.as_millis().min(u128::from(u64::MAX)) as u64;
-        if avg_ms >= threshold_ms.saturating_mul(ADAPTIVE_LATENCY_MULTIPLIER) {
+        if self.adaptive.note_latency(elapsed, threshold) {
             self.eject(max_ejection, EjectionReason::Latency);
         } else {
-            self.maybe_trim_adaptive_window();
+            self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
         }
-    }
-
-    fn maybe_trim_adaptive_window(&self) {
-        maybe_trim_adaptive_window(
-            &self.adaptive_successes,
-            &self.adaptive_failures,
-            &self.adaptive_latency_total_ms,
-            &self.adaptive_latency_samples,
-            ADAPTIVE_MAX_SAMPLES,
-        );
     }
 
     fn reset_adaptive_stats(&self) {
-        reset_adaptive_stats(
-            &self.adaptive_successes,
-            &self.adaptive_failures,
-            &self.adaptive_latency_total_ms,
-            &self.adaptive_latency_samples,
-        );
+        self.adaptive.reset();
     }
 }
 

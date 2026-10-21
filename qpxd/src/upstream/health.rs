@@ -10,9 +10,105 @@ pub(crate) const LATENCY_P95_WINDOW: usize = 100;
 /// needs a full window; override with `outlier_detection.latency.min_requests`.
 pub(crate) const LATENCY_P95_DEFAULT_MIN_SAMPLES: u64 = LATENCY_P95_WINDOW as u64;
 
+/// The adaptive counters an endpoint owner keeps for its ejection decisions.
+///
+/// The counters, the thresholds and the decisions live here. The ejection, the
+/// backoff and the sample bound stay with each owner, because they differ
+/// between the forward cluster and the reverse endpoint.
+#[derive(Debug)]
+pub(crate) struct AdaptiveEjection {
+    successes: AtomicU32,
+    failures: AtomicU32,
+    latency_total_ms: AtomicU64,
+    latency_samples: AtomicU32,
+}
+
+/// Requests observed before the success rate can eject.
+const ADAPTIVE_MIN_SAMPLES: u32 = 8;
+/// Failures per request that count as a falling success rate.
+const ADAPTIVE_FAILURE_RATE_NUM: u32 = 1;
+const ADAPTIVE_FAILURE_RATE_DEN: u32 = 2;
+/// How far the average latency may exceed the threshold before it ejects.
+const ADAPTIVE_LATENCY_MULTIPLIER: u64 = 2;
+
+impl AdaptiveEjection {
+    pub(crate) const fn new() -> Self {
+        Self {
+            successes: AtomicU32::new(0),
+            failures: AtomicU32::new(0),
+            latency_total_ms: AtomicU64::new(0),
+            latency_samples: AtomicU32::new(0),
+        }
+    }
+
+    /// The successful requests observed so far.
+    #[cfg(test)]
+    pub(crate) fn successes(&self) -> u32 {
+        self.successes.load(Ordering::Relaxed)
+    }
+
+    /// Records a successful request.
+    pub(crate) fn note_success(&self) {
+        self.successes.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Records a failed request and reports whether the success rate fell too
+    /// far.
+    pub(crate) fn note_failure(&self) -> bool {
+        let failures = self
+            .failures
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        let successes = self.successes.load(Ordering::Relaxed);
+        let total = successes.saturating_add(failures);
+        total >= ADAPTIVE_MIN_SAMPLES
+            && failures.saturating_mul(ADAPTIVE_FAILURE_RATE_DEN)
+                >= total.saturating_mul(ADAPTIVE_FAILURE_RATE_NUM)
+    }
+
+    /// Records a latency sample and reports whether the average latency rose
+    /// too far.
+    pub(crate) fn note_latency(&self, elapsed: Duration, threshold: Duration) -> bool {
+        let sample = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+        let samples = self
+            .latency_samples
+            .fetch_add(1, Ordering::Relaxed)
+            .saturating_add(1);
+        self.latency_total_ms.fetch_add(sample, Ordering::Relaxed);
+        if samples < ADAPTIVE_MIN_SAMPLES {
+            return false;
+        }
+        let total_ms = self.latency_total_ms.load(Ordering::Relaxed);
+        let avg_ms = total_ms / u64::from(samples.max(1));
+        let threshold_ms = threshold.as_millis().min(u128::from(u64::MAX)) as u64;
+        avg_ms >= threshold_ms.saturating_mul(ADAPTIVE_LATENCY_MULTIPLIER)
+    }
+
+    /// Trims the counters above the owner's sample bound.
+    pub(crate) fn maybe_trim(&self, max_samples: u32) {
+        maybe_trim_adaptive_window(
+            &self.successes,
+            &self.failures,
+            &self.latency_total_ms,
+            &self.latency_samples,
+            max_samples,
+        );
+    }
+
+    /// Clears the counters.
+    pub(crate) fn reset(&self) {
+        reset_adaptive_stats(
+            &self.successes,
+            &self.failures,
+            &self.latency_total_ms,
+            &self.latency_samples,
+        );
+    }
+}
+
 /// Trim adaptive counters above the owner's sample bound. Only atomic mechanics
 /// are shared; the bound and decisions about when to trim stay with each owner.
-pub(crate) fn maybe_trim_adaptive_window(
+fn maybe_trim_adaptive_window(
     successes: &AtomicU32,
     failures: &AtomicU32,
     latency_total_ms: &AtomicU64,
@@ -39,7 +135,7 @@ pub(crate) fn maybe_trim_adaptive_window(
 }
 
 /// Clear adaptive counters when requested by the endpoint owner.
-pub(crate) fn reset_adaptive_stats(
+fn reset_adaptive_stats(
     successes: &AtomicU32,
     failures: &AtomicU32,
     latency_total_ms: &AtomicU64,
@@ -226,6 +322,26 @@ mod tests {
         assert_eq!(failures.load(Ordering::Relaxed), 0);
         assert_eq!(latency_total_ms.load(Ordering::Relaxed), 0);
         assert_eq!(latency_samples.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn the_component_answers_the_success_rate_and_the_latency_decisions() {
+        let adaptive = AdaptiveEjection::new();
+        for _ in 0..7 {
+            adaptive.note_success();
+        }
+        // The failures are still fewer than the successes, so no ejection yet.
+        for _ in 0..6 {
+            assert!(!adaptive.note_failure());
+        }
+        // The seventh failure makes the failures half of the requests.
+        assert!(adaptive.note_failure());
+
+        // The latency decision needs a full sample floor before it answers.
+        for _ in 0..7 {
+            assert!(!adaptive.note_latency(Duration::from_millis(90), Duration::from_millis(1)));
+        }
+        assert!(adaptive.note_latency(Duration::from_millis(90), Duration::from_millis(1)));
     }
 
     #[test]
