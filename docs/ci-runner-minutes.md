@@ -45,8 +45,11 @@ The reporting job is the one exception: it is running while it reports, so it
 is counted separately as `jobs_reporter_unfinished` and never makes the run
 total partial. The flag therefore means "the push still had unfinished work
 when the report was taken", not "the reporter had not finished yet". The
-reporter's own minutes are not in the run's number; they appear in a later
-report's breakdown of the same run, once the job has completed.
+exemption covers that one job of the reported run: another run's reporting job
+is ordinary unfinished work, so a second push or pull-request run in flight
+keeps the day total partial. The reporter's own minutes are not in the run's
+number; they appear in a later report's breakdown of the same run, once the
+job has completed.
 
 ## Partial totals
 
@@ -75,16 +78,22 @@ report that lost its own run could not say what it measured.
 
 ## Reproducing a report
 
-The report is a pure function of the collected records, so the artifact can be
-re-summed without the API:
+The report is a pure function of the collected records and of the collection
+note, so the artifact can be re-summed without the API:
 
 ```bash
 python3 scripts/ci-runner-minutes.py report \
   --runs target/ci-runner-minutes/runs.jsonl \
   --jobs target/ci-runner-minutes/jobs.jsonl \
+  --collection target/ci-runner-minutes/collection.json \
   --run-id <run id> \
   --out /tmp/runner-minutes.json
 ```
+
+The collection note matters: it names the reporting job, whose own unfinished
+state is exempt from the reported run's total, and it records what the
+collector left out. Without it the re-summed report differs from the
+published one.
 
 `scripts/test-ci-runner-minutes.py` checks the calculation on synthetic
 records: overlapping jobs, queued and running jobs, failures, skipped jobs,
