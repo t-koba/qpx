@@ -494,28 +494,7 @@ async fn handle_stream<H: H3RequestHandler>(
 mod tests;
 
 fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u64>, String> {
-    let mut parsed: Option<u64> = None;
-    for value in headers.get_all(http::header::CONTENT_LENGTH).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|err| format!("invalid Content-Length header: {err}"))?
-            .trim();
-        if raw.is_empty() {
-            return Err("empty Content-Length header".to_string());
-        }
-        for part in raw.split(',') {
-            let value = qpx_http::protocol::semantics::parse_content_length_member(part)
-                .ok_or_else(|| format!("invalid Content-Length value: {}", part.trim()))?;
-            match parsed {
-                Some(existing) if existing != value => {
-                    return Err("conflicting Content-Length values".to_string());
-                }
-                Some(_) => {}
-                None => parsed = Some(value),
-            }
-        }
-    }
-    Ok(parsed)
+    qpx_http::protocol::semantics::declared_content_length(headers).map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Clone, Copy)]

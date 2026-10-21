@@ -133,28 +133,7 @@ pub(crate) fn prepare_h3_response_head(
 }
 
 pub(crate) fn parse_content_length_fields(headers: &http::HeaderMap) -> Result<Option<u64>> {
-    let mut parsed: Option<u64> = None;
-    for value in headers.get_all(http::header::CONTENT_LENGTH).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|err| anyhow!("invalid Content-Length header: {err}"))?
-            .trim();
-        if raw.is_empty() {
-            return Err(anyhow!("empty Content-Length header"));
-        }
-        for part in raw.split(',') {
-            let next = qpx_http::protocol::semantics::parse_content_length_member(part)
-                .ok_or_else(|| anyhow!("invalid Content-Length value: {}", part.trim()))?;
-            match parsed {
-                Some(existing) if existing != next => {
-                    return Err(anyhow!("conflicting Content-Length values"));
-                }
-                Some(_) => {}
-                None => parsed = Some(next),
-            }
-        }
-    }
-    Ok(parsed)
+    qpx_http::protocol::semantics::declared_content_length(headers).map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]

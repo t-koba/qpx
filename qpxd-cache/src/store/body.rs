@@ -1,10 +1,8 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::header::CONTENT_LENGTH;
 use http::{HeaderMap, Method, StatusCode};
 use hyper::body::{Body as HttpBody, Frame};
 use qpx_http::body::{Body, BodyError};
-use qpx_http::protocol::semantics::parse_content_length_member;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
@@ -13,17 +11,8 @@ pub(super) fn expected_body_length(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Result<Option<u64>> {
-    let mut declared = None;
-    for value in headers.get_all(CONTENT_LENGTH) {
-        for member in value.to_str()?.split(',') {
-            let length = parse_content_length_member(member)
-                .ok_or_else(|| anyhow!("invalid cache response Content-Length"))?;
-            if declared.is_some_and(|previous| previous != length) {
-                return Err(anyhow!("conflicting cache response Content-Length values"));
-            }
-            declared = Some(length);
-        }
-    }
+    let declared = qpx_http::protocol::semantics::declared_content_length(headers)
+        .map_err(|err| anyhow!("cache response Content-Length: {err}"))?;
     // Match qpx_http's no-body response normalization. HEAD's length describes
     // the corresponding GET representation, not bytes in this stream.
     if method == Method::HEAD

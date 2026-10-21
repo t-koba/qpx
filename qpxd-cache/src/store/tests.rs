@@ -133,6 +133,25 @@ fn body_length_expectation_matches_no_body_response_semantics() {
     );
 }
 
+#[test]
+fn body_length_expectation_rejects_a_declaration_the_owner_refuses() {
+    let mut conflicting = http::HeaderMap::new();
+    conflicting.append(CONTENT_LENGTH, http::HeaderValue::from_static("4"));
+    conflicting.append(CONTENT_LENGTH, http::HeaderValue::from_static("5"));
+    assert!(expected_body_length(&Method::GET, StatusCode::OK, &conflicting).is_err());
+
+    let mut member = http::HeaderMap::new();
+    member.insert(CONTENT_LENGTH, http::HeaderValue::from_static("+4"));
+    assert!(expected_body_length(&Method::GET, StatusCode::OK, &member).is_err());
+
+    let mut list = http::HeaderMap::new();
+    list.insert(CONTENT_LENGTH, http::HeaderValue::from_static("4, 4"));
+    assert_eq!(
+        expected_body_length(&Method::GET, StatusCode::OK, &list).unwrap(),
+        Some(4)
+    );
+}
+
 #[tokio::test]
 async fn length_checked_body_validates_terminal_frames_and_preserves_source_errors() {
     use hyper::body::Body as _;

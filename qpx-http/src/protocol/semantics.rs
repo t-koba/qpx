@@ -734,8 +734,21 @@ pub enum ContentLengthError {
 /// value that names two different lengths is a conflict rather than a choice.
 ///
 /// The owner sits beside the member grammar it uses, so the HTTP/1 and
-/// HTTP/2 codecs, the HTTP/3 codec and listener and the cache read the
-/// field the same way instead of each keeping its own interpretation.
+/// HTTP/2 codecs, the HTTP/3 codec and listener, the cache and the request
+/// validation read the field the same way instead of each keeping its own
+/// interpretation.
+///
+/// The sites that still read the declaration themselves are the ones that
+/// answer a different question or read a field the owner cannot see: the
+/// raw HTTP/1 upstream path, the raw HTTP/1 head reader, the reverse
+/// request template, the CGI IPC request and the HTTP/3 response head parse
+/// the value as a plain integer, so they accept a leading plus sign that the
+/// grammar does not, and the reverse request template does not split a comma
+/// list; the request guard compares the raw field values rather than the
+/// length they declare; and the sites that read one value as a size hint,
+/// the observed body size among them, are not reading a declaration at all.
+/// Folding any of the first kind changes what it accepts, so each is a
+/// decision of its own.
 pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
     let mut declared = None::<u64>;
     for value in headers.get_all(CONTENT_LENGTH) {
