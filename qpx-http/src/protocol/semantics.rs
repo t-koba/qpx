@@ -735,9 +735,9 @@ pub enum ContentLengthError {
 ///
 /// The owner sits beside the member grammar it uses, so the HTTP/1 and
 /// HTTP/2 codecs, the HTTP/3 codec and listener, the cache, the upstream
-/// raw HTTP/1 path, the reverse request template and the request validation
-/// read the field the same way instead of each keeping its own
-/// interpretation.
+/// raw HTTP/1 path, the reverse raw HTTP/1 path, the reverse request
+/// template and the request validation read the field the same way instead
+/// of each keeping its own interpretation.
 ///
 /// The sites that read the declaration through a helper are named here, so
 /// the Content-Length gate can check that this list and the tree agree:
@@ -745,8 +745,6 @@ pub enum ContentLengthError {
 /// - `qpxd/src/reverse/transport/mirrors.rs` parses every value as a plain
 ///   integer, so it accepts a leading plus sign, and it does not split a
 ///   comma list.
-/// - `qpxd/src/reverse/transport/raw_http1.rs` parses every member of every
-///   raw header line as a plain integer.
 /// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
 ///   than a declaration.
 /// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
@@ -759,6 +757,16 @@ pub enum ContentLengthError {
 /// owner's value-level entry point. A leading plus sign is refused there
 /// too, so an upstream response that frames its body with one is rejected
 /// instead of read.
+///
+/// The reverse raw HTTP/1 path reads the declaration through the owner as
+/// well: `qpxd/src/reverse/transport/raw_http1.rs` reads raw header lines
+/// rather than a header map, so it hands the field's values to the owner's
+/// value-level entry point, and the length it reads says whether the
+/// request may carry a body. A leading plus sign is refused there, so a
+/// request that declares its length as "+0" is treated as one that may
+/// carry a body instead of one without a body, and the fast path is
+/// declined for it. A comma list of equal members is still one length and
+/// two members that disagree are still a conflict.
 ///
 /// The reverse request template reads the declaration through the owner as
 /// well: `qpxd/src/reverse/transport/request_template.rs` calls it for the

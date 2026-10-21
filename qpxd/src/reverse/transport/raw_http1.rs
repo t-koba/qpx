@@ -922,16 +922,34 @@ fn request_has_body_or_expect(headers: &[httparse::Header<'_>]) -> bool {
     }) {
         return true;
     }
-    headers
-        .iter()
-        .filter(|header| header.name.eq_ignore_ascii_case("content-length"))
-        .any(|header| {
-            std::str::from_utf8(header.value).ok().is_none_or(|value| {
-                value
-                    .split(',')
-                    .any(|part| part.trim().parse::<u64>().ok() != Some(0))
-            })
-        })
+    match raw_declared_content_length(headers) {
+        Ok(Some(length)) => length > 0,
+        Ok(None) => false,
+        // A declaration the grammar does not have names no length, so the
+        // request is treated as one that may carry a body.
+        Err(_) => true,
+    }
+}
+
+/// The Content-Length that the raw header lines declare.
+///
+/// The raw request has no header map to hand the owner, so it hands the
+/// field's values to the owner's value-level entry point: the member
+/// grammar and the conflict rule stay with the owner, and a member that is
+/// not a digit sequence is refused here as it is everywhere else.
+fn raw_declared_content_length(
+    headers: &[httparse::Header<'_>],
+) -> Result<Option<u64>, qpx_http::protocol::semantics::ContentLengthError> {
+    let mut values = Vec::new();
+    for header in headers {
+        if !header.name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        let raw = std::str::from_utf8(header.value)
+            .map_err(|_| qpx_http::protocol::semantics::ContentLengthError::InvalidHeader)?;
+        values.push(raw);
+    }
+    qpx_http::protocol::semantics::declared_content_length_in_values(values)
 }
 
 fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {
@@ -964,6 +982,47 @@ fn append_header_line(out: &mut BytesMut, name: &[u8], value: &[u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_request_reads_the_declared_content_length_through_the_owner() {
+        // A comma list of equal members is one length, so a request that
+        // declares a body length is one that may carry a body.
+        let declared_body = [httparse::Header {
+            name: "Content-Length",
+            value: b"16, 16",
+        }];
+        assert!(request_has_body_or_expect(&declared_body));
+
+        // A declared length of zero is no body.
+        let declared_no_body = [httparse::Header {
+            name: "Content-Length",
+            value: b"0, 0",
+        }];
+        assert!(!request_has_body_or_expect(&declared_no_body));
+
+        // No declaration at all is no body.
+        assert!(!request_has_body_or_expect(&[]));
+    }
+
+    #[test]
+    fn raw_request_treats_a_signed_content_length_as_may_carry_a_body() {
+        // The owner's grammar has no signed member, so the declaration names
+        // no length and the request is treated as one that may carry a body.
+        let signed = [httparse::Header {
+            name: "Content-Length",
+            value: b"+0",
+        }];
+        assert!(request_has_body_or_expect(&signed));
+    }
+
+    #[test]
+    fn raw_request_treats_conflicting_content_lengths_as_may_carry_a_body() {
+        let conflicting = [httparse::Header {
+            name: "Content-Length",
+            value: b"0, 5",
+        }];
+        assert!(request_has_body_or_expect(&conflicting));
+    }
 
     #[test]
     fn raw_response_via_uses_upstream_version_and_matches_full_dispatch() {
