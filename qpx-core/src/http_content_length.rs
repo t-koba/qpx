@@ -91,6 +91,15 @@ pub enum ContentLengthError {
 /// leading plus sign is refused, so a request that declares its length that
 /// way is not retried.
 ///
+/// The observed body size is read by another reader, which reads the field
+/// as a size hint rather than a declaration:
+/// `qpxd/src/http/body/size/io.rs` takes the first value and parses it as a
+/// plain integer, so it reads one length and refuses a comma list. It does
+/// not decide the retry, but it reads the observed size before the retry
+/// decision is made, so a request that declares its length as a comma list
+/// has no observed size and its body is observed rather than sized from the
+/// declaration.
+///
 /// The HTTP/3 path reads the declaration through the owner as well:
 /// `qpx-h3/src/response.rs` hands the header map to it, so the HTTP/3 server
 /// and client frame a body from the same length the HTTP/1 and HTTP/2 paths
