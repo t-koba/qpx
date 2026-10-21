@@ -146,13 +146,185 @@ fn open_secure_options(options: &mut OpenOptions, path: &Path) -> Result<File> {
         Ok(file)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_GENERIC_READ, FILE_GENERIC_WRITE, WRITE_DAC,
+        };
+
+        // The file is created new, so it cannot be a pre-existing link, and
+        // the handle is opened for writing so that the owner-only access
+        // control list can be applied to it before anything is written.
+        options.access_mode(FILE_GENERIC_READ | FILE_GENERIC_WRITE | WRITE_DAC);
+        let file = options.open(path).map_err(|source| SecureFileError::Open {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        validate_windows_secure_file_handle(&file, path)?;
+        apply_owner_only_acl(&file, path)?;
+        Ok(file)
+    }
+
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = options;
         Err(SecureFileError::UnsupportedPlatform {
             path: path.to_path_buf(),
         })
     }
+}
+
+/// Applies the owner-only access control list to an open file.
+///
+/// The descriptor grants full access to the local system, the administrators
+/// and the file's owner, and nothing to anyone else. It is the same
+/// descriptor the MITM CA material uses, so both kinds of private file get
+/// the same protection on Windows.
+#[cfg(windows)]
+pub(crate) fn apply_owner_only_acl(file: &File, path: &Path) -> Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
+        SetSecurityInfo,
+    };
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
+        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    };
+
+    // Protected DACL: LocalSystem, Administrators and the current owner get
+    // full access. This keeps private file material out of inherited
+    // temp-directory ACLs.
+    let sddl_text = concat!("D:P(A;;FA;;;SY)(A;;FA;;;", "\x42", "\x41", ")(A;;FA;;;OW)");
+    let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(SecureFileError::Chmod {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!(
+                "failed to build owner-only security descriptor: {}",
+                std::io::Error::last_os_error()
+            )),
+        });
+    }
+    let mut dacl_present = 0;
+    let mut dacl_defaulted = 0;
+    let mut dacl: *mut ACL = std::ptr::null_mut();
+    // SAFETY: descriptor is a valid security descriptor produced by the Win32 conversion API.
+    if unsafe {
+        GetSecurityDescriptorDacl(
+            descriptor,
+            &mut dacl_present,
+            &mut dacl,
+            &mut dacl_defaulted,
+        )
+    } == 0
+    {
+        // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        unsafe {
+            let _ = LocalFree(descriptor.cast());
+        }
+        return Err(SecureFileError::Chmod {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!(
+                "failed to extract the owner-only DACL: {}",
+                std::io::Error::last_os_error()
+            )),
+        });
+    }
+    if dacl_present == 0 || dacl.is_null() {
+        // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+        unsafe {
+            let _ = LocalFree(descriptor.cast());
+        }
+        return Err(SecureFileError::Chmod {
+            path: path.to_path_buf(),
+            source: std::io::Error::other("the owner-only security descriptor has no DACL"),
+        });
+    }
+    // SAFETY: the file handle is open and validated by the caller; DACL belongs to the live descriptor.
+    let status = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            dacl,
+            std::ptr::null_mut(),
+        )
+    };
+    // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe {
+        let _ = LocalFree(descriptor.cast());
+    }
+    if status != 0 {
+        return Err(SecureFileError::Chmod {
+            path: path.to_path_buf(),
+            source: std::io::Error::from_raw_os_error(status as i32),
+        });
+    }
+    Ok(())
+}
+
+/// Checks that an open handle refers to a private regular file.
+///
+/// The file must not be a reparse point, a directory, or a file with more than
+/// one hard link, so that the owner-only access control list protects exactly
+/// the file the caller opened.
+#[cfg(windows)]
+pub(crate) fn validate_windows_secure_file_handle(file: &File, path: &Path) -> Result<()> {
+    use std::mem::MaybeUninit;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
+        GetFileInformationByHandle,
+    };
+
+    let metadata = file.metadata()?;
+    if !metadata.is_file() {
+        return Err(SecureFileError::NonRegular {
+            path: path.to_path_buf(),
+        });
+    }
+    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
+    // SAFETY: `file` is an open file handle and `info` points to writable storage.
+    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr()) };
+    if ok == 0 {
+        return Err(SecureFileError::Stat {
+            path: path.to_path_buf(),
+            source: std::io::Error::last_os_error(),
+        });
+    }
+    // SAFETY: the API succeeded and initialized the structure.
+    let info = unsafe { info.assume_init() };
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+        return Err(SecureFileError::Symlink {
+            path: path.to_path_buf(),
+        });
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+        return Err(SecureFileError::NonRegular {
+            path: path.to_path_buf(),
+        });
+    }
+    if info.nNumberOfLinks != 1 {
+        return Err(SecureFileError::HardLinked {
+            path: path.to_path_buf(),
+        });
+    }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -197,6 +369,21 @@ fn already_exists(err: &SecureFileError) -> bool {
     match err {
         SecureFileError::Open { source, .. } => source.kind() == std::io::ErrorKind::AlreadyExists,
         _ => false,
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn create_secure_temp_file_creates_a_private_file() {
+        let (file, path) =
+            create_secure_temp_file("qpx-secure-temp-test", ".body").expect("secure temp file");
+        assert!(path.exists(), "the secure temp file must exist");
+        assert!(file.metadata().expect("metadata").is_file());
+        drop(file);
+        let _ = std::fs::remove_file(&path);
     }
 }
 

@@ -140,7 +140,7 @@ fn write_text_file(path: &Path, contents: &str, owner_only_acl: bool) -> Result<
     ensure_path_not_symlink(path, "MITM CA material")?;
     let mut file = match open_windows_ca_material(path, false) {
         Ok(file) => {
-            validate_windows_ca_material_handle(&file, path)?;
+            crate::secure_file::validate_windows_secure_file_handle(&file, path)?;
             file
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -153,15 +153,15 @@ fn write_text_file(path: &Path, contents: &str, owner_only_acl: bool) -> Result<
             );
         }
     };
-    validate_windows_ca_material_handle(&file, path)?;
+    crate::secure_file::validate_windows_secure_file_handle(&file, path)?;
     if owner_only_acl {
-        set_owner_only_acl(&file, path)?;
+        crate::secure_file::apply_owner_only_acl(&file, path)?;
     }
     file.set_len(0)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     if owner_only_acl {
-        set_owner_only_acl(&file, path)?;
+        crate::secure_file::apply_owner_only_acl(&file, path)?;
     }
     Ok(())
 }
@@ -193,8 +193,8 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
 fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     ensure_path_not_symlink(path, "ca key")?;
     let file = open_windows_ca_material(path, false)?;
-    validate_windows_ca_material_handle(&file, path)?;
-    set_owner_only_acl(&file, path)
+    crate::secure_file::validate_windows_secure_file_handle(&file, path)?;
+    Ok(crate::secure_file::apply_owner_only_acl(&file, path)?)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -361,162 +361,12 @@ fn reject_untrusted_state_ancestor(_path: &Path, _meta: &fs::Metadata) -> Result
     Ok(())
 }
 
-#[cfg(windows)]
-fn validate_windows_ca_material_handle(file: &fs::File, path: &Path) -> Result<()> {
-    use std::mem::MaybeUninit;
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        BY_HANDLE_FILE_INFORMATION, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT,
-        GetFileInformationByHandle,
-    };
-
-    let metadata = file.metadata()?;
-    if !metadata.is_file() {
-        return Err(anyhow!(
-            "MITM CA material must be a regular file: {}",
-            path.display()
-        )
-        .into());
-    }
-    let mut info = MaybeUninit::<BY_HANDLE_FILE_INFORMATION>::uninit();
-    // SAFETY: `file` is an open file handle and `info` points to writable storage.
-    let ok = unsafe { GetFileInformationByHandle(file.as_raw_handle().cast(), info.as_mut_ptr()) };
-    if ok == 0 {
-        return Err(anyhow!(
-            "failed to inspect MITM CA material handle {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        )
-        .into());
-    }
-    // SAFETY: the API succeeded and initialized the structure.
-    let info = unsafe { info.assume_init() };
-    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-        return Err(anyhow!(
-            "MITM CA material must not be a reparse point: {}",
-            path.display()
-        )
-        .into());
-    }
-    if info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
-        return Err(anyhow!(
-            "MITM CA material must not be a directory: {}",
-            path.display()
-        )
-        .into());
-    }
-    if info.nNumberOfLinks != 1 {
-        return Err(anyhow!(
-            "MITM CA material must not have hard links: {}",
-            path.display()
-        )
-        .into());
-    }
-    Ok(())
-}
-
 #[cfg(not(any(unix, windows)))]
 fn reject_untrusted_state_ancestor(path: &Path, _meta: &fs::Metadata) -> Result<()> {
     Err(anyhow!(
         "refusing to use MITM state directory on this platform: private ACL and reparse-point protection is not implemented: {}",
         path.display()
     ))
-}
-
-#[cfg(windows)]
-fn set_owner_only_acl(file: &fs::File, path: &Path) -> Result<()> {
-    use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1, SE_FILE_OBJECT,
-        SetSecurityInfo,
-    };
-    use windows_sys::Win32::Security::{
-        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl,
-        PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
-    };
-
-    // Protected DACL: LocalSystem, Administrators and the current owner get full access.
-    // This keeps generated MITM CA private material out of inherited temp-directory ACLs.
-    let sddl_text = concat!("D:P(A;;FA;;;SY)(A;;FA;;;", "\x42", "\x41", ")(A;;FA;;;OW)");
-    let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err(anyhow!(
-            "failed to build owner-only security descriptor: {}",
-            std::io::Error::last_os_error()
-        )
-        .into());
-    }
-    let mut dacl_present = 0;
-    let mut dacl_defaulted = 0;
-    let mut dacl: *mut ACL = std::ptr::null_mut();
-    // SAFETY: descriptor is a valid security descriptor produced by the Win32 conversion API.
-    if unsafe {
-        GetSecurityDescriptorDacl(
-            descriptor,
-            &mut dacl_present,
-            &mut dacl,
-            &mut dacl_defaulted,
-        )
-    } == 0
-    {
-        // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
-        unsafe {
-            let _ = LocalFree(descriptor.cast());
-        }
-        return Err(anyhow!(
-            "failed to extract owner-only DACL for {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        )
-        .into());
-    }
-    if dacl_present == 0 || dacl.is_null() {
-        // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
-        unsafe {
-            let _ = LocalFree(descriptor.cast());
-        }
-        return Err(anyhow!(
-            "owner-only security descriptor did not contain a DACL for {}",
-            path.display()
-        )
-        .into());
-    }
-    // SAFETY: the file handle is open and validated by the caller; DACL belongs to the live descriptor.
-    let status = unsafe {
-        SetSecurityInfo(
-            file.as_raw_handle(),
-            SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
-            std::ptr::null_mut(),
-            std::ptr::null_mut(),
-            dacl,
-            std::ptr::null_mut(),
-        )
-    };
-    // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
-    unsafe {
-        let _ = LocalFree(descriptor.cast());
-    }
-    if status != 0 {
-        return Err(anyhow!(
-            "failed to set owner-only ACL on MITM CA material {}: {}",
-            path.display(),
-            std::io::Error::from_raw_os_error(status as i32)
-        )
-        .into());
-    }
-    Ok(())
 }
 
 #[cfg(windows)]
