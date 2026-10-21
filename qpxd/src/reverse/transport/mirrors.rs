@@ -5,7 +5,7 @@ use crate::reverse::router::{RoutePolicy, SelectedMirrorTarget};
 use crate::upstream::health::PassiveFailureKind;
 use crate::upstream::origin::proxy_http;
 use anyhow::Error;
-use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use http::header::TRANSFER_ENCODING;
 use hyper::{Request, StatusCode};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
@@ -123,25 +123,14 @@ pub(super) fn request_is_templateable(req: &Request<Body>, max_body_bytes: usize
     if req.headers().contains_key(TRANSFER_ENCODING) {
         return false;
     }
-    let values = req.headers().get_all(CONTENT_LENGTH);
-    let mut parsed = Vec::new();
-    for value in values {
-        let Ok(raw) = value.to_str() else {
-            return false;
-        };
-        let Ok(len) = raw.trim().parse::<u64>() else {
-            return false;
-        };
-        parsed.push(len);
-    }
-    if parsed.is_empty() {
+    match qpx_http::protocol::semantics::declared_content_length(req.headers()) {
+        Ok(Some(length)) => usize::try_from(length).is_ok_and(|length| length <= max_body_bytes),
         // HTTP/1.1 without Content-Length/Transfer-Encoding cannot have a body.
-        return req.version() == http::Version::HTTP_11;
+        Ok(None) => req.version() == http::Version::HTTP_11,
+        // A declaration the grammar does not have names no length, so the
+        // request is not one that can be safely buffered.
+        Err(_) => false,
     }
-    if parsed.iter().any(|l| *l != parsed[0]) {
-        return false;
-    }
-    (parsed[0] as usize) <= max_body_bytes
 }
 
 #[expect(
@@ -296,4 +285,57 @@ pub(super) struct StreamingMirrorDispatch<'a> {
     pub(super) lifecycle: EndpointLifecycleRuntime,
     pub(super) upstream_trust: Option<Arc<CompiledUpstreamTlsTrust>>,
     pub(super) proxy_name: &'a str,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::header::CONTENT_LENGTH;
+
+    fn request_with_content_length(value: &str) -> Request<Body> {
+        Request::builder()
+            .method(http::Method::GET)
+            .uri("http://example.test/")
+            .header(CONTENT_LENGTH, value)
+            .body(Body::empty())
+            .expect("request")
+    }
+
+    #[test]
+    fn templateable_request_reads_the_declared_length_through_the_owner() {
+        // A comma list of equal members is one length, so such a request can
+        // be mirrored.
+        let listed = request_with_content_length("16, 16");
+        assert!(request_is_templateable(&listed, 16));
+
+        // A declared length within the threshold can be mirrored.
+        let within = request_with_content_length("16");
+        assert!(request_is_templateable(&within, 16));
+
+        // A declared length beyond the threshold cannot.
+        let beyond = request_with_content_length("17");
+        assert!(!request_is_templateable(&beyond, 16));
+
+        // A request without a declaration is one without a body on HTTP/1.1.
+        let plain = Request::builder()
+            .method(http::Method::GET)
+            .uri("http://example.test/")
+            .body(Body::empty())
+            .expect("request");
+        assert!(request_is_templateable(&plain, 16));
+    }
+
+    #[test]
+    fn templateable_request_refuses_a_signed_content_length() {
+        // The owner's grammar has no signed member, so the declaration names
+        // no length and the request is not one that can be safely buffered.
+        let signed = request_with_content_length("+16");
+        assert!(!request_is_templateable(&signed, 16));
+    }
+
+    #[test]
+    fn templateable_request_refuses_conflicting_content_lengths() {
+        let conflicting = request_with_content_length("16, 17");
+        assert!(!request_is_templateable(&conflicting, 16));
+    }
 }

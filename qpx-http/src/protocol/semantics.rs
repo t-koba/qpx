@@ -735,16 +735,13 @@ pub enum ContentLengthError {
 ///
 /// The owner sits beside the member grammar it uses, so the HTTP/1 and
 /// HTTP/2 codecs, the HTTP/3 codec and listener, the cache, the upstream
-/// raw HTTP/1 path, the reverse raw HTTP/1 path, the reverse request
-/// template and the request validation read the field the same way instead
-/// of each keeping its own interpretation.
+/// raw HTTP/1 path, the reverse raw HTTP/1 path, the reverse mirror path,
+/// the reverse request template and the request validation read the field
+/// the same way instead of each keeping its own interpretation.
 ///
 /// The sites that read the declaration through a helper are named here, so
 /// the Content-Length gate can check that this list and the tree agree:
 ///
-/// - `qpxd/src/reverse/transport/mirrors.rs` parses every value as a plain
-///   integer, so it accepts a leading plus sign, and it does not split a
-///   comma list.
 /// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
 ///   than a declaration.
 /// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
@@ -767,6 +764,13 @@ pub enum ContentLengthError {
 /// carry a body instead of one without a body, and the fast path is
 /// declined for it. A comma list of equal members is still one length and
 /// two members that disagree are still a conflict.
+///
+/// The reverse mirror path reads the declaration through the owner as well:
+/// `qpxd/src/reverse/transport/mirrors.rs` calls it for the length that
+/// says whether a request can be mirrored. A comma list of equal members is
+/// one length there now, so such a request can be mirrored, and a leading
+/// plus sign is refused, so a request that declares its length that way is
+/// not mirrored.
 ///
 /// The reverse request template reads the declaration through the owner as
 /// well: `qpxd/src/reverse/transport/request_template.rs` calls it for the
