@@ -7,7 +7,7 @@ use super::Validate;
 
 pub(crate) fn validate_http_token(value: &str, context: &str) -> Result<()> {
     validate_non_empty_ascii(value, context)?;
-    if !value.bytes().all(is_http_token_char) {
+    if !crate::http_token::is_http_token(value) {
         return Err(anyhow!("{context} must be a valid HTTP token"));
     }
     Ok(())
@@ -23,26 +23,6 @@ pub(crate) fn validate_non_empty_ascii(value: &str, context: &str) -> Result<()>
     Ok(())
 }
 
-fn is_http_token_char(byte: u8) -> bool {
-    byte.is_ascii_alphanumeric()
-        || matches!(
-            byte,
-            b'!' | b'#'
-                | b'$'
-                | b'%'
-                | b'&'
-                | b'\''
-                | b'*'
-                | b'+'
-                | b'-'
-                | b'.'
-                | b'^'
-                | b'_'
-                | b'`'
-                | b'|'
-                | b'~'
-        )
-}
 pub(crate) fn validate_header_name(name: &str, context: &str) -> Result<()> {
     let name = name.trim();
     if name.is_empty() {

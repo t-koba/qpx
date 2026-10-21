@@ -22,6 +22,9 @@ pub mod dpop;
 pub mod envsubst;
 /// Shared exporter configuration and queue policy types.
 pub mod exporter;
+/// The HTTP token vocabulary: the RFC 9110 token grammar and the
+/// comma-separated header token search.
+pub mod http_token;
 /// IPC framing and shared metadata protocol definitions.
 #[cfg(feature = "ipc-support")]
 pub mod ipc;

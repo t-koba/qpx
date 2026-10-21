@@ -1136,43 +1136,135 @@ fn dispatch_limit_response_commonality_violations(content: &str) -> Vec<&'static
 }
 
 /// The HTTP token grammar and the comma-separated header token search have
-/// one owner: `qpx-http`. A second copy in `qpxd` would let the two drift
-/// apart, and the Forwarded element names, the WebSocket subprotocol names
-/// and the Connection tokens would then disagree about what a token is.
+/// one owner: `qpx-core::http_token`.
+///
+/// The owner sits below the crates that use it - the configuration
+/// validation, the DPoP claim validation and the HTTP runtime - so a single
+/// implementation can serve all of them. A copy in any of them would let the
+/// Forwarded element names, the WebSocket subprotocol names, the Connection
+/// tokens, the configuration's header names and the DPoP method claim drift
+/// apart, and the DPoP copy already had.
+///
+/// The gate covers the whole workspace, not one crate. No other file may
+/// define a token grammar predicate or a header token search under one of the
+/// names the workspace has used, and no other file may spell the search the
+/// way the owner spells it: a comma split whose members are compared
+/// case-insensitively after trimming. A copy that renames the predicate and
+/// spells the character set differently is beyond a text gate; the owner
+/// below its users is what keeps that from mattering.
 fn check_http_token_vocabulary_single_owner(root: &Path) -> Result<()> {
+    const OWNER: &str = "qpx-core/src/http_token.rs";
+    const OWNER_FUNCTIONS: [&str; 2] = [
+        "pub fn is_http_token(",
+        "pub fn header_values_contain_token(",
+    ];
     let mut violations = Vec::new();
-    for path in rust_files_under(&root.join("qpxd/src"))? {
-        let rel_path = rel_path(root, &path);
-        let content = fs::read_to_string(&path)
-            .with_context(|| format!("failed to read {}", path.display()))?;
-        violations.extend(
-            http_token_vocabulary_violations(&content)
-                .into_iter()
-                .map(|violation| format!("{rel_path}: {violation}")),
-        );
+    let owner = fs::read_to_string(root.join(OWNER))
+        .with_context(|| format!("the HTTP token vocabulary owner {OWNER} is missing"))?;
+    for required in OWNER_FUNCTIONS {
+        if !owner.contains(required) {
+            violations.push(format!("{OWNER}: the owner does not define `{required}`"));
+        }
+    }
+    for crate_dir in workspace_member_crates(root)? {
+        // The gate's own crate names the vocabulary it looks for.
+        if crate_dir == "xtask" {
+            continue;
+        }
+        let crate_root = root.join(&crate_dir);
+        for dir in ["src", "tests"] {
+            let scan_root = crate_root.join(dir);
+            if !scan_root.is_dir() {
+                continue;
+            }
+            for path in rust_files_under(&scan_root)? {
+                let rel_path = rel_path(root, &path);
+                if rel_path == OWNER {
+                    continue;
+                }
+                let content = fs::read_to_string(&path)
+                    .with_context(|| format!("failed to read {}", path.display()))?;
+                violations.extend(
+                    http_token_vocabulary_violations(&content)
+                        .into_iter()
+                        .map(|violation| format!("{rel_path}: {violation}")),
+                );
+            }
+        }
     }
     if !violations.is_empty() {
         bail!(
-            "HTTP token vocabulary must have one owner:\n{}",
+            "the HTTP token vocabulary must have one owner ({OWNER}):\n{}",
             violations.join("\n")
         );
     }
     Ok(())
 }
 
+/// The workspace's member crates, read from the root manifest.
+///
+/// The gate covers every member, so it reads the manifest rather than a
+/// hand-written list that can fall behind a new crate.
+fn workspace_member_crates(root: &Path) -> Result<Vec<String>> {
+    let content = fs::read_to_string(root.join("Cargo.toml"))
+        .with_context(|| "failed to read the workspace manifest".to_string())?;
+    let manifest: toml::Value = toml::from_str(&content)
+        .with_context(|| "failed to parse the workspace manifest".to_string())?;
+    let members = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(toml::Value::as_array)
+        .ok_or_else(|| anyhow!("the workspace manifest has no members list"))?
+        .iter()
+        .filter_map(|member| member.as_str().map(str::to_owned))
+        .collect::<Vec<_>>();
+    if members.is_empty() {
+        bail!("the workspace manifest has no members list");
+    }
+    Ok(members)
+}
+
+/// The names the workspace has used for the token grammar and the header
+/// token search.
+const HTTP_TOKEN_VOCABULARY_NAMES: [&str; 6] = [
+    "fn is_http_token(",
+    "fn is_http_token_char(",
+    "fn is_forwarded_token(",
+    "fn has_connection_token(",
+    "fn header_values_contain_token(",
+    "fn is_token_char(",
+];
+
 fn http_token_vocabulary_violations(content: &str) -> Vec<&'static str> {
     let mut violations = Vec::new();
-    for forbidden in [
-        "fn is_http_token(",
-        "fn is_forwarded_token(",
-        "fn has_connection_token(",
-        "fn header_values_contain_token(",
-    ] {
+    for forbidden in HTTP_TOKEN_VOCABULARY_NAMES {
         if content.contains(forbidden) {
             violations.push(forbidden);
         }
     }
+    if contains_token_search_idiom(content) {
+        violations
+            .push("the header token search idiom (a comma split compared case-insensitively)");
+    }
     violations
+}
+
+/// The owner's spelling of the header token search: a comma split whose
+/// members are compared case-insensitively after trimming.
+fn contains_token_search_idiom(content: &str) -> bool {
+    const SPLIT: &str = "split(',')";
+    const COMPARE: &str = "trim().eq_ignore_ascii_case(";
+    const WINDOW: usize = 240;
+    let mut rest = content;
+    while let Some(index) = rest.find(SPLIT) {
+        let after = &rest[index + SPLIT.len()..];
+        let window = after.get(..WINDOW).unwrap_or(after);
+        if window.contains(COMPARE) {
+            return true;
+        }
+        rest = after;
+    }
+    false
 }
 
 fn check_http_response_body_hard_cap(root: &Path) -> Result<()> {
@@ -3958,16 +4050,26 @@ mod tests {
     }
 
     #[test]
+    fn http_token_vocabulary_violations_flag_the_search_idiom_under_any_name() {
+        assert_eq!(
+            http_token_vocabulary_violations(
+                "let present = values\n    .split(',')\n    .any(|part| part.trim().eq_ignore_ascii_case(\"100-continue\"));\n"
+            ),
+            vec!["the header token search idiom (a comma split compared case-insensitively)"]
+        );
+    }
+
+    #[test]
     fn http_token_vocabulary_violations_accept_the_shared_owner() {
         assert!(
             http_token_vocabulary_violations(
-                "use qpx_http::protocol::semantics::{header_values_contain_token, is_http_token};"
+                "use qpx_core::http_token::{header_values_contain_token, is_http_token};"
             )
             .is_empty()
         );
         assert!(
             http_token_vocabulary_violations(
-                "let upgrade = qpx_http::protocol::semantics::header_values_contain_token(headers, CONNECTION, \"upgrade\");"
+                "let upgrade = qpx_core::http_token::header_values_contain_token(headers, CONNECTION, \"upgrade\");"
             )
             .is_empty()
         );

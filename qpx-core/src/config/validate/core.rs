@@ -17,7 +17,7 @@ pub(super) fn validate_identity_config(identity: &IdentityConfig) -> Result<()> 
     if identity.proxy_name.trim().is_empty() {
         return Err(anyhow!("identity.proxy_name must not be empty"));
     }
-    if !is_http_token(identity.proxy_name.as_str()) {
+    if !crate::http_token::is_http_token(identity.proxy_name.as_str()) {
         return Err(anyhow!("identity.proxy_name must be a valid HTTP token"));
     }
     if identity.auth_realm.trim().is_empty() {
@@ -53,30 +53,6 @@ pub(super) fn validate_identity_config(identity: &IdentityConfig) -> Result<()> 
         ));
     }
     Ok(())
-}
-
-fn is_http_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|b| {
-            b.is_ascii_alphanumeric()
-                || matches!(
-                    b,
-                    b'!' | b'#'
-                        | b'$'
-                        | b'%'
-                        | b'&'
-                        | b'\''
-                        | b'*'
-                        | b'+'
-                        | b'-'
-                        | b'.'
-                        | b'^'
-                        | b'_'
-                        | b'`'
-                        | b'|'
-                        | b'~'
-                )
-        })
 }
 
 pub(super) fn validate_messages_config(messages: &MessagesConfig) -> Result<()> {

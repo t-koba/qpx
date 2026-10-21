@@ -4,7 +4,7 @@
 
 ## Crates
 
-- `qpx-core`: shared configuration types, validation, redaction, TLS helpers, shared-memory ring, and low-level protocol utilities.
+- `qpx-core`: shared configuration types, validation, redaction, TLS helpers, shared-memory ring, and low-level protocol utilities, including the HTTP token vocabulary that the configuration validation, the DPoP claim validation and the HTTP runtime share.
 - `qpx-http`: shared HTTP runtime primitives (body channels/spooling with cancellation, protocol helpers, sharding, TLS glue) lifted out of `qpxd` for reuse by sibling crates.
 - `qpx-auth`: Basic, Digest, LDAP, and auth cache logic.
 - `qpx-h3`: the qpx-owned HTTP/3 transport implementation used where the stock `h3` crate cannot expose the required control points.

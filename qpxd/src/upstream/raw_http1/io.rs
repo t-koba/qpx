@@ -11,7 +11,7 @@ use bytes::Buf;
 use bytes::BytesMut;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode, Version};
-use qpx_http::protocol::semantics::header_values_contain_token;
+use qpx_core::http_token::header_values_contain_token;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Duration;
 

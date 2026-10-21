@@ -1,6 +1,6 @@
 use hyper_util::rt::TokioIo;
+use qpx_core::http_token::{header_values_contain_token, is_http_token};
 use qpx_http::body::Body;
-use qpx_http::protocol::semantics::{header_values_contain_token, is_http_token};
 use std::collections::HashSet;
 use std::future::Future;
 use std::time::Duration;

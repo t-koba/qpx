@@ -839,32 +839,3 @@ fn capsule_protocol_rejects_repeated_field_lines() {
         assert!(!capsule_protocol_enabled(&headers), "{values:?}");
     }
 }
-
-#[test]
-fn http_token_accepts_only_the_rfc_token_characters() {
-    assert!(is_http_token("token"));
-    assert!(is_http_token("keep-alive"));
-    assert!(is_http_token("a1!#$%&'*+-.^_`|~"));
-    assert!(!is_http_token(""));
-    assert!(!is_http_token("has space"));
-    assert!(!is_http_token("comma,separated"));
-    assert!(!is_http_token("colon:value"));
-}
-
-#[test]
-fn header_token_search_ignores_case_and_surrounding_whitespace() {
-    let mut headers = HeaderMap::new();
-    headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, Close"));
-    assert!(header_values_contain_token(&headers, CONNECTION, "close"));
-    assert!(header_values_contain_token(
-        &headers,
-        CONNECTION,
-        "keep-alive"
-    ));
-    assert!(!header_values_contain_token(&headers, CONNECTION, "keep"));
-    assert!(!header_values_contain_token(
-        &headers,
-        http::header::UPGRADE,
-        "websocket"
-    ));
-}

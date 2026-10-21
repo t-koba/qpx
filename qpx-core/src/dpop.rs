@@ -578,7 +578,7 @@ fn parse_proof(
         .get("htm")
         .and_then(Value::as_str)
         .ok_or(DpopError::InvalidClaim("htm"))?;
-    if !is_http_token(method) {
+    if !crate::http_token::is_http_token(method) {
         return Err(DpopError::InvalidClaim("htm"));
     }
     if method != context.method {
@@ -882,20 +882,6 @@ fn validate_thumbprint(value: &str) -> Result<(), DpopError> {
         return Err(DpopError::InvalidClaim("cnf.jkt"));
     }
     Ok(())
-}
-
-fn is_http_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            matches!(
-                byte,
-                b'!' | b'#'..=b'\''
-                    | b'*'
-                    | b'+'..=b'9'
-                    | b'A'..=b'Z'
-                    | b'^'..=b'~'
-            )
-        })
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

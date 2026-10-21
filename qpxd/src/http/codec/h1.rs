@@ -561,7 +561,7 @@ pub(crate) fn fuzz_parse_http1_request_head(bytes: &[u8]) {
 
 fn request_has_upgrade(headers: &HeaderMap) -> bool {
     headers.contains_key(hyper::header::UPGRADE)
-        && qpx_http::protocol::semantics::header_values_contain_token(
+        && qpx_core::http_token::header_values_contain_token(
             headers,
             hyper::header::CONNECTION,
             "upgrade",
@@ -569,12 +569,7 @@ fn request_has_upgrade(headers: &HeaderMap) -> bool {
 }
 
 fn expect_continue(headers: &HeaderMap) -> bool {
-    headers
-        .get_all(EXPECT)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|raw| raw.split(','))
-        .any(|part| part.trim().eq_ignore_ascii_case("100-continue"))
+    qpx_core::http_token::header_values_contain_token(headers, EXPECT, "100-continue")
 }
 
 fn determine_request_body_kind(headers: &HeaderMap) -> Result<RequestBodyKind> {

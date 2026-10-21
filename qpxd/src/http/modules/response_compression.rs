@@ -455,18 +455,15 @@ fn strip_stale_digests(headers: &mut HeaderMap) {
 }
 
 fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
+    if qpx_core::http_token::header_values_contain_token(headers, VARY.clone(), token) {
+        return Ok(());
+    }
     let existing = headers
         .get_all(VARY)
         .iter()
         .map(|value| value.to_str())
         .collect::<std::result::Result<Vec<_>, _>>()?
         .join(", ");
-    if existing
-        .split(',')
-        .any(|value| value.trim().eq_ignore_ascii_case(token))
-    {
-        return Ok(());
-    }
     let value = if existing.is_empty() {
         token.to_owned()
     } else {

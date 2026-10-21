@@ -160,7 +160,7 @@ fn push_forwarded_node(output: &mut String, ip: IpAddr) {
 }
 
 fn push_forwarded_value(output: &mut String, value: &str) {
-    if qpx_http::protocol::semantics::is_http_token(value) {
+    if qpx_core::http_token::is_http_token(value) {
         output.push_str(value);
         return;
     }
