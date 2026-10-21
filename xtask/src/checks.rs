@@ -3046,6 +3046,8 @@ fn ci_acceptance_violations(
         "types: [published]",
         "tags:",
         "\"v*\"",
+        "scripts/ci-runner-minutes.py collect",
+        "scripts/ci-runner-minutes.py report",
     ] {
         if !ci.contains(required) {
             violations.push(format!(
@@ -5401,6 +5403,8 @@ mod tests {
             types: [published]
             tags:
             "v*"
+            scripts/ci-runner-minutes.py collect
+            scripts/ci-runner-minutes.py report
         "#;
         let security = r#"
             RUSTFLAGS: -Zsanitizer=address

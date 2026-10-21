@@ -896,6 +896,44 @@ jobs:
       - run: cargo audit
       - run: cargo deny check
 
+  runner_minutes:
+    name: CI runner minutes
+    if: always()
+    needs:
+      - build_test
+      - perf_audit_proxy
+      - perf_audit_protocol
+      - perf_audit_qpx
+      - e2e_tests
+      - http_rfc_all_features
+      - external_h3_interop
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    permissions:
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+      - name: collect the run and job records
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 ./scripts/ci-runner-minutes.py collect --out-dir target/ci-runner-minutes
+      - name: report the runner minutes
+        run: |
+          python3 ./scripts/ci-runner-minutes.py report \
+            --runs target/ci-runner-minutes/runs.jsonl \
+            --jobs target/ci-runner-minutes/jobs.jsonl \
+            --run-id "${GITHUB_RUN_ID}" \
+            --captured-at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --collection target/ci-runner-minutes/collection.json \
+            --out target/ci-runner-minutes/runner-minutes.json
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: qpx-ci-runner-minutes
+          path: target/ci-runner-minutes
+          if-no-files-found: ignore
+
   http_rfc_compliance:
     name: HTTP RFC compliance release gate
     if: always()
