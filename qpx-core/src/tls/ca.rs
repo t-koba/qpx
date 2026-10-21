@@ -140,7 +140,8 @@ fn write_text_file(path: &Path, contents: &str, owner_only_acl: bool) -> Result<
     ensure_path_not_symlink(path, "MITM CA material")?;
     let mut file = match open_windows_ca_material(path, false) {
         Ok(file) => {
-            crate::secure_file::validate_windows_secure_file_handle(&file, path)?;
+            crate::secure_file::validate_windows_secure_file_handle(&file, path)
+                .map_err(|err| anyhow!("{err}"))?;
             file
         }
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -153,15 +154,16 @@ fn write_text_file(path: &Path, contents: &str, owner_only_acl: bool) -> Result<
             );
         }
     };
-    crate::secure_file::validate_windows_secure_file_handle(&file, path)?;
+    crate::secure_file::validate_windows_secure_file_handle(&file, path)
+        .map_err(|err| anyhow!("{err}"))?;
     if owner_only_acl {
-        crate::secure_file::apply_owner_only_acl(&file, path)?;
+        crate::secure_file::apply_owner_only_acl(&file, path).map_err(|err| anyhow!("{err}"))?;
     }
     file.set_len(0)?;
     file.write_all(contents.as_bytes())?;
     file.sync_all()?;
     if owner_only_acl {
-        crate::secure_file::apply_owner_only_acl(&file, path)?;
+        crate::secure_file::apply_owner_only_acl(&file, path).map_err(|err| anyhow!("{err}"))?;
     }
     Ok(())
 }
@@ -193,8 +195,9 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
 fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     ensure_path_not_symlink(path, "ca key")?;
     let file = open_windows_ca_material(path, false)?;
-    crate::secure_file::validate_windows_secure_file_handle(&file, path)?;
-    Ok(crate::secure_file::apply_owner_only_acl(&file, path)?)
+    crate::secure_file::validate_windows_secure_file_handle(&file, path)
+        .map_err(|err| anyhow!("{err}"))?;
+    crate::secure_file::apply_owner_only_acl(&file, path).map_err(|err| anyhow!("{err}"))
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -263,7 +266,7 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        crate::secure_file::apply_owner_only_directory_acl(path)?;
+        crate::secure_file::apply_owner_only_directory_acl(path).map_err(|err| anyhow!("{err}"))?;
     }
     #[cfg(not(any(unix, windows)))]
     {

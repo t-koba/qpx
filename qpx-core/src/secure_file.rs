@@ -312,7 +312,7 @@ pub(crate) fn apply_owner_only_acl(file: &File, path: &Path) -> Result<()> {
     // SAFETY: the file handle is open and validated by the caller; DACL belongs to the live descriptor.
     let status = unsafe {
         SetSecurityInfo(
-            file.as_raw_handle(),
+            file.as_raw_handle().cast(),
             SE_FILE_OBJECT,
             DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
             std::ptr::null_mut(),
@@ -540,14 +540,14 @@ mod windows_tests {
                 std::ptr::null_mut(),
                 std::ptr::null_mut(),
                 &mut dacl,
-                &mut descriptor,
                 std::ptr::null_mut(),
+                &mut descriptor,
             )
         };
         if status != 0 {
             return false;
         }
-        let mut control = 0u32;
+        let mut control = 0u16;
         let mut revision = 0u32;
         // SAFETY: descriptor is a valid security descriptor.
         let ok = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) };
