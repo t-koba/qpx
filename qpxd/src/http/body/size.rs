@@ -17,7 +17,7 @@ use tokio::io::AsyncWriteExt;
 pub(crate) mod io;
 mod storage;
 
-use self::io::{parse_content_length, read_body_data, read_body_trailers};
+use self::io::{declared_size_hint, read_body_data, read_body_trailers};
 pub(crate) use self::storage::ObservedBodyReader;
 use self::storage::{
     ObservedBodyBytes, ObservedBodyFile, ObservedBodySize, ObservedBodyStorage,
@@ -40,7 +40,7 @@ pub(crate) fn observed_request_size(req: &Request<Body>) -> Option<u64> {
     req.extensions()
         .get::<ObservedBodySize>()
         .map(|size| size.0)
-        .or_else(|| parse_content_length(req.headers()))
+        .or_else(|| declared_size_hint(req.headers()))
 }
 
 pub(crate) fn has_observed_request_bytes(req: &Request<Body>) -> bool {
@@ -85,7 +85,7 @@ pub(crate) fn observed_response_size(response: &Response<Body>) -> Option<u64> {
         .extensions()
         .get::<ObservedBodySize>()
         .map(|size| size.0)
-        .or_else(|| parse_content_length(response.headers()))
+        .or_else(|| declared_size_hint(response.headers()))
 }
 
 #[cfg(test)]
@@ -378,7 +378,7 @@ async fn observe_request_body(
         }
         Ok(req)
     } else {
-        if let Some(size) = parse_content_length(&parts.headers) {
+        if let Some(size) = declared_size_hint(&parts.headers) {
             ensure_observed_size_within_limit(size, max_body_bytes)?;
             let mut req = Request::from_parts(parts, body);
             set_observed_request_size(&mut req, size);
@@ -429,7 +429,7 @@ async fn observe_response_body(
         }
         Ok(response)
     } else {
-        if let Some(size) = parse_content_length(&parts.headers) {
+        if let Some(size) = declared_size_hint(&parts.headers) {
             ensure_observed_size_within_limit(size, max_body_bytes)?;
             let mut response = Response::from_parts(parts, body);
             response.extensions_mut().insert(ObservedBodySize(size));

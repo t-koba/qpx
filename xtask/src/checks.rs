@@ -1241,7 +1241,10 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 ///
 /// A site that reads the declaration through a helper either calls the owner
 /// or is named in the owner's own list, so a new reader cannot appear
-/// without the owner saying what it does differently. The gate reads the
+/// without the owner saying what it does differently. The list may be empty:
+/// an empty list says that every site that reads the declaration through a
+/// helper calls the owner, and a reader that does not call the owner is a
+/// violation whether or not the owner names a site. The gate reads the
 /// names the workspace has used for such a helper, so a reader under a name
 /// it has not seen before, a reader that reads the declaration inline, and a
 /// reader that answers a different question - the request guard compares the
@@ -1287,11 +1290,6 @@ fn check_content_length_single_owner(root: &Path) -> Result<()> {
 fn content_length_single_owner_violations(owner: &str, files: &[(String, String)]) -> Vec<String> {
     let listed = content_length_listed_sites(owner);
     let mut violations = Vec::new();
-    if listed.is_empty() {
-        violations.push(format!(
-            "{CONTENT_LENGTH_OWNER}: the owner does not name the sites that read the declaration through a helper"
-        ));
-    }
     let mut readers = Vec::new();
     for (path, content) in files {
         if !CONTENT_LENGTH_READER_NAMES
@@ -5167,7 +5165,7 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
         // A site that reads through the owner needs no entry.
         let folded = (
             "qpxd/src/http/codec/h1.rs".to_string(),
-            "fn parse_declared_content_length() { qpx_http::protocol::semantics::declared_content_length(headers) }\n"
+            "fn parse_declared_content_length() { qpx_core::http_content_length::declared_content_length(headers) }\n"
                 .to_string(),
         );
         let violations = content_length_single_owner_violations(owner, &[folded]);
@@ -5176,6 +5174,39 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
                 .iter()
                 .any(|violation| violation.contains("qpxd/src/http/codec/h1.rs")),
             "{violations:?}"
+        );
+
+        // An owner that names no site says that every site that reads the
+        // declaration through a helper calls the owner.
+        let empty_owner = r#"
+/// Every site that reads the declaration through a helper reads it through
+/// the owner.
+pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
+    Ok(None)
+}
+"#;
+        let folded = (
+            "qpxd/src/http/codec/h1.rs".to_string(),
+            "fn parse_declared_content_length() { qpx_core::http_content_length::declared_content_length(headers) }\n"
+                .to_string(),
+        );
+        assert!(
+            content_length_single_owner_violations(empty_owner, std::slice::from_ref(&folded))
+                .is_empty(),
+            "a reader that calls the owner needs no entry"
+        );
+
+        // A reader that does not call the owner is a violation whether or not
+        // the owner names a site.
+        let unlisted = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            "fn parse_content_length() {}\n".to_string(),
+        );
+        assert_eq!(
+            content_length_single_owner_violations(empty_owner, &[folded, unlisted]),
+            [
+                "qpxd/src/http/body/size/io.rs reads the declared Content-Length through its own helper and the owner does not name it"
+            ]
         );
     }
 

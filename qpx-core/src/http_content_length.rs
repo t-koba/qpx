@@ -49,14 +49,16 @@ pub enum ContentLengthError {
 /// The owner sits beside the member grammar it uses, so the HTTP/1 and
 /// HTTP/2 codecs, the HTTP/3 codec and listener, the cache, the upstream
 /// raw HTTP/1 path, the reverse raw HTTP/1 path, the reverse mirror path,
-/// the reverse request template and the request validation read the field
-/// the same way instead of each keeping its own interpretation.
+/// the reverse request template, the request validation and the observed
+/// body size read the field the same way instead of each keeping its own
+/// interpretation.
 ///
-/// The sites that read the declaration through a helper are named here, so
-/// the Content-Length gate can check that this list and the tree agree:
-///
-/// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
-///   than a declaration.
+/// Every site that reads the declaration through a helper of its own reads
+/// it through the owner, so the Content-Length gate can check that the tree
+/// and the owner agree: a site that reads the declaration through a helper
+/// calls the owner unless the owner names it as a site that does something
+/// different. No site does something different today, so the owner names
+/// none.
 ///
 /// The upstream raw HTTP/1 path reads the declaration through the owner as
 /// well: `qpxd/src/upstream/raw_http1/mod.rs` calls it with the header map
@@ -91,14 +93,15 @@ pub enum ContentLengthError {
 /// leading plus sign is refused, so a request that declares its length that
 /// way is not retried.
 ///
-/// The observed body size is read by another reader, which reads the field
-/// as a size hint rather than a declaration:
-/// `qpxd/src/http/body/size/io.rs` takes the first value and parses it as a
-/// plain integer, so it reads one length and refuses a comma list. It does
-/// not decide the retry, but it reads the observed size before the retry
-/// decision is made, so a request that declares its length as a comma list
-/// has no observed size and its body is observed rather than sized from the
-/// declaration.
+/// The observed body size is read through the owner as well:
+/// `qpxd/src/http/body/size/io.rs` hands the header map to it and reads the
+/// answer as a size hint. The hint is the length the field declares, so a
+/// comma list of equal members is one length there now and such a request
+/// has an observed size instead of a body that is observed, a leading plus
+/// sign is refused there too and gives no hint, and two values that
+/// disagree declare no length, so the body of such a request is observed
+/// rather than sized from the first value, which is what the plain integer
+/// parse this reader used to do.
 ///
 /// The HTTP/3 path reads the declaration through the owner as well:
 /// `qpx-h3/src/response.rs` hands the header map to it, so the HTTP/3 server
@@ -124,9 +127,9 @@ pub enum ContentLengthError {
 /// length that way is refused instead of read, and a comma list of equal
 /// members is one length there as well.
 /// The gate finds those helpers by the names the workspace has used for
-/// them, so a site that reads the declaration inline is outside both the
-/// list and the gate. Those sites are named here as well, so that the record
-/// of the sites that read the declaration is complete:
+/// them, so a site that reads the declaration inline is outside the gate.
+/// Those sites are named here as well, so that the record of the sites that
+/// read the declaration is complete:
 /// `qpxd-cache/src/backend_http.rs` compares the cached response's declared
 /// length with the expected body length, `qpxd/src/http/modules/response_compression.rs`
 /// reads the declared length to decide whether the body is compressed,

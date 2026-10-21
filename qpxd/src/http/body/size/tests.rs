@@ -56,6 +56,53 @@ async fn observe_request_body_size_uses_content_length_without_buffering() {
 }
 
 #[tokio::test]
+async fn observe_request_body_size_uses_a_comma_list_of_equal_members() {
+    let (_sender, body) = Body::channel();
+    let req = Request::builder()
+        .header(CONTENT_LENGTH, "4, 4")
+        .body(body)
+        .expect("request");
+
+    let req = timeout(
+        Duration::from_millis(25),
+        observe_request_body_size(req, 8, Duration::from_secs(1)),
+    )
+    .await
+    .expect("content-length size observation must not wait for body")
+    .expect("observe");
+    assert_eq!(observed_request_size(&req), Some(4));
+}
+
+#[test]
+fn observed_request_size_reads_the_declaration_through_the_owner() {
+    // A leading plus sign is not a member of the grammar, so the request
+    // declares no length and its body is observed rather than sized from
+    // the declaration.
+    let req = Request::builder()
+        .header(CONTENT_LENGTH, "+4")
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(observed_request_size(&req), None);
+
+    // Two values that disagree declare no length either.
+    let req = Request::builder()
+        .header(CONTENT_LENGTH, "4")
+        .header(CONTENT_LENGTH, "5")
+        .body(Body::empty())
+        .expect("request");
+    assert_eq!(observed_request_size(&req), None);
+}
+
+#[test]
+fn observed_response_size_reads_the_declaration_through_the_owner() {
+    let response = Response::builder()
+        .header(CONTENT_LENGTH, "9, 9")
+        .body(Body::empty())
+        .expect("response");
+    assert_eq!(observed_response_size(&response), Some(9));
+}
+
+#[tokio::test]
 async fn limit_request_body_streams_unknown_length_without_prebuffering() {
     let (mut sender, body) = Body::channel();
     let req = Request::builder().body(body).expect("request");

@@ -2,7 +2,6 @@ use super::Body;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
-use http::header::CONTENT_LENGTH;
 use std::time::Duration;
 use tokio::time::timeout;
 
@@ -25,9 +24,15 @@ pub(crate) async fn read_body_trailers(
         .map_err(Into::into)
 }
 
-pub(super) fn parse_content_length(headers: &http::HeaderMap) -> Option<u64> {
-    headers
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
+/// The size the header set declares, read through the owner.
+///
+/// The declaration is read by `qpx_core::http_content_length`, so the hint
+/// is the length the field declares: a comma list of equal members is one
+/// length, and a declaration that names no length - one that is not text,
+/// one whose members are not digits, or one whose members disagree - gives
+/// no hint, so the body is observed rather than sized from the declaration.
+pub(super) fn declared_size_hint(headers: &HeaderMap) -> Option<u64> {
+    qpx_core::http_content_length::declared_content_length(headers)
+        .ok()
+        .flatten()
 }
