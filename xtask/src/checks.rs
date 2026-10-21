@@ -1148,10 +1148,15 @@ fn dispatch_limit_response_commonality_violations(content: &str) -> Vec<&'static
 /// The gate covers the whole workspace, not one crate. No other file may
 /// define a token grammar predicate or a header token search under one of the
 /// names the workspace has used, and no other file may spell the search the
-/// way the owner spells it: a comma split whose members are compared
-/// case-insensitively after trimming. A copy that renames the predicate and
-/// spells the character set differently is beyond a text gate; the owner
-/// below its users is what keeps that from mattering.
+/// way the owner spells it: a comma split on a comma literal, in either
+/// literal spelling, whose members are compared case-insensitively after
+/// trimming, within 240 bytes of the split.
+///
+/// What the text match cannot see is stated here rather than implied: a copy
+/// that renames the predicate and spells the character set differently, a
+/// copy that trims its members another way, and a copy whose comparison
+/// stands further from its split. The owner below its users is what keeps
+/// those from mattering.
 fn check_http_token_vocabulary_single_owner(root: &Path) -> Result<()> {
     const OWNER: &str = "qpx-core/src/http_token.rs";
     const OWNER_FUNCTIONS: [&str; 2] = [
@@ -1249,17 +1254,23 @@ fn http_token_vocabulary_violations(content: &str) -> Vec<&'static str> {
     violations
 }
 
-/// The owner's spelling of the header token search: a comma split whose
-/// members are compared case-insensitively after trimming.
+/// The owner's spelling of the header token search: a comma split on a
+/// comma literal whose members are compared case-insensitively after
+/// trimming.
+///
+/// The comma literal is matched in either Rust spelling, so a copy that
+/// splits on `","` is caught like one that splits on `','`.
 fn contains_token_search_idiom(content: &str) -> bool {
-    const SPLIT: &str = "split(',')";
     const COMPARE: &str = "trim().eq_ignore_ascii_case(";
     const WINDOW: usize = 240;
     let mut rest = content;
-    while let Some(index) = rest.find(SPLIT) {
-        let after = &rest[index + SPLIT.len()..];
+    while let Some(index) = rest.find("split") {
+        let after = &rest[index + "split".len()..];
         let window = after.get(..WINDOW).unwrap_or(after);
-        if window.contains(COMPARE) {
+        let split = window.find("','").or_else(|| window.find("\",\""));
+        if let Some(split) = split
+            && window[split..].contains(COMPARE)
+        {
             return true;
         }
         rest = after;
@@ -4054,6 +4065,16 @@ mod tests {
         assert_eq!(
             http_token_vocabulary_violations(
                 "let present = values\n    .split(',')\n    .any(|part| part.trim().eq_ignore_ascii_case(\"100-continue\"));\n"
+            ),
+            vec!["the header token search idiom (a comma split compared case-insensitively)"]
+        );
+    }
+
+    #[test]
+    fn http_token_vocabulary_violations_flag_the_search_idiom_in_either_spelling() {
+        assert_eq!(
+            http_token_vocabulary_violations(
+                "let present = values\n    .split(\",\")\n    .any(|part| part.trim().eq_ignore_ascii_case(\"100-continue\"));\n"
             ),
             vec!["the header token search idiom (a comma split compared case-insensitively)"]
         );
