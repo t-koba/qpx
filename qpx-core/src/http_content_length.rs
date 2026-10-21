@@ -57,8 +57,6 @@ pub enum ContentLengthError {
 ///
 /// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
 ///   than a declaration.
-/// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
-///   plain integer.
 ///
 /// The upstream raw HTTP/1 path reads the declaration through the owner as
 /// well: `qpxd/src/upstream/raw_http1/mod.rs` calls it with the header map
@@ -107,6 +105,13 @@ pub enum ContentLengthError {
 /// way declares no length: the cache falls back to the stored body's length,
 /// and the helper reports no cacheable length.
 ///
+/// The IPC gateway reads the declaration through the owner as well:
+/// `qpxf/src/ipc_request.rs` hands the header list's Content-Length values
+/// to the owner's value-level entry point, so the length that says how many
+/// stdin bytes the script may read is the length the field declares. A
+/// leading plus sign is refused there too, so a request that declares its
+/// length that way is refused instead of read, and a comma list of equal
+/// members is one length there as well.
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside both the
 /// list and the gate. Those sites are named here as well, so that the record

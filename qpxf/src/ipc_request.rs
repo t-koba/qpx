@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use crate::executor::{CgiRequest, Executor};
 use crate::router::Router;
+use qpx_core::http_content_length::ContentLengthError;
 use qpx_core::ipc::meta::{IpcRequestMeta, IpcResponseMeta};
 
 pub(crate) struct IpcPlainResponse {
@@ -36,30 +37,23 @@ pub(crate) fn plaintext_meta(status: u16) -> IpcResponseMeta {
 }
 
 pub(crate) fn declared_content_length(headers: &[(String, String)]) -> Result<Option<usize>> {
-    let mut parsed = None;
-    for (_, value) in headers
+    let values = headers
         .iter()
-        .filter(|(k, _)| k.eq_ignore_ascii_case("content-length"))
-    {
-        for part in value.split(',') {
-            let raw = part.trim();
-            if raw.is_empty() || raw.starts_with('-') {
-                return Err(anyhow!("invalid Content-Length value"));
+        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .map(|(_, value)| value.as_str());
+    let declared = qpx_core::http_content_length::declared_content_length_in_values(values)
+        .map_err(|err| match err {
+            ContentLengthError::Conflicting => anyhow!("conflicting Content-Length values"),
+            ContentLengthError::InvalidValue | ContentLengthError::InvalidHeader => {
+                anyhow!("invalid Content-Length value")
             }
-            let len = raw
-                .parse::<u64>()
-                .map_err(|_| anyhow!("invalid Content-Length value"))?;
-            let len = usize::try_from(len).map_err(|_| anyhow!("Content-Length too large"))?;
-            match parsed {
-                Some(existing) if existing != len => {
-                    return Err(anyhow!("conflicting Content-Length values"));
-                }
-                Some(_) => {}
-                None => parsed = Some(len),
-            }
-        }
-    }
-    Ok(parsed)
+        })?;
+    let Some(length) = declared else {
+        return Ok(None);
+    };
+    Ok(Some(
+        usize::try_from(length).map_err(|_| anyhow!("Content-Length too large"))?,
+    ))
 }
 
 pub(crate) fn meta_params_bytes(meta: &IpcRequestMeta) -> usize {
@@ -349,6 +343,14 @@ mod tests {
     #[test]
     fn declared_content_length_rejects_invalid_values() {
         let headers = vec![("Content-Length".to_string(), "nope".to_string())];
+        assert!(declared_content_length(&headers).is_err());
+    }
+
+    #[test]
+    fn declared_content_length_rejects_a_signed_value() {
+        // The owner's grammar is `1*DIGIT`, so a leading plus sign names no
+        // length and the request is refused.
+        let headers = vec![("Content-Length".to_string(), "+5".to_string())];
         assert!(declared_content_length(&headers).is_err());
     }
 
