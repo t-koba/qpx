@@ -77,6 +77,56 @@ fn guard_rejects_content_length_with_transfer_encoding() {
 }
 
 #[test]
+fn guard_accepts_content_length_values_that_declare_the_same_length() {
+    let profile = strict_profile();
+    // RFC 9112 section 6.3 lets a recipient replace duplicated
+    // Content-Length values that declare the same length with one value, so
+    // the guard reads the length the field declares and not the text of its
+    // values.
+    for values in [["10", "10"], ["10", "10, 10"], ["10, 10", "10, 10"]] {
+        let mut req = head_request(http::Version::HTTP_11);
+        for value in values {
+            req.headers_mut().append(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_static(value),
+            );
+        }
+        let reject = profile.evaluate_request(&req).expect("guard");
+        assert!(reject.is_none(), "content-length {values:?} must pass");
+    }
+}
+
+#[test]
+fn guard_rejects_a_content_length_that_names_two_lengths() {
+    let profile = strict_profile();
+    // One value that names two lengths is a conflict as well, so the guard
+    // refuses it rather than reading a length out of it.
+    let mut req = head_request(http::Version::HTTP_11);
+    req.headers_mut().insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("10, 11"),
+    );
+    let reject = profile.evaluate_request(&req).expect("guard");
+    assert!(reject.is_some());
+}
+
+#[test]
+fn guard_rejects_a_content_length_that_declares_no_length() {
+    let profile = strict_profile();
+    // A declaration the owner refuses is not a length, and a request whose
+    // length cannot be determined has ambiguous framing.
+    for value in ["+10", "abc", "", "10,"] {
+        let mut req = head_request(http::Version::HTTP_11);
+        req.headers_mut().insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_str(value).expect("content-length value"),
+        );
+        let reject = profile.evaluate_request(&req).expect("guard");
+        assert!(reject.is_some(), "content-length {value:?} must be refused");
+    }
+}
+
+#[test]
 fn guard_rejects_ambiguous_transfer_encoding_values() {
     let profile = strict_profile();
     for te in [

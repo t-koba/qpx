@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use hyper::{Request, StatusCode};
 use qpx_core::config::HttpGuardProfileConfig;
+use qpx_core::http_content_length::ContentLengthError;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -273,19 +274,31 @@ fn validate_query_limits(
     None
 }
 
+/// The length the request's Content-Length declares, read through the owner.
+///
+/// The guard asks the owner because a request's framing depends on the
+/// length the field declares and not on the text of its values: a comma
+/// list of equal members declares one length, two values that disagree
+/// are a conflict, and a declaration the owner refuses is not a length at
+/// all. The name is one the Content-Length gate knows, so a guard that
+/// stops reading the declaration through the owner is caught by it.
+fn declared_request_length(
+    headers: &http::HeaderMap,
+) -> std::result::Result<Option<u64>, ContentLengthError> {
+    qpx_core::http_content_length::declared_content_length(headers)
+}
+
 fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
-    let content_length_headers = req.headers().get_all(http::header::CONTENT_LENGTH);
-    let has_content_length = content_length_headers.iter().next().is_some();
-    let mut content_lengths = content_length_headers
-        .iter()
-        .filter_map(|value| value.to_str().ok().map(str::trim))
-        .filter(|value| !value.is_empty());
-    if let Some(first) = content_lengths.next()
-        && content_lengths.any(|candidate| candidate != first)
-    {
-        return Some(bad_request("multiple conflicting Content-Length headers"));
-    }
-    if has_content_length && req.headers().contains_key(http::header::TRANSFER_ENCODING) {
+    let declared = match declared_request_length(req.headers()) {
+        Ok(declared) => declared,
+        Err(ContentLengthError::Conflicting) => {
+            return Some(bad_request("multiple conflicting Content-Length headers"));
+        }
+        Err(ContentLengthError::InvalidValue | ContentLengthError::InvalidHeader) => {
+            return Some(bad_request("invalid Content-Length header"));
+        }
+    };
+    if declared.is_some() && req.headers().contains_key(http::header::TRANSFER_ENCODING) {
         return Some(bad_request(
             "Transfer-Encoding with Content-Length is not allowed",
         ));

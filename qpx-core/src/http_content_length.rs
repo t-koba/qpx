@@ -180,8 +180,8 @@ pub enum ContentLengthError {
 ///
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside the gate.
-/// The request guard is the one site that still reads the declaration
-/// inline, and it is named below.
+/// No site reads the declaration inline today: the request guard, the last
+/// one, reads it through the owner as well.
 ///
 /// The access log reads the declaration through the owner as well:
 /// `qpxd/src/reverse/listener/raw_http1.rs` and
@@ -191,10 +191,18 @@ pub enum ContentLengthError {
 /// length instead of no bytes, and a declaration the owner refuses names no
 /// length, so the count is no bytes.
 ///
-/// The request guard in `qpxd/src/http/policy/guard.rs` compares the raw
-/// field values rather than the length they declare, so it answers a
-/// different question and keeps its own reading. Folding it would change
-/// what it accepts, so it is a decision of its own.
+/// The request guard reads the declaration through the owner as well:
+/// `qpxd/src/http/policy/guard.rs` hands the header map to it, so the
+/// guard judges a request's framing by the length the field declares and
+/// not by the text of its values. A comma list of equal members is one
+/// length there now, so two values that declare the same length are no
+/// longer refused as a conflict, which is the reading RFC 9112 section
+/// 6.3 allows a recipient to take of duplicated values. Two values that
+/// disagree are a conflict, so such a request is refused as one, and so is
+/// one value that names two lengths. A declaration the owner refuses - a
+/// member that is not digits, a leading plus sign, a value that is not
+/// text - is refused as well, because a request whose length cannot be
+/// determined has ambiguous framing.
 pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
     // Every value is read as text before any member is parsed, so a field
     // that carries a value which is not text is reported the same way

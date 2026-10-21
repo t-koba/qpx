@@ -1216,7 +1216,7 @@ const CONTENT_LENGTH_OWNER: &str = "qpx-core/src/http_content_length.rs";
 
 /// The names the workspace has used for a function that reads a header set's
 /// declared Content-Length.
-const CONTENT_LENGTH_READER_NAMES: [&str; 14] = [
+const CONTENT_LENGTH_READER_NAMES: [&str; 15] = [
     "fn content_length(",
     "fn parse_content_length(",
     "fn parse_declared_content_length(",
@@ -1231,6 +1231,7 @@ const CONTENT_LENGTH_READER_NAMES: [&str; 14] = [
     "fn parse_header_u64(",
     "fn declared_response_bytes(",
     "fn response_exceeds_max_response_bytes(",
+    "fn declared_request_length(",
 ];
 
 /// The qualified call a site that folds the declaration into the owner uses.
@@ -1250,9 +1251,8 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// helper calls the owner, and a reader that does not call the owner is a
 /// violation whether or not the owner names a site. The gate reads the
 /// names the workspace has used for such a helper, so a reader under a name
-/// it has not seen before, a reader that reads the declaration inline, and a
-/// reader that answers a different question - the request guard compares the
-/// raw field values - are beyond it.
+/// it has not seen before and a reader that reads the declaration inline
+/// are beyond it.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -5210,6 +5210,30 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
             content_length_single_owner_violations(empty_owner, &[folded, unlisted]),
             [
                 "qpxd/src/http/body/size/io.rs reads the declared Content-Length through its own helper and the owner does not name it"
+            ]
+        );
+
+        // The request guard reads the declaration through the owner under a
+        // name the gate knows, so a guard that stops calling the owner is
+        // caught by it.
+        let guard = (
+            "qpxd/src/http/policy/guard.rs".to_string(),
+            "fn declared_request_length() { qpx_core::http_content_length::declared_content_length(headers) }\n"
+                .to_string(),
+        );
+        assert!(
+            content_length_single_owner_violations(empty_owner, std::slice::from_ref(&guard))
+                .is_empty(),
+            "a guard that calls the owner needs no entry"
+        );
+        let guard_without_the_owner = (
+            "qpxd/src/http/policy/guard.rs".to_string(),
+            "fn declared_request_length() {}\n".to_string(),
+        );
+        assert_eq!(
+            content_length_single_owner_violations(empty_owner, &[guard_without_the_owner]),
+            [
+                "qpxd/src/http/policy/guard.rs reads the declared Content-Length through its own helper and the owner does not name it"
             ]
         );
     }
