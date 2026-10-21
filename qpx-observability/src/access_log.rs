@@ -2,6 +2,7 @@ use crate::handler::RequestHandler;
 use arc_swap::ArcSwapOption;
 use http::{Request, Response, StatusCode};
 use qpx_core::config::AccessLogConfig;
+use qpx_core::http_content_length::declared_content_length;
 use qpx_core::redaction::{
     redact_authority_userinfo, redact_request_target, redact_uri_query_keys,
 };
@@ -516,24 +517,13 @@ fn http_version_label(version: http::Version) -> &'static str {
     }
 }
 
-fn parse_header_u64(value: &http::HeaderValue) -> Option<u64> {
-    let mut parsed = 0_u64;
-    let mut saw_digit = false;
-    let mut trailing_ows = false;
-    for byte in value.as_bytes() {
-        match byte {
-            b'0'..=b'9' if !trailing_ows => {
-                saw_digit = true;
-                parsed = parsed.checked_mul(10)?.checked_add((byte - b'0') as u64)?;
-            }
-            b' ' | b'\t' if !saw_digit => {}
-            b' ' | b'\t' => {
-                trailing_ows = true;
-            }
-            _ => return None,
-        }
-    }
-    saw_digit.then_some(parsed)
+/// The number of bytes the response declares it carries.
+///
+/// The declaration is read through the owner, so a comma list of equal
+/// members is one length and a declaration the owner refuses names no
+/// length, which the access log records as no bytes.
+fn declared_response_bytes(headers: &http::HeaderMap) -> u64 {
+    declared_content_length(headers).ok().flatten().unwrap_or(0)
 }
 
 struct TimestampPrefixCache {
@@ -724,11 +714,7 @@ where
                     (this.start.take(), this.direct_snapshot.take(), result)
                 {
                     let completed = Instant::now();
-                    let bytes_out = response
-                        .headers()
-                        .get(http::header::CONTENT_LENGTH)
-                        .and_then(parse_header_u64)
-                        .unwrap_or(0);
+                    let bytes_out = declared_response_bytes(response.headers());
                     let _ = emit_direct_combined_access_log(
                         &snapshot,
                         response.status(),
@@ -764,11 +750,7 @@ where
                 {
                     let elapsed = start.elapsed();
                     let latency_ms = (elapsed.as_micros() as f64) / 1000.0;
-                    let bytes_out = resp
-                        .headers()
-                        .get(http::header::CONTENT_LENGTH)
-                        .and_then(|v| v.to_str().ok())
-                        .and_then(|raw| raw.trim().parse::<u64>().ok());
+                    let bytes_out = declared_response_bytes(resp.headers());
                     let direct_combined = false;
                     if this.combined && !direct_combined {
                         tracing::info!(
@@ -779,7 +761,7 @@ where
                             version = ?snapshot.version,
                             status = resp.status().as_u16(),
                             latency_ms = latency_ms,
-                            bytes_out = bytes_out.unwrap_or(0),
+                            bytes_out = bytes_out,
                             referer = snapshot.referer.as_deref().unwrap_or(""),
                             user_agent = snapshot
                                 .user_agent
@@ -831,7 +813,7 @@ where
                             version = ?snapshot.version,
                             status = resp.status().as_u16(),
                             latency_ms = latency_ms,
-                            bytes_out = bytes_out.unwrap_or(0),
+                            bytes_out = bytes_out,
                             host = snapshot
                                 .host
                                 .as_ref()
@@ -1053,14 +1035,17 @@ mod tests {
             String::from_utf8(line).expect("ASCII log primitives"),
             r#"0 18446744073709551615 000042 "a\"b\\c""#
         );
-        assert_eq!(
-            parse_header_u64(&http::HeaderValue::from_static(" 1048576\t")),
-            Some(1_048_576)
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static(" 1048576\t"),
         );
-        assert_eq!(
-            parse_header_u64(&http::HeaderValue::from_static("12 34")),
-            None
+        assert_eq!(declared_response_bytes(&headers), 1_048_576);
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static("12 34"),
         );
+        assert_eq!(declared_response_bytes(&headers), 0);
     }
 
     #[test]

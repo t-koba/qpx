@@ -184,8 +184,9 @@ pub enum ContentLengthError {
 /// inline, and it is named below.
 ///
 /// The access log reads the declaration through the owner as well:
-/// `qpxd/src/reverse/listener/raw_http1.rs` hands the header map to it, so
-/// the byte count the log records is the length the field declares. A comma
+/// `qpxd/src/reverse/listener/raw_http1.rs` and
+/// `qpx-observability/src/access_log.rs` hand the header map to it, so the
+/// byte count the log records is the length the field declares. A comma
 /// list of equal members is one length there now, so the count is that
 /// length instead of no bytes, and a declaration the owner refuses names no
 /// length, so the count is no bytes.
