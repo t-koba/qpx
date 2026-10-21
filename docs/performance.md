@@ -275,17 +275,21 @@ That measurement found no regression between the two builds. It is one
 comparison of one pair of builds, so it is the record of that comparison and
 not a standing claim about the path: a later build is not covered by it.
 
-These figures come from a one-off measurement of that pair of builds, and
-the repository does not yet ship a harness that reproduces them: the bootstrap
-interval and the median-of-three quantiles above were computed from the
-recorded per-round samples, and the paired policy lanes report per-round
-deltas rather than a bootstrap interval. Treat these numbers as the record
-of that measurement rather than as a result the product's tooling
-regenerates. The method does not depend on the tooling: a question about
-whether one build regressed against another is answered by measuring both in
-the same rounds with the order counterbalanced and the per-round deltas
-published, as the paired policy lanes do, and not by comparing ratios taken
-from separate runs.
+These figures come from a one-off measurement of that pair of builds, and no
+script in the repository reproduces them: the bootstrap interval and the
+median-of-three quantiles above were computed from the recorded per-round
+samples, and the paired policy lanes report per-round deltas rather than a
+bootstrap interval. Treat these numbers as the record of that measurement
+rather than as a result the product's tooling regenerates. The method is
+shipped, though: the streaming lane measures a reference build next to the
+current build in the same rounds with the order counterbalanced, and
+publishes the paired per-round deltas (see "The paired reference build in
+the streaming lane" below). What the lane does not reproduce is this pair of
+builds, because its reference is the pinned previous release rather than the
+last green streaming run. A question about whether one build regressed
+against another is answered by measuring both in the same rounds with the
+order counterbalanced and the per-round deltas published, and not by
+comparing ratios taken from separate runs.
 
 ### Shared-runner validity and paired-regression contract
 
@@ -529,6 +533,34 @@ a stable measurement is still reported against the cap.
 `scripts/test-streaming-performance.py` exercises both sides of both bounds
 against synthetic lanes so the noise model is checked without running the
 benchmark.
+
+### The paired reference build in the streaming lane
+
+The streaming lane also measures a reference build. When the caller exports
+`QPX_PREVIOUS_BIN`, the script starts that binary on its own port with the
+same reverse route, the same origin and the same body limit as the current
+build, and measures the two next to each other in every round. The order
+inside the pair alternates between rounds, so round one measures the current
+build first and round two the reference first, and neither build can gain
+from a fixed position in the round. The CI proxy audit exports the pinned
+previous release this way, so the lane now performs the paired measurement
+the matched-source section describes, against the pinned release rather than
+against an arbitrary earlier commit.
+
+The pair is reported, never judged. `scripts/check-streaming-performance.sh`
+does not read the reference records, no objective mentions them, and a
+reference build that cannot start or that produces no valid sample leaves the
+lane without a reference instead of failing the audit. The comparison is
+written to `target/perf/streaming-compare-reference.json` and printed in the
+CI log. For each read mode it states how many rounds were paired and the
+median, minimum and maximum of the per-round current-over-reference ratio
+together with the median difference, for the total time, the CPU rate and the
+p99 chunk gap. A `total_ms` ratio above 1 means the current build was slower
+in that round, and a `requests_per_cpu_second` ratio below 1 means it was
+less efficient. The report names the reference build's source SHA, so every
+number can be traced to the build it was measured against.
+`scripts/test-streaming-reference-comparison.py` exercises the pairing, the
+missing-reference case and the report against synthetic per-round records.
 
 ## Allocation gate
 

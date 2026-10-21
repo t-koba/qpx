@@ -3013,6 +3013,7 @@ fn ci_acceptance_violations(
         "sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk",
         "cargo build -p qpxd --release --locked",
         "python3 scripts/test-perf-policy.py",
+        "python3 scripts/test-streaming-reference-comparison.py",
         "checkout pinned previous release",
         "d67a148e7ccbbd272750415213601005af0f38c5",
         "python3 scripts/perf-audit-policy.py run proxy",
@@ -5385,6 +5386,7 @@ mod tests {
             target/perf/qpx-h3-interop-matrix.json
             target/perf/proxy-compare-logs/**
             python3 scripts/test-perf-policy.py
+            python3 scripts/test-streaming-reference-comparison.py
             checkout pinned previous release
             d67a148e7ccbbd272750415213601005af0f38c5
             python3 scripts/perf-audit-policy.py run proxy

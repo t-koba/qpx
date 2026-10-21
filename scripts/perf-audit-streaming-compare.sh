@@ -18,6 +18,12 @@ NGINX_PORT="${QPX_STREAMING_COMPARE_NGINX_PORT:-18382}"
 APACHE_PORT="${QPX_STREAMING_COMPARE_APACHE_PORT:-18383}"
 LIGHTTPD_PORT="${QPX_STREAMING_COMPARE_LIGHTTPD_PORT:-18384}"
 APACHE_BIN="${QPX_STREAMING_COMPARE_APACHE_BIN:-}"
+# The pinned previous release, when the caller exports it, is measured in the
+# same rounds as the current build so that the two can be compared pairwise.
+# The reference is a report: no objective and no gate depends on it.
+QPX_PREVIOUS_BIN="${QPX_PREVIOUS_BIN:-}"
+QPX_PREVIOUS_SOURCE_SHA="${QPX_PREVIOUS_SOURCE_SHA:-}"
+PREVIOUS_PORT="${QPX_STREAMING_COMPARE_PREVIOUS_PORT:-18385}"
 
 TMP_DIR="$(make_temp_dir qpx-streaming-compare)"
 LOG_DIR="$TMP_DIR/logs"
@@ -29,6 +35,8 @@ ARTIFACTS_COLLECTED=0
 INVALID_SAMPLES=0
 BACKEND_PID=""
 QPXD_PID=""
+PREVIOUS_QPXD_PID=""
+PREVIOUS_REFERENCE_AVAILABLE=false
 NGINX_PID=""
 APACHE_PID=""
 LIGHTTPD_PID=""
@@ -137,20 +145,25 @@ wait_http() {
     if ! kill -0 "$pid" >/dev/null 2>&1; then
       echo "${name} exited before becoming ready" >&2
       cat "$log_file" >&2 || true
-      exit 1
+      return 1
     fi
     tries=$((tries + 1))
     sleep 0.1
   done
   echo "timeout waiting for ${name} on port ${port}" >&2
   cat "$log_file" >&2 || true
-  exit 1
+  return 1
 }
 
-start_qpxd() {
-  local config="$TMP_DIR/qpxd-streaming.yaml"
+# One configuration shape for both builds: the current build and the pinned
+# previous release must be measured on the same reverse route, against the
+# same origin, with the same body limit.
+write_qpxd_config() {
+  local config="$1"
+  local port="$2"
+  local state_dir="$3"
   cat >"$config" <<YAML
-state_dir: "$STATE_DIR"
+state_dir: "$state_dir"
 telemetry:
   system_log:
     level: warn
@@ -163,7 +176,7 @@ runtime:
 edges:
   - kind: reverse
     name: streaming
-    listen: 127.0.0.1:${QPX_PORT}
+    listen: 127.0.0.1:${port}
     routes:
       - name: stream
         streaming_requirement: required
@@ -174,10 +187,47 @@ edges:
           type: upstream
           upstreams: [http://127.0.0.1:${BACKEND_PORT}]
 YAML
+}
+
+start_qpxd() {
+  local config="$TMP_DIR/qpxd-streaming.yaml"
+  write_qpxd_config "$config" "$QPX_PORT" "$STATE_DIR"
   QPX_STATE_DIR="$STATE_DIR" "$QPXD_BIN" run --config "$config" >"$LOG_DIR/qpxd.log" 2>&1 &
   QPXD_PID=$!
   register_pid "$QPXD_PID"
   wait_http "qpxd" "$QPX_PORT" "$QPXD_PID" "$LOG_DIR/qpxd.log"
+}
+
+start_previous_qpxd() {
+  local config="$TMP_DIR/qpxd-previous.yaml"
+  local state_dir="$STATE_DIR/previous"
+  mkdir -p "$state_dir"
+  write_qpxd_config "$config" "$PREVIOUS_PORT" "$state_dir"
+  QPX_STATE_DIR="$state_dir" "$QPX_PREVIOUS_BIN" run --config "$config" >"$LOG_DIR/qpxd-previous.log" 2>&1 &
+  PREVIOUS_QPXD_PID=$!
+  register_pid "$PREVIOUS_QPXD_PID"
+  wait_http "qpxd-previous" "$PREVIOUS_PORT" "$PREVIOUS_QPXD_PID" "$LOG_DIR/qpxd-previous.log"
+}
+
+# The reference build is best effort: a previous release that cannot start
+# leaves the lane without a reference instead of failing the whole audit.
+start_previous_reference() {
+  if [ -z "$QPX_PREVIOUS_BIN" ]; then
+    return 0
+  fi
+  if [ ! -x "$QPX_PREVIOUS_BIN" ]; then
+    echo "previous release binary is not executable: $QPX_PREVIOUS_BIN; continuing without the reference lane" >&2
+    return 0
+  fi
+  if ! start_previous_qpxd; then
+    echo "previous release did not start; continuing without the reference lane" >&2
+    if [ -n "$PREVIOUS_QPXD_PID" ]; then
+      kill "$PREVIOUS_QPXD_PID" >/dev/null 2>&1 || true
+      PREVIOUS_QPXD_PID=""
+    fi
+    return 0
+  fi
+  PREVIOUS_REFERENCE_AVAILABLE=true
 }
 
 start_nginx() {
@@ -627,11 +677,11 @@ print(json.dumps(records[len(records) // 2], sort_keys=True, separators=(",", ":
 PY
 )"
   commit="${GITHUB_SHA:-unknown}"
-  python3 - "$OUT_JSON" "$selected_sample" "$STREAM_BYTES" "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit" <<'PY'
+  python3 - "$OUT_JSON" "$selected_sample" "$STREAM_BYTES" "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit" "${CURRENT_SAMPLE_ROUND:-0}" <<'PY'
 import json
 import sys
 
-out, sample, stream_bytes, chunk_bytes, attempts, valid_samples, commit = sys.argv[1:8]
+out, sample, stream_bytes, chunk_bytes, attempts, valid_samples, commit, sample_round = sys.argv[1:9]
 record = json.loads(sample)
 record.update({
     "bench": "proxy_compare_http1_streaming_reverse",
@@ -640,6 +690,7 @@ record.update({
     "sample_attempts": int(attempts),
     "valid_samples": int(valid_samples),
     "aggregation": "single_sample",
+    "sample_round": int(sample_round),
     "commit": commit,
 })
 with open(out, "a", encoding="utf-8") as handle:
@@ -705,6 +756,7 @@ fi
 : >"$OUT_JSON"
 start_streaming_backend
 start_qpxd
+start_previous_reference
 start_nginx
 start_apache
 start_lighttpd
@@ -718,12 +770,30 @@ SAMPLE_ATTEMPTS=1
 MIN_VALID_SAMPLES=1
 : >"$OUT_JSON"
 
+# The current build and the reference build are measured next to each other in
+# the same round, and the order inside the pair alternates between rounds, so
+# that neither build can gain from a fixed position in the round.
+run_qpxd_pair() {
+  local read_mode="$1"
+  if [ "$PREVIOUS_REFERENCE_AVAILABLE" != "true" ]; then
+    run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode"
+    return
+  fi
+  if [ $(( ${CURRENT_SAMPLE_ROUND:-0} % 2 )) -eq 1 ]; then
+    run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode"
+    run_one "qpxd-previous" "$PREVIOUS_PORT" "$PREVIOUS_QPXD_PID" "$read_mode"
+  else
+    run_one "qpxd-previous" "$PREVIOUS_PORT" "$PREVIOUS_QPXD_PID" "$read_mode"
+    run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode"
+  fi
+}
+
 run_streaming_proxy_by_index() {
   local index="$1"
   local read_mode="$2"
   case "$index" in
     0) run_one "direct-backend" "$BACKEND_PORT" "$BACKEND_PID" "$read_mode" ;;
-    1) run_one "qpxd" "$QPX_PORT" "$QPXD_PID" "$read_mode" ;;
+    1) run_qpxd_pair "$read_mode" ;;
     2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$read_mode" ;;
     3) run_one "apache" "$APACHE_PORT" "$APACHE_PID" "$read_mode" ;;
     4) run_one "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$read_mode" ;;
@@ -761,6 +831,7 @@ raw_path, out_path, attempts, minimum = sys.argv[1:5]
 attempts = int(attempts)
 minimum = int(minimum)
 proxies = ("direct-backend", "qpxd", "nginx", "apache", "lighttpd")
+reference_proxy = "qpxd-previous"
 expected = {(read_mode, proxy) for read_mode in ("fast", "slow") for proxy in proxies}
 
 groups = defaultdict(list)
@@ -771,6 +842,15 @@ with open(raw_path, "r", encoding="utf-8") as handle:
         record = json.loads(line)
         if record.get("valid") is True:
             groups[(record["read_mode"], record["proxy"])].append(record)
+
+# The reference build is reported, never required: a previous release that
+# produced no valid sample leaves the lane without a reference instead of
+# failing the audit.
+reference_keys = {
+    (read_mode, reference_proxy)
+    for read_mode in ("fast", "slow")
+    if groups.get((read_mode, reference_proxy))
+}
 
 def values(records, field):
     return sorted(
@@ -801,15 +881,18 @@ def spread_or_one(records, field):
     return 1.0 if value is None else value
 
 aggregated = []
-for key in sorted(expected):
+for key in sorted(expected | reference_keys):
     records = groups.get(key, [])
-    if len(records) < minimum:
+    required = minimum if key in expected else 1
+    if len(records) < required:
         raise SystemExit(
             f"{key[1]} produced {len(records)}/{attempts} valid {key[0]} streaming samples; "
-            f"{minimum} required"
+            f"{required} required"
         )
     records.sort(key=lambda record: record["total_ms"])
     record = dict(records[len(records) // 2])
+    # The round number belongs to the per-round records, not to the summary.
+    record.pop("sample_round", None)
     for field in (
         "total_ms",
         "first_byte_ms",
@@ -917,4 +1000,23 @@ for key in sorted(expected):
 with open(out_path, "w", encoding="utf-8") as handle:
     for record in aggregated:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+
+REFERENCE_OUT_JSON="$(dirname "$FINAL_OUT_JSON")/streaming-compare-reference.json"
+python3 - "$ROOT_DIR/scripts/lib" "$RAW_OUT_JSON" "$REFERENCE_OUT_JSON" \
+  "$QPX_PREVIOUS_SOURCE_SHA" <<'PY'
+import importlib
+import json
+import sys
+
+lib_dir, raw_path, out_path, previous_sha = sys.argv[1:5]
+sys.path.insert(0, lib_dir)
+streaming_reference = importlib.import_module("streaming_reference")
+
+report = streaming_reference.compare(streaming_reference.load_records(raw_path))
+report["reference_source_sha"] = previous_sha or "unknown"
+with open(out_path, "w", encoding="utf-8") as handle:
+    json.dump(report, handle, sort_keys=True, indent=2)
+    handle.write("\n")
+print(streaming_reference.format_summary(report))
 PY

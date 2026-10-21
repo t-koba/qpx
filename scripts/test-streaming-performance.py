@@ -372,6 +372,33 @@ class StreamingGateTest(unittest.TestCase):
             path.write_text(json.dumps(policy), encoding="utf-8")
             return self.run_gate(fast=fast, slow=slow, objectives=path)
 
+    def run_gate_with_reference(self, reference):
+        """Runs the gate against the healthy lanes plus one reference record."""
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "streaming.jsonl"
+            records = list(FAST_LANE.values()) + list(SLOW_LANE.values()) + [reference]
+            with path.open("w", encoding="utf-8") as handle:
+                for record in records:
+                    handle.write(json.dumps(record, sort_keys=True) + "\n")
+            return subprocess.run(
+                [str(CHECKER), str(path), str(OBJECTIVES)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+    def test_the_reference_build_record_is_not_a_gate_input(self):
+        """The paired reference build is reported; the gate does not read it."""
+        reference = build("qpxd-previous", "fast", total_ms=400.0)
+        result = self.run_gate_with_reference(reference)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def test_an_unusable_reference_build_record_does_not_fail_the_gate(self):
+        """A reference record that no gate could judge is still only a report."""
+        reference = build("qpxd-previous", "fast", total_ms=0.0, cpu_ms=0)
+        result = self.run_gate_with_reference(reference)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     def test_healthy_lane_passes_without_marginals(self):
         result = self.run_gate()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
