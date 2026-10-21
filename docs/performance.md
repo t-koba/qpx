@@ -271,20 +271,21 @@ workload, using that lane's own backend, client and qpxd configuration:
   interval of `+23.1` to `+109.4`. The ratio seen across CI runs fell from
   `6.73` to `3.48`, which this measurement does not reproduce.
 
-The reverse HTTP/1 path therefore shows no regression between the two
-builds.
+That measurement found no regression between the two builds. It is one
+comparison of one pair of builds, so it is the record of that comparison and
+not a standing claim about the path: a later build is not covered by it.
 
 These figures come from a one-off measurement of that pair of builds, and
 the repository does not yet ship a harness that reproduces them: the bootstrap
 interval and the median-of-three quantiles above were computed from the
 recorded per-round samples, and the paired policy lanes report per-round
-deltas rather than a bootstrap interval. Until such a harness exists, treat
-these numbers as the record of that measurement rather than as a result the
-product's tooling regenerates. The conclusion does not depend on the tooling:
-a question about whether one build regressed against another is answered by
-measuring both in the same rounds with the order counterbalanced and the
-per-round deltas published, as the paired policy lanes do, and not by
-comparing ratios taken from separate runs.
+deltas rather than a bootstrap interval. Treat these numbers as the record
+of that measurement rather than as a result the product's tooling
+regenerates. The method does not depend on the tooling: a question about
+whether one build regressed against another is answered by measuring both in
+the same rounds with the order counterbalanced and the per-round deltas
+published, as the paired policy lanes do, and not by comparing ratios taken
+from separate runs.
 
 ### Shared-runner validity and paired-regression contract
 
