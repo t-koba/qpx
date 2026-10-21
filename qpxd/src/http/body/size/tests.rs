@@ -234,6 +234,24 @@ fn spilling_chunk() -> Bytes {
     Bytes::from(vec![b'x'; OBSERVED_BODY_MEMORY_BYTES + 1])
 }
 
+// The secure temp file helper provides owner-only spool files on unix only.
+// On the other platforms the collection fails before it spills, and it must
+// fail rather than write the body to a file other users could read.
+#[tokio::test]
+#[cfg(not(unix))]
+async fn a_body_that_needs_a_spool_file_fails_closed_without_owner_only_permissions() {
+    let chunk = Bytes::from(vec![b'x'; OBSERVED_BODY_MEMORY_BYTES + 1]);
+    let body = Body::replay_chunks(vec![chunk.clone(), Bytes::from_static(b"!")], None);
+    let req = Request::builder().body(body).expect("request");
+
+    let err = buffer_request_body(req, chunk.len(), Duration::from_secs(1))
+        .await
+        .expect_err("a body that needs a spool file must not be stored unprotected");
+    assert!(is_observed_body_spool_error(&err));
+    let message = format!("{err:#}");
+    assert!(message.contains("owner-only file permissions"), "{message}");
+}
+
 #[tokio::test]
 #[cfg(unix)]
 async fn failed_request_body_collection_after_spill_removes_the_spool_file() {
