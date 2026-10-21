@@ -31,9 +31,11 @@ descriptor is reused for every attempt. When the script is momentarily open
 for writing, the kernel refuses the execution with `ETXTBSY`; qpxf retries
 the spawn a bounded number of times, inside the configured CGI timeout, so a
 request that lands in an operator's script-replacement window does not fail
-outright. The refusal is the kernel's, so the retry changes the outcome on
-the platforms that report it, Linux, while the others wait for the writer
-instead of refusing the execution.
+outright. The refusal is the kernel's, and the product only meets it where it
+executes the script itself: on Linux it executes the script through
+`/proc/self/fd/N`, so the kernel can refuse it, while on macOS the script is
+handed to the interpreter through a descriptor and no execution of the script
+takes place.
 
 Important operational limits:
 
