@@ -24,6 +24,17 @@ after a complete responder `END_REQUEST`. SCGI uses per-request connections and
 requires a valid `Content-Length` for non-empty stdin so qpxf does not buffer
 the full upload to construct the SCGI netstring.
 
+A CGI script is executed through a file descriptor instead of by path, so the
+script that runs is the one that was validated. The descriptor is opened
+read-only and without following a symbolic link, and the same validated
+descriptor is reused for every attempt. When the script is momentarily open
+for writing, the kernel refuses the execution with `ETXTBSY`; qpxf retries
+the spawn a bounded number of times, inside the configured CGI timeout, so a
+request that lands in an operator's script-replacement window does not fail
+outright. The refusal is the kernel's, so the retry changes the outcome on
+the platforms that report it, Linux, while the others wait for the writer
+instead of refusing the execution.
+
 Important operational limits:
 
 - request stdin byte limits
