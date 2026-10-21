@@ -73,6 +73,25 @@ mod tests {
     }
 
     #[test]
+    fn the_token_grammar_accepts_exactly_the_rfc_9110_characters() {
+        // The four grammars that were folded into this owner - the Prefer
+        // field names, the Forwarded element names, the Content-Disposition
+        // parameter names and the browser policy's directive values - each
+        // accepted exactly these bytes, so folding them changed no verdict.
+        // The set is pinned here so that a later change to the owner's own
+        // grammar is a visible test failure rather than a silent behaviour
+        // change at every site that reaches the owner.
+        let expected: Vec<u8> =
+            b"!#$%&'*+-.0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ^_`abcdefghijklmnopqrstuvwxyz|~"
+                .to_vec();
+        let accepted: Vec<u8> = (0u8..=127)
+            .filter(|byte| is_http_token(&char::from(*byte).to_string()))
+            .collect();
+        assert_eq!(accepted, expected);
+        assert!(!is_http_token(""));
+    }
+
+    #[test]
     fn http_token_rejects_the_characters_a_drifted_copy_accepted() {
         // The copy that used to live in the DPoP claim validation accepted
         // these characters; the RFC 9110 token grammar does not.
