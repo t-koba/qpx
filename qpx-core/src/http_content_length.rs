@@ -94,8 +94,10 @@ pub enum ContentLengthError {
 /// The HTTP/3 path reads the declaration through the owner as well:
 /// `qpx-h3/src/response.rs` hands the header map to it, so the HTTP/3 server
 /// and client frame a body from the same length the HTTP/1 and HTTP/2 paths
-/// read. A leading plus sign is refused there too, so a request or a
-/// response that frames its body with one is rejected instead of read.
+/// read. A leading plus sign is refused there too, and the request and the
+/// response sides treat that differently: a request that declares its
+/// length that way is refused, while a response that declares it that way
+/// has the field dropped rather than the response refused.
 ///
 /// The cache reads the declaration through the owner as well:
 /// `qpxd-cache/src/entry.rs` hands the stored response's Content-Length
