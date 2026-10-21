@@ -103,6 +103,15 @@ pub enum ContentLengthError {
 /// rather than sized from the first value, which is what the plain integer
 /// parse this reader used to do.
 ///
+/// The truncated response body reads the declaration through the owner as
+/// well: `qpxd/src/http/capture/stream.rs` hands the header map to it, and
+/// the reverse raw HTTP/1 path calls the same helper, so one place decides
+/// whether a body that is cut to the limit keeps the length it declared. A
+/// comma list of equal members is one length there now, so a response that
+/// declares its size that way loses the declaration when the body is cut,
+/// and a declaration the owner refuses names no length, so the header stays
+/// as it did when the plain integer parse could not read the value.
+///
 /// The HTTP/3 path reads the declaration through the owner as well:
 /// `qpx-h3/src/response.rs` hands the header map to it, so the HTTP/3 server
 /// and client frame a body from the same length the HTTP/1 and HTTP/2 paths
@@ -149,10 +158,10 @@ pub enum ContentLengthError {
 /// read the declaration is complete:
 /// `qpxd/src/http/modules/response_compression.rs`
 /// reads the declared length to decide whether the body is compressed,
-/// `qpxd/src/http/capture/stream.rs`, `qpxd/src/http/modules/subrequest.rs`
-/// and `qpxd/src/reverse/transport/raw_http1.rs` read it as a size hint, and
+/// `qpxd/src/http/modules/subrequest.rs` reads it as a size hint,
 /// `qpxd/src/policy_context/decision_service/mod.rs` parses it to enforce a
-/// hard cap.
+/// hard cap, and `qpxd/src/reverse/listener/raw_http1.rs` counts the bytes
+/// the response declared.
 ///
 /// The request guard in `qpxd/src/http/policy/guard.rs` compares the raw
 /// field values rather than the length they declare, so it answers a

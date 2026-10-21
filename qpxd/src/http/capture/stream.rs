@@ -2,6 +2,7 @@ use crate::exporter::ExportSession;
 use crate::runtime::ExecutionPlan;
 use bytes::Bytes;
 use hyper::{Request, Response};
+use qpx_core::http_content_length::declared_content_length;
 use qpx_http::body::{Body, Sender};
 use tokio::time::{Duration, timeout};
 
@@ -200,12 +201,8 @@ pub(crate) fn limit_response_body_to_max_bytes(response: &mut Response<Body>, ma
     if response_body_fits_limit(response.body(), max_bytes) {
         return;
     }
-    if let Some(len) = response
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        && len > max_bytes
+    if let Some(len) = declared_content_length(response.headers()).ok().flatten()
+        && len > max_bytes as u64
     {
         response.headers_mut().remove(http::header::CONTENT_LENGTH);
     }
@@ -490,6 +487,49 @@ mod tests {
         let body = Body::from(Bytes::from_static(b"abcd"));
         assert!(response_body_fits_limit(&body, 4));
         assert!(!response_body_fits_limit(&body, 3));
+    }
+
+    #[test]
+    fn the_truncated_response_reads_its_declared_length_through_the_owner() {
+        // A comma list of equal members is one length, so a response that
+        // declares a length over the limit loses the declaration: the body
+        // is cut to the limit and the header no longer describes it.
+        let mut response = Response::builder()
+            .header(http::header::CONTENT_LENGTH, "10, 10")
+            .body(Body::from("0123456789"))
+            .expect("response");
+        limit_response_body_to_max_bytes(&mut response, 4);
+        assert!(
+            response
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .is_none()
+        );
+
+        // A declaration the owner refuses names no length, so the header
+        // stays, as it did when the plain integer parse could not read the
+        // value.
+        let mut response = Response::builder()
+            .header(http::header::CONTENT_LENGTH, "+10")
+            .body(Body::from("0123456789"))
+            .expect("response");
+        limit_response_body_to_max_bytes(&mut response, 4);
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_LENGTH),
+            Some(&http::HeaderValue::from_static("+10"))
+        );
+
+        // A declared length within the limit still describes the body that
+        // is sent.
+        let mut response = Response::builder()
+            .header(http::header::CONTENT_LENGTH, "4")
+            .body(Body::from("0123456789"))
+            .expect("response");
+        limit_response_body_to_max_bytes(&mut response, 4);
+        assert_eq!(
+            response.headers().get(http::header::CONTENT_LENGTH),
+            Some(&http::HeaderValue::from_static("4"))
+        );
     }
 
     #[test]
