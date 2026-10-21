@@ -306,8 +306,10 @@ marginals = []
 # never widen the band: competitor instability must not excuse a qpx miss;
 # spread-cap breaches still fail as invalid below.
 #
-# Every band is capped by a named policy multiplier, so the effective limit of
-# an objective is its documented cap times at most that multiplier. The bound
+# Every band is bounded by a named policy multiplier, so an objective's
+# effective limit stays within a bounded factor of its documented cap: a
+# maximum-direction objective's decisive threshold is the cap times the band,
+# a minimum-direction objective's is the cap divided by the band. The bound
 # is what keeps the gate's teeth: the band comes from the subject's own
 # measurement, so without it a subject whose regression also inflates its
 # measurement noise would widen the band far enough to excuse the miss it
@@ -320,9 +322,9 @@ marginals = []
 # shared CI runner varies more between runs than one interleaved lane spread
 # shows, so a perfectly stable measurement can still miss a cap by a few
 # percent for no product reason. The floor keeps that run-to-run variation
-# from being reported as a regression, and it is a policy value like the
-# multipliers, so the documented effective limit is never more than the floor
-# above the cap.
+# from being reported as a regression. It is the band's lower bound, so the
+# band is never below the floor, and it is a policy value like the
+# multipliers.
 stability_objectives = objectives.get("stability", {})
 lane_noise_multiplier = ratio_limit(
     stability_objectives, "max_lane_noise_multiplier"
