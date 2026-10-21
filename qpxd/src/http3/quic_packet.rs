@@ -1,5 +1,8 @@
 use serde::{Deserialize, Serialize};
 
+/// The longest connection id a QUIC endpoint may use.
+pub(crate) const MAX_CONNECTION_ID_LEN: u8 = 20;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct QuicConnectionId {
     pub(crate) len: u8,
@@ -8,7 +11,7 @@ pub(crate) struct QuicConnectionId {
 
 impl QuicConnectionId {
     fn from_slice(value: &[u8]) -> Option<Self> {
-        if value.len() > 20 {
+        if value.len() > usize::from(MAX_CONNECTION_ID_LEN) {
             return None;
         }
         let mut bytes = [0u8; 20];
@@ -36,7 +39,7 @@ pub(crate) fn parse_quic_long_header(packet: &[u8]) -> Option<ParsedQuicLongHead
     let mut idx = 5usize;
     let dcid_len = *packet.get(idx)? as usize;
     idx += 1;
-    if dcid_len > 20 || idx + dcid_len > packet.len() {
+    if dcid_len > usize::from(MAX_CONNECTION_ID_LEN) || idx + dcid_len > packet.len() {
         return None;
     }
     let dcid = if dcid_len == 0 {
@@ -47,7 +50,7 @@ pub(crate) fn parse_quic_long_header(packet: &[u8]) -> Option<ParsedQuicLongHead
     idx += dcid_len;
     let scid_len = *packet.get(idx)? as usize;
     idx += 1;
-    if scid_len > 20 || idx + scid_len > packet.len() {
+    if scid_len > usize::from(MAX_CONNECTION_ID_LEN) || idx + scid_len > packet.len() {
         return None;
     }
     let scid = if scid_len == 0 {
@@ -77,6 +80,50 @@ pub(crate) fn parse_quic_short_dcid(packet: &[u8], dcid_len: u8) -> Option<QuicC
 
 pub(crate) fn is_quic_long_header(packet: &[u8]) -> bool {
     packet.first().is_some_and(|first| (first & 0x80) != 0)
+}
+
+/// The bit that marks a connection-id length in the set of known lengths.
+pub(crate) fn connection_id_len_bit(len: u8) -> Option<u32> {
+    (1..=MAX_CONNECTION_ID_LEN)
+        .contains(&len)
+        .then_some(1u32 << len)
+}
+
+/// Visits the known connection-id lengths, shortest first, until `f` returns
+/// true, and reports whether it ever did.
+pub(crate) fn for_each_known_connection_id_len(bits: u32, mut f: impl FnMut(u8) -> bool) -> bool {
+    let mut bits = bits & !1;
+    while bits != 0 {
+        let len = bits.trailing_zeros() as u8;
+        if f(len) {
+            return true;
+        }
+        bits &= bits - 1;
+    }
+    false
+}
+
+/// Finds the session that owns a short-header packet.
+///
+/// A server may use several connection-id lengths, so the known lengths are
+/// tried from the shortest and the first that yields a session wins.
+pub(crate) fn find_by_known_connection_id_len<T>(
+    bits: u32,
+    packet: &[u8],
+    mut lookup: impl FnMut(QuicConnectionId) -> Option<T>,
+) -> Option<T> {
+    let mut found = None;
+    for_each_known_connection_id_len(bits, |len| {
+        if let Some(cid) = parse_quic_short_dcid(packet, len)
+            && let Some(value) = lookup(cid)
+        {
+            found = Some(value);
+            true
+        } else {
+            false
+        }
+    });
+    found
 }
 
 #[cfg(test)]

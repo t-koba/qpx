@@ -7,7 +7,10 @@ use std::sync::{Arc, Mutex, RwLock};
 use tokio::sync::mpsc;
 
 use super::session::{PassthroughSession, SessionTouch};
-use crate::http3::quic_packet::{QuicConnectionId, parse_quic_long_header, parse_quic_short_dcid};
+use crate::http3::quic_packet::{
+    QuicConnectionId, connection_id_len_bit, find_by_known_connection_id_len,
+    parse_quic_long_header, parse_quic_short_dcid,
+};
 
 const MAX_CIDS_PER_SESSION: usize = 32;
 
@@ -262,17 +265,12 @@ impl SharedSessionIndex {
 
         let first = *packet.first()?;
         if (first & 0x80) == 0
-            && let Some(found) = for_known_server_cid_len(
+            && let Some(found) = find_by_known_connection_id_len(
                 self.known_server_cid_len_bits.load(Ordering::Relaxed),
-                |len| {
-                    if let Some(cid) = parse_quic_short_dcid(packet, len)
-                        && let Some((id, session)) = self.session_by_cid(cid)
-                        && session.current_client_addr() == client_addr
-                    {
-                        Some((id, session))
-                    } else {
-                        None
-                    }
+                packet,
+                |cid| {
+                    let (id, session) = self.session_by_cid(cid)?;
+                    (session.current_client_addr() == client_addr).then_some((id, session))
                 },
             )
         {
@@ -488,25 +486,9 @@ impl SharedSessionIndex {
     }
 
     fn record_known_server_cid_len(&self, len: u8) {
-        if let Some(bit) = cid_len_bit(len) {
+        if let Some(bit) = connection_id_len_bit(len) {
             self.known_server_cid_len_bits
                 .fetch_or(bit, Ordering::Relaxed);
         }
     }
-}
-
-fn cid_len_bit(len: u8) -> Option<u32> {
-    (1..=20).contains(&len).then_some(1u32 << len)
-}
-
-fn for_known_server_cid_len<T>(mut bits: u32, mut f: impl FnMut(u8) -> Option<T>) -> Option<T> {
-    bits &= !1;
-    while bits != 0 {
-        let len = bits.trailing_zeros() as u8;
-        if let Some(value) = f(len) {
-            return Some(value);
-        }
-        bits &= bits - 1;
-    }
-    None
 }

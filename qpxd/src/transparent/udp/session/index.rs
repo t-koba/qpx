@@ -1,6 +1,6 @@
 use super::{
-    MAX_CIDS_PER_SESSION, QuicConnectionId, TransparentUdpSession, parse_quic_long_header,
-    parse_quic_short_dcid,
+    MAX_CIDS_PER_SESSION, QuicConnectionId, TransparentUdpSession, connection_id_len_bit,
+    find_by_known_connection_id_len, parse_quic_long_header, parse_quic_short_dcid,
 };
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -237,17 +237,12 @@ impl SharedSessionIndex {
 
         let first = *packet.first()?;
         if (first & 0x80) == 0
-            && let Some(found) = for_known_server_cid_len(
+            && let Some(found) = find_by_known_connection_id_len(
                 self.known_server_cid_len_bits.load(Ordering::Relaxed),
-                |len| {
-                    if let Some(cid) = parse_quic_short_dcid(packet, len)
-                        && let Some((session_id, session)) = self.session_by_cid(cid)
-                        && session.current_client_addr() == client_addr
-                    {
-                        Some((session_id, session))
-                    } else {
-                        None
-                    }
+                packet,
+                |cid| {
+                    let (session_id, session) = self.session_by_cid(cid)?;
+                    (session.current_client_addr() == client_addr).then_some((session_id, session))
                 },
             )
         {
@@ -403,7 +398,7 @@ impl SharedSessionIndex {
     }
 
     fn record_known_server_cid_len(&self, len: u8) {
-        if let Some(bit) = cid_len_bit(len) {
+        if let Some(bit) = connection_id_len_bit(len) {
             self.known_server_cid_len_bits
                 .fetch_or(bit, Ordering::Relaxed);
         }
@@ -423,20 +418,4 @@ impl TargetIndexExt for HashMap<SocketAddr, HashMap<Arc<str>, u64>> {
             }
         }
     }
-}
-
-fn cid_len_bit(len: u8) -> Option<u32> {
-    (1..=20).contains(&len).then_some(1u32 << len)
-}
-
-fn for_known_server_cid_len<T>(mut bits: u32, mut f: impl FnMut(u8) -> Option<T>) -> Option<T> {
-    bits &= !1;
-    while bits != 0 {
-        let len = bits.trailing_zeros() as u8;
-        if let Some(value) = f(len) {
-            return Some(value);
-        }
-        bits &= bits - 1;
-    }
-    None
 }

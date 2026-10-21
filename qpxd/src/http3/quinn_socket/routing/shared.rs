@@ -1,6 +1,9 @@
 use super::state::RouteState;
 use super::{ROUTE_STATE_REFRESH_INTERVAL, ROUTE_STATE_SHARDS};
-use crate::http3::quic_packet::{QuicConnectionId, parse_quic_long_header, parse_quic_short_dcid};
+use crate::http3::quic_packet::{
+    QuicConnectionId, connection_id_len_bit, for_each_known_connection_id_len,
+    parse_quic_long_header, parse_quic_short_dcid,
+};
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -199,19 +202,19 @@ impl SharedRouteState {
     }
 
     fn record_server_cid_len(&self, len: u8) {
-        if let Some(bit) = cid_len_bit(len) {
+        if let Some(bit) = connection_id_len_bit(len) {
             self.known_server_cid_len_bits
                 .fetch_or(bit, Ordering::Relaxed);
         }
     }
 
     fn server_cid_len_known(&self, len: u8) -> bool {
-        cid_len_bit(len)
+        connection_id_len_bit(len)
             .is_some_and(|bit| self.known_server_cid_len_bits.load(Ordering::Relaxed) & bit != 0)
     }
 
     fn for_each_server_cid_len(&self, mut f: impl FnMut(u8)) {
-        for_server_cid_len_bit(
+        for_each_known_connection_id_len(
             self.known_server_cid_len_bits.load(Ordering::Relaxed),
             |len| {
                 f(len);
@@ -221,7 +224,7 @@ impl SharedRouteState {
     }
 
     fn any_server_cid_len(&self, f: impl FnMut(u8) -> bool) -> bool {
-        for_server_cid_len_bit(self.known_server_cid_len_bits.load(Ordering::Relaxed), f)
+        for_each_known_connection_id_len(self.known_server_cid_len_bits.load(Ordering::Relaxed), f)
     }
 
     fn addr_shard_idx(&self, addr: SocketAddr) -> usize {
@@ -264,22 +267,6 @@ impl SharedRouteState {
                 .collect(),
         ));
     }
-}
-
-fn cid_len_bit(len: u8) -> Option<u32> {
-    (1..=20).contains(&len).then_some(1u32 << len)
-}
-
-fn for_server_cid_len_bit(mut bits: u32, mut f: impl FnMut(u8) -> bool) -> bool {
-    bits &= !1;
-    while bits != 0 {
-        let len = bits.trailing_zeros() as u8;
-        if f(len) {
-            return true;
-        }
-        bits &= bits - 1;
-    }
-    false
 }
 
 #[cfg(test)]
