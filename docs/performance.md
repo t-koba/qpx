@@ -244,12 +244,14 @@ HTTP/2 implementation; only the location of the profiling window changes.
 
 The streaming lane reports one ratio per run, so comparing the ratio of one
 run with the ratio of another run compares two noisy statistics, not two
-implementations. Two qpxd builds measured against the same origin in the same
-round, alternating which build is measured first, isolate the build
-difference from runner and origin load. The paired policy lanes already work
-this way: `scripts/perf-audit-policy.py` measures the current build and the
-pinned previous release against one origin, alternating the order within each
-round and publishing the per-round deltas.
+implementations. A comparison that measures two qpxd builds in the same round,
+against the same origin, with the order rotated between rounds, isolates the
+build difference from runner and origin load. The paired policy lanes measure
+the current build and the pinned previous release that way, with one
+difference: `scripts/perf-audit-policy.py` gives every sample its own fresh
+origin instance, and cancels origin-load differences by counterbalancing the
+order between rounds - round one measures the current build first, round two
+the previous release first - and by publishing the per-round deltas.
 
 Applied to the reverse HTTP/1 path, the last green streaming run `5ecb4d1` was
 compared with the current tree over 30 rounds of the streaming lane's own
@@ -280,8 +282,9 @@ deltas rather than a bootstrap interval. Until such a harness exists, treat
 these numbers as the record of that measurement rather than as a result the
 product's tooling regenerates. The conclusion does not depend on the tooling:
 a question about whether one build regressed against another is answered by
-measuring both against one origin in the same round, as the paired policy
-lanes do, and not by comparing ratios taken from separate runs.
+measuring both in the same rounds with the order counterbalanced and the
+per-round deltas published, as the paired policy lanes do, and not by
+comparing ratios taken from separate runs.
 
 ### Shared-runner validity and paired-regression contract
 
