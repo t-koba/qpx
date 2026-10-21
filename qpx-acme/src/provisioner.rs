@@ -773,11 +773,37 @@ mod tests {
         fixture.assert_empty();
     }
 
-    /// ACME secure file output fails closed where owner-only semantics are
-    /// unavailable (Windows): no output file may be left behind.
+    /// The ACME material is written through the secure file path, and
+    /// Windows gives that path owner-only semantics: the material is
+    /// written, and only the owner can read it.
     #[cfg(windows)]
     #[test]
-    fn secure_file_output_fails_closed_on_unsupported_platform() {
+    fn secure_file_output_writes_the_material_on_windows() {
+        static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+        let path = std::env::temp_dir().join(format!(
+            "qpx-acme-secure-{}-{}-{}.pem",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        ));
+        let _ = fs::remove_file(&path);
+        write_bytes_file(&path, b"synthetic-acme-contents", 0o600)
+            .expect("the ACME material must be written through the secure file path");
+        assert_eq!(
+            fs::read(&path).expect("read the ACME material"),
+            b"synthetic-acme-contents"
+        );
+        let _ = fs::remove_file(&path);
+    }
+
+    /// A platform without owner-only semantics has no secure file, so the
+    /// ACME material must fail closed and leave no output file behind.
+    #[cfg(not(any(unix, windows)))]
+    #[test]
+    fn secure_file_output_fails_closed_without_owner_only_semantics() {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let path = std::env::temp_dir().join(format!(
             "qpx-acme-unsupported-{}-{}-{}.pem",
@@ -795,11 +821,11 @@ mod tests {
             message.contains(
                 "secure file creation is not supported on this platform without owner-only file permissions"
             ),
-            "ACME secure file output must fail closed on unsupported platform: {message}"
+            "ACME secure file output must fail closed without owner-only semantics: {message}"
         );
         assert!(
             !path.exists(),
-            "ACME secure file output must not create output on unsupported platform"
+            "ACME secure file output must not create output without owner-only semantics"
         );
         let _ = fs::remove_file(&path);
     }
