@@ -283,13 +283,13 @@ bootstrap interval. Treat these numbers as the record of that measurement
 rather than as a result the product's tooling regenerates. The method is
 shipped, though: the streaming lane measures a reference build next to the
 current build in the same rounds with the order counterbalanced, and
-publishes the paired per-round deltas (see "The paired reference build in
-the streaming lane" below). What the lane does not reproduce is this pair of
-builds, because its reference is the pinned previous release rather than the
-last green streaming run. A question about whether one build regressed
-against another is answered by measuring both in the same rounds with the
-order counterbalanced and the per-round deltas published, and not by
-comparing ratios taken from separate runs.
+publishes the paired comparison of those rounds (see "The paired reference
+build in the streaming lane" below). What the lane does not reproduce is
+this pair of builds, because its reference is the pinned previous release
+rather than the last green streaming run. A question about whether one build
+regressed against another is answered by measuring both in the same rounds
+with the order counterbalanced and the per-round measurements published, and
+not by comparing ratios taken from separate runs.
 
 ### Shared-runner validity and paired-regression contract
 
@@ -561,6 +561,14 @@ less efficient. The report names the reference build's source SHA, so every
 number can be traced to the build it was measured against.
 `scripts/test-streaming-reference-comparison.py` exercises the pairing, the
 missing-reference case and the report against synthetic per-round records.
+The lane's own pairing is exercised as well:
+`scripts/test-streaming-pair.py` drives the plan that owns the round, the
+shell that applies it and the record that carries the round the report pairs
+on, so a pair whose members no longer share a round fails there instead of
+leaving the lane with an empty report. The per-round samples themselves
+reach the artifact logs, one file per proxy, read mode and round
+(`target/perf/streaming-compare-logs/*.valid-samples.jsonl`); the report
+carries the statistics of the paired rounds.
 
 ## Allocation gate
 
