@@ -129,6 +129,14 @@ pub enum ContentLengthError {
 /// and a declaration the owner refuses names no length, so the body is read
 /// under the cap instead; the cap holds either way.
 ///
+/// The response compression module reads the declaration through the owner
+/// as well: `qpxd/src/http/modules/response_compression.rs` hands the header
+/// map to it, so the length that says whether the body is within the
+/// compressible window is the length the field declares. A comma list of
+/// equal members is one length there now, so such a response is compressed
+/// when the window allows it, and a declaration the owner refuses names no
+/// length, so the response declares no size and is not compressed.
+///
 /// The HTTP/3 path reads the declaration through the owner as well:
 /// `qpx-h3/src/response.rs` hands the header map to it, so the HTTP/3 server
 /// and client frame a body from the same length the HTTP/1 and HTTP/2 paths
@@ -172,10 +180,8 @@ pub enum ContentLengthError {
 ///
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside the gate.
-/// Those sites are named here as well, so that the record of the sites that
-/// read the declaration is complete:
-/// `qpxd/src/http/modules/response_compression.rs`
-/// reads the declared length to decide whether the body is compressed.
+/// The request guard is the one site that still reads the declaration
+/// inline, and it is named below.
 ///
 /// The access log reads the declaration through the owner as well:
 /// `qpxd/src/reverse/listener/raw_http1.rs` hands the header map to it, so
@@ -186,9 +192,8 @@ pub enum ContentLengthError {
 ///
 /// The request guard in `qpxd/src/http/policy/guard.rs` compares the raw
 /// field values rather than the length they declare, so it answers a
-/// different question and keeps its own reading. A plain integer accepts a
-/// leading plus sign that the grammar does not, so folding any of the named
-/// sites changes what it accepts: each is a decision of its own.
+/// different question and keeps its own reading. Folding it would change
+/// what it accepts, so it is a decision of its own.
 pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
     // Every value is read as text before any member is parsed, so a field
     // that carries a value which is not text is reported the same way

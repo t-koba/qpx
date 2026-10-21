@@ -198,6 +198,43 @@ fn response_no_transform_disables_compression() {
     assert!(!response_is_compressible(&Method::GET, &config, &frozen).expect("predicate runs"));
 }
 
+#[test]
+fn the_compressible_window_reads_the_declared_length_through_the_owner() {
+    let config = identity_test_config();
+
+    // A comma list of equal members is one length, so the response declares
+    // a size inside the window and is compressible.
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12, 12")
+        .body(Body::empty())
+        .expect("response");
+    assert!(
+        response_body_is_compressible(&config, &response).expect("predicate runs"),
+        "a comma list of equal members is one length"
+    );
+
+    // A declaration the owner refuses names no length, so the response
+    // declares no size and is not compressed.
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "+12")
+        .body(Body::empty())
+        .expect("response");
+    assert!(!response_body_is_compressible(&config, &response).expect("predicate runs"));
+
+    // Two members that disagree declare no length either.
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, "text/plain")
+        .header(CONTENT_LENGTH, "12, 13")
+        .body(Body::empty())
+        .expect("response");
+    assert!(!response_body_is_compressible(&config, &response).expect("predicate runs"));
+}
+
 fn identity_test_config() -> ResponseCompressionModuleConfig {
     ResponseCompressionModuleConfig {
         min_body_bytes: 1,

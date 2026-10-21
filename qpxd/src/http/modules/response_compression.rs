@@ -11,6 +11,7 @@ use http::header::{
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
+use qpx_core::http_content_length::declared_content_length;
 use qpx_http::body::{Body, to_bytes};
 use qpx_http::compression_dictionary::{
     encode_dcb, encode_dcz, parse_available_dictionary, parse_dictionary_id,
@@ -396,15 +397,12 @@ fn response_body_is_compressible(
         return Ok(false);
     }
 
-    let content_length = response
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    let Some(content_length) = content_length else {
+    let Some(content_length) = declared_content_length(response.headers()).ok().flatten() else {
         return Ok(false);
     };
-    if content_length < config.min_body_bytes || content_length > config.max_body_bytes {
+    if content_length < config.min_body_bytes as u64
+        || content_length > config.max_body_bytes as u64
+    {
         return Ok(false);
     }
     if parse_cache_control_response_directives(response.headers()).no_transform {
