@@ -202,12 +202,8 @@ impl HttpCacheBackend {
         } else {
             self.max_object_bytes.min(64 * 1024)
         };
-        if let Some(length) = resp
-            .headers()
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            && length > max_body_bytes
+        if let Some(length) = declared_response_length(resp.headers())
+            && length > max_body_bytes as u64
         {
             return Err(anyhow!(
                 "http cache backend response payload too large: {} > {}",
@@ -267,12 +263,8 @@ impl HttpCacheBackend {
         } else {
             self.max_object_bytes.min(64 * 1024)
         };
-        if let Some(length) = resp
-            .headers()
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<usize>().ok())
-            && length > max_body_bytes
+        if let Some(length) = declared_response_length(resp.headers())
+            && length > max_body_bytes as u64
         {
             return Err(anyhow!(
                 "http cache backend response payload too large: {} > {}",
@@ -314,6 +306,21 @@ struct BatchGetRequest<'a> {
 #[derive(Deserialize)]
 struct BatchGetResponse {
     values: Vec<Option<String>>,
+}
+
+/// The length the cached response declares, read through the owner.
+///
+/// The declaration is read the way every other site reads it: a comma list
+/// of equal members is one length, and a declaration the owner refuses - a
+/// value that is not text, a member that is not a `1*DIGIT` sequence, or two
+/// members that disagree - declares no length. A response that declares no
+/// length is not measured against the cache's limits; the body is bounded by
+/// the streaming limit instead, so the size check here is a fast path and not
+/// the limit itself.
+fn declared_response_length(headers: &http::HeaderMap) -> Option<u64> {
+    qpx_core::http_content_length::declared_content_length(headers)
+        .ok()
+        .flatten()
 }
 
 async fn recycle_sender(idle: Arc<AsyncMutex<Vec<Http1SendRequest>>>, sender: Http1SendRequest) {
@@ -477,11 +484,7 @@ impl CacheBackend for HttpCacheBackend {
         let expected_body_len = range
             .map(|(start, end)| end.saturating_sub(start).saturating_add(1))
             .unwrap_or(expected_len);
-        if let Some(length) = resp
-            .headers()
-            .get(http::header::CONTENT_LENGTH)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.trim().parse::<u64>().ok())
+        if let Some(length) = declared_response_length(resp.headers())
             && length != expected_body_len
         {
             return Ok(None);

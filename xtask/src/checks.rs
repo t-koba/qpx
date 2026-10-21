@@ -1216,7 +1216,7 @@ const CONTENT_LENGTH_OWNER: &str = "qpx-core/src/http_content_length.rs";
 
 /// The names the workspace has used for a function that reads a header set's
 /// declared Content-Length.
-const CONTENT_LENGTH_READER_NAMES: [&str; 10] = [
+const CONTENT_LENGTH_READER_NAMES: [&str; 11] = [
     "fn content_length(",
     "fn parse_content_length(",
     "fn parse_declared_content_length(",
@@ -1227,6 +1227,7 @@ const CONTENT_LENGTH_READER_NAMES: [&str; 10] = [
     "fn request_has_body_or_expect(",
     "fn stored_content_length(",
     "fn cacheable_content_length(",
+    "fn declared_response_length(",
 ];
 
 /// The qualified call a site that folds the declaration into the owner uses.

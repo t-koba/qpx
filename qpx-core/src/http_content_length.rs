@@ -119,6 +119,23 @@ pub enum ContentLengthError {
 /// way declares no length: the cache falls back to the stored body's length,
 /// and the helper reports no cacheable length.
 ///
+/// The cache backend reads the declaration through the owner as well:
+/// `qpxd-cache/src/backend_http.rs` hands the response's header map to it,
+/// so the length the cache compares with its size limit and with the length
+/// it expects is the length the field declares. A comma list of equal
+/// members is one length there now, so a response that declares its size
+/// that way is measured against the limit instead of escaping the check,
+/// and a response that declares a length other than the one the cache
+/// expects is a miss instead of a body that fails while it is read. The
+/// shapes the owner refuses - a leading plus sign, a member that is not
+/// digits, two members that disagree - do not reach that path at all: the
+/// HTTP/1 client that delivers the response refuses such a response before
+/// its headers arrive, so the cache's reading and the framing that
+/// delivered the response cannot disagree. A response that declares no
+/// length is not measured against the limit: the streaming limit bounds the
+/// body instead, and the object the cache asked for is confirmed by the
+/// body it reads.
+///
 /// The IPC gateway reads the declaration through the owner as well:
 /// `qpxf/src/ipc_request.rs` hands the header list's Content-Length values
 /// to the owner's value-level entry point, so the length that says how many
@@ -130,8 +147,7 @@ pub enum ContentLengthError {
 /// them, so a site that reads the declaration inline is outside the gate.
 /// Those sites are named here as well, so that the record of the sites that
 /// read the declaration is complete:
-/// `qpxd-cache/src/backend_http.rs` compares the cached response's declared
-/// length with the expected body length, `qpxd/src/http/modules/response_compression.rs`
+/// `qpxd/src/http/modules/response_compression.rs`
 /// reads the declared length to decide whether the body is compressed,
 /// `qpxd/src/http/capture/stream.rs`, `qpxd/src/http/modules/subrequest.rs`
 /// and `qpxd/src/reverse/transport/raw_http1.rs` read it as a size hint, and
