@@ -842,6 +842,20 @@ def spread(records, field):
     ordered = [value for value in values(records, field) if value > 0]
     return None if not ordered else ordered[-1] / ordered[0]
 
+def extremes(records, field):
+    """The smallest and largest value the metric took.
+
+    The range is what a judgment over the observed samples needs: the
+    summary's own value is one sample, and the spread beside it says how
+    far the samples move. The range says how far they moved, so a judgment
+    can ask whether the movement can change its verdict.
+    """
+    ordered = [value for value in values(records, field) if value > 0]
+    if not ordered:
+        return {"min": 0.0, "max": 0.0}
+    return {"min": ordered[0], "max": ordered[-1]}
+
+
 def spread_or_one(records, field):
     """Observed spread, or 1.0 when the metric was never positive."""
     value = spread(records, field)
@@ -945,7 +959,13 @@ for key in sorted(expected | reference_keys):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 6,
+        "benchmark_schema_version": 7,
+        "sample_extremes": {
+            "p99_chunk_gap_ms": extremes(records, "p99_chunk_gap_ms"),
+            "scheduler_queue_delay_us_per_transfer": extremes(
+                records, "scheduler_queue_delay_us_per_transfer"
+            ),
+        },
         "resource_measurement": "sampled_workload_peak_v1",
         "sample_attempts": attempts,
         "sampling_order": "round_robin_interleaved",

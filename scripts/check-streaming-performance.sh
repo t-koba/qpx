@@ -67,6 +67,45 @@ def nested_number(record, container, field):
     return positive_number(nested, field)
 
 
+def validated_extremes(record, field):
+    """The observed range of a metric, checked against the record's own
+    spread.
+
+    The range is the smallest and the largest value the metric took, and the
+    spread beside it is the ratio of the two. A record whose range and
+    spread disagree is not a measurement the checker can judge, so it is
+    rejected rather than read.
+    """
+    container = record.get("sample_extremes")
+    if not isinstance(container, dict):
+        fail(f"record for {record.get('proxy', '<missing>')} is missing object sample_extremes")
+    extremes = container.get(field)
+    if not isinstance(extremes, dict):
+        fail(f"record for {record.get('proxy', '<missing>')} is missing object {field}")
+    minimum = nonnegative_number(extremes, "min")
+    maximum = nonnegative_number(extremes, "max")
+    if maximum < minimum:
+        fail(f"record for {record.get('proxy', '<missing>')} has an inverted {field} range")
+    if minimum == 0:
+        # The metric was never positive, so the range is empty and the
+        # published spread is the neutral one.
+        if maximum != 0:
+            fail(f"record for {record.get('proxy', '<missing>')} has an empty {field} range")
+        return minimum, maximum
+    published = nested_number(record, "sample_spread", f"{field}_ratio")
+    if abs(maximum / minimum - published) > 1e-9 * max(1.0, published):
+        fail(
+            f"record for {record.get('proxy', '<missing>')} has a {field} range "
+            f"that disagrees with its published spread"
+        )
+    value = nonnegative_number(record, field)
+    # A round in which the metric was never positive contributes no value
+    # to the range, so the record's own zero lies outside it.
+    if value != 0 and not minimum <= value <= maximum:
+        fail(f"record for {record.get('proxy', '<missing>')} has a {field} value outside its range")
+    return minimum, maximum
+
+
 def ratio_limit(config, field):
     try:
         value = float(config[field])
@@ -119,7 +158,7 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 6:
+        if nonnegative_int(record, "benchmark_schema_version") != 7:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"streaming performance record for {key} uses an unsupported resource measurement")
@@ -176,6 +215,8 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "total_fd_growth",
         ):
             nonnegative_number(record, field)
+        for field in ("p99_chunk_gap_ms", "scheduler_queue_delay_us_per_transfer"):
+            validated_extremes(record, field)
         for baseline_field, peak_field, growth_field in (
             ("rss_baseline_kb", "rss_peak_kb", "rss_growth_kb"),
             ("backend_rss_baseline_kb", "backend_rss_peak_kb", "backend_rss_growth_kb"),
@@ -255,6 +296,9 @@ slow_resource_leader_name = min(
     external_proxies, key=lambda name: positive_number(slow[name], "total_ms")
 )
 slow_resource_leader = slow[slow_resource_leader_name]
+qpx_slow = slow["qpxd"]
+direct_slow = slow["direct-backend"]
+slow_objectives = objectives.get("slow", {})
 
 throughput_ratio = positive_number(leader, "total_ms") / positive_number(qpx_fast, "total_ms")
 direct_efficiency_ratio = positive_number(direct_fast, "total_ms") / positive_number(qpx_fast, "total_ms")
@@ -408,20 +452,82 @@ for key in sorted(stability_records):
 metric_spread_cap = ratio_limit(
     stability_objectives, "max_qpx_metric_sample_spread_ratio"
 )
+# The tail objectives are ratios against a reference, so the instability of
+# the metric behind one of them matters only when it can change the
+# verdict. The worst end of the objective - the subject's largest observed
+# value against the reference's smallest - is the verdict the instability
+# could produce; while that end still meets the objective, the instability
+# cannot excuse a miss and the measurement stays judgeable. The CPU rate
+# keeps the spread cap: no objective judges it against a reference, so its
+# own spread is what that cap is about.
+#
+# The rule is deliberately one-sided. It only ever keeps a run that the
+# spread cap would have failed, and only when the movement cannot change
+# the verdict; a run whose worst end misses keeps failing as unjudgeable.
+tail_objectives = (
+    (
+        "fast",
+        "p99_chunk_gap_ms",
+        qpx_fast,
+        leader,
+        ratio_limit(fast_objectives, "max_p99_gap_ratio"),
+        False,
+    ),
+    (
+        "fast",
+        "scheduler_queue_delay_us_per_transfer",
+        qpx_fast,
+        leader,
+        ratio_limit(fast_objectives, "max_scheduler_queue_delay_ratio"),
+        True,
+    ),
+    (
+        "slow",
+        "p99_chunk_gap_ms",
+        qpx_slow,
+        direct_slow,
+        ratio_limit(slow_objectives, "max_p99_gap_ratio"),
+        False,
+    ),
+    (
+        "slow",
+        "scheduler_queue_delay_us_per_transfer",
+        qpx_slow,
+        slow_resource_leader,
+        ratio_limit(slow_objectives, "max_scheduler_queue_delay_ratio"),
+        True,
+    ),
+)
+for lane, metric, subject, reference, cap, lower_is_better in tail_objectives:
+    record = records[(lane, "qpxd")]
+    spread_field = f"{metric}_ratio"
+    metric_spread = nested_number(record, "sample_spread", spread_field)
+    if metric_spread <= metric_spread_cap + 1e-12:
+        continue
+    subject_max = validated_extremes(subject, metric)[1]
+    reference_min = validated_extremes(reference, metric)[0]
+    if lower_is_better:
+        worst_end = lower_is_better_ratio(subject_max, reference_min)
+    elif reference_min == 0:
+        worst_end = math.inf if subject_max > 0 else 1.0
+    else:
+        worst_end = subject_max / reference_min
+    if worst_end <= cap + 1e-12:
+        continue
+    failures.append(
+        f"streaming {lane} {spread_field} sample spread {metric_spread:.6f} "
+        f"> stability cap {metric_spread_cap:.6f}: the measurement "
+        f"is unjudgeable"
+    )
 for key in (("fast", "qpxd"), ("slow", "qpxd")):
     record = records[key]
-    for field in (
-        "p99_chunk_gap_ms_ratio",
-        "scheduler_queue_delay_us_per_transfer_ratio",
-        "requests_per_total_cpu_second_ratio",
-    ):
-        metric_spread = nested_number(record, "sample_spread", field)
-        if metric_spread > metric_spread_cap + 1e-12:
-            failures.append(
-                f"streaming {key} {field} sample spread {metric_spread:.6f} "
-                f"> stability cap {metric_spread_cap:.6f}: the measurement "
-                f"is unjudgeable"
-            )
+    metric_spread = nested_number(record, "sample_spread", "requests_per_total_cpu_second_ratio")
+    if metric_spread > metric_spread_cap + 1e-12:
+        failures.append(
+            f"streaming {key} requests_per_total_cpu_second_ratio sample spread "
+            f"{metric_spread:.6f} > stability cap {metric_spread_cap:.6f}: "
+            f"the measurement is unjudgeable"
+        )
 for name, current, objective, direction in fast_checks:
     # The time and CPU-rate objectives use the bounded lane band; the tail
     # objectives use the band of their own metric.
@@ -458,8 +564,6 @@ for name, current, objective, direction in fast_checks:
                 f"{noise:.6f}; not a regression signal"
             )
 
-qpx_slow = slow["qpxd"]
-direct_slow = slow["direct-backend"]
 slow_ratios = {
     "max_total_time_ratio": positive_number(qpx_slow, "total_ms") / positive_number(direct_slow, "total_ms"),
     "max_first_byte_ratio": positive_number(qpx_slow, "first_byte_ms") / positive_number(direct_slow, "first_byte_ms"),
@@ -478,7 +582,6 @@ slow_ratios = {
         nonnegative_number(slow_resource_leader, "scheduler_queue_delay_us_per_transfer"),
     ),
 }
-slow_objectives = objectives.get("slow", {})
 slow_lane_noise = 1.0
 for field in ("total_ms_ratio", "requests_per_total_cpu_second_ratio"):
     slow_lane_noise = max(slow_lane_noise, nested_number(qpx_slow, "sample_spread", field))

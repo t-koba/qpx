@@ -18,6 +18,22 @@ FAST_TRANSFERS = 8
 SLOW_TRANSFERS = 1
 
 
+def with_extremes(record):
+    """The observed range of the tail metrics.
+
+    The range is derived from the record's own value and the published
+    spread, so a synthetic record carries a range that agrees with the
+    spread the checker reads beside it.
+    """
+    extremes = {}
+    for field in ("p99_chunk_gap_ms", "scheduler_queue_delay_us_per_transfer"):
+        value = float(record[field])
+        root = float(record["sample_spread"][f"{field}_ratio"]) ** 0.5
+        extremes[field] = {"min": value / root, "max": value * root}
+    record["sample_extremes"] = extremes
+    return record
+
+
 def build(proxy, mode, **overrides):
     """One aggregate streaming record that satisfies the gate's own invariants."""
     transfers = FAST_TRANSFERS if mode == "fast" else SLOW_TRANSFERS
@@ -30,7 +46,7 @@ def build(proxy, mode, **overrides):
         "valid_samples": 3,
         "aggregation": "conservative_median_per_metric",
         "sampling_order": "round_robin_interleaved",
-        "benchmark_schema_version": 6,
+        "benchmark_schema_version": 7,
         "resource_measurement": "sampled_workload_peak_v1",
         "kernel_resource_metrics": True,
         "stream_bytes": STREAM_BYTES,
@@ -77,6 +93,7 @@ def build(proxy, mode, **overrides):
     record.update(overrides)
     if spread is not None:
         record["sample_spread"].update(spread)
+    with_extremes(record)
     if proxy == "direct-backend":
         record["total_rss_peak_kb"] = record["rss_peak_kb"]
         record["total_rss_growth_kb"] = record["rss_growth_kb"]
@@ -330,6 +347,7 @@ def lane(base, **overrides):
         record.update(values)
         if spread is not None:
             record["sample_spread"].update(spread)
+        with_extremes(record)
         if record["proxy"] == "direct-backend":
             record["total_rss_peak_kb"] = record["rss_peak_kb"]
             record["total_rss_growth_kb"] = record["rss_growth_kb"]
@@ -644,6 +662,37 @@ class StreamingGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("p99_chunk_gap_ms_ratio sample spread", result.stderr)
 
+    def test_an_unstable_tail_measurement_that_cannot_miss_stays_valid(self):
+        """An unstable metric whose worst end still meets the objective is
+        judgeable, so the movement does not fail the run.
+
+        The measurement moved, but every sample it took met the objective:
+        the movement cannot change the verdict, so the run is not invalid.
+        This is the false red the streaming assessment produced on a shared
+        runner, where a metric of a few milliseconds moved several-fold
+        while the objective it judges was met with a wide margin.
+        """
+        result = self.run_gate(
+            slow=lane(
+                SLOW_LANE,
+                qpxd={
+                    "sample_spread": {
+                        "scheduler_queue_delay_us_per_transfer_ratio": 3.5,
+                    },
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("unjudgeable", result.stderr)
+
+    def test_a_range_that_disagrees_with_the_spread_is_rejected(self):
+        """A record whose range and spread disagree is not judgeable."""
+        fast = lane(FAST_LANE)
+        fast["qpxd"]["sample_extremes"]["p99_chunk_gap_ms"] = {"min": 0.01, "max": 0.5}
+        result = self.run_gate(fast)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("disagrees with its published spread", result.stderr)
+
     def test_unstable_cpu_rate_measurement_is_invalid(self):
         result = self.run_gate(
             lane(
@@ -672,7 +721,7 @@ class StreamingGateTest(unittest.TestCase):
 
     def test_old_record_schema_is_rejected(self):
         fast = lane(FAST_LANE)
-        fast["qpxd"]["benchmark_schema_version"] = 5
+        fast["qpxd"]["benchmark_schema_version"] = 6
         result = self.run_gate(fast)
         self.assertEqual(result.returncode, 1)
         self.assertIn("unsupported benchmark schema", result.stderr)

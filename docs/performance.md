@@ -473,10 +473,16 @@ timer quantization cannot dominate CPU accounting. CPU efficiency includes both
 the proxy and the shared backend. Stability is mandatory for qpx, the direct
 backend, the winning external proxy, and every external proxy within 25% of the
 leader. A distant unstable implementation remains visible in the artifact but
-cannot invalidate an otherwise stable competitive comparison. qpx's own p99
-gap, scheduler queue-delay and CPU-rate sample spreads must also stay within
-the tracked stability cap: a wider spread makes those metrics unjudgeable
-rather than merely noisy, and the run fails as invalid.
+cannot invalidate an otherwise stable competitive comparison. qpx's own CPU-rate
+sample spread must stay within the tracked stability cap: a wider spread makes
+that metric unjudgeable rather than merely noisy, and the run fails as invalid.
+The p99 gap and scheduler queue-delay spreads are judged against the range the
+lane published for them beside their spread. Their objectives are ratios
+against a reference, so the movement only makes the measurement unjudgeable
+when it can change the verdict, which is when the worst end of the objective -
+qpx's largest observed value against the reference's smallest - misses the
+objective. While that end still meets the objective, the movement cannot
+excuse a miss and the run stays judgeable.
 
 `scripts/check-streaming-performance.sh` enforces the tracked objectives in
 `perf/streaming-performance-objectives.json`. For a fast reader, qpx must:
