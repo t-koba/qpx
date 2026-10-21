@@ -191,3 +191,17 @@ fn cacheable_content_length_rejects_inconsistent_values() {
     headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("10, 11"));
     assert_eq!(cacheable_content_length(&headers), None);
 }
+
+#[test]
+fn cacheable_content_length_reads_a_list_of_equal_members() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("10, 10"));
+    assert_eq!(cacheable_content_length(&headers), Some(10));
+}
+
+#[test]
+fn cacheable_content_length_rejects_a_signed_member() {
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("+10"));
+    assert_eq!(cacheable_content_length(&headers), None);
+}

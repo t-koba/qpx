@@ -319,22 +319,20 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
     Ok(response)
 }
 
+/// The Content-Length that the stored response declares.
+///
+/// The stored headers are a list of name-value pairs rather than a header
+/// map, so the field's values go to the owner's value-level entry point: the
+/// member grammar and the conflict rule stay in one place.
 fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
-    let mut parsed = None;
-    for (name, value) in &envelope.headers {
-        if !name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()) {
-            continue;
-        }
-        for part in value.split(',') {
-            let next = part.trim().parse::<u64>().ok()?;
-            match parsed {
-                Some(existing) if existing != next => return None,
-                Some(_) => {}
-                None => parsed = Some(next),
-            }
-        }
-    }
-    parsed
+    let values = envelope
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
+        .map(|(_, value)| value.as_str());
+    qpx_http::protocol::semantics::declared_content_length_in_values(values)
+        .ok()
+        .flatten()
 }
 
 pub fn resolve_range(range: &ByteRangeSpec, len: u64) -> Option<(u64, u64)> {
@@ -357,5 +355,77 @@ pub fn resolve_range(range: &ByteRangeSpec, len: u64) -> Option<(u64, u64)> {
             let start = len.saturating_sub(suffix);
             Some((start, len.saturating_sub(1)))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::CachedBody;
+
+    fn envelope_with_headers(headers: Vec<(String, String)>) -> CachedResponseEnvelope {
+        CachedResponseEnvelope {
+            status: 200,
+            headers,
+            body: CachedBody::default(),
+            body_len: 0,
+            stored_at_ms: 0,
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 60,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            header_map: Default::default(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        }
+    }
+
+    fn envelope_with_content_length(value: &str) -> CachedResponseEnvelope {
+        envelope_with_headers(vec![("content-length".to_string(), value.to_string())])
+    }
+
+    #[test]
+    fn the_stored_length_is_the_owners_reading() {
+        assert_eq!(
+            stored_content_length(&envelope_with_content_length("42")),
+            Some(42)
+        );
+        assert_eq!(
+            stored_content_length(&envelope_with_content_length("42, 42")),
+            Some(42)
+        );
+    }
+
+    #[test]
+    fn the_stored_length_refuses_a_signed_member() {
+        assert_eq!(
+            stored_content_length(&envelope_with_content_length("+42")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_stored_length_refuses_conflicting_members() {
+        assert_eq!(
+            stored_content_length(&envelope_with_content_length("42, 43")),
+            None
+        );
+    }
+
+    #[test]
+    fn the_stored_length_of_an_empty_value_is_absent() {
+        assert_eq!(
+            stored_content_length(&envelope_with_content_length("")),
+            None
+        );
+    }
+
+    #[test]
+    fn a_response_without_the_field_declares_no_length() {
+        assert_eq!(
+            stored_content_length(&envelope_with_headers(Vec::new())),
+            None
+        );
     }
 }

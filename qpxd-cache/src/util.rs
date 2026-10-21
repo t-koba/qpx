@@ -2,7 +2,7 @@ use super::types::{CacheBackend, MAX_VARIANTS_PER_PRIMARY, ResponseDirectives, V
 use super::vary::index_storage_key;
 use anyhow::Result;
 #[cfg(test)]
-use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use http::header::TRANSFER_ENCODING;
 use qpx_core::config::CachePolicyConfig;
 pub use qpx_http::now_millis;
 use std::collections::HashSet;
@@ -35,21 +35,9 @@ pub fn cacheable_content_length(headers: &http::HeaderMap) -> Option<u64> {
     if headers.contains_key(TRANSFER_ENCODING) {
         return None;
     }
-    let mut parsed: Option<u64> = None;
-    for value in headers.get_all(CONTENT_LENGTH).iter() {
-        let raw = value.to_str().ok()?;
-        for part in raw.split(',') {
-            let current = part.trim().parse::<u64>().ok()?;
-            if let Some(prev) = parsed {
-                if prev != current {
-                    return None;
-                }
-            } else {
-                parsed = Some(current);
-            }
-        }
-    }
-    parsed
+    qpx_http::protocol::semantics::declared_content_length(headers)
+        .ok()
+        .flatten()
 }
 
 pub fn upsert_variant_with_cap(index: &mut VariantIndex, variant_key: &str) -> Vec<String> {

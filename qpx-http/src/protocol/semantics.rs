@@ -749,9 +749,6 @@ pub enum ContentLengthError {
 ///   raw header line as a plain integer.
 /// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
 ///   than a declaration.
-/// - `qpxd-cache/src/entry.rs` parses every member of the stored response's
-///   values as a plain integer.
-/// - `qpxd-cache/src/util.rs` does the same in a test helper.
 /// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
 ///   plain integer.
 ///
@@ -776,6 +773,14 @@ pub enum ContentLengthError {
 /// and client frame a body from the same length the HTTP/1 and HTTP/2 paths
 /// read. A leading plus sign is refused there too, so a request or a
 /// response that frames its body with one is rejected instead of read.
+///
+/// The cache reads the declaration through the owner as well:
+/// `qpxd-cache/src/entry.rs` hands the stored response's Content-Length
+/// values to the owner's value-level entry point, and the test helper in
+/// `qpxd-cache/src/util.rs` hands the header map to it. A leading plus sign
+/// is refused there too, so a stored response that declares its length that
+/// way declares no length: the cache falls back to the stored body's length,
+/// and the helper reports no cacheable length.
 ///
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside both the
