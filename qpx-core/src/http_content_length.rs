@@ -141,15 +141,40 @@ pub enum ContentLengthError {
 /// leading plus sign that the grammar does not, so folding any of the named
 /// sites changes what it accepts: each is a decision of its own.
 pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
-    let mut values = Vec::new();
+    // Every value is read as text before any member is parsed, so a field
+    // that carries a value which is not text is reported the same way
+    // whatever else the field carries.
     for value in headers.get_all(CONTENT_LENGTH) {
-        values.push(
-            value
-                .to_str()
-                .map_err(|_| ContentLengthError::InvalidHeader)?,
-        );
+        value
+            .to_str()
+            .map_err(|_| ContentLengthError::InvalidHeader)?;
     }
-    declared_content_length_in_values(values)
+    let mut declared = None;
+    for value in headers.get_all(CONTENT_LENGTH) {
+        let value = value
+            .to_str()
+            .map_err(|_| ContentLengthError::InvalidHeader)?;
+        merge_value(value, &mut declared)?;
+    }
+    Ok(declared)
+}
+
+/// Merges one field value's members into the length the field declares so
+/// far.
+///
+/// Every member of the value declares the same length, so a value that
+/// names two different lengths is a conflict rather than a choice.
+fn merge_value(value: &str, declared: &mut Option<u64>) -> Result<(), ContentLengthError> {
+    for part in value.split(',') {
+        let length = parse_content_length_member(part).ok_or(ContentLengthError::InvalidValue)?;
+        if let Some(previous) = *declared
+            && previous != length
+        {
+            return Err(ContentLengthError::Conflicting);
+        }
+        *declared = Some(length);
+    }
+    Ok(())
 }
 
 /// The Content-Length that a sequence of field values declares.
@@ -165,17 +190,8 @@ pub fn declared_content_length_in_values<'a>(
     values: impl IntoIterator<Item = &'a str>,
 ) -> Result<Option<u64>, ContentLengthError> {
     let mut declared = None::<u64>;
-    for raw in values {
-        for part in raw.split(',') {
-            let length =
-                parse_content_length_member(part).ok_or(ContentLengthError::InvalidValue)?;
-            if let Some(previous) = declared
-                && previous != length
-            {
-                return Err(ContentLengthError::Conflicting);
-            }
-            declared = Some(length);
-        }
+    for value in values {
+        merge_value(value, &mut declared)?;
     }
     Ok(declared)
 }
