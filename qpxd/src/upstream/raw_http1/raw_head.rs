@@ -308,29 +308,24 @@ fn validate_field_values(headers: &[httparse::Header<'_>]) -> Result<()> {
     Ok(())
 }
 
+/// The Content-Length that the raw header lines declare.
+///
+/// The raw head has no header map to hand the owner, so it hands the
+/// field's values to the owner's value-level entry point: the member
+/// grammar and the conflict rule stay with the owner, and a member that is
+/// not a digit sequence is refused here as it is everywhere else.
 fn parse_content_length(headers: &[httparse::Header<'_>]) -> Result<Option<u64>> {
-    let mut parsed = None;
+    let mut values = Vec::new();
     for header in headers {
         if !header.name.eq_ignore_ascii_case("content-length") {
             continue;
         }
         let raw = std::str::from_utf8(header.value)
             .map_err(|_| anyhow!("invalid content-length header"))?;
-        for part in raw.split(',') {
-            let value = part
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| anyhow!("invalid content-length value: {}", part.trim()))?;
-            match parsed {
-                Some(existing) if existing != value => {
-                    return Err(anyhow!("conflicting content-length values"));
-                }
-                Some(_) => {}
-                None => parsed = Some(value),
-            }
-        }
+        values.push(raw);
     }
-    Ok(parsed)
+    qpx_http::protocol::semantics::declared_content_length_in_values(values)
+        .map_err(anyhow::Error::new)
 }
 
 fn has_only_chunked_transfer_encoding(headers: &[httparse::Header<'_>]) -> Result<bool> {
@@ -438,6 +433,38 @@ mod tests {
         )
         .expect_err("conflict");
         assert!(error.to_string().contains("conflicting content-length"));
+    }
+
+    #[test]
+    fn raw_head_refuses_a_signed_content_length() {
+        let headers = [httparse::Header {
+            name: "Content-Length",
+            value: b"+4",
+        }];
+        let error = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect_err("signed length");
+        assert_eq!(error.to_string(), "invalid content-length value");
+    }
+
+    #[test]
+    fn raw_head_accepts_a_repeated_equal_content_length() {
+        let headers = [httparse::Header {
+            name: "Content-Length",
+            value: b"4, 4",
+        }];
+        let raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("raw head");
+        assert_eq!(raw.framing(), RawHttp1BodyFraming::ContentLength(4));
     }
 
     #[test]

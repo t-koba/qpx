@@ -1230,7 +1230,11 @@ const CONTENT_LENGTH_READER_NAMES: [&str; 10] = [
 ];
 
 /// The qualified call a site that folds the declaration into the owner uses.
-const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length(";
+///
+/// The owner has two entry points, one for a header map and one for the
+/// field's values, so the call is matched by its name: a site that reads
+/// the declaration through either of them has folded it.
+const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 
 /// The declared Content-Length has one owner, and the owner names the sites
 /// that still read the declaration themselves.

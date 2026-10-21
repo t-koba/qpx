@@ -414,6 +414,14 @@ fn parse_declared_content_length_accepts_repeated_equal_values() {
 }
 
 #[test]
+fn parse_declared_content_length_refuses_a_signed_member() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("+12"));
+    let error = parse_declared_content_length(&headers).expect_err("signed length");
+    assert_eq!(error.to_string(), "invalid content-length value");
+}
+
+#[test]
 fn reset_content_response_has_no_body_and_allows_reuse() {
     let headers = HeaderMap::new();
     let kind = determine_response_body_kind(&Method::GET, StatusCode::RESET_CONTENT, &headers)

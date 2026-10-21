@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use bytes::BytesMut;
-use hyper::header::{CONTENT_LENGTH, HeaderMap};
+use hyper::header::HeaderMap;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
@@ -494,25 +494,12 @@ where
     })
 }
 
+/// The Content-Length that the upstream header map declares.
+///
+/// The declaration has one owner, so the upstream path reads the field the
+/// same way the codecs, the cache and the request validation read it: a
+/// value that is not text, a member that is not a digit sequence and two
+/// members that declare different lengths are the three failures it is.
 fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
-    let mut parsed = None::<u64>;
-    for value in headers.get_all(CONTENT_LENGTH).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|_| anyhow!("invalid content-length header"))?;
-        for part in raw.split(',') {
-            let len = part
-                .trim()
-                .parse::<u64>()
-                .map_err(|_| anyhow!("invalid content-length value: {}", part.trim()))?;
-            match parsed {
-                Some(existing) if existing != len => {
-                    return Err(anyhow!("conflicting content-length values"));
-                }
-                Some(_) => {}
-                None => parsed = Some(len),
-            }
-        }
-    }
-    Ok(parsed)
+    qpx_http::protocol::semantics::declared_content_length(headers).map_err(anyhow::Error::new)
 }

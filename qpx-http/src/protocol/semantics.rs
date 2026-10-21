@@ -734,9 +734,9 @@ pub enum ContentLengthError {
 /// value that names two different lengths is a conflict rather than a choice.
 ///
 /// The owner sits beside the member grammar it uses, so the HTTP/1 and
-/// HTTP/2 codecs, the HTTP/3 codec and listener, the cache and the request
-/// validation read the field the same way instead of each keeping its own
-/// interpretation.
+/// HTTP/2 codecs, the HTTP/3 codec and listener, the cache, the upstream
+/// raw HTTP/1 path and the request validation read the field the same way
+/// instead of each keeping its own interpretation.
 ///
 /// The sites that read the declaration through a helper are named here, so
 /// the Content-Length gate can check that this list and the tree agree:
@@ -748,10 +748,6 @@ pub enum ContentLengthError {
 ///   raw header line as a plain integer.
 /// - `qpxd/src/reverse/transport/request_template.rs` parses every value as
 ///   a plain integer and does not split a comma list.
-/// - `qpxd/src/upstream/raw_http1/mod.rs` parses every member as a plain
-///   integer.
-/// - `qpxd/src/upstream/raw_http1/raw_head.rs` parses every member of the
-///   raw header lines as a plain integer.
 /// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
 ///   than a declaration.
 /// - `qpxd-cache/src/entry.rs` parses every member of the stored response's
@@ -760,6 +756,14 @@ pub enum ContentLengthError {
 /// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
 ///   plain integer.
 /// - `qpx-h3/src/response.rs` parses every member as a plain integer.
+///
+/// The upstream raw HTTP/1 path reads the declaration through the owner as
+/// well: `qpxd/src/upstream/raw_http1/mod.rs` calls it with the header map
+/// it holds, and `qpxd/src/upstream/raw_http1/raw_head.rs`, which reads raw
+/// header lines rather than a header map, hands the field's values to the
+/// owner's value-level entry point. A leading plus sign is refused there
+/// too, so an upstream response that frames its body with one is rejected
+/// instead of read.
 ///
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside both the
@@ -779,11 +783,31 @@ pub enum ContentLengthError {
 /// leading plus sign that the grammar does not, so folding any of the named
 /// sites changes what it accepts: each is a decision of its own.
 pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
-    let mut declared = None::<u64>;
+    let mut values = Vec::new();
     for value in headers.get_all(CONTENT_LENGTH) {
-        let raw = value
-            .to_str()
-            .map_err(|_| ContentLengthError::InvalidHeader)?;
+        values.push(
+            value
+                .to_str()
+                .map_err(|_| ContentLengthError::InvalidHeader)?,
+        );
+    }
+    declared_content_length_in_values(values)
+}
+
+/// The Content-Length that a sequence of field values declares.
+///
+/// The values are the field's values in the order they appear, and each one
+/// is a comma-separated list of `1*DIGIT` members (RFC 9110 section 8.6),
+/// so two different lengths are a conflict rather than a choice.
+///
+/// A site that reads the declaration from raw header lines has no header
+/// map to hand the owner, so it hands the values instead: the member
+/// grammar and the conflict rule stay in one place.
+pub fn declared_content_length_in_values<'a>(
+    values: impl IntoIterator<Item = &'a str>,
+) -> Result<Option<u64>, ContentLengthError> {
+    let mut declared = None::<u64>;
+    for raw in values {
         for part in raw.split(',') {
             let length =
                 parse_content_length_member(part).ok_or(ContentLengthError::InvalidValue)?;

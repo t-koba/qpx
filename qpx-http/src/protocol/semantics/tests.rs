@@ -9,6 +9,42 @@ fn declared_content_length_reads_every_member_of_every_value() {
 }
 
 #[test]
+fn declared_content_length_in_values_reads_every_member_of_every_value() {
+    assert_eq!(
+        declared_content_length_in_values(["42", "42, 42"]),
+        Ok(Some(42))
+    );
+    assert_eq!(
+        declared_content_length_in_values(Vec::<&str>::new()),
+        Ok(None)
+    );
+}
+
+#[test]
+fn declared_content_length_in_values_rejects_a_member_that_is_not_digits() {
+    for values in [
+        vec!["+5"],
+        vec!["5, +5"],
+        vec![""],
+        vec!["4,"],
+        vec!["4,,4"],
+    ] {
+        assert_eq!(
+            declared_content_length_in_values(values),
+            Err(ContentLengthError::InvalidValue)
+        );
+    }
+}
+
+#[test]
+fn declared_content_length_in_values_rejects_conflicting_members() {
+    assert_eq!(
+        declared_content_length_in_values(["5", "6"]),
+        Err(ContentLengthError::Conflicting)
+    );
+}
+
+#[test]
 fn declared_content_length_rejects_a_member_that_is_not_digits() {
     for value in ["+5", "-5", "5x", "", "4,", "4,,4"] {
         let mut headers = HeaderMap::new();
