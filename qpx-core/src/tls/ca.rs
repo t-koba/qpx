@@ -197,7 +197,8 @@ fn enforce_private_key_permissions(path: &Path) -> Result<()> {
     let file = open_windows_ca_material(path, false)?;
     crate::secure_file::validate_windows_secure_file_handle(&file, path)
         .map_err(|err| anyhow!("{err}"))?;
-    crate::secure_file::apply_owner_only_acl(&file, path).map_err(|err| anyhow!("{err}"))
+    crate::secure_file::apply_owner_only_acl(&file, path).map_err(|err| anyhow!("{err}"))?;
+    Ok(())
 }
 
 #[cfg(not(any(unix, windows)))]
