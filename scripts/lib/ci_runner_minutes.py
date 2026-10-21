@@ -86,16 +86,19 @@ def job_day(record):
     return None if started is None else started.date().isoformat()
 
 
-def summarize_jobs(records, run_starts=None):
+def summarize_jobs(records, run_starts=None, reporter=None):
     """Sums the runner time of job records and reports what it could not count.
 
     `run_starts` maps a run identifier to the moment that run started, which
-    is what the queue delay is measured against.
+    is what the queue delay is measured against. `reporter` names the job that
+    writes the report: it is running while it reports, so it is counted
+    separately and never makes the total partial.
     """
     run_starts = run_starts or {}
     minutes = 0.0
     counted = 0
     unfinished = 0
+    reporter_unfinished = 0
     skipped = 0
     failed = 0
     missing = 0
@@ -106,7 +109,10 @@ def summarize_jobs(records, run_starts=None):
         status = str(record.get("status") or "").lower()
         conclusion = str(record.get("conclusion") or "").lower()
         if status and status != "completed":
-            unfinished += 1
+            if reporter and record.get("name") == reporter:
+                reporter_unfinished += 1
+            else:
+                unfinished += 1
             continue
         if conclusion == "skipped":
             skipped += 1
@@ -141,6 +147,7 @@ def summarize_jobs(records, run_starts=None):
         "jobs_total": len(records),
         "jobs_counted": counted,
         "jobs_unfinished": unfinished,
+        "jobs_reporter_unfinished": reporter_unfinished,
         "jobs_skipped": skipped,
         "jobs_failed": failed,
         "jobs_without_timestamps": missing,
@@ -151,9 +158,9 @@ def summarize_jobs(records, run_starts=None):
     }
 
 
-def summarize_day(day, records, run_starts=None):
+def summarize_day(day, records, run_starts=None, reporter=None):
     """Sums the runner time of the jobs that started on one UTC day."""
-    summary = summarize_jobs(records, run_starts)
+    summary = summarize_jobs(records, run_starts, reporter)
     summary["day"] = day
     summary["timezone"] = "UTC"
     return summary
@@ -182,13 +189,21 @@ def build_report(runs, jobs, run_id, captured_at, collection=None):
     run = next((record for record in runs if str(record.get("run_id")) == run_id), None)
     run_jobs = [record for record in jobs if str(record.get("run_id")) == run_id]
     starts = run_start_map(runs)
-    run_summary = summarize_jobs(run_jobs, starts)
+    reporter = (collection or {}).get("reporter_job")
+    run_summary = summarize_jobs(run_jobs, starts, reporter)
+    if run is None:
+        # The run's records were not collected, so nothing about its cost is
+        # known. A missing run must never read as a run that cost nothing.
+        run_summary["partial"] = True
+        run_summary["partial_reasons"] = run_summary["partial_reasons"] + [
+            "the run's records were not collected"
+        ]
     reference = parse_timestamp((run or {}).get("run_started_at")) or parse_timestamp(
         (run or {}).get("created_at")
     ) or captured_at
     day = reference.date().isoformat()
     day_jobs = [record for record in jobs if job_day(record) == day]
-    day_summary = summarize_day(day, day_jobs, starts)
+    day_summary = summarize_day(day, day_jobs, starts, reporter)
     day_run_ids = {str(job.get("run_id")) for job in day_jobs}
     day_runs = {str(record.get("run_id")) for record in runs if str(record.get("run_id")) in day_run_ids}
     selected_runs = {str(record.get("run_id")) for record in runs}
@@ -206,14 +221,33 @@ def build_report(runs, jobs, run_id, captured_at, collection=None):
         day_summary["partial_reasons"] = day_summary["partial_reasons"] + [
             f"{omitted} run(s) of the day were not collected"
         ]
+    breakdown = []
+    for record in runs:
+        record_id = str(record.get("run_id"))
+        summary = summarize_jobs(
+            [job for job in jobs if str(job.get("run_id")) == record_id], starts, reporter
+        )
+        breakdown.append(
+            {
+                "run_id": record_id,
+                "workflow": record.get("workflow"),
+                "head_sha": record.get("head_sha"),
+                "runner_minutes": summary["runner_minutes"],
+                "jobs_counted": summary["jobs_counted"],
+                "jobs_total": summary["jobs_total"],
+                "partial": summary["partial"],
+            }
+        )
     return {
         "captured_at": format_timestamp(captured_at),
         "head_sha": (run or {}).get("head_sha"),
         "workflow": (run or {}).get("workflow"),
         "run_id": run_id,
         "run_conclusion": (run or {}).get("conclusion"),
+        "reporter_job": reporter,
         "run": run_summary,
         "day": day_summary,
+        "runs": breakdown,
     }
 
 
@@ -231,6 +265,8 @@ def format_report(report):
         f"day {day['day']} runner minutes {day['runner_minutes']:.2f} "
         f"({day['runs_counted']}/{day['runs_total']} runs)",
     ]
+    if report.get("reporter_job"):
+        lines.append(f"the reporting job {report['reporter_job']} is not in the run total")
     for reason in run["partial_reasons"]:
         lines.append(f"run total is partial: {reason}")
     for reason in day["partial_reasons"]:

@@ -246,6 +246,101 @@ class ApiRecords(unittest.TestCase):
         self.assertEqual(record["started_at"], "2026-10-20T10:01:00Z")
 
 
+class Selection(unittest.TestCase):
+    def test_the_target_run_survives_a_truncated_day(self):
+        target = {"id": 5000, "name": "ci"}
+        listed = [{"id": 4000 + index, "name": "ci"} for index in range(120)]
+        selected, omitted = DRIVER.select_runs(target, listed, "ci", 100)
+        self.assertEqual(str(selected[0]["id"]), "5000")
+        self.assertEqual(len(selected), 100)
+        self.assertEqual(omitted, 21)
+
+    def test_the_day_covers_only_the_target_workflow(self):
+        target = {"id": 5000, "name": "ci"}
+        listed = [
+            {"id": 4000, "name": "ci"},
+            {"id": 4001, "name": "structure"},
+            {"id": 4002, "name": "codeql"},
+        ]
+        selected, omitted = DRIVER.select_runs(target, listed, "ci", 100)
+        self.assertEqual([str(record["id"]) for record in selected], ["5000", "4000"])
+        self.assertEqual(omitted, 0)
+
+    def test_a_day_without_runs_keeps_the_target(self):
+        target = {"id": 5000, "name": "ci"}
+        selected, omitted = DRIVER.select_runs(target, [], "ci", 100)
+        self.assertEqual([str(record["id"]) for record in selected], ["5000"])
+        self.assertEqual(omitted, 0)
+
+
+class MissingRun(unittest.TestCase):
+    def test_a_missing_run_never_reads_as_a_zero_cost_run(self):
+        payload = build_report([], [], "7", CAPTURED)
+        self.assertIsNone(payload["head_sha"])
+        self.assertEqual(payload["run"]["runner_minutes"], 0.0)
+        self.assertTrue(payload["run"]["partial"])
+        self.assertTrue(
+            any("were not collected" in reason for reason in payload["run"]["partial_reasons"])
+        )
+
+
+class Reporter(unittest.TestCase):
+    def test_the_reporting_job_does_not_make_the_run_partial(self):
+        jobs = [
+            job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:06:00Z"),
+            job("CI runner minutes", "2026-10-20T10:02:00Z", None, status="in_progress",
+                conclusion=""),
+        ]
+        payload = build_report(
+            [run()], jobs, "7", CAPTURED, {"reporter_job": "CI runner minutes"}
+        )
+        self.assertFalse(payload["run"]["partial"])
+        self.assertEqual(payload["run"]["jobs_reporter_unfinished"], 1)
+        self.assertEqual(payload["run"]["runner_minutes"], 5.0)
+        self.assertEqual(payload["reporter_job"], "CI runner minutes")
+
+    def test_other_unfinished_jobs_still_make_the_run_partial(self):
+        jobs = [
+            job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:06:00Z"),
+            job("CI runner minutes", "2026-10-20T10:02:00Z", None, status="in_progress",
+                conclusion=""),
+            job("build", "2026-10-20T10:02:00Z", None, status="in_progress", conclusion=""),
+        ]
+        payload = build_report(
+            [run()], jobs, "7", CAPTURED, {"reporter_job": "CI runner minutes"}
+        )
+        self.assertTrue(payload["run"]["partial"])
+        self.assertEqual(payload["run"]["jobs_unfinished"], 1)
+        self.assertEqual(payload["run"]["jobs_reporter_unfinished"], 1)
+
+    def test_the_report_names_the_reporting_job(self):
+        payload = build_report(
+            [run()],
+            [job("a", "2026-10-20T10:05:00Z", "2026-10-20T10:10:00Z")],
+            "7",
+            CAPTURED,
+            {"reporter_job": "CI runner minutes"},
+        )
+        self.assertIn("the reporting job CI runner minutes is not in the run total",
+                      format_report(payload))
+
+
+class Breakdown(unittest.TestCase):
+    def test_every_collected_run_gets_its_own_line(self):
+        runs = [
+            run(),
+            run(run_id="8", created="2026-10-20T11:00:00Z", started="2026-10-20T11:01:00Z"),
+        ]
+        jobs = [
+            job("a", "2026-10-20T10:05:00Z", "2026-10-20T10:10:00Z"),
+            job("b", "2026-10-20T11:05:00Z", "2026-10-20T11:10:00Z", run_id="8"),
+        ]
+        payload = build_report(runs, jobs, "7", CAPTURED)
+        self.assertEqual([entry["run_id"] for entry in payload["runs"]], ["7", "8"])
+        self.assertEqual(payload["runs"][0]["runner_minutes"], 5.0)
+        self.assertEqual(payload["runs"][1]["runner_minutes"], 5.0)
+
+
 class Command(unittest.TestCase):
     def test_the_report_command_writes_the_report(self):
         with tempfile.TemporaryDirectory() as directory:

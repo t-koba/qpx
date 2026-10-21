@@ -917,6 +917,7 @@ jobs:
       - name: collect the run and job records
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          QPX_REPORTER_JOB: CI runner minutes
         run: python3 ./scripts/ci-runner-minutes.py collect --out-dir target/ci-runner-minutes
       - name: report the runner minutes
         run: |

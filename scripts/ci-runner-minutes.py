@@ -128,8 +128,33 @@ def list_jobs(repo, token, run_id, workflow):
     return jobs
 
 
-def collect(repo, token, run_id, out_dir):
-    """Writes the run and job records of the target run and of its UTC day."""
+def select_runs(target, listed, workflow, max_runs):
+    """Chooses the runs to collect: the target first, then its workflow's day.
+
+    The target run is always kept, so a report can never lose the run it
+    describes, and the oldest runs of the day are the ones dropped when the
+    day holds more runs than the collector keeps.
+    """
+    same_workflow = [record for record in listed if record.get("name") == workflow]
+    same_workflow = [
+        record for record in same_workflow if str(record.get("id")) != str(target.get("id"))
+    ]
+    selected = [target] + same_workflow
+    omitted = 0
+    if len(selected) > max_runs:
+        omitted = len(selected) - max_runs
+        selected = selected[:max_runs]
+    return selected, omitted
+
+
+def collect(repo, token, run_id, out_dir, reporter=None):
+    """Writes the run and job records of the target run and of its UTC day.
+
+    The day view covers the runs of the target run's own workflow, so the
+    collection stays small enough to be cheap and complete. The target run is
+    always collected, even when the day holds more runs than the collector
+    keeps, because a report without its own run cannot say what it measured.
+    """
     target = api_get(f"/repos/{repo}/actions/runs/{run_id}", token)
     target_record = run_record(target)
     started = parse_timestamp(target_record["run_started_at"]) or parse_timestamp(
@@ -138,19 +163,18 @@ def collect(repo, token, run_id, out_dir):
     if started is None:
         raise SystemExit("the target run has no usable start timestamp")
     day_start = started.replace(hour=0, minute=0, second=0, microsecond=0)
-    selected, truncated = list_runs(repo, token, day_start)
-    known = {str(record.get("id")) for record in selected}
-    if str(run_id) not in known:
-        selected.append(target)
-    omitted = 0
-    if len(selected) > MAX_RUNS:
-        omitted = len(selected) - MAX_RUNS
-        selected = selected[:MAX_RUNS]
+    workflow = target_record["workflow"]
+    listed, truncated = list_runs(repo, token, day_start)
+    selected, omitted = select_runs(target, listed, workflow, MAX_RUNS)
     runs = [run_record(record) for record in selected]
     jobs = []
     for record in selected:
-        workflow = record.get("name")
-        jobs.extend(list_jobs(repo, token, record.get("id"), workflow))
+        jobs.extend(list_jobs(repo, token, record.get("id"), record.get("name")))
+    if reporter and not any(
+        job.get("name") == reporter and str(job.get("run_id")) == str(run_id) for job in jobs
+    ):
+        print(f"the reporting job {reporter!r} is not among the run's jobs", file=sys.stderr)
+        reporter = None
     out_path = Path(out_dir)
     write_jsonl(out_path / "runs.jsonl", runs)
     write_jsonl(out_path / "jobs.jsonl", jobs)
@@ -159,6 +183,8 @@ def collect(repo, token, run_id, out_dir):
         {
             "collected_at": format_timestamp(datetime.now(timezone.utc)),
             "day": day_start.date().isoformat(),
+            "workflow": workflow,
+            "reporter_job": reporter,
             "runs_selected": len(runs),
             "runs_omitted": omitted,
             "run_list_truncated": truncated,
@@ -192,6 +218,7 @@ def main(argv=None):
     collect_parser.add_argument("--run-id", default=os.environ.get("GITHUB_RUN_ID", ""))
     collect_parser.add_argument("--out-dir", required=True)
     collect_parser.add_argument("--token", default=os.environ.get("GITHUB_TOKEN", ""))
+    collect_parser.add_argument("--reporter", default=os.environ.get("QPX_REPORTER_JOB", ""))
 
     report_parser = commands.add_parser("report", help="write the runner-minute report")
     report_parser.add_argument("--runs", required=True)
@@ -205,7 +232,7 @@ def main(argv=None):
     if args.command == "collect":
         if not args.repo or not args.run_id or not args.token:
             raise SystemExit("collect needs a repository, a run identifier, and a token")
-        collect(args.repo, args.token, args.run_id, args.out_dir)
+        collect(args.repo, args.token, args.run_id, args.out_dir, args.reporter or None)
         return 0
     captured = parse_timestamp(args.captured_at) or datetime.now(timezone.utc)
     report(args.runs, args.jobs, args.run_id, args.out, captured, args.collection or None)
