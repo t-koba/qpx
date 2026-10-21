@@ -19,14 +19,18 @@ SLOW_TRANSFERS = 1
 
 
 def with_extremes(record):
-    """The observed range of the tail metrics.
+    """The observed range of the metrics the checker judges by range.
 
     The range is derived from the record's own value and the published
     spread, so a synthetic record carries a range that agrees with the
     spread the checker reads beside it.
     """
     extremes = {}
-    for field in ("p99_chunk_gap_ms", "scheduler_queue_delay_us_per_transfer"):
+    for field in (
+        "p99_chunk_gap_ms",
+        "requests_per_total_cpu_second",
+        "scheduler_queue_delay_us_per_transfer",
+    ):
         value = float(record[field])
         root = float(record["sample_spread"][f"{field}_ratio"]) ** 0.5
         extremes[field] = {"min": value / root, "max": value * root}
@@ -46,7 +50,7 @@ def build(proxy, mode, **overrides):
         "valid_samples": 3,
         "aggregation": "conservative_median_per_metric",
         "sampling_order": "round_robin_interleaved",
-        "benchmark_schema_version": 7,
+        "benchmark_schema_version": 8,
         "resource_measurement": "sampled_workload_peak_v1",
         "kernel_resource_metrics": True,
         "stream_bytes": STREAM_BYTES,
@@ -710,6 +714,15 @@ class StreamingGateTest(unittest.TestCase):
         self.assertIn("disagrees with its published spread", result.stderr)
 
     def test_unstable_cpu_rate_measurement_is_invalid(self):
+        """A CPU-rate spread whose worst end reaches the decisive bar makes
+        the run invalid.
+
+        The lane's CPU rate is 20.0 against the leader's 10.8, so a spread
+        of 3.5 puts the subject's worst end at 20.0 / sqrt(3.5) = 10.69
+        against the leader's 10.8: a ratio of 0.990, below the decisive
+        bar of 1.25 / 1.25 = 1.0. The movement could turn the
+        CPU-efficiency verdict into a failure, so the run is unjudgeable.
+        """
         result = self.run_gate(
             lane(
                 FAST_LANE,
@@ -718,6 +731,58 @@ class StreamingGateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("requests_per_total_cpu_second_ratio sample spread", result.stderr)
+        self.assertIn("the CPU rate's worst end", result.stderr)
+
+    def test_an_unstable_cpu_rate_that_cannot_change_the_verdict_stays_valid(self):
+        """A CPU-rate spread whose worst end stays above the decisive bar
+        leaves the run judgeable.
+
+        A spread of 3.2 puts the subject's worst end at 20.0 / sqrt(3.2) =
+        11.18 against the leader's 10.8: a ratio of 1.035, above the
+        decisive bar of 1.25 / 1.25 = 1.0, so no observed end of the CPU
+        rate could have produced a failure and the movement cannot excuse
+        a miss.
+        """
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={"sample_spread": {"requests_per_total_cpu_second_ratio": 3.2}},
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertNotIn("unjudgeable", result.stderr)
+
+    def test_an_unstable_slow_cpu_rate_is_invalid(self):
+        """The slow lane has no CPU-rate objective, so the cap stays there."""
+        result = self.run_gate(
+            slow=lane(
+                SLOW_LANE,
+                qpxd={"sample_spread": {"requests_per_total_cpu_second_ratio": 3.5}},
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(
+            "streaming ('slow', 'qpxd') requests_per_total_cpu_second_ratio sample spread",
+            result.stderr,
+        )
+
+    def test_a_record_without_the_cpu_rate_range_is_rejected(self):
+        """The record that the checker judges by range must carry the range."""
+        fast = lane(FAST_LANE)
+        del fast["qpxd"]["sample_extremes"]["requests_per_total_cpu_second"]
+        result = self.run_gate(fast)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("requests_per_total_cpu_second", result.stderr)
+
+    def test_a_cpu_rate_range_that_disagrees_with_the_spread_is_rejected(self):
+        fast = lane(FAST_LANE)
+        fast["qpxd"]["sample_extremes"]["requests_per_total_cpu_second"] = {
+            "min": 1.0,
+            "max": 100.0,
+        }
+        result = self.run_gate(fast)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("disagrees with its published spread", result.stderr)
 
     def test_stable_cpu_rate_measurement_stays_valid(self):
         result = self.run_gate(
@@ -737,7 +802,7 @@ class StreamingGateTest(unittest.TestCase):
 
     def test_old_record_schema_is_rejected(self):
         fast = lane(FAST_LANE)
-        fast["qpxd"]["benchmark_schema_version"] = 6
+        fast["qpxd"]["benchmark_schema_version"] = 7
         result = self.run_gate(fast)
         self.assertEqual(result.returncode, 1)
         self.assertIn("unsupported benchmark schema", result.stderr)

@@ -698,7 +698,7 @@ require scripts/perf-audit-streaming-compare.sh 'read_mode'
 require scripts/perf-audit-streaming-compare.sh 'requests_per_cpu_second'
 require scripts/perf-audit-streaming-compare.sh 'requests_per_total_cpu_second'
 require scripts/perf-audit-streaming-compare.sh 'backend_cpu_ms'
-require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 7'
+require scripts/perf-audit-streaming-compare.sh '"benchmark_schema_version": 8'
 require scripts/perf-audit-streaming-compare.sh 'gap_observation_bytes'
 require scripts/perf-audit-streaming-compare.sh 'total_rss_peak_kb'
 require scripts/perf-audit-streaming-compare.sh 'total_rss_growth_kb'
@@ -710,6 +710,9 @@ require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_tr
 require scripts/perf-audit-streaming-compare.sh 'source "$ROOT_DIR/scripts/lib/streaming_pair.sh"'
 require scripts/perf-audit-streaming-compare.sh 'streaming_begin_round "$round"'
 require scripts/perf-audit-streaming-compare.sh 'streaming_write_round_record'
+# The lane publishes the observed range of every metric the checker judges
+# by range, the CPU rate among them.
+require scripts/perf-audit-streaming-compare.sh '"requests_per_total_cpu_second": extremes('
 require scripts/perf-audit-streaming-compare.sh 'QPX_PREVIOUS_BIN'
 # The lane states no round of its own: the plan's round is the round the
 # lane's records carry, so the lane must not write a record itself.
@@ -719,6 +722,8 @@ require scripts/lib/streaming_pair.sh '"$STREAMING_PAIR_ROUND"'
 require scripts/lib/streaming_pair.py '"qpxd-previous"'
 require scripts/lib/streaming_records.py '"sample_round"'
 require scripts/check-streaming-performance.sh 'scheduler_queue_delay_us_per_transfer_ratio'
+require scripts/check-streaming-performance.sh 'requests_per_total_cpu_second_ratio'
+require scripts/check-streaming-performance.sh "CPU rate's worst end"
 require scripts/check-streaming-performance.sh 'max_qpx_metric_sample_spread_ratio'
 require scripts/check-streaming-performance.sh 'growth != peak - baseline'
 require scripts/check-streaming-performance.sh 'inconsistent total_rss_growth_kb'

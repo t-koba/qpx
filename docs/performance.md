@@ -473,23 +473,29 @@ timer quantization cannot dominate CPU accounting. CPU efficiency includes both
 the proxy and the shared backend. Stability is mandatory for qpx, the direct
 backend, the winning external proxy, and every external proxy within 25% of the
 leader. A distant unstable implementation remains visible in the artifact but
-cannot invalidate an otherwise stable competitive comparison. qpx's own CPU-rate
-sample spread must stay within the tracked stability cap: a wider spread makes
-that metric unjudgeable rather than merely noisy, and the run fails as invalid.
-Its objective is a ratio against the leader like the tail objectives', but the
-lane publishes no observed range for the CPU rate, so the cap stays the
-stricter policy for that metric.
+cannot invalidate an otherwise stable competitive comparison.
 
-The p99 gap and scheduler queue-delay spreads are judged against the observed
-range the lane publishes for them beside their spread: the `sample_extremes`
-field of the record, which the record schema version 7 introduced. Their
-objectives are ratios against a reference, so the movement only makes the
-measurement unjudgeable when it can change the verdict. The worst end of the
-objective - qpx's largest observed value against the reference's smallest - is
-compared with the objective's decisive bar, the objective times the band of
-that metric. While the worst end stays inside the decisive bar, no observed
-end of the metric could have produced a failure, so the movement cannot
-excuse a miss and the run stays judgeable.
+The p99 gap, scheduler queue-delay and CPU-rate spreads are judged against the
+observed range the lane publishes for them beside their spread: the
+`sample_extremes` field of the record, which the record schema version 7
+introduced and which version 8 extended with the CPU rate. Their objectives
+are ratios against a reference, so the movement only makes the measurement
+unjudgeable when it can change the verdict. The worst end of the objective -
+qpx's largest observed value against the reference's smallest, or qpx's
+smallest against the reference's largest for a ratio that is better when it is
+larger - is compared with the objective's decisive bar: the objective times
+the band of that metric for a ratio that is better when it is smaller, and
+the objective divided by the band for a ratio that is better when it is
+larger. While the worst end stays inside the decisive bar, no observed end of
+the metric could have produced a failure, so the movement cannot excuse a
+miss and the run stays judgeable.
+
+The CPU rate enters two verdicts in the fast lane: the total-CPU-efficiency
+ratio and the dominance score, which carries that ratio beside the other
+three. Its worst end is compared with the decisive bar of both, so the run
+stays judgeable only while neither verdict could have failed. The slow lane
+has no CPU-rate objective, so the movement of the CPU rate cannot excuse a
+verdict there, and the tracked stability cap stays the policy for that lane.
 
 `scripts/check-streaming-performance.sh` enforces the tracked objectives in
 `perf/streaming-performance-objectives.json`. For a fast reader, qpx must:

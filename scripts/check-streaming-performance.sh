@@ -158,7 +158,7 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             fail(f"streaming performance record for {key} uses an unsupported aggregation")
         if record.get("sampling_order") != "round_robin_interleaved":
             fail(f"streaming performance record for {key} uses an unsupported sampling order")
-        if nonnegative_int(record, "benchmark_schema_version") != 7:
+        if nonnegative_int(record, "benchmark_schema_version") != 8:
             fail(f"streaming performance record for {key} uses an unsupported benchmark schema")
         if record.get("resource_measurement") != "sampled_workload_peak_v1":
             fail(f"streaming performance record for {key} uses an unsupported resource measurement")
@@ -215,7 +215,11 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "total_fd_growth",
         ):
             nonnegative_number(record, field)
-        for field in ("p99_chunk_gap_ms", "scheduler_queue_delay_us_per_transfer"):
+        for field in (
+            "p99_chunk_gap_ms",
+            "requests_per_total_cpu_second",
+            "scheduler_queue_delay_us_per_transfer",
+        ):
             validated_extremes(record, field)
         for baseline_field, peak_field, growth_field in (
             ("rss_baseline_kb", "rss_peak_kb", "rss_growth_kb"),
@@ -532,11 +536,11 @@ metric_spread_cap = ratio_limit(
 # when the movement could turn the objective's verdict into a failure, and a
 # movement that only reaches a marginal verdict leaves the run judgeable.
 #
-# The CPU rate keeps the spread cap. Its objective is a ratio against the
-# leader like the tail metrics', but the lane publishes no observed range
-# for the CPU rate, so the cap stays the stricter policy for that metric: a
-# wide CPU-rate spread makes the CPU-efficiency objective unjudgeable rather
-# than merely noisy.
+# The CPU rate is judged the same way. The lane publishes its observed
+# range too, and its objective is a ratio against the leader like the tail
+# metrics', so the movement of the CPU rate is judged by the verdicts it
+# enters rather than by the spread cap: the CPU-efficiency ratio and the
+# dominance score, which carries that ratio beside the other three.
 #
 # The rule is deliberately one-sided. It only ever keeps a run that the
 # spread cap would have failed, and only when the movement cannot change
@@ -606,15 +610,66 @@ for lane, _name, metric, subject, reference, cap, band, lower_is_better in tail_
         f"> stability cap {metric_spread_cap:.6f}: the measurement "
         f"is unjudgeable"
     )
-for key in (("fast", "qpxd"), ("slow", "qpxd")):
-    record = records[key]
-    metric_spread = nested_number(record, "sample_spread", "requests_per_total_cpu_second_ratio")
-    if metric_spread > metric_spread_cap + 1e-12:
+# The CPU rate's objective is a minimum-direction one - the CPU-efficiency
+# ratio, which the dominance score also carries - so its worst end is the
+# subject's smallest observed CPU rate against the reference's largest, and
+# its decisive bar is the objective divided by the band of that objective.
+# While the worst end stays above the decisive bar, no observed end of the
+# metric could have produced a failure, so the movement cannot excuse a
+# miss and the run stays judgeable.
+cpu_rate_metric = "requests_per_total_cpu_second"
+cpu_rate_spread = nested_number(
+    qpx_fast, "sample_spread", "requests_per_total_cpu_second_ratio"
+)
+if cpu_rate_spread > metric_spread_cap + 1e-12:
+    subject_min = validated_extremes(qpx_fast, cpu_rate_metric)[0]
+    reference_max = validated_extremes(leader, cpu_rate_metric)[1]
+    if reference_max > 0:
+        worst_cpu_ratio = subject_min / reference_max
+    else:
+        worst_cpu_ratio = 0.0 if subject_min == 0 else math.inf
+    cpu_efficiency_bar = (
+        ratio_limit(fast_objectives, "min_total_cpu_efficiency_ratio")
+        / fast_objective_noise.get("total CPU efficiency ratio", fast_effective)
+    )
+    dominance_bar = (
+        ratio_limit(fast_objectives, "min_dominance_score")
+        / fast_objective_noise.get("dominance score", fast_effective)
+    )
+    # The dominance score carries the CPU rate beside the other three
+    # ratios, so the CPU rate's movement alone must not be able to turn
+    # that verdict into a failure either. The other three ratios stay at
+    # their published values: their own movement is judged by their own
+    # rules.
+    worst_dominance = (
+        throughput_ratio * worst_cpu_ratio / first_byte_ratio / p99_gap_ratio
+    ) ** 0.25
+    unjudgeable = None
+    if worst_cpu_ratio + 1e-12 < cpu_efficiency_bar:
+        unjudgeable = (worst_cpu_ratio, cpu_efficiency_bar, "total CPU efficiency ratio")
+    elif worst_dominance + 1e-12 < dominance_bar:
+        unjudgeable = (worst_dominance, dominance_bar, "dominance score")
+    if unjudgeable is not None:
+        worst_end, decisive_bar, name = unjudgeable
         failures.append(
-            f"streaming {key} requests_per_total_cpu_second_ratio sample spread "
-            f"{metric_spread:.6f} > stability cap {metric_spread_cap:.6f}: "
-            f"the measurement is unjudgeable"
+            f"streaming ('fast', 'qpxd') requests_per_total_cpu_second_ratio "
+            f"sample spread {cpu_rate_spread:.6f} > stability cap "
+            f"{metric_spread_cap:.6f}: the measurement is unjudgeable: the "
+            f"CPU rate's worst end {worst_end:.6f} misses the {name} "
+            f"decisive bar {decisive_bar:.6f}"
         )
+# The slow lane has no CPU-rate objective, so the movement of the CPU rate
+# cannot excuse a verdict there, and the spread cap stays the policy for
+# that lane.
+slow_cpu_rate_spread = nested_number(
+    qpx_slow, "sample_spread", "requests_per_total_cpu_second_ratio"
+)
+if slow_cpu_rate_spread > metric_spread_cap + 1e-12:
+    failures.append(
+        f"streaming ('slow', 'qpxd') requests_per_total_cpu_second_ratio "
+        f"sample spread {slow_cpu_rate_spread:.6f} > stability cap "
+        f"{metric_spread_cap:.6f}: the measurement is unjudgeable"
+    )
 
 for field, current in slow_ratios.items():
     objective = ratio_limit(slow_objectives, field)

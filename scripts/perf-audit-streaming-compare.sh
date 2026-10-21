@@ -959,9 +959,12 @@ for key in sorted(expected | reference_keys):
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 7,
+        "benchmark_schema_version": 8,
         "sample_extremes": {
             "p99_chunk_gap_ms": extremes(records, "p99_chunk_gap_ms"),
+            "requests_per_total_cpu_second": extremes(
+                records, "requests_per_total_cpu_second"
+            ),
             "scheduler_queue_delay_us_per_transfer": extremes(
                 records, "scheduler_queue_delay_us_per_transfer"
             ),
