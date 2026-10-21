@@ -87,7 +87,7 @@ static TEMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Creates a unique owner-only temporary file in the process temp directory.
 pub fn create_secure_temp_file(prefix: &str, suffix: &str) -> Result<(File, PathBuf)> {
-    let dir = std::env::temp_dir();
+    let dir = secure_temp_dir()?;
     for _ in 0..128 {
         let counter = TEMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
         let nanos = SystemTime::now()
@@ -105,6 +105,59 @@ pub fn create_secure_temp_file(prefix: &str, suffix: &str) -> Result<(File, Path
         }
     }
     Err(SecureFileError::UniqueTempExhausted)
+}
+
+/// The directory that holds the secure temporary files.
+///
+/// On Unix a file is created with the owner-only mode, so the file never
+/// exists with a wider mode and the directory needs no protection of its
+/// own. On Windows a file inherits the access control list of the directory
+/// it is created in, so the directory itself is restricted to its owner
+/// before any file is created inside it.
+#[cfg(unix)]
+fn secure_temp_dir() -> Result<PathBuf> {
+    Ok(std::env::temp_dir())
+}
+
+#[cfg(not(any(unix, windows)))]
+fn secure_temp_dir() -> Result<PathBuf> {
+    Ok(std::env::temp_dir())
+}
+
+#[cfg(windows)]
+fn secure_temp_dir() -> Result<PathBuf> {
+    owner_only_temp_dir()
+}
+
+/// The per-process directory that holds the secure temporary files.
+///
+/// The directory is created once and restricted to its owner, so a file
+/// created inside it inherits an owner-only access control list from its
+/// first instant. The file is therefore never readable by another local
+/// user, not even in the window between its creation and the application of
+/// its own access control list.
+#[cfg(windows)]
+fn owner_only_temp_dir() -> Result<PathBuf> {
+    use std::sync::OnceLock;
+
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    if let Some(dir) = DIR.get() {
+        return Ok(dir.clone());
+    }
+    let path = std::env::temp_dir().join(format!("qpx-secure-{}", std::process::id()));
+    match std::fs::create_dir(&path) {
+        Ok(()) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(source) => {
+            return Err(SecureFileError::Open {
+                path: path.clone(),
+                source,
+            });
+        }
+    }
+    apply_owner_only_directory_acl(&path)?;
+    let _ = DIR.set(path.clone());
+    Ok(path)
 }
 
 /// Opens `path` for secure output and truncates it after handle validation.
@@ -278,6 +331,68 @@ pub(crate) fn apply_owner_only_acl(file: &File, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Restricts a directory to its owner.
+///
+/// The descriptor grants full access to the local system, the administrators
+/// and the directory's owner, and nothing to anyone else. A file created
+/// inside the directory inherits that access control list, so the file is
+/// private from its first instant.
+#[cfg(windows)]
+pub(crate) fn apply_owner_only_directory_acl(path: &Path) -> Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Authorization::{
+        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
+    };
+    use windows_sys::Win32::Security::{
+        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
+    };
+
+    let sddl_text = concat!("D:P(A;;FA;;;SY)(A;;FA;;;", "\x42", "\x41", ")(A;;FA;;;OW)");
+    let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+    // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            std::ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(SecureFileError::Chmod {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!(
+                "failed to build the owner-only directory security descriptor: {}",
+                std::io::Error::last_os_error()
+            )),
+        });
+    }
+
+    let path_wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: both pointers are valid NUL-terminated/Windows-owned buffers for the call.
+    let ok = unsafe { SetFileSecurityW(path_wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
+    // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
+    unsafe {
+        let _ = LocalFree(descriptor.cast());
+    }
+    if ok == 0 {
+        return Err(SecureFileError::Chmod {
+            path: path.to_path_buf(),
+            source: std::io::Error::other(format!(
+                "failed to set the owner-only ACL on the directory: {}",
+                std::io::Error::last_os_error()
+            )),
+        });
+    }
+    Ok(())
+}
+
 /// Checks that an open handle refers to a private regular file.
 ///
 /// The file must not be a reparse point, a directory, or a file with more than
@@ -292,7 +407,10 @@ pub(crate) fn validate_windows_secure_file_handle(file: &File, path: &Path) -> R
         GetFileInformationByHandle,
     };
 
-    let metadata = file.metadata()?;
+    let metadata = file.metadata().map_err(|source| SecureFileError::Stat {
+        path: path.to_path_buf(),
+        source,
+    })?;
     if !metadata.is_file() {
         return Err(SecureFileError::NonRegular {
             path: path.to_path_buf(),
@@ -382,8 +500,50 @@ mod windows_tests {
             create_secure_temp_file("qpx-secure-temp-test", ".body").expect("secure temp file");
         assert!(path.exists(), "the secure temp file must exist");
         assert!(file.metadata().expect("metadata").is_file());
+        assert!(
+            dacl_is_protected(&file),
+            "the file's access control list must be set on the file, not inherited"
+        );
         drop(file);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// Whether the file's access control list is protected, that is, set on
+    /// the file itself instead of inherited from its directory.
+    fn dacl_is_protected(file: &File) -> bool {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::Security::Authorization::{GetSecurityInfo, SE_FILE_OBJECT};
+        use windows_sys::Win32::Security::{
+            ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorControl, PSECURITY_DESCRIPTOR,
+            SE_DACL_PROTECTED,
+        };
+
+        let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+        let mut dacl: *mut ACL = std::ptr::null_mut();
+        // SAFETY: the handle is open and every out pointer is valid.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle().cast(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut dacl,
+                &mut descriptor,
+                std::ptr::null_mut(),
+            )
+        };
+        if status != 0 {
+            return false;
+        }
+        let mut control = 0u32;
+        let mut revision = 0u32;
+        // SAFETY: descriptor is a valid security descriptor.
+        let ok = unsafe { GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) };
+        if ok == 0 {
+            return false;
+        }
+        control & SE_DACL_PROTECTED != 0
     }
 }
 
@@ -391,6 +551,21 @@ mod windows_tests {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    #[test]
+    fn create_secure_temp_file_creates_an_owner_only_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let (file, path) =
+            create_secure_temp_file("qpx-secure-temp-test", ".body").expect("secure temp file");
+        let mode = file.metadata().expect("metadata").permissions().mode() & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "the secure temp file must be private to its owner"
+        );
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn open_secure_output_file_rejects_hard_link_before_truncate() {

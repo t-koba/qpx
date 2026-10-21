@@ -263,7 +263,7 @@ fn set_private_directory_permissions(path: &Path) -> Result<()> {
     }
     #[cfg(windows)]
     {
-        set_owner_only_directory_acl(path)?;
+        crate::secure_file::apply_owner_only_directory_acl(path)?;
     }
     #[cfg(not(any(unix, windows)))]
     {
@@ -385,59 +385,6 @@ fn open_windows_ca_material(path: &Path, create_new: bool) -> std::io::Result<fs
         options.create_new(true);
     }
     options.open(path)
-}
-
-#[cfg(windows)]
-fn set_owner_only_directory_acl(path: &Path) -> Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Foundation::LocalFree;
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
-    };
-    use windows_sys::Win32::Security::{
-        DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SetFileSecurityW,
-    };
-
-    let sddl_text = concat!("D:P(A;;FA;;;SY)(A;;FA;;;", "\x42", "\x41", ")(A;;FA;;;OW)");
-    let sddl: Vec<u16> = sddl_text.encode_utf16().chain(std::iter::once(0)).collect();
-    let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
-    // SAFETY: `sddl` is NUL-terminated and `descriptor` is an out pointer freed with LocalFree.
-    if unsafe {
-        ConvertStringSecurityDescriptorToSecurityDescriptorW(
-            sddl.as_ptr(),
-            SDDL_REVISION_1,
-            &mut descriptor,
-            std::ptr::null_mut(),
-        )
-    } == 0
-    {
-        return Err(anyhow!(
-            "failed to build owner-only directory security descriptor: {}",
-            std::io::Error::last_os_error()
-        )
-        .into());
-    }
-
-    let path_wide: Vec<u16> = path
-        .as_os_str()
-        .encode_wide()
-        .chain(std::iter::once(0))
-        .collect();
-    // SAFETY: both pointers are valid NUL-terminated/Windows-owned buffers for the call.
-    let ok = unsafe { SetFileSecurityW(path_wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor) };
-    // SAFETY: descriptor came from ConvertStringSecurityDescriptorToSecurityDescriptorW.
-    unsafe {
-        let _ = LocalFree(descriptor.cast());
-    }
-    if ok == 0 {
-        return Err(anyhow!(
-            "failed to set owner-only ACL on MITM CA state directory {}: {}",
-            path.display(),
-            std::io::Error::last_os_error()
-        )
-        .into());
-    }
-    Ok(())
 }
 
 impl CaStore {
