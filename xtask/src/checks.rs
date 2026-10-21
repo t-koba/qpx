@@ -1235,12 +1235,13 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length(";
 /// The declared Content-Length has one owner, and the owner names the sites
 /// that still read the declaration themselves.
 ///
-/// A site that reads the declaration either calls the owner or is named in
-/// the owner's own list, so a new reader cannot appear without the owner
-/// saying what it does differently. The gate reads the names the workspace
-/// has used for such a function, so a reader under a name it has not seen
-/// before, and a reader that answers a different question - the request
-/// guard compares the raw field values - are beyond it.
+/// A site that reads the declaration through a helper either calls the owner
+/// or is named in the owner's own list, so a new reader cannot appear
+/// without the owner saying what it does differently. The gate reads the
+/// names the workspace has used for such a helper, so a reader under a name
+/// it has not seen before, a reader that reads the declaration inline, and a
+/// reader that answers a different question - the request guard compares the
+/// raw field values - are beyond it.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1284,7 +1285,7 @@ fn content_length_single_owner_violations(owner: &str, files: &[(String, String)
     let mut violations = Vec::new();
     if listed.is_empty() {
         violations.push(format!(
-            "{CONTENT_LENGTH_OWNER}: the owner does not name the sites that read the declaration themselves"
+            "{CONTENT_LENGTH_OWNER}: the owner does not name the sites that read the declaration through a helper"
         ));
     }
     let mut readers = Vec::new();
@@ -1303,7 +1304,7 @@ fn content_length_single_owner_violations(owner: &str, files: &[(String, String)
             continue;
         }
         violations.push(format!(
-            "{path} reads the declared Content-Length itself and the owner does not name it"
+            "{path} reads the declared Content-Length through its own helper and the owner does not name it"
         ));
     }
     for site in &listed {
@@ -5146,7 +5147,7 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
         assert_eq!(
             content_length_single_owner_violations(owner, &[named.clone(), unlisted]),
             [
-                "qpxd/src/http/body/size/io.rs reads the declared Content-Length itself and the owner does not name it"
+                "qpxd/src/http/body/size/io.rs reads the declared Content-Length through its own helper and the owner does not name it"
             ]
         );
 

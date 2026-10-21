@@ -738,7 +738,7 @@ pub enum ContentLengthError {
 /// validation read the field the same way instead of each keeping its own
 /// interpretation.
 ///
-/// The sites that still read the declaration themselves are named here, so
+/// The sites that read the declaration through a helper are named here, so
 /// the Content-Length gate can check that this list and the tree agree:
 ///
 /// - `qpxd/src/reverse/transport/mirrors.rs` parses every value as a plain
@@ -760,6 +760,18 @@ pub enum ContentLengthError {
 /// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
 ///   plain integer.
 /// - `qpx-h3/src/response.rs` parses every member as a plain integer.
+///
+/// The gate finds those helpers by the names the workspace has used for
+/// them, so a site that reads the declaration inline is outside both the
+/// list and the gate. Those sites are named here as well, so that the record
+/// of the sites that read the declaration is complete:
+/// `qpxd-cache/src/backend_http.rs` compares the cached response's declared
+/// length with the expected body length, `qpxd/src/http/modules/response_compression.rs`
+/// reads the declared length to decide whether the body is compressed,
+/// `qpxd/src/http/capture/stream.rs`, `qpxd/src/http/modules/subrequest.rs`
+/// and `qpxd/src/reverse/transport/raw_http1.rs` read it as a size hint, and
+/// `qpxd/src/policy_context/decision_service/mod.rs` parses it to enforce a
+/// hard cap.
 ///
 /// The request guard in `qpxd/src/http/policy/guard.rs` compares the raw
 /// field values rather than the length they declare, so it answers a
