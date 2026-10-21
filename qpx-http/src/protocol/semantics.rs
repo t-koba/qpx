@@ -735,8 +735,9 @@ pub enum ContentLengthError {
 ///
 /// The owner sits beside the member grammar it uses, so the HTTP/1 and
 /// HTTP/2 codecs, the HTTP/3 codec and listener, the cache, the upstream
-/// raw HTTP/1 path and the request validation read the field the same way
-/// instead of each keeping its own interpretation.
+/// raw HTTP/1 path, the reverse request template and the request validation
+/// read the field the same way instead of each keeping its own
+/// interpretation.
 ///
 /// The sites that read the declaration through a helper are named here, so
 /// the Content-Length gate can check that this list and the tree agree:
@@ -746,8 +747,6 @@ pub enum ContentLengthError {
 ///   comma list.
 /// - `qpxd/src/reverse/transport/raw_http1.rs` parses every member of every
 ///   raw header line as a plain integer.
-/// - `qpxd/src/reverse/transport/request_template.rs` parses every value as
-///   a plain integer and does not split a comma list.
 /// - `qpxd/src/http/body/size/io.rs` reads one value as a size hint rather
 ///   than a declaration.
 /// - `qpxd-cache/src/entry.rs` parses every member of the stored response's
@@ -764,6 +763,14 @@ pub enum ContentLengthError {
 /// owner's value-level entry point. A leading plus sign is refused there
 /// too, so an upstream response that frames its body with one is rejected
 /// instead of read.
+///
+/// The reverse request template reads the declaration through the owner as
+/// well: `qpxd/src/reverse/transport/request_template.rs` calls it for the
+/// length a retry may buffer and for the length that says whether the
+/// request may carry a body. A comma list of equal members is one length
+/// there now, so such a request is retried within the threshold, and a
+/// leading plus sign is refused, so a request that declares its length that
+/// way is not retried.
 ///
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside both the

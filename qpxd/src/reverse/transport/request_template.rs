@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
-use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
+use http::header::TRANSFER_ENCODING;
 use hyper::{Request, Uri};
 use qpx_http::body::Body;
 use qpx_http::body::spool::SpoolFile;
@@ -329,36 +329,22 @@ pub(super) fn request_may_have_body(req: &Request<Body>) -> bool {
     if req.headers().contains_key(TRANSFER_ENCODING) {
         return true;
     }
-    for value in req.headers().get_all(CONTENT_LENGTH) {
-        let Ok(raw) = value.to_str() else {
-            return true;
-        };
-        let Ok(parsed) = raw.trim().parse::<u64>() else {
-            return true;
-        };
-        if parsed > 0 {
-            return true;
-        }
+    match qpx_http::protocol::semantics::declared_content_length(req.headers()) {
+        Ok(Some(length)) => length > 0,
+        Ok(None) => false,
+        // A declaration the grammar does not have names no length, so the
+        // request is treated as one that may carry a body.
+        Err(_) => true,
     }
-    false
 }
 
 fn content_length(req: &Request<Body>) -> Option<u64> {
     if req.headers().contains_key(TRANSFER_ENCODING) {
         return None;
     }
-    let values = req.headers().get_all(CONTENT_LENGTH);
-    let mut parsed = None;
-    for value in values {
-        let raw = value.to_str().ok()?;
-        let len = raw.trim().parse::<u64>().ok()?;
-        match parsed {
-            Some(existing) if existing != len => return None,
-            Some(_) => {}
-            None => parsed = Some(len),
-        }
-    }
-    parsed
+    qpx_http::protocol::semantics::declared_content_length(req.headers())
+        .ok()
+        .flatten()
 }
 
 #[cfg(test)]
@@ -427,6 +413,7 @@ async fn create_template_spool() -> Result<SpoolFile<TokioFile>> {
 mod tests {
     use crate::reverse::transport::request_template::*;
     use bytes::Bytes;
+    use http::header::CONTENT_LENGTH;
     use tokio::time::Duration;
 
     #[tokio::test]
@@ -477,6 +464,41 @@ mod tests {
             .expect("request");
         assert!(request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(!request_is_retryable(&req, &http::Method::PUT, 15));
+    }
+
+    #[test]
+    fn a_comma_list_of_equal_members_declares_one_length() {
+        let req = Request::builder()
+            .method(http::Method::PUT)
+            .uri("http://example.test/upload")
+            .header(CONTENT_LENGTH, "16, 16")
+            .body(Body::from("0123456789abcdef"))
+            .expect("request");
+        assert!(request_is_retryable(&req, &http::Method::PUT, 16));
+        assert!(!request_is_retryable(&req, &http::Method::PUT, 15));
+    }
+
+    #[test]
+    fn a_signed_length_is_not_a_declared_length() {
+        let req = Request::builder()
+            .method(http::Method::PUT)
+            .uri("http://example.test/upload")
+            .header(CONTENT_LENGTH, "+16")
+            .body(Body::from("0123456789abcdef"))
+            .expect("request");
+        assert!(!request_is_retryable(&req, &http::Method::PUT, 16));
+        assert!(request_may_have_body(&req));
+    }
+
+    #[test]
+    fn a_list_of_zero_members_declares_no_body() {
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri("http://example.test/resource")
+            .header(CONTENT_LENGTH, "0, 0")
+            .body(Body::empty())
+            .expect("request");
+        assert!(!request_may_have_body(&req));
     }
 
     #[test]
