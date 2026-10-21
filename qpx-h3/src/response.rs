@@ -56,31 +56,17 @@ pub(crate) fn sanitize_streaming_response_head_for_h3(
     Ok(Some(true))
 }
 
+/// The Content-Length that a header set declares.
+///
+/// The declared Content-Length has one owner, in `qpx-http`, so the HTTP/3
+/// path reads the field with the same member grammar and the same conflict
+/// rule as the HTTP/1 and HTTP/2 paths: every member of every value declares
+/// the same length, and a member that is not a `1*DIGIT` sequence is
+/// refused. A leading plus sign is not field syntax, so it is refused here
+/// too.
 pub(crate) fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
-    let mut parsed: Option<u64> = None;
-    for value in headers.get_all(http::header::CONTENT_LENGTH).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|err| anyhow!("invalid Content-Length header: {err}"))?
-            .trim();
-        if raw.is_empty() {
-            return Err(anyhow!("empty Content-Length header").into());
-        }
-        for part in raw.split(',') {
-            let next = part
-                .trim()
-                .parse::<u64>()
-                .map_err(|err| anyhow!("invalid Content-Length value: {err}"))?;
-            match parsed {
-                Some(existing) if existing != next => {
-                    return Err(anyhow!("conflicting Content-Length values").into());
-                }
-                Some(_) => {}
-                None => parsed = Some(next),
-            }
-        }
-    }
-    Ok(parsed)
+    qpx_http::protocol::semantics::declared_content_length(headers)
+        .map_err(|err| anyhow!("invalid Content-Length: {err}").into())
 }
 
 fn sanitize_h3_regular_headers(headers: &mut http::HeaderMap) {
@@ -148,4 +134,55 @@ fn is_prohibited_trailer_field(name: &str) -> bool {
             | "content-location"
             | "content-range"
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_content_length;
+
+    fn headers_with(values: &[&str]) -> http::HeaderMap {
+        let mut headers = http::HeaderMap::new();
+        for value in values {
+            headers.append(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_str(value).expect("header value"),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn the_declared_length_is_read_by_the_owner() {
+        assert_eq!(
+            parse_content_length(&headers_with(&["5"])).expect("length"),
+            Some(5)
+        );
+        // A comma list of equal members declares one length.
+        assert_eq!(
+            parse_content_length(&headers_with(&["5, 5"])).expect("length"),
+            Some(5)
+        );
+        assert_eq!(
+            parse_content_length(&headers_with(&["5", "5"])).expect("length"),
+            Some(5)
+        );
+        assert_eq!(
+            parse_content_length(&headers_with(&[])).expect("length"),
+            None
+        );
+    }
+
+    #[test]
+    fn a_signed_declared_length_is_refused() {
+        let err = parse_content_length(&headers_with(&["+5"])).expect_err("signed length");
+        assert!(err.to_string().contains("invalid Content-Length"), "{err}");
+    }
+
+    #[test]
+    fn conflicting_declared_lengths_are_refused() {
+        let err = parse_content_length(&headers_with(&["5, 6"])).expect_err("conflict");
+        assert!(err.to_string().contains("invalid Content-Length"), "{err}");
+        let err = parse_content_length(&headers_with(&["5", "6"])).expect_err("conflict");
+        assert!(err.to_string().contains("invalid Content-Length"), "{err}");
+    }
 }

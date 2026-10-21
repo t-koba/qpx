@@ -754,7 +754,6 @@ pub enum ContentLengthError {
 /// - `qpxd-cache/src/util.rs` does the same in a test helper.
 /// - `qpxf/src/ipc_request.rs` parses every member of a header list as a
 ///   plain integer.
-/// - `qpx-h3/src/response.rs` parses every member as a plain integer.
 ///
 /// The upstream raw HTTP/1 path reads the declaration through the owner as
 /// well: `qpxd/src/upstream/raw_http1/mod.rs` calls it with the header map
@@ -771,6 +770,12 @@ pub enum ContentLengthError {
 /// there now, so such a request is retried within the threshold, and a
 /// leading plus sign is refused, so a request that declares its length that
 /// way is not retried.
+///
+/// The HTTP/3 path reads the declaration through the owner as well:
+/// `qpx-h3/src/response.rs` hands the header map to it, so the HTTP/3 server
+/// and client frame a body from the same length the HTTP/1 and HTTP/2 paths
+/// read. A leading plus sign is refused there too, so a request or a
+/// response that frames its body with one is rejected instead of read.
 ///
 /// The gate finds those helpers by the names the workspace has used for
 /// them, so a site that reads the declaration inline is outside both the
