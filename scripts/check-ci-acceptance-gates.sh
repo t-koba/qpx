@@ -16,6 +16,15 @@ require() {
   fi
 }
 
+reject() {
+  local file="$1"
+  local needle="$2"
+  if grep -Fq -- "$needle" "$file"; then
+    echo "ci acceptance gate must not contain in ${file}: ${needle}" >&2
+    exit 1
+  fi
+}
+
 reject_step_value() {
   local file="$1"
   local step_name="$2"
@@ -698,8 +707,14 @@ require scripts/perf-audit-streaming-compare.sh '"resource_measurement": "sample
 require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_transfer'
 require scripts/perf-audit-streaming-compare.sh 'scheduler_queue_delay_us_per_transfer_ratio'
 require scripts/perf-audit-streaming-compare.sh 'source "$ROOT_DIR/scripts/lib/streaming_pair.sh"'
-require scripts/perf-audit-streaming-compare.sh 'scripts/lib/streaming_records.py'
+require scripts/perf-audit-streaming-compare.sh 'streaming_begin_round "$round"'
+require scripts/perf-audit-streaming-compare.sh 'streaming_write_round_record'
 require scripts/perf-audit-streaming-compare.sh 'QPX_PREVIOUS_BIN'
+# The lane states no round of its own: the plan's round is the round the
+# lane's records carry, so the lane must not write a record itself.
+reject scripts/perf-audit-streaming-compare.sh 'scripts/lib/streaming_records.py'
+require scripts/lib/streaming_pair.sh 'streaming_write_round_record'
+require scripts/lib/streaming_pair.sh '"$STREAMING_PAIR_ROUND"'
 require scripts/lib/streaming_pair.py '"qpxd-previous"'
 require scripts/lib/streaming_records.py '"sample_round"'
 require scripts/check-streaming-performance.sh 'scheduler_queue_delay_us_per_transfer_ratio'

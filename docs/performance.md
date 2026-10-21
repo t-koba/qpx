@@ -563,9 +563,12 @@ number can be traced to the build it was measured against.
 missing-reference case and the report against synthetic per-round records.
 The lane's own pairing is exercised as well:
 `scripts/test-streaming-pair.py` drives the plan that owns the round, the
-shell that applies it and the record that carries the round the report pairs
-on, so a pair whose members no longer share a round fails there instead of
-leaving the lane with an empty report. The per-round samples themselves
+library that holds that plan while the lane measures, and the record the
+lane's writer produces, so a pair whose members no longer share a round, or
+a record that carries a round of its own, fails there instead of leaving
+the lane with a silently degraded report. The lane states no round of its
+own: it begins each round with the plan, and the plan's round is the round
+every record of that round carries. The per-round samples themselves
 reach the artifact logs, one file per proxy, read mode and round
 (`target/perf/streaming-compare-logs/*.valid-samples.jsonl`); the report
 carries the statistics of the paired rounds.

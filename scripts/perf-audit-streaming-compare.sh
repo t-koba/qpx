@@ -426,7 +426,6 @@ run_one() {
   local port="$2"
   local resource_pid="$3"
   local read_mode="$4"
-  local sample_round="$5"
   local delay_ms="0"
   local cpu_before_ms cpu_after_ms cpu_ms backend_cpu_before_ms backend_cpu_after_ms
   local backend_cpu_ms total_cpu_ms metrics commit
@@ -442,11 +441,8 @@ run_one() {
   if [ "$read_mode" = "slow" ]; then
     delay_ms="$SLOW_READ_DELAY_MS"
   fi
-  if ! [[ "$sample_round" =~ ^[1-9][0-9]*$ ]]; then
-    echo "invalid sample round: ${sample_round}" >&2
-    exit 1
-  fi
-  local artifact="streaming.${proxy}.${read_mode}.round-${sample_round}"
+  streaming_require_round
+  local artifact="streaming.${proxy}.${read_mode}.round-${STREAMING_PAIR_ROUND}"
   samples_file="$TMP_DIR/${artifact}.valid-samples.jsonl"
   : >"$samples_file"
   attempt=1
@@ -683,9 +679,8 @@ print(json.dumps(records[len(records) // 2], sort_keys=True, separators=(",", ":
 PY
 )"
   commit="${GITHUB_SHA:-unknown}"
-  python3 "$ROOT_DIR/scripts/lib/streaming_records.py" "$OUT_JSON" "$selected_sample" \
-    "$STREAM_BYTES" "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit" \
-    "$sample_round"
+  streaming_write_round_record "$OUT_JSON" "$selected_sample" "$STREAM_BYTES" \
+    "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit"
 }
 
 require_cmd curl
@@ -763,13 +758,12 @@ MIN_VALID_SAMPLES=1
 run_streaming_proxy_by_index() {
   local index="$1"
   local read_mode="$2"
-  local round="${CURRENT_SAMPLE_ROUND:-0}"
   case "$index" in
-    0) run_one "direct-backend" "$BACKEND_PORT" "$BACKEND_PID" "$read_mode" "$round" ;;
+    0) run_one "direct-backend" "$BACKEND_PORT" "$BACKEND_PID" "$read_mode" ;;
     1) run_qpxd_pair "$read_mode" ;;
-    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$read_mode" "$round" ;;
-    3) run_one "apache" "$APACHE_PORT" "$APACHE_PID" "$read_mode" "$round" ;;
-    4) run_one "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$read_mode" "$round" ;;
+    2) run_one "nginx" "$NGINX_PORT" "$NGINX_PID" "$read_mode" ;;
+    3) run_one "apache" "$APACHE_PORT" "$APACHE_PID" "$read_mode" ;;
+    4) run_one "lighttpd" "$LIGHTTPD_PORT" "$LIGHTTPD_PID" "$read_mode" ;;
     *) echo "invalid streaming benchmark index: ${index}" >&2; exit 1 ;;
   esac
 }
@@ -777,7 +771,7 @@ run_streaming_proxy_by_index() {
 for read_mode in fast slow; do
   round=1
   while [ "$round" -le "$REQUESTED_SAMPLE_ATTEMPTS" ]; do
-    CURRENT_SAMPLE_ROUND="$round"
+    streaming_begin_round "$round"
     start_index=$((((round - 1) * 4) % 5))
     offset=0
     while [ "$offset" -lt 5 ]; do
