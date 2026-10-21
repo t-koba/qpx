@@ -1251,8 +1251,12 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// helper calls the owner, and a reader that does not call the owner is a
 /// violation whether or not the owner names a site. The gate reads the
 /// names the workspace has used for such a helper, so a reader under a name
-/// it has not seen before and a reader that reads the declaration inline
-/// are beyond it.
+/// it has not seen before is beyond that rule; a reader that reads the
+/// declaration inline is not beyond the gate, because the gate looks inside
+/// a function's body as well and asks whether the body reads the field's
+/// value and turns text into a number. Such a body must reach the owner
+/// alone: a function that calls the owner and still reads the field on its
+/// own is a violation as well.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1280,7 +1284,10 @@ fn check_content_length_single_owner(root: &Path) -> Result<()> {
             }
         }
     }
-    let violations = content_length_single_owner_violations(&owner, &files);
+    let mut violations = content_length_single_owner_violations(&owner, &files);
+    for (path, content) in &files {
+        violations.extend(content_length_inline_reader_violations(path, content)?);
+    }
     if !violations.is_empty() {
         bail!(
             "the declared Content-Length must have one owner ({CONTENT_LENGTH_OWNER}):\n{}",
@@ -1348,6 +1355,247 @@ fn content_length_listed_sites(owner: &str) -> Vec<String> {
         }
     }
     sites
+}
+
+/// The methods that read a header's value.
+const CONTENT_LENGTH_READ_METHODS: [&str; 3] = ["get", "get_all", "contains_key"];
+
+/// The field's name, as a header spells it.
+const CONTENT_LENGTH_FIELD: &str = "content-length";
+
+/// The module the owner is reached through.
+const CONTENT_LENGTH_OWNER_MODULE: &str = "http_content_length";
+
+/// The entry points the owner has.
+const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 2] = [
+    "declared_content_length",
+    "declared_content_length_in_values",
+];
+
+/// The violations of a site that reads the declared Content-Length inline.
+///
+/// The rule above sees a reader that has a helper of its own, because it
+/// looks for the names the workspace has used for such a helper. A reader
+/// that reads the declaration in the body of a function has no helper to
+/// name, so the gate looks inside the functions as well: a function that
+/// reads the field's value and turns text into a number in the same body
+/// reads the declaration itself, and must reach the owner alone.
+///
+/// The rule is what it says and no more. It sees a read of the field
+/// through `get`, `get_all` and `contains_key`, and it sees a comparison
+/// of a header name with the field's name. It does not see a parse whose
+/// integer type is inferred rather than written, it does not see a reader
+/// that lives outside a function body, and it reads a function's body as
+/// one whole rather than tying a parse to the read it belongs to.
+fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
+    let syntax = syn::parse_file(content)
+        .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
+    let mut violations = Vec::new();
+    for (name, facts) in content_length_reader_facts(&syntax) {
+        if !facts.reads_field || !facts.parses_integer {
+            continue;
+        }
+        let detail = if facts.calls_owner {
+            "as well as calling the owner; it must read the declaration through the owner alone"
+        } else {
+            "inline; it must call the owner"
+        };
+        violations.push(format!(
+            "{path}: the function {name} reads the declared Content-Length {detail}"
+        ));
+    }
+    Ok(violations)
+}
+
+/// The functions of a file and what each of them says about the declared
+/// Content-Length.
+fn content_length_reader_facts(syntax: &syn::File) -> Vec<(String, ContentLengthReaderFacts)> {
+    let mut collector = ContentLengthFunctionCollector::default();
+    collector.visit_file(syntax);
+    collector.facts
+}
+
+/// What a function says about the declared Content-Length.
+#[derive(Default)]
+struct ContentLengthReaderFacts {
+    /// The function reads the field's value.
+    reads_field: bool,
+    /// The function turns text into a number.
+    parses_integer: bool,
+    /// The function calls the owner.
+    calls_owner: bool,
+}
+
+/// The collector of the functions of a file.
+///
+/// Every function of the file is recorded on its own, so a reader in a
+/// function is named by that function rather than by the one it sits in.
+#[derive(Default)]
+struct ContentLengthFunctionCollector {
+    facts: Vec<(String, ContentLengthReaderFacts)>,
+}
+
+impl Visit<'_> for ContentLengthFunctionCollector {
+    fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+        self.record(node.sig.ident.to_string(), &node.block);
+        syn::visit::visit_item_fn(self, node);
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &syn::ImplItemFn) {
+        self.record(node.sig.ident.to_string(), &node.block);
+        syn::visit::visit_impl_item_fn(self, node);
+    }
+
+    fn visit_trait_item_fn(&mut self, node: &syn::TraitItemFn) {
+        if let Some(block) = &node.default {
+            self.record(node.sig.ident.to_string(), block);
+        }
+        syn::visit::visit_trait_item_fn(self, node);
+    }
+}
+
+impl ContentLengthFunctionCollector {
+    /// The facts of one function, taken from its body.
+    fn record(&mut self, name: String, block: &syn::Block) {
+        let mut facts = ContentLengthReaderFacts::default();
+        facts.visit_block(block);
+        self.facts.push((name, facts));
+    }
+}
+
+impl Visit<'_> for ContentLengthReaderFacts {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        let names_field = node.args.iter().any(names_content_length_field);
+        if (CONTENT_LENGTH_READ_METHODS.contains(&method.as_str()) || method.starts_with("eq"))
+            && names_field
+        {
+            self.reads_field = true;
+        }
+        if method == "parse"
+            && let Some(turbofish) = &node.turbofish
+            && names_integer_type(&turbofish.args)
+        {
+            self.parses_integer = true;
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+        if let syn::Expr::Path(path) = &*node.func {
+            let segments = &path.path.segments;
+            if let Some(last) = segments.last() {
+                let names_integer = match &last.arguments {
+                    PathArguments::AngleBracketed(arguments) => {
+                        last.ident == "parse" && names_integer_type(&arguments.args)
+                    }
+                    _ => false,
+                };
+                let from_integer = last.ident == "from_str"
+                    && segments
+                        .iter()
+                        .rev()
+                        .nth(1)
+                        .is_some_and(|segment| is_integer_type(&segment.ident.to_string()));
+                if names_integer || from_integer {
+                    self.parses_integer = true;
+                }
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_binary(&mut self, node: &syn::ExprBinary) {
+        if matches!(node.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
+            && (names_content_length_field(&node.left) || names_content_length_field(&node.right))
+        {
+            self.reads_field = true;
+        }
+        syn::visit::visit_expr_binary(self, node);
+    }
+
+    fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+        if is_content_length_owner_call(&node.path) {
+            self.calls_owner = true;
+        }
+        syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_item_fn(&mut self, _node: &syn::ItemFn) {
+        // A function inside a function is recorded on its own, so the
+        // enclosing function is not charged with its body.
+    }
+
+    fn visit_impl_item_fn(&mut self, _node: &syn::ImplItemFn) {}
+
+    fn visit_trait_item_fn(&mut self, _node: &syn::TraitItemFn) {}
+}
+
+/// Whether an expression names the Content-Length field.
+fn names_content_length_field(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "CONTENT_LENGTH"),
+        syn::Expr::Lit(lit) => match &lit.lit {
+            syn::Lit::Str(value) => value.value().eq_ignore_ascii_case(CONTENT_LENGTH_FIELD),
+            syn::Lit::ByteStr(value) => value
+                .value()
+                .eq_ignore_ascii_case(CONTENT_LENGTH_FIELD.as_bytes()),
+            _ => false,
+        },
+        _ => false,
+    }
+}
+
+/// Whether a generic argument list names an integer type.
+fn names_integer_type(args: &syn::punctuated::Punctuated<GenericArgument, syn::Token![,]>) -> bool {
+    args.iter().any(|arg| match arg {
+        GenericArgument::Type(Type::Path(path)) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| is_integer_type(&segment.ident.to_string())),
+        _ => false,
+    })
+}
+
+/// Whether a type name is an integer type a length may be parsed into.
+fn is_integer_type(name: &str) -> bool {
+    matches!(
+        name,
+        "u8" | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+    )
+}
+
+/// Whether a path reaches the owner.
+///
+/// The owner is reached through its module, or through a name the site
+/// imported from it, so both spellings count.
+fn is_content_length_owner_call(path: &syn::Path) -> bool {
+    let segments = &path.segments;
+    let Some(last) = segments.last() else {
+        return false;
+    };
+    if !CONTENT_LENGTH_OWNER_ENTRIES.contains(&last.ident.to_string().as_str()) {
+        return false;
+    }
+    match segments.iter().rev().nth(1) {
+        None => true,
+        Some(segment) => segment.ident == CONTENT_LENGTH_OWNER_MODULE,
+    }
 }
 
 /// The workspace's member crates, read from the root manifest.
@@ -5123,6 +5371,151 @@ mod tests {
                 "effective load must not double count open queue depth",
                 "stream capacity must be capped by open queue capacity",
             ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_reader_that_reads_the_field_inline() {
+        // A reader that reads the field's value and turns it into a number
+        // in the same body reads the declaration itself.
+        let inline = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn observed_size(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&inline.0, &inline.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function observed_size reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+
+        // The same reader written as a comparison of a header name with the
+        // field's name is seen as well.
+        let compared = (
+            "qpxd/tests/http_rfc/mod.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> usize {
+    headers
+        .iter()
+        .find(|(name, _)| name == "content-length")
+        .and_then(|(_, value)| value.parse::<usize>().ok())
+        .unwrap_or(0)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&compared.0, &compared.1).unwrap(),
+            [
+                "qpxd/tests/http_rfc/mod.rs: the function declared_length reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+
+        // A reader that calls the owner is not a violation.
+        let folded = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn observed_size(headers: &HeaderMap) -> Option<u64> {
+    qpx_core::http_content_length::declared_content_length(headers).ok().flatten()
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_inline_reader_violations(&folded.0, &folded.1)
+                .unwrap()
+                .is_empty(),
+            "a reader that calls the owner is not a violation"
+        );
+
+        // A function that turns text into a number without naming the
+        // field reads no declaration.
+        let unrelated = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn observed_size(port: &str) -> Option<u16> {
+    port.parse::<u16>().ok()
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_inline_reader_violations(&unrelated.0, &unrelated.1)
+                .unwrap()
+                .is_empty(),
+            "a number that is not the field's length is not a reader"
+        );
+
+        // A function that calls the owner and still reads the field on its
+        // own is a violation as well: the fold is not complete while an
+        // inline read remains.
+        let half_folded = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn observed_size(headers: &HeaderMap) -> Option<u64> {
+    let declared = qpx_core::http_content_length::declared_content_length(headers).ok().flatten();
+    let inline = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    declared.or(inline)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&half_folded.0, &half_folded.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function observed_size reads the declared Content-Length as well as calling the owner; it must read the declaration through the owner alone"
+            ]
+        );
+
+        // A reader in a trait's default method is seen as well.
+        let in_trait = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+trait Observed {
+    fn observed_size(&self, headers: &HeaderMap) -> Option<u64> {
+        headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse::<u64>().ok())
+    }
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&in_trait.0, &in_trait.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function observed_size reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+
+        // A function that writes the field and reads another number is not
+        // a reader either.
+        let writer = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn set_length(headers: &mut HeaderMap, body: &[u8]) {
+    headers.insert(CONTENT_LENGTH, body.len().to_string().parse().unwrap());
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_inline_reader_violations(&writer.0, &writer.1)
+                .unwrap()
+                .is_empty(),
+            "a function that writes the field is not a reader"
         );
     }
 

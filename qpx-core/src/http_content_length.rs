@@ -179,10 +179,12 @@ pub enum ContentLengthError {
 /// members is one length there as well.
 ///
 /// The gate finds those helpers by the names the workspace has used for
-/// them, so a site that reads the declaration inline is outside the gate.
-/// No site reads the declaration inline today: the request guard, the last
-/// one, reads it through the owner as well, and so do the test helpers
-/// that read a raw head.
+/// them, and it looks inside a function's body as well, so a site that
+/// reads the declaration inline is inside the gate too: a function that
+/// reads the field's value and turns text into a number reads the
+/// declaration itself, and it must reach the owner alone. No site reads
+/// the declaration inline today: the request guard, the last one, reads it
+/// through the owner as well.
 ///
 /// The test helpers read the declaration through the owner as well:
 /// `qpxd/src/test_util.rs` and `qpxd/tests/http_rfc/mod.rs` read a raw
