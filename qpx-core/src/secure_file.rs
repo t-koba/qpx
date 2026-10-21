@@ -519,6 +519,21 @@ mod windows_tests {
         let _ = std::fs::remove_file(&path);
     }
 
+    #[test]
+    fn open_secure_output_file_creates_a_private_file() {
+        let path =
+            std::env::temp_dir().join(format!("qpx-secure-output-test-{}.pem", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let file = open_secure_output_file(&path).expect("secure output file");
+        assert!(path.exists(), "the secure output file must exist");
+        assert!(
+            dacl_is_protected(&file),
+            "the file's access control list must be set on the file, not inherited"
+        );
+        drop(file);
+        let _ = std::fs::remove_file(&path);
+    }
+
     /// Whether the file's access control list is protected, that is, set on
     /// the file itself instead of inherited from its directory.
     fn dacl_is_protected(file: &File) -> bool {
