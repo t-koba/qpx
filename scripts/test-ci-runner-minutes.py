@@ -17,6 +17,7 @@ from ci_runner_minutes import (  # noqa: E402
     format_report,
     job_day,
     job_interval,
+    job_metered_minutes,
     parse_timestamp,
     summarize_jobs,
     write_jsonl,
@@ -153,6 +154,39 @@ class DayGrouping(unittest.TestCase):
         payload = build_report(runs, jobs, "7", CAPTURED)
         self.assertEqual(payload["day"]["day"], "2026-10-20")
         self.assertEqual(payload["day"]["runner_minutes"], 5.0)
+
+
+class Metered(unittest.TestCase):
+    def test_a_macos_minute_counts_for_more_than_a_linux_minute(self):
+        linux = job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:06:00Z")
+        macos = job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:06:00Z")
+        macos["labels"] = ["macos-14", "arm64"]
+        self.assertEqual(job_metered_minutes(linux), 5.0)
+        self.assertEqual(job_metered_minutes(macos), 5.0 * (0.062 / 0.006))
+        self.assertGreater(job_metered_minutes(macos), job_metered_minutes(linux))
+
+    def test_a_windows_minute_counts_for_more_than_a_linux_minute(self):
+        windows = job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:03:00Z")
+        windows["labels"] = ["windows-2022", "x64"]
+        self.assertEqual(job_metered_minutes(windows), 2.0 * (0.010 / 0.006))
+
+    def test_a_short_job_is_rounded_up_to_a_whole_minute(self):
+        short = job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:01:24Z")
+        self.assertEqual(job_metered_minutes(short), 1.0)
+
+    def test_a_self_hosted_job_consumes_no_minutes(self):
+        hosted = job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:06:00Z")
+        hosted["labels"] = ["self-hosted", "linux", "x64"]
+        self.assertEqual(job_metered_minutes(hosted), 0.0)
+
+    def test_the_summary_carries_both_numbers(self):
+        macos = job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:06:00Z")
+        macos["labels"] = ["macos-14", "arm64"]
+        summary = summarize_jobs([macos])
+        self.assertEqual(summary["runner_minutes"], 5.0)
+        self.assertEqual(
+            summary["metered_minutes_estimate"], round(5.0 * (0.062 / 0.006), 2)
+        )
 
 
 class Report(unittest.TestCase):

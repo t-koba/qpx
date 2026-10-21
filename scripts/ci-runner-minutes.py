@@ -77,6 +77,7 @@ def job_record(payload, workflow):
         "conclusion": payload.get("conclusion"),
         "started_at": payload.get("started_at"),
         "completed_at": payload.get("completed_at"),
+        "labels": payload.get("labels") or [],
     }
 
 

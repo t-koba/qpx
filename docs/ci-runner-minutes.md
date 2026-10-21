@@ -27,8 +27,17 @@ The report keeps three quantities apart, because they answer different
 questions:
 
 - `runner_minutes` is the summed wall-clock time each completed job occupied
-  a runner. This is the number that costs runner time. Jobs run in parallel,
-  so the sum is larger than the run's elapsed time.
+  a runner. It is the occupancy of the runners, and it is not the quantity
+  the account is metered for. Jobs run in parallel, so the sum is larger than
+  the run's elapsed time.
+- `metered_minutes_estimate` is the same jobs weighted the way GitHub meters
+  them: every job is rounded up to a whole minute, and each minute counts at
+  its runner's published rate relative to the standard Linux runner (Linux
+  1, Windows 1.67, macOS 10.33), so a macOS job counts for about ten Linux
+  minutes. A self-hosted runner consumes no GitHub minutes and is metered at
+  zero. The estimate is a published-rate model, not a bill: for a public
+  repository the minutes are free, so this measures the shared-runner
+  capacity a push consumes, not money.
 - `elapsed_minutes` is the wall-clock span from the first counted job's start
   to the last one's completion. It is how long the run took, not what it
   cost.

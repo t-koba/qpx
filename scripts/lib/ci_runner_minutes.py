@@ -6,15 +6,32 @@ sum is the larger number and the elapsed span is the smaller one. The queue
 delay before the first job starts is a third quantity again. Every number in a
 report therefore carries its own name, and a report whose totals are
 incomplete says which records are missing instead of quietly reporting less.
+
+The occupancy sum also is not what the account is metered for: a minute on a
+macOS runner is worth several Linux minutes, and GitHub rounds every job up to
+a whole minute. The report therefore carries a second number, the metered
+estimate, which weights each job by its runner and rounds it the way GitHub
+does.
 """
 
 from __future__ import annotations
 
 import json
+import math
 from datetime import datetime, timezone
 from pathlib import Path
 
 MINUTES_PER_SECOND = 60.0
+
+# The published per-minute rates of the standard GitHub-hosted runners,
+# relative to the standard Linux runner: Linux 2-core $0.006, Windows 2-core
+# $0.010, macOS 3-core $0.062.
+# https://docs.github.com/en/billing/reference/actions-runner-pricing
+RUNNER_PRICE_RELATIVE_TO_LINUX = {
+    "linux": 1.0,
+    "windows": 0.010 / 0.006,
+    "macos": 0.062 / 0.006,
+}
 
 
 def parse_timestamp(value):
@@ -80,6 +97,37 @@ def job_interval(record):
     return (completed - started).total_seconds() / MINUTES_PER_SECOND
 
 
+def runner_class(record):
+    """The runner class of a job, from the labels the jobs API returns.
+
+    The labels name the image the job ran on, such as "macos-14" or
+    "windows-2022", so the class is the leading part of the label.
+    """
+    labels = [str(label).lower() for label in (record.get("labels") or [])]
+    if any(label.startswith("macos") for label in labels):
+        return "macos"
+    if any(label.startswith("windows") for label in labels):
+        return "windows"
+    return "linux"
+
+
+def job_metered_minutes(record):
+    """The minutes a job is metered for, or None when it has no usable interval.
+
+    GitHub rounds every job up to a whole minute and charges each minute of a
+    runner at that runner's rate, so a macOS minute counts for more than a
+    Linux minute. A self-hosted runner consumes no GitHub minutes at all.
+    """
+    interval = job_interval(record)
+    if interval is None:
+        return None
+    labels = [str(label).lower() for label in (record.get("labels") or [])]
+    if "self-hosted" in labels:
+        return 0.0
+    weight = RUNNER_PRICE_RELATIVE_TO_LINUX.get(runner_class(record), 1.0)
+    return math.ceil(interval) * weight
+
+
 def job_day(record):
     """The UTC day a job started on, or None when it has no start timestamp."""
     started = parse_timestamp(record.get("started_at"))
@@ -100,6 +148,7 @@ def summarize_jobs(records, run_starts=None, reporter=None):
     run_starts = run_starts or {}
     reporter_name, reporter_run = reporter if reporter else (None, None)
     minutes = 0.0
+    metered_minutes = 0.0
     counted = 0
     unfinished = 0
     reporter_unfinished = 0
@@ -131,6 +180,9 @@ def summarize_jobs(records, run_starts=None, reporter=None):
             continue
         counted += 1
         minutes += interval
+        metered = job_metered_minutes(record)
+        if metered is not None:
+            metered_minutes += metered
         if conclusion == "failure":
             failed += 1
         started = parse_timestamp(record.get("started_at"))
@@ -152,6 +204,7 @@ def summarize_jobs(records, run_starts=None, reporter=None):
         elapsed = (latest - earliest).total_seconds() / MINUTES_PER_SECOND
     return {
         "runner_minutes": round(minutes, 2),
+        "metered_minutes_estimate": round(metered_minutes, 2),
         "jobs_total": len(records),
         "jobs_counted": counted,
         "jobs_unfinished": unfinished,
@@ -271,10 +324,12 @@ def format_report(report):
         f"run {report['run_id']} sha {report['head_sha']} captured {report['captured_at']}",
         f"runner minutes {run['runner_minutes']:.2f} "
         f"({run['jobs_counted']}/{run['jobs_total']} jobs counted)",
+        f"metered minutes estimate {run['metered_minutes_estimate']:.2f}",
         f"elapsed minutes {'unknown' if elapsed is None else elapsed} "
         f"queue delay minutes {run['queue_delay_minutes_max']}",
         f"day {day['day']} runner minutes {day['runner_minutes']:.2f} "
         f"({day['runs_counted']}/{day['runs_total']} runs)",
+        f"day {day['day']} metered minutes estimate {day['metered_minutes_estimate']:.2f}",
     ]
     if report.get("reporter_job"):
         lines.append(f"the reporting job {report['reporter_job']} is not in the run total")
