@@ -253,6 +253,8 @@ smoke tests, multi-platform builds, and end-to-end reload/upgrade paths.
   protocol interoperability lanes
 - [`docs/usecase-inventory.md`](docs/usecase-inventory.md): `config/usecases/`
   capability inventory
+- [`docs/ci-runner-minutes.md`](docs/ci-runner-minutes.md): what each CI push
+  costs in runner minutes, and how the report is produced
 
 ## License
 
