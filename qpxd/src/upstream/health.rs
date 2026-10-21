@@ -147,6 +147,50 @@ fn reset_adaptive_stats(
     latency_samples.store(0, Ordering::Relaxed);
 }
 
+/// Why an endpoint was ejected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum EjectionReason {
+    /// The active health check failed.
+    ActiveFailure,
+    /// The endpoint answered with a server error.
+    Http5xx,
+    /// The endpoint did not answer in time.
+    Timeout,
+    /// The connection to the endpoint failed.
+    ConnectError,
+    /// The connection was reset.
+    Reset,
+    /// The endpoint was too slow.
+    Latency,
+    /// Too many of the recent requests failed.
+    SuccessRate,
+}
+
+impl EjectionReason {
+    /// The metric label of this reason.
+    pub(crate) fn as_label(self) -> &'static str {
+        match self {
+            Self::ActiveFailure => "active_failure",
+            Self::Http5xx => "http_5xx",
+            Self::Timeout => "timeout",
+            Self::ConnectError => "connect_error",
+            Self::Reset => "reset",
+            Self::Latency => "latency",
+            Self::SuccessRate => "success_rate",
+        }
+    }
+
+    /// The reason a passive failure maps to.
+    pub(crate) fn from_passive_failure(kind: PassiveFailureKind) -> Self {
+        match kind {
+            PassiveFailureKind::Http5xx => Self::Http5xx,
+            PassiveFailureKind::Timeout => Self::Timeout,
+            PassiveFailureKind::ConnectError => Self::ConnectError,
+            PassiveFailureKind::Reset => Self::Reset,
+        }
+    }
+}
+
 // Passive failure kinds shared by forward-cluster and reverse endpoints.
 // Only the kind discriminant and the consecutive-counter mechanics live here;
 // thresholds, ejection, backoff, recovery, lifecycle, and all policy mapping

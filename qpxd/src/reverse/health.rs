@@ -1,5 +1,5 @@
 use crate::upstream::health::{
-    AdaptiveEjection, LatencyWindow, PassiveFailureCounters, PassiveFailureKind,
+    AdaptiveEjection, EjectionReason, LatencyWindow, PassiveFailureCounters, PassiveFailureKind,
 };
 use qpx_core::config::{EndpointLifecycleConfig, HealthCheckConfig, HttpHealthCheckConfig};
 use std::sync::Arc;
@@ -49,31 +49,6 @@ pub(super) struct EndpointLifecycleRuntime {
     pub(super) slow_start: Option<Duration>,
     pub(super) warmup: Option<Duration>,
     pub(super) drain_timeout: Option<Duration>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum EjectionReason {
-    ActiveFailure,
-    Http5xx,
-    Timeout,
-    ConnectError,
-    Reset,
-    Latency,
-    SuccessRate,
-}
-
-impl EjectionReason {
-    fn as_label(self) -> &'static str {
-        match self {
-            Self::ActiveFailure => "active_failure",
-            Self::Http5xx => "http_5xx",
-            Self::Timeout => "timeout",
-            Self::ConnectError => "connect_error",
-            Self::Reset => "reset",
-            Self::Latency => "latency",
-            Self::SuccessRate => "success_rate",
-        }
-    }
 }
 
 impl HealthCheckRuntime {
@@ -290,7 +265,7 @@ impl UpstreamEndpoint {
         }
         self.passive.reset_except(kind);
         let count = self.passive.increment(kind);
-        let reason = passive_failure_reason(kind);
+        let reason = EjectionReason::from_passive_failure(kind);
         self.note_adaptive_failure(policy.ejection_base, policy.ejection_max, reason);
         if count >= threshold {
             self.eject(policy.ejection_base, Some(policy.ejection_max), reason);
@@ -485,15 +460,6 @@ impl Drop for InflightAttemptGuard {
         if let Some(endpoint) = self.endpoint.take() {
             endpoint.inflight.fetch_sub(1, Ordering::Relaxed);
         }
-    }
-}
-
-fn passive_failure_reason(kind: PassiveFailureKind) -> EjectionReason {
-    match kind {
-        PassiveFailureKind::Http5xx => EjectionReason::Http5xx,
-        PassiveFailureKind::Timeout => EjectionReason::Timeout,
-        PassiveFailureKind::ConnectError => EjectionReason::ConnectError,
-        PassiveFailureKind::Reset => EjectionReason::Reset,
     }
 }
 

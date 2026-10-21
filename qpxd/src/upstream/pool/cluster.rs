@@ -2,8 +2,8 @@ use super::ConnectionPool;
 use super::resolved::{EndpointConcurrencyPermit, ResolvedUpstreamProxy};
 use crate::runtime::now_millis;
 use crate::upstream::health::{
-    AdaptiveEjection, LATENCY_P95_DEFAULT_MIN_SAMPLES, LatencyWindow, PassiveFailureCounters,
-    PassiveFailureKind,
+    AdaptiveEjection, EjectionReason, LATENCY_P95_DEFAULT_MIN_SAMPLES, LatencyWindow,
+    PassiveFailureCounters, PassiveFailureKind,
 };
 use crate::upstream::http1::{UpstreamProxyEndpoint, parse_upstream_proxy_endpoint};
 use crate::upstream::origin::discover_origin_endpoints;
@@ -150,7 +150,7 @@ impl ManagedUpstreamEndpoint {
         }
         self.passive.reset_except(kind);
         let count = self.passive.increment(kind);
-        let reason = passive_failure_reason(kind);
+        let reason = EjectionReason::from_passive_failure(kind);
         self.note_adaptive_failure(policy.max_ejection);
         if count >= threshold {
             self.eject(policy.max_ejection, reason);
@@ -224,38 +224,6 @@ impl ManagedUpstreamEndpoint {
 
     fn reset_adaptive_stats(&self) {
         self.adaptive.reset();
-    }
-}
-
-fn passive_failure_reason(kind: PassiveFailureKind) -> EjectionReason {
-    match kind {
-        PassiveFailureKind::Http5xx => EjectionReason::Http5xx,
-        PassiveFailureKind::Timeout => EjectionReason::Timeout,
-        PassiveFailureKind::ConnectError => EjectionReason::ConnectError,
-        PassiveFailureKind::Reset => EjectionReason::Reset,
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
-enum EjectionReason {
-    Http5xx,
-    Timeout,
-    ConnectError,
-    Reset,
-    Latency,
-    SuccessRate,
-}
-
-impl EjectionReason {
-    fn as_label(self) -> &'static str {
-        match self {
-            Self::Http5xx => "http_5xx",
-            Self::Timeout => "timeout",
-            Self::ConnectError => "connect_error",
-            Self::Reset => "reset",
-            Self::Latency => "latency",
-            Self::SuccessRate => "success_rate",
-        }
     }
 }
 
