@@ -188,7 +188,15 @@ pub(crate) fn limit_response_body_for_plan_in_place(
     response: &mut Response<Body>,
     plan: &ExecutionPlan,
 ) {
-    let max_bytes = plan.streaming.max_response_body_bytes;
+    limit_response_body_to_max_bytes(response, plan.streaming.max_response_body_bytes);
+}
+
+/// Truncates the response body to the limit and drops the declared length
+/// that no longer describes it.
+///
+/// The body that is cut to the limit is shorter than the length the
+/// response declared, so a declaration over the limit goes with it.
+pub(crate) fn limit_response_body_to_max_bytes(response: &mut Response<Body>, max_bytes: usize) {
     if response_body_fits_limit(response.body(), max_bytes) {
         return;
     }

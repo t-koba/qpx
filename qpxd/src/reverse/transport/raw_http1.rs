@@ -784,7 +784,10 @@ async fn serve_raw_cache_miss(
     session.recycle_response_globally(&mut proxied);
     let proxied = proxied.into_http_response()?;
     let mut response = proxied.response;
-    limit_response_body_for_max_bytes(&mut response, miss.max_response_body_bytes);
+    crate::http::capture::stream::limit_response_body_to_max_bytes(
+        &mut response,
+        miss.max_response_body_bytes,
+    );
     // RFC 9110 §7.6.3: Via received-protocol is the parsed upstream version,
     // not the downstream request version.
     let upstream_version = response.version();
@@ -833,28 +836,6 @@ async fn serve_raw_cache_miss(
         proxied.interim,
         response,
     )))
-}
-
-/// Mirrors `limit_response_body_for_plan_in_place` for the raw cache miss
-/// path, which carries the streaming limit without a full execution plan.
-fn limit_response_body_for_max_bytes(response: &mut Response<Body>, max_bytes: usize) {
-    if http_body::Body::size_hint(response.body())
-        .exact()
-        .is_some_and(|len| len <= max_bytes as u64)
-    {
-        return;
-    }
-    if let Some(len) = response
-        .headers()
-        .get(http::header::CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.trim().parse::<usize>().ok())
-        && len > max_bytes
-    {
-        response.headers_mut().remove(http::header::CONTENT_LENGTH);
-    }
-    let body = std::mem::replace(response.body_mut(), Body::empty());
-    *response.body_mut() = body.limit_bytes(max_bytes);
 }
 
 fn take_in_memory_body(
