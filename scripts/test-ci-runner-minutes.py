@@ -313,6 +313,30 @@ class Reporter(unittest.TestCase):
         self.assertEqual(payload["run"]["jobs_unfinished"], 1)
         self.assertEqual(payload["run"]["jobs_reporter_unfinished"], 1)
 
+    def test_another_runs_reporting_job_is_ordinary_unfinished_work(self):
+        runs = [
+            run(),
+            run(run_id="8", created="2026-10-20T11:00:00Z", started="2026-10-20T11:01:00Z"),
+        ]
+        jobs = [
+            job("a", "2026-10-20T10:01:00Z", "2026-10-20T10:06:00Z"),
+            job("CI runner minutes", "2026-10-20T10:02:00Z", None, status="in_progress",
+                conclusion=""),
+            job("b", "2026-10-20T11:05:00Z", "2026-10-20T11:10:00Z", run_id="8"),
+            job("CI runner minutes", "2026-10-20T11:02:00Z", None, status="in_progress",
+                conclusion="", run_id="8"),
+        ]
+        payload = build_report(
+            runs, jobs, "7", CAPTURED, {"reporter_job": "CI runner minutes"}
+        )
+        # The reported run's own reporting job is exempt.
+        self.assertEqual(payload["run"]["jobs_reporter_unfinished"], 1)
+        self.assertFalse(payload["run"]["partial"])
+        # Another run's reporting job is ordinary unfinished work.
+        self.assertTrue(payload["day"]["partial"])
+        self.assertTrue(payload["runs"][1]["partial"])
+        self.assertEqual(payload["day"]["jobs_unfinished"], 1)
+
     def test_the_report_names_the_reporting_job(self):
         payload = build_report(
             [run()],

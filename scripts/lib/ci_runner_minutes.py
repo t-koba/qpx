@@ -90,11 +90,15 @@ def summarize_jobs(records, run_starts=None, reporter=None):
     """Sums the runner time of job records and reports what it could not count.
 
     `run_starts` maps a run identifier to the moment that run started, which
-    is what the queue delay is measured against. `reporter` names the job that
-    writes the report: it is running while it reports, so it is counted
-    separately and never makes the total partial.
+    is what the queue delay is measured against. `reporter` is the name and
+    the run identifier of the job that writes the report: it is running while
+    it reports, so it is counted separately and never makes the total
+    partial. Only that one job is exempt - another run's job of the same
+    name is ordinary unfinished work, and the workflow runs more than one
+    push and pull-request run at a time.
     """
     run_starts = run_starts or {}
+    reporter_name, reporter_run = reporter if reporter else (None, None)
     minutes = 0.0
     counted = 0
     unfinished = 0
@@ -109,7 +113,11 @@ def summarize_jobs(records, run_starts=None, reporter=None):
         status = str(record.get("status") or "").lower()
         conclusion = str(record.get("conclusion") or "").lower()
         if status and status != "completed":
-            if reporter and record.get("name") == reporter:
+            if (
+                reporter_name
+                and record.get("name") == reporter_name
+                and str(record.get("run_id")) == str(reporter_run)
+            ):
                 reporter_unfinished += 1
             else:
                 unfinished += 1
@@ -189,7 +197,8 @@ def build_report(runs, jobs, run_id, captured_at, collection=None):
     run = next((record for record in runs if str(record.get("run_id")) == run_id), None)
     run_jobs = [record for record in jobs if str(record.get("run_id")) == run_id]
     starts = run_start_map(runs)
-    reporter = (collection or {}).get("reporter_job")
+    reporter_name = (collection or {}).get("reporter_job")
+    reporter = (reporter_name, run_id) if reporter_name else None
     run_summary = summarize_jobs(run_jobs, starts, reporter)
     if run is None:
         # The run's records were not collected, so nothing about its cost is
@@ -225,7 +234,9 @@ def build_report(runs, jobs, run_id, captured_at, collection=None):
     for record in runs:
         record_id = str(record.get("run_id"))
         summary = summarize_jobs(
-            [job for job in jobs if str(job.get("run_id")) == record_id], starts, reporter
+            [job for job in jobs if str(job.get("run_id")) == record_id],
+            starts,
+            reporter if record_id == run_id else None,
         )
         breakdown.append(
             {
@@ -244,7 +255,7 @@ def build_report(runs, jobs, run_id, captured_at, collection=None):
         "workflow": (run or {}).get("workflow"),
         "run_id": run_id,
         "run_conclusion": (run or {}).get("conclusion"),
-        "reporter_job": reporter,
+        "reporter_job": reporter_name,
         "run": run_summary,
         "day": day_summary,
         "runs": breakdown,
