@@ -261,7 +261,6 @@ pub(crate) mod spool_registry {
     }
 
     /// The spool files created on this thread so far, in creation order.
-    #[cfg(unix)]
     pub(crate) fn created() -> Vec<PathBuf> {
         CREATED_SPOOL_PATHS.with(|paths| paths.borrow().clone())
     }

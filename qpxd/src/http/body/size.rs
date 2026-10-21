@@ -678,7 +678,6 @@ mod spool_registry {
     }
 
     /// The spool files created on this thread so far, in creation order.
-    #[cfg(unix)]
     pub(super) fn created() -> Vec<PathBuf> {
         CREATED_SPOOL_PATHS.with(|paths| paths.borrow().clone())
     }
@@ -688,7 +687,7 @@ mod spool_registry {
 ///
 /// The registry is thread-local so that a test observes exactly the spool
 /// files of its own collection, even when other tests run concurrently.
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) fn created_spool_paths() -> Vec<std::path::PathBuf> {
     spool_registry::created()
 }

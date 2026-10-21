@@ -1,22 +1,11 @@
-#[cfg(unix)]
 use super::super::types::created_spool_paths;
-#[cfg(unix)]
 use crate::CachedBody;
-#[cfg(unix)]
 use bytes::Bytes;
-#[cfg(unix)]
 use qpx_http::body::Body;
 use qpx_http::body::spool::SpoolFile;
-#[cfg(unix)]
 use std::time::Duration;
 
-// The cache body spills to a spool file that the secure temp file helper
-// creates with owner-only permissions, which it provides on unix only. On the
-// other platforms the collection fails before it spills, so there is no spool
-// file to observe there.
-
 /// A body chunk that is large enough to leave the in-memory buffer.
-#[cfg(unix)]
 fn spilling_chunk() -> Bytes {
     Bytes::from(vec![b'x'; 64 * 1024 + 1])
 }
@@ -25,7 +14,6 @@ fn spilling_chunk() -> Bytes {
 ///
 /// The wait observes the collection itself, so it never depends on how long
 /// the write to the spool file takes.
-#[cfg(unix)]
 async fn wait_for_created_spool_file(before: usize) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     while created_spool_paths().len() <= before {
@@ -38,7 +26,6 @@ async fn wait_for_created_spool_file(before: usize) {
 }
 
 #[tokio::test]
-#[cfg(unix)]
 async fn failed_cache_body_collection_after_spill_removes_the_spool_file() {
     let before = created_spool_paths().len();
     let (mut sender, body) = Body::channel();
@@ -74,7 +61,6 @@ async fn failed_cache_body_collection_after_spill_removes_the_spool_file() {
 }
 
 #[tokio::test]
-#[cfg(unix)]
 async fn cancelled_cache_body_collection_after_spill_removes_the_spool_file() {
     let before = created_spool_paths().len();
     let (mut sender, body) = Body::channel();
@@ -107,7 +93,6 @@ async fn cancelled_cache_body_collection_after_spill_removes_the_spool_file() {
 }
 
 #[tokio::test]
-#[cfg(unix)]
 async fn a_spooled_cache_body_removes_its_file_when_released() {
     let before = created_spool_paths().len();
     let chunk = spilling_chunk();
