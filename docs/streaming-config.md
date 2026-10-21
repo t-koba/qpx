@@ -216,6 +216,16 @@ be observed, so its `reason` names the spool that owns the file
 (`observed_body`, `retry_template`, `cache_body`, `cache_redis`) and its
 `direction` is the side of the exchange the spooled body came from.
 
+An observed body larger than the in-memory limit is spooled to a temporary
+file that only the owner can read, and the secure temp file helper provides
+that owner-only file on Unix only. On the other platforms the collection
+fails before it spills, so an observed body larger than 64 KiB is an error
+there rather than a buffered body. The failure is counted by
+`qpx_body_spool_errors_total` with `error="create"`, and it is not a body
+limit error, so it is not answered with a "too large" response. A deployment
+that observes bodies on Windows is therefore limited to bodies below that
+size until the helper provides owner-only files there.
+
 Cache writeback uses a lossy mirror so downstream response streaming is not
 blocked by a slow cache backend. Dropped writeback mirror chunks increment
 `qpx_body_mirror_drops_total{mirror="cache_writeback",...}` so hit-rate loss
