@@ -10,7 +10,7 @@ use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
-use hyper::header::{CONTENT_LENGTH, EXPECT, HeaderMap};
+use hyper::header::{EXPECT, HeaderMap};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
@@ -598,24 +598,7 @@ fn has_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
 }
 
 fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
-    let mut parsed = None::<u64>;
-    for value in headers.get_all(CONTENT_LENGTH).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|_| anyhow!("invalid content-length header"))?;
-        for part in raw.split(',') {
-            let len = qpx_http::protocol::semantics::parse_content_length_member(part)
-                .ok_or_else(|| anyhow!("invalid content-length value"))?;
-            match parsed {
-                Some(existing) if existing != len => {
-                    return Err(anyhow!("conflicting content-length values"));
-                }
-                Some(_) => {}
-                None => parsed = Some(len),
-            }
-        }
-    }
-    Ok(parsed)
+    qpx_http::protocol::semantics::declared_content_length(headers).map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]

@@ -3,6 +3,7 @@ use http::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HOST, TRAILER, TRANSFER_E
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use std::cell::RefCell;
 use std::fmt;
+use thiserror::Error;
 
 static WELL_KNOWN_HOP_HEADERS: [HeaderName; 8] = [
     HeaderName::from_static("proxy-connection"),
@@ -712,31 +713,55 @@ pub fn parse_content_length_member(part: &str) -> Option<u64> {
     digits.parse::<u64>().ok()
 }
 
+/// The error a declared Content-Length carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ContentLengthError {
+    /// A field value is not readable as text.
+    #[error("invalid content-length header")]
+    InvalidHeader,
+    /// A member is not a `1*DIGIT` sequence.
+    #[error("invalid content-length value")]
+    InvalidValue,
+    /// Two members declare different lengths.
+    #[error("conflicting content-length values")]
+    Conflicting,
+}
+
+/// The Content-Length that a header set declares.
+///
+/// RFC 9110 section 8.6: every value is a comma-separated list of `1*DIGIT`
+/// members, and every member of every value declares the same length, so a
+/// value that names two different lengths is a conflict rather than a choice.
+///
+/// The owner sits beside the member grammar it uses, so the HTTP/1 and
+/// HTTP/2 codecs, the HTTP/3 codec and listener and the cache read the
+/// field the same way instead of each keeping its own interpretation.
+pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, ContentLengthError> {
+    let mut declared = None::<u64>;
+    for value in headers.get_all(CONTENT_LENGTH) {
+        let raw = value
+            .to_str()
+            .map_err(|_| ContentLengthError::InvalidHeader)?;
+        for part in raw.split(',') {
+            let length =
+                parse_content_length_member(part).ok_or(ContentLengthError::InvalidValue)?;
+            if let Some(previous) = declared
+                && previous != length
+            {
+                return Err(ContentLengthError::Conflicting);
+            }
+            declared = Some(length);
+        }
+    }
+    Ok(declared)
+}
+
 fn validate_request_body_length_headers(
     version: Version,
     headers: &HeaderMap,
 ) -> Result<(), RequestValidationError> {
-    let mut parsed_content_length = None::<u64>;
-    for value in headers.get_all(CONTENT_LENGTH) {
-        let raw = value
-            .to_str()
-            .map_err(|_| RequestValidationError::InvalidContentLength)?
-            .trim();
-        if raw.is_empty() {
-            return Err(RequestValidationError::InvalidContentLength);
-        }
-        for part in raw.split(',') {
-            let parsed = parse_content_length_member(part)
-                .ok_or(RequestValidationError::InvalidContentLength)?;
-            if let Some(existing) = parsed_content_length {
-                if existing != parsed {
-                    return Err(RequestValidationError::InvalidContentLength);
-                }
-            } else {
-                parsed_content_length = Some(parsed);
-            }
-        }
-    }
+    let parsed_content_length = declared_content_length(headers)
+        .map_err(|_| RequestValidationError::InvalidContentLength)?;
 
     if parsed_content_length.is_some() && headers.contains_key(TRANSFER_ENCODING) {
         return Err(RequestValidationError::BothTransferEncodingAndContentLength);

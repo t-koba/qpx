@@ -7,7 +7,7 @@ use h2::Reason;
 use h2::RecvStream;
 use h2::server::SendResponse;
 use http_body::Frame;
-use hyper::header::{CONTENT_LENGTH, COOKIE};
+use hyper::header::COOKIE;
 use hyper::{Request, Response};
 use qpx_http::body::{Body, BodyError};
 use std::future::poll_fn;
@@ -608,24 +608,7 @@ fn http_headers_into_h1(src: http::HeaderMap) -> ::http::HeaderMap {
 }
 
 pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
-    let mut parsed = None::<u64>;
-    for value in headers.get_all(CONTENT_LENGTH).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|_| anyhow!("invalid content-length header"))?;
-        for part in raw.split(',') {
-            let len = qpx_http::protocol::semantics::parse_content_length_member(part)
-                .ok_or_else(|| anyhow!("invalid content-length value"))?;
-            match parsed {
-                Some(existing) if existing != len => {
-                    return Err(anyhow!("conflicting content-length values"));
-                }
-                Some(_) => {}
-                None => parsed = Some(len),
-            }
-        }
-    }
-    Ok(parsed)
+    qpx_http::protocol::semantics::declared_content_length(headers).map_err(anyhow::Error::new)
 }
 
 #[derive(Debug, thiserror::Error)]

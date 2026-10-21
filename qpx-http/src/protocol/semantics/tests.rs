@@ -1,6 +1,58 @@
 use crate::protocol::semantics::*;
 
 #[test]
+fn declared_content_length_reads_every_member_of_every_value() {
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("42"));
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("42, 42"));
+    assert_eq!(declared_content_length(&headers), Ok(Some(42)));
+}
+
+#[test]
+fn declared_content_length_rejects_a_member_that_is_not_digits() {
+    for value in ["+5", "-5", "5x", "", "4,", "4,,4"] {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static(value));
+        assert_eq!(
+            declared_content_length(&headers),
+            Err(ContentLengthError::InvalidValue),
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn declared_content_length_rejects_two_different_lengths() {
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("4"));
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("5"));
+    assert_eq!(
+        declared_content_length(&headers),
+        Err(ContentLengthError::Conflicting)
+    );
+
+    let mut one_value = HeaderMap::new();
+    one_value.insert(CONTENT_LENGTH, HeaderValue::from_static("4, 5"));
+    assert_eq!(
+        declared_content_length(&one_value),
+        Err(ContentLengthError::Conflicting)
+    );
+}
+
+#[test]
+fn declared_content_length_rejects_a_value_that_is_not_text() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        CONTENT_LENGTH,
+        HeaderValue::from_bytes(b"\xff").expect("opaque value"),
+    );
+    assert_eq!(
+        declared_content_length(&headers),
+        Err(ContentLengthError::InvalidHeader)
+    );
+}
+
+#[test]
 fn sanitize_removes_connection_tokens_and_hop_headers() {
     let mut headers = HeaderMap::new();
     headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, x-remove"));
