@@ -13,12 +13,9 @@ use qpx_core::config::{ResilienceConfig, UpstreamConfig};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use tokio::time::Duration;
 use tracing::warn;
-
-const ADAPTIVE_MAX_SAMPLES: u32 = 32;
-const ADAPTIVE_MAX_BACKOFF_SHIFT: u32 = 5;
 
 #[derive(Debug, Clone)]
 pub(super) struct PassiveHealthPolicy {
@@ -96,7 +93,6 @@ pub(super) struct ManagedUpstreamEndpoint {
     passive: PassiveFailureCounters,
     adaptive: AdaptiveEjection,
     latency_window: LatencyWindow,
-    ejection_backoff_shift: AtomicU32,
     pub(super) inflight: AtomicUsize,
 }
 
@@ -108,7 +104,6 @@ impl ManagedUpstreamEndpoint {
             passive: PassiveFailureCounters::new(),
             adaptive: AdaptiveEjection::new(),
             latency_window: LatencyWindow::new(),
-            ejection_backoff_shift: AtomicU32::new(0),
             inflight: AtomicUsize::new(0),
         }
     }
@@ -181,13 +176,7 @@ impl ManagedUpstreamEndpoint {
     }
 
     fn eject(&self, duration: Duration, reason: EjectionReason) {
-        let shift = self
-            .ejection_backoff_shift
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some((current + 1).min(ADAPTIVE_MAX_BACKOFF_SHIFT))
-            })
-            .unwrap_or(0)
-            .min(ADAPTIVE_MAX_BACKOFF_SHIFT);
+        let shift = self.adaptive.next_backoff_shift();
         let scaled_ms = (duration.as_millis() as u64).saturating_mul(1u64 << shift);
         let until = now_millis().saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
@@ -197,15 +186,14 @@ impl ManagedUpstreamEndpoint {
 
     fn note_adaptive_success(&self) {
         self.adaptive.note_success();
-        self.ejection_backoff_shift.store(0, Ordering::Relaxed);
-        self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
+        self.adaptive.maybe_trim();
     }
 
     fn note_adaptive_failure(&self, max_ejection: Duration) {
         if self.adaptive.note_failure() {
             self.eject(max_ejection, EjectionReason::SuccessRate);
         } else {
-            self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
+            self.adaptive.maybe_trim();
         }
     }
 
@@ -218,7 +206,7 @@ impl ManagedUpstreamEndpoint {
         if self.adaptive.note_latency(elapsed, threshold) {
             self.eject(max_ejection, EjectionReason::Latency);
         } else {
-            self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
+            self.adaptive.maybe_trim();
         }
     }
 

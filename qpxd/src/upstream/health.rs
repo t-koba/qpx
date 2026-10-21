@@ -12,15 +12,16 @@ pub(crate) const LATENCY_P95_DEFAULT_MIN_SAMPLES: u64 = LATENCY_P95_WINDOW as u6
 
 /// The adaptive counters an endpoint owner keeps for its ejection decisions.
 ///
-/// The counters, the thresholds and the decisions live here. The ejection, the
-/// backoff and the sample bound stay with each owner, because they differ
-/// between the forward cluster and the reverse endpoint.
+/// The counters, the thresholds, the decisions and the backoff live here. The
+/// ejection itself stays with each owner, because the forward cluster and the
+/// reverse endpoint eject for different spans.
 #[derive(Debug)]
 pub(crate) struct AdaptiveEjection {
     successes: AtomicU32,
     failures: AtomicU32,
     latency_total_ms: AtomicU64,
     latency_samples: AtomicU32,
+    backoff_shift: AtomicU32,
 }
 
 /// Requests observed before the success rate can eject.
@@ -30,6 +31,10 @@ const ADAPTIVE_FAILURE_RATE_NUM: u32 = 1;
 const ADAPTIVE_FAILURE_RATE_DEN: u32 = 2;
 /// How far the average latency may exceed the threshold before it ejects.
 const ADAPTIVE_LATENCY_MULTIPLIER: u64 = 2;
+/// Requests above which the counters are halved instead of kept.
+const ADAPTIVE_MAX_SAMPLES: u32 = 32;
+/// The largest backoff shift a run of ejections may reach.
+const ADAPTIVE_MAX_BACKOFF_SHIFT: u32 = 5;
 
 impl AdaptiveEjection {
     pub(crate) const fn new() -> Self {
@@ -38,6 +43,7 @@ impl AdaptiveEjection {
             failures: AtomicU32::new(0),
             latency_total_ms: AtomicU64::new(0),
             latency_samples: AtomicU32::new(0),
+            backoff_shift: AtomicU32::new(0),
         }
     }
 
@@ -47,9 +53,23 @@ impl AdaptiveEjection {
         self.successes.load(Ordering::Relaxed)
     }
 
-    /// Records a successful request.
+    /// Records a successful request and clears the ejection backoff.
     pub(crate) fn note_success(&self) {
         self.successes.fetch_add(1, Ordering::Relaxed);
+        self.backoff_shift.store(0, Ordering::Relaxed);
+    }
+
+    /// The backoff shift for the next ejection, one step past the last one.
+    ///
+    /// The shift grows with every consecutive ejection and is capped, so a
+    /// long outage cannot grow the backoff without bound.
+    pub(crate) fn next_backoff_shift(&self) -> u32 {
+        self.backoff_shift
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
+                Some((current + 1).min(ADAPTIVE_MAX_BACKOFF_SHIFT))
+            })
+            .unwrap_or(0)
+            .min(ADAPTIVE_MAX_BACKOFF_SHIFT)
     }
 
     /// Records a failed request and reports whether the success rate fell too
@@ -84,14 +104,14 @@ impl AdaptiveEjection {
         avg_ms >= threshold_ms.saturating_mul(ADAPTIVE_LATENCY_MULTIPLIER)
     }
 
-    /// Trims the counters above the owner's sample bound.
-    pub(crate) fn maybe_trim(&self, max_samples: u32) {
+    /// Trims the counters above the sample bound.
+    pub(crate) fn maybe_trim(&self) {
         maybe_trim_adaptive_window(
             &self.successes,
             &self.failures,
             &self.latency_total_ms,
             &self.latency_samples,
-            max_samples,
+            ADAPTIVE_MAX_SAMPLES,
         );
     }
 

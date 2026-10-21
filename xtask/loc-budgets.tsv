@@ -2,7 +2,7 @@ qpxd/src/forward/h3/connect/mod.rs	21	r
 qpxd/src/reverse/transport/mod.rs	158	r
 qpxd/src/forward/connect/mod.rs	499	r
 qpxd/src/reverse/router/mod.rs	537	r
-qpxd/src/reverse/health.rs	447	r
+qpxd/src/reverse/health.rs	436	r
 qpxd/src/transparent/udp/mod.rs	415	r
 qpxd/src/transparent/udp/dispatch.rs	335	r
 qpxd/src/transparent/udp/dispatch/rule_eval.rs	160	r
@@ -13,7 +13,7 @@ qpx-core/src/config/validate/mod.rs	86	r
 qpx-core/src/config/types/mod.rs	152	r
 qpxd/src/runtime/mod.rs	265	r
 qpxd/src/upstream/origin/mod.rs	195	r
-qpxd/src/upstream/health.rs	240	r
+qpxd/src/upstream/health.rs	253	r
 qpxd/src/transparent/http/mod.rs	111	r
 qpxd/src/http/mitm/mod.rs	54	r
 qpxd/src/reverse/transport/dispatch.rs	591	r
@@ -57,7 +57,7 @@ qpxd/src/runtime/plan/types.rs	565	r
 qpxd/src/transparent/tls_path.rs	404	r
 qpxd/src/forward/h3/connect/standard/handlers.rs	214	r
 qpxd/src/upstream/pool/mod.rs	15	r
-qpxd/src/upstream/pool/cluster.rs	395	r
+qpxd/src/upstream/pool/cluster.rs	384	r
 qpxd/src/ipc_client/mod.rs	44	r
 qpxd/src/ftp/mod.rs	219	r
 qpxd/src/rate_limit/mod.rs	13	r

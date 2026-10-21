@@ -13,9 +13,6 @@ mod probe;
 pub(super) use self::probe::probe_upstream;
 pub(super) use crate::runtime::now_millis;
 
-const ADAPTIVE_MAX_SAMPLES: u32 = 32;
-const ADAPTIVE_MAX_BACKOFF_SHIFT: u32 = 5;
-
 #[derive(Debug, Clone)]
 pub(super) struct HealthCheckRuntime {
     pub(super) interval: Duration,
@@ -135,7 +132,6 @@ pub(super) struct UpstreamEndpoint {
     passive: PassiveFailureCounters,
     adaptive: AdaptiveEjection,
     latency_window: LatencyWindow,
-    ejection_backoff_shift: AtomicU32,
     recovery_start_ms: AtomicU64,
     warmup_until_ms: AtomicU64,
     drain_deadline_ms: AtomicU64,
@@ -157,7 +153,6 @@ impl UpstreamEndpoint {
             passive: PassiveFailureCounters::new(),
             adaptive: AdaptiveEjection::new(),
             latency_window: LatencyWindow::new(),
-            ejection_backoff_shift: AtomicU32::new(0),
             recovery_start_ms: AtomicU64::new(0),
             warmup_until_ms: AtomicU64::new(0),
             drain_deadline_ms: AtomicU64::new(0),
@@ -311,13 +306,7 @@ impl UpstreamEndpoint {
     }
 
     fn eject_at(&self, base: Duration, cap: Option<Duration>, reason: EjectionReason, now_ms: u64) {
-        let shift = self
-            .ejection_backoff_shift
-            .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some((current + 1).min(ADAPTIVE_MAX_BACKOFF_SHIFT))
-            })
-            .unwrap_or(0)
-            .min(ADAPTIVE_MAX_BACKOFF_SHIFT);
+        let shift = self.adaptive.next_backoff_shift();
         let scaled_ms = (base.as_millis() as u64).saturating_mul(1u64 << shift);
         let scaled_ms = match cap {
             Some(cap) => scaled_ms.min(cap.as_millis().min(u128::from(u64::MAX)) as u64),
@@ -401,8 +390,7 @@ impl UpstreamEndpoint {
 
     fn note_adaptive_success(&self) {
         self.adaptive.note_success();
-        self.ejection_backoff_shift.store(0, Ordering::Relaxed);
-        self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
+        self.adaptive.maybe_trim();
     }
 
     fn note_adaptive_failure(
@@ -418,7 +406,7 @@ impl UpstreamEndpoint {
                 EjectionReason::SuccessRate,
             );
         } else {
-            self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
+            self.adaptive.maybe_trim();
         }
     }
 
@@ -432,7 +420,7 @@ impl UpstreamEndpoint {
         if self.adaptive.note_latency(elapsed, threshold) {
             self.eject(ejection_base, Some(ejection_cap), EjectionReason::Latency);
         } else {
-            self.adaptive.maybe_trim(ADAPTIVE_MAX_SAMPLES);
+            self.adaptive.maybe_trim();
         }
     }
 
