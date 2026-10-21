@@ -158,10 +158,16 @@ pub enum ContentLengthError {
 /// read the declaration is complete:
 /// `qpxd/src/http/modules/response_compression.rs`
 /// reads the declared length to decide whether the body is compressed,
-/// `qpxd/src/http/modules/subrequest.rs` reads it as a size hint,
+/// `qpxd/src/http/modules/subrequest.rs` reads it as a size hint, and
 /// `qpxd/src/policy_context/decision_service/mod.rs` parses it to enforce a
-/// hard cap, and `qpxd/src/reverse/listener/raw_http1.rs` counts the bytes
-/// the response declared.
+/// hard cap.
+///
+/// The access log reads the declaration through the owner as well:
+/// `qpxd/src/reverse/listener/raw_http1.rs` hands the header map to it, so
+/// the byte count the log records is the length the field declares. A comma
+/// list of equal members is one length there now, so the count is that
+/// length instead of no bytes, and a declaration the owner refuses names no
+/// length, so the count is no bytes.
 ///
 /// The request guard in `qpxd/src/http/policy/guard.rs` compares the raw
 /// field values rather than the length they declare, so it answers a

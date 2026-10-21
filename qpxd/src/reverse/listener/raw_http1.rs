@@ -15,6 +15,7 @@ use crate::upstream::origin::PreparedPlainHttp1Session;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Response, StatusCode};
+use qpx_core::http_content_length::declared_content_length;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use qpx_observability::access_log::{
@@ -128,12 +129,7 @@ pub(super) async fn serve_raw_or_fallback(
                         direct_generic_log.as_ref(),
                         direct_generic_started,
                     ) {
-                        let bytes_out = response
-                            .headers()
-                            .get(http::header::CONTENT_LENGTH)
-                            .and_then(|value| value.to_str().ok())
-                            .and_then(|value| value.parse::<u64>().ok())
-                            .unwrap_or(0);
+                        let bytes_out = declared_response_bytes(&response);
                         service.record_direct_combined_status(
                             log_request,
                             response.status(),
@@ -181,20 +177,16 @@ pub(super) async fn serve_raw_or_fallback(
                 ) {
                     let (status, bytes_out) = match &response {
                         PreparedRawHttp1Response::Direct(response) => {
+                            // The relay's framing was read through the owner
+                            // when the raw head was parsed.
                             (response.status(), response.content_length().unwrap_or(0))
                         }
                         PreparedRawHttp1Response::InMemory { status, body, .. } => {
                             (*status, body.len() as u64)
                         }
-                        PreparedRawHttp1Response::Generic(_, response) => (
-                            response.status(),
-                            response
-                                .headers()
-                                .get(http::header::CONTENT_LENGTH)
-                                .and_then(|value| value.to_str().ok())
-                                .and_then(|value| value.parse::<u64>().ok())
-                                .unwrap_or(0),
-                        ),
+                        PreparedRawHttp1Response::Generic(_, response) => {
+                            (response.status(), declared_response_bytes(response))
+                        }
                     };
                     service.record_direct_combined_status(log_request, status, bytes_out, started);
                 }
@@ -404,4 +396,44 @@ fn prepare_complete_request<'a>(
         return FastParse::Fallback;
     };
     FastParse::Prepared { consumed, request }
+}
+
+/// The number of bytes the response declares it carries.
+///
+/// The declaration is read through the owner, so a comma list of equal
+/// members is one length and a declaration the owner refuses names no
+/// length, which the access log records as no bytes.
+fn declared_response_bytes(response: &Response<Body>) -> u64 {
+    declared_content_length(response.headers())
+        .ok()
+        .flatten()
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_access_log_counts_the_declared_length_through_the_owner() {
+        // A comma list of equal members is one length, so the count is that
+        // length instead of no bytes.
+        let response = Response::builder()
+            .header(http::header::CONTENT_LENGTH, "16, 16")
+            .body(Body::empty())
+            .expect("response");
+        assert_eq!(declared_response_bytes(&response), 16);
+
+        // A declaration the owner refuses names no length, so the count is
+        // no bytes.
+        let response = Response::builder()
+            .header(http::header::CONTENT_LENGTH, "+16")
+            .body(Body::empty())
+            .expect("response");
+        assert_eq!(declared_response_bytes(&response), 0);
+
+        // A response that declares no length counts no bytes either.
+        let response = Response::builder().body(Body::empty()).expect("response");
+        assert_eq!(declared_response_bytes(&response), 0);
+    }
 }
