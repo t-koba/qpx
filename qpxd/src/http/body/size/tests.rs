@@ -166,7 +166,6 @@ async fn observe_response_body_size_rejects_content_length_over_cap_without_buff
 }
 
 #[tokio::test]
-#[cfg(unix)]
 async fn observe_request_body_size_without_content_length_replays_from_spool_only() {
     let payload = vec![b'x'; OBSERVED_BODY_MEMORY_BYTES + 1];
     let req = Request::builder()
@@ -215,7 +214,6 @@ async fn buffer_request_body_times_out_idle_body() {
 }
 
 #[tokio::test]
-#[cfg(unix)]
 async fn buffer_request_body_spools_large_observed_body() {
     let payload = vec![b'x'; OBSERVED_BODY_MEMORY_BYTES + 1];
     let req = Request::builder()
