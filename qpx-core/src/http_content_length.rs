@@ -211,7 +211,11 @@ pub enum ContentLengthError {
 /// never used. The gate sees the field named through a reference to the
 /// constant, through the constant's text and through a name built from
 /// the field's text, so a reader cannot hide behind another spelling of
-/// the field's name. The gate sees a value taken out of the field's own
+/// the field's name. The gate follows a binding of the field's name as
+/// well: a site that binds the field's name to a name of its own and
+/// reads the field through that binding reads the declaration, so a
+/// reader cannot hide behind a name the site holds of its own. The gate
+/// sees a value taken out of the field's own
 /// entry as well: a site that compares a header's name with the field's
 /// name and takes the value of a header entry in the same body finds that
 /// entry itself, which is the second reading of the field this owner

@@ -1279,12 +1279,17 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// the entry's value is taken: by a closure that receives the entry as
 /// a pair and uses its second element, by the second element of the
 /// pair, and by the `value` member of the entry whose name the
-/// comparison found. What the gate cannot see is a site that finds the
-/// field's entry by a name it holds in a variable of its own, a site
-/// whose name comparison and whose taken value stand in two different
-/// functions, a site that takes the value under a member of another
-/// name, and a site that takes the `value` member of an entry whose
-/// name it compares under a name of its own.
+/// comparison found.
+///
+/// The gate follows a binding of the field's name as well: a site that
+/// binds the field's name to a name of its own and reads the field
+/// through that binding reads the declaration, so the binding names the
+/// field, and a comparison under the binding is a comparison of a
+/// header's name with the field's name. What the gate cannot see is a
+/// site that finds the field's entry by a name it holds in a variable of
+/// its own that it did not bind from the field's name, a site whose name
+/// comparison and whose taken value stand in two different functions,
+/// and a site that takes the value under a member of another name.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1604,6 +1609,12 @@ struct ContentLengthReaderFacts {
     /// Test code observes the field's value to assert on what the proxy
     /// put on the wire; it does not decide what the proxy does.
     test_code: bool,
+    /// The names the function binds the field's name to.
+    ///
+    /// A site that binds the field's name to a name of its own and reads
+    /// the field through that name reads the declaration, so the gate
+    /// follows the binding.
+    field_aliases: Vec<String>,
 }
 
 /// The collector of the functions of a file.
@@ -1685,9 +1696,26 @@ impl ContentLengthFunctionCollector {
 }
 
 impl Visit<'_> for ContentLengthReaderFacts {
+    fn visit_local(&mut self, node: &syn::Local) {
+        // A binding of the field's name to a name of its own names the
+        // field as well, so a site that reads the field through the
+        // binding reads the declaration.
+        if let Some(initializer) = &node.init
+            && names_content_length_field(&initializer.expr)
+            && let syn::Pat::Ident(binding) = &node.pat
+            && binding.subpat.is_none()
+        {
+            self.field_aliases.push(binding.ident.to_string());
+        }
+        syn::visit::visit_local(self, node);
+    }
+
     fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
         let method = node.method.to_string();
-        let names_field = node.args.iter().any(names_content_length_field);
+        let names_field = node
+            .args
+            .iter()
+            .any(|argument| names_content_length_field_or_alias(argument, &self.field_aliases));
         if (CONTENT_LENGTH_READ_METHODS.contains(&method.as_str()) || method.starts_with("eq"))
             && names_field
         {
@@ -1696,7 +1724,10 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // A comparison of a header's name with the field's name finds the
         // field's own entry, whether the field is named by the argument or
         // by the receiver.
-        if method.starts_with("eq") && (names_field || names_content_length_field(&node.receiver)) {
+        if method.starts_with("eq")
+            && (names_field
+                || names_content_length_field_or_alias(&node.receiver, &self.field_aliases))
+        {
             // The name of the entry the site found is the other side of
             // the comparison.
             let compared = if names_field {
@@ -1756,7 +1787,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
 
     fn visit_expr_index(&mut self, node: &syn::ExprIndex) {
         // An indexed read of the field's value is a read of it as well.
-        if names_content_length_field(&node.index) {
+        if names_content_length_field_or_alias(&node.index, &self.field_aliases) {
             self.reads_field = true;
             self.reads_value = true;
         }
@@ -1765,12 +1796,13 @@ impl Visit<'_> for ContentLengthReaderFacts {
 
     fn visit_expr_binary(&mut self, node: &syn::ExprBinary) {
         if matches!(node.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
-            && (names_content_length_field(&node.left) || names_content_length_field(&node.right))
+            && (names_content_length_field_or_alias(&node.left, &self.field_aliases)
+                || names_content_length_field_or_alias(&node.right, &self.field_aliases))
         {
             self.reads_field = true;
             // The name of the entry the site found is the other side of
             // the comparison.
-            let compared = if names_content_length_field(&node.left) {
+            let compared = if names_content_length_field_or_alias(&node.left, &self.field_aliases) {
                 &node.right
             } else {
                 &node.left
@@ -1801,8 +1833,8 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // comparison in the condition reads the other way round. A
         // condition that holds more than the comparison is left alone:
         // the rule cannot say which part of it skips the entry.
-        let skipping =
-            is_field_comparison(&node.cond) && self.branch_skips_the_entry(&node.then_branch);
+        let skipping = is_field_comparison(&node.cond, &self.field_aliases)
+            && self.branch_skips_the_entry(&node.then_branch);
         let saved = self.skipping_condition;
         self.skipping_condition = saved || skipping;
         self.visit_expr(&node.cond);
@@ -1822,6 +1854,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
             let mut scope = ContentLengthReaderFacts {
                 test_code: self.test_code,
                 bound_value_names: vec![value.clone()],
+                field_aliases: self.field_aliases.clone(),
                 ..ContentLengthReaderFacts::default()
             };
             scope.visit_block(&node.body);
@@ -1905,6 +1938,7 @@ impl ContentLengthReaderFacts {
     fn branch_takes_the_value(&self, block: &syn::Block) -> bool {
         let mut scope = ContentLengthReaderFacts {
             test_code: self.test_code,
+            field_aliases: self.field_aliases.clone(),
             ..ContentLengthReaderFacts::default()
         };
         scope.visit_block(block);
@@ -1949,18 +1983,21 @@ fn pair_binding_names(pat: &syn::Pat) -> Option<(String, String)> {
 /// The rule reads the comparison in a condition the other way round when
 /// the branch it guards skips the entry, and it can only say that about a
 /// condition that holds the comparison and nothing else.
-fn is_field_comparison(expr: &syn::Expr) -> bool {
+fn is_field_comparison(expr: &syn::Expr, aliases: &[String]) -> bool {
     match expr {
-        syn::Expr::Paren(paren) => is_field_comparison(&paren.expr),
+        syn::Expr::Paren(paren) => is_field_comparison(&paren.expr, aliases),
         syn::Expr::Binary(binary) => {
             matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
-                && (names_content_length_field(&binary.left)
-                    || names_content_length_field(&binary.right))
+                && (names_content_length_field_or_alias(&binary.left, aliases)
+                    || names_content_length_field_or_alias(&binary.right, aliases))
         }
         syn::Expr::MethodCall(call) => {
             call.method.to_string().starts_with("eq")
-                && (call.args.iter().any(names_content_length_field)
-                    || names_content_length_field(&call.receiver))
+                && (call
+                    .args
+                    .iter()
+                    .any(|argument| names_content_length_field_or_alias(argument, aliases))
+                    || names_content_length_field_or_alias(&call.receiver, aliases))
         }
         _ => false,
     }
@@ -2045,8 +2082,34 @@ fn names_content_length_field(expr: &syn::Expr) -> bool {
     }
 }
 
-/// The name an expression stands under.
+/// Whether an expression names the field, directly or through a binding
+/// the function made of the field's name.
 ///
+/// A site that binds the field's name to a name of its own and reads the
+/// field through that name reads the declaration, so the binding names
+/// the field as well.
+fn names_content_length_field_or_alias(expr: &syn::Expr, aliases: &[String]) -> bool {
+    names_content_length_field(expr) || alias_base_name(expr, aliases).is_some()
+}
+
+/// The name a binding of the field's name is used under.
+///
+/// A binding is a plain name the function bound the field's name to, so
+/// the name is the one the binding introduced. The binding is followed
+/// for the rest of the function, and a binding made in a block of its own
+/// is followed outside that block as well, so the gate errs towards
+/// seeing a read of the field.
+fn alias_base_name(expr: &syn::Expr, aliases: &[String]) -> Option<String> {
+    match expr {
+        syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+            let name = path.path.segments[0].ident.to_string();
+            aliases.contains(&name).then_some(name)
+        }
+        syn::Expr::Reference(reference) => alias_base_name(&reference.expr, aliases),
+        _ => None,
+    }
+}
+
 /// The name a header entry is held under is the name the entry's own
 /// expression stands under, so the name of `header.name` is `header` and
 /// the name of `header` is `header`.
@@ -6393,6 +6456,102 @@ fn declared_type(headers: &HeaderMap) -> Option<&HeaderValue> {
                 .unwrap()
                 .is_empty(),
             "another field's name is not the field"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_field_through_a_binding_of_its_name() {
+        // A site that binds the field's name to a name of its own and
+        // reads the field through the binding reads the declaration.
+        let by_binding = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<&HeaderValue> {
+    let name = CONTENT_LENGTH;
+    headers.get(name)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&by_binding.0, &by_binding.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A binding of the field's text names the field as well, so a
+        // site that finds the field's own entry under the binding and
+        // takes that entry's value reads the declaration.
+        let by_bound_text = (
+            "qpxd-cache/src/entry.rs".to_string(),
+            r#"
+fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
+    let field = "content-length";
+    let values = envelope
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(field))
+        .map(|(_, value)| value.as_str());
+    values.next().and_then(|value| value.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &by_bound_text.0,
+                &by_bound_text.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd-cache/src/entry.rs: the function stored_content_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A site that skips the field under the binding and takes another
+        // header's value decides about the field rather than reading it.
+        let skipping = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn other_length(headers: &[(&str, &str)]) -> Option<&str> {
+    let field = "content-length";
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case(field) {
+            continue;
+        }
+        return Some(value);
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&skipping.0, &skipping.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a site that skips the field under the binding and takes another header's value is not a reader"
+        );
+
+        // A binding of another field's name is not the field.
+        let other_field = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_type(headers: &HeaderMap) -> Option<&HeaderValue> {
+    let name = CONTENT_TYPE;
+    headers.get(name)
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other_field.0, &other_field.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a binding of another field's name is not the field"
         );
     }
 
