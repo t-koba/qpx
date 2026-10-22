@@ -81,7 +81,7 @@ use cache::cache_contract;
 use hop_via::hop_by_hop_and_via_contract;
 use http1::{
     http11_absolute_form_empty_options_uses_asterisk, http11_absolute_form_target_authority_wins,
-    http11_validation_cases,
+    http11_content_length_is_emitted_as_one_canonical_value, http11_validation_cases,
 };
 use http2::{http2_h2c_contract, http2_tls_alpn_contract};
 use http3::http3_reverse_terminate_smoke;
@@ -127,6 +127,7 @@ runtime:
         http11_absolute_form_target_authority_wins(forward_port).await?;
         // Empty-path absolute-form OPTIONS is forwarded as asterisk-form by the final proxy.
         http11_absolute_form_empty_options_uses_asterisk(forward_port).await?;
+        http11_content_length_is_emitted_as_one_canonical_value(forward_port).await?;
 
         // RFC 9110: hop-by-hop header stripping + Via, and RFC 9110 section 11.7 proxy creds not forwarded.
         hop_by_hop_and_via_contract(forward_port).await?;

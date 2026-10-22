@@ -75,7 +75,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 
 | RFC | Classification | Implemented contract | Evidence |
 |---|---|---|---|
-| 9110 | native | shared semantics, methods, status codes, fields, conditional requests, ranges, authentication framework | `qpx-http` protocol tests and `qpxd/tests/http_rfc_contract.rs` |
+| 9110 | native | shared semantics, methods, status codes, fields, conditional requests, ranges, authentication framework, and one canonical Content-Length field line at every writer | `qpx-http` protocol tests and `qpxd/tests/http_rfc_contract.rs` |
 | 9111 | native | cache keying, freshness, validation, invalidation, Vary, Age, and warning behavior | `qpxd-cache` unit/scenario tests and RFC cache contracts |
 | 9112 | native | strict HTTP/1.1 framing, connection lifecycle, trailers, Upgrade, CONNECT, absolute-form authority/target handling, and empty-path/asterisk-form OPTIONS normalization | H1 codec tests, target-form validation, smuggling regressions, configured-upstream/direct-origin E2E, and the Hyper H1 `max_header_size` helper (`qpx-http` `protocol::common`, fixture-derived allowance, unset preserves Hyper default) |
 | 9113 | transport-library-with-contract | pinned h2 transport with non-poisoning low-contention stream locks; HTTP/2 framing, stream lifecycle, extended CONNECT, limits, and forward/reverse/transparent paths | qpxd HTTP/2 codec lifecycle tests; HTTP/2 contract, E2E, and comparative performance suites |
@@ -252,7 +252,9 @@ All gates below must pass on one commit before a release is published:
 3. fuzz smoke and ASan lanes
 4. every checked-in configuration sample
 5. real AuthZEN/schema-mapped provider matrix using the same qpx binary
-6. HTTP/1.1, HTTP/2, and HTTP/3 RFC contract matrix
+6. HTTP/1.1, HTTP/2, and HTTP/3 RFC contract matrix, including the
+   Content-Length sender rule: one field line whose value is the resolved
+   decimal
 7. H3, WebSocket, CONNECT-UDP, CONNECT-IP, and WebTransport interop
 8. DAV litmus and CalDAV tester against a real qpxd listener and filesystem/redb
 9. memory, file-descriptor, queue, and p95 performance budgets

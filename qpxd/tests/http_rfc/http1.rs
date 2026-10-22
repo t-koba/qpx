@@ -120,6 +120,51 @@ pub(crate) async fn http11_absolute_form_target_authority_wins(forward_port: u16
     Ok(())
 }
 
+/// The one canonical Content-Length a writer emits (RFC 9110 section 8.6).
+///
+/// A request that carries an equal-member comma list is accepted, and the
+/// writer that forwards it emits one field line whose value is the
+/// resolved decimal, because the section's grammar is one decimal and the
+/// sender must not forward a value that does not match it.
+pub(crate) async fn http11_content_length_is_emitted_as_one_canonical_value(
+    forward_port: u16,
+) -> Result<()> {
+    for received in [
+        "Content-Length: 0, 0",
+        "Content-Length: 0\r\nContent-Length: 0",
+    ] {
+        let (backend_addr, captured_rx) = serve_http1_capture_once(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok".to_vec(),
+        )
+        .await?;
+        let proxy_addr: SocketAddr = format!("127.0.0.1:{forward_port}").parse()?;
+        let request = format!(
+            "GET http://{backend_addr}/canonical-length HTTP/1.1\r\nHost: {backend_addr}\r\n{received}\r\nConnection: close\r\n\r\n"
+        );
+        let (status, _, _) = send_http1_and_read_head(proxy_addr, request.as_bytes()).await?;
+        if status != 200 {
+            return Err(anyhow!(
+                "request with a comma list of lengths should be accepted, got status {status}"
+            ));
+        }
+
+        let captured = timeout(Duration::from_secs(5), captured_rx)
+            .await
+            .context("timed out waiting for the forwarded request at the origin")??;
+        let captured = String::from_utf8_lossy(&captured);
+        let length_lines: Vec<&str> = captured
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+            .collect();
+        if length_lines.len() != 1 || !length_lines[0].eq_ignore_ascii_case("content-length: 0") {
+            return Err(anyhow!(
+                "the forwarded request should carry one canonical content-length:\n{captured}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 pub(crate) async fn http11_absolute_form_empty_options_uses_asterisk(
     forward_port: u16,
 ) -> Result<()> {
