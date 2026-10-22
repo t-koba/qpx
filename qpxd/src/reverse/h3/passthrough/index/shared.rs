@@ -327,25 +327,13 @@ impl SharedSessionIndex {
         session: &PassthroughSession,
         packet: &[u8],
     ) -> bool {
-        if let Some(long) = parse_quic_long_header(packet) {
-            if long.scid_len > 0 && session.server_cid_len() != Some(long.scid_len) {
-                return true;
-            }
-            if session.client_cid_len().is_none() && long.dcid_len > 0 {
-                return true;
-            }
-            return [long.dcid, long.scid]
-                .into_iter()
-                .flatten()
-                .any(|cid| self.cid_owner(cid) != Some(session_id));
-        }
-        let Some(client_cid_len) = session.client_cid_len() else {
-            return false;
-        };
-        let Some(cid) = parse_quic_short_dcid(packet, client_cid_len) else {
-            return false;
-        };
-        self.cid_owner(cid) != Some(session_id)
+        crate::http3::quic_packet::upstream_packet_needs_cid_index_update(
+            packet,
+            session_id,
+            || session.server_cid_len(),
+            || session.client_cid_len(),
+            |cid| self.cid_owner(cid),
+        )
     }
 
     pub(in crate::reverse::h3::passthrough) fn cid_owner(

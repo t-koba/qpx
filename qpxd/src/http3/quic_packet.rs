@@ -133,6 +133,28 @@ pub(crate) fn observe_upstream_quic_packet(
     }
 }
 
+/// Checks whether an upstream packet requires this session's CID index to update.
+/// Lazy length reads preserve the index's existing order; CID ownership stays caller-owned.
+pub(crate) fn upstream_packet_needs_cid_index_update(
+    packet: &[u8],
+    session_id: u64,
+    mut server_cid_len: impl FnMut() -> Option<u8>,
+    mut client_cid_len: impl FnMut() -> Option<u8>,
+    mut cid_owner: impl FnMut(QuicConnectionId) -> Option<u64>,
+) -> bool {
+    if let Some(long) = parse_quic_long_header(packet) {
+        return (long.scid_len > 0 && server_cid_len() != Some(long.scid_len))
+            || (client_cid_len().is_none() && long.dcid_len > 0)
+            || [long.dcid, long.scid]
+                .into_iter()
+                .flatten()
+                .any(|cid| cid_owner(cid) != Some(session_id));
+    }
+    client_cid_len()
+        .and_then(|len| parse_quic_short_dcid(packet, len))
+        .is_some_and(|cid| cid_owner(cid) != Some(session_id))
+}
+
 pub(crate) fn is_quic_long_header(packet: &[u8]) -> bool {
     packet.first().is_some_and(|first| (first & 0x80) != 0)
 }
@@ -247,6 +269,73 @@ mod tests {
             observe_upstream_quic_packet(&packet, None).connection_ids,
             [None, None]
         );
+    }
+
+    #[test]
+    fn upstream_index_update_preserves_directional_reads_and_owner_checks() {
+        use std::cell::RefCell;
+
+        let packet = long_packet(0xc0, 1, 3, 2);
+        let reads = RefCell::new(Vec::new());
+        assert!(!upstream_packet_needs_cid_index_update(
+            &packet,
+            7,
+            || {
+                reads.borrow_mut().push("server");
+                Some(2)
+            },
+            || {
+                reads.borrow_mut().push("client");
+                Some(3)
+            },
+            |_| Some(7),
+        ));
+        assert_eq!(*reads.borrow(), ["server", "client"]);
+
+        assert!(upstream_packet_needs_cid_index_update(
+            &packet,
+            7,
+            || Some(1),
+            || panic!("client CID length is not read after server mismatch"),
+            |_| Some(7),
+        ));
+        assert!(upstream_packet_needs_cid_index_update(
+            &packet,
+            7,
+            || Some(2),
+            || None,
+            |_| Some(7),
+        ));
+        assert!(upstream_packet_needs_cid_index_update(
+            &packet,
+            7,
+            || Some(2),
+            || Some(3),
+            |_| Some(8),
+        ));
+
+        let short_packet = [0x40, 0x42, 0x24];
+        assert!(!upstream_packet_needs_cid_index_update(
+            &short_packet,
+            7,
+            || panic!("server CID length is not read for short headers"),
+            || Some(2),
+            |_| Some(7),
+        ));
+        assert!(upstream_packet_needs_cid_index_update(
+            &short_packet,
+            7,
+            || panic!("server CID length is not read for short headers"),
+            || Some(2),
+            |_| Some(8),
+        ));
+        assert!(!upstream_packet_needs_cid_index_update(
+            &short_packet,
+            7,
+            || panic!("server CID length is not read for short headers"),
+            || None,
+            |_| Some(8),
+        ));
     }
 
     #[test]
