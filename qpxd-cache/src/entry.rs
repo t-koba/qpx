@@ -322,15 +322,12 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
 /// The Content-Length that the stored response declares.
 ///
 /// The stored headers are a list of name-value pairs rather than a header
-/// map, so the field's values go to the owner's value-level entry point: the
-/// member grammar and the conflict rule stay in one place.
+/// map, so the pairs go to the owner's named-value entry point, which finds
+/// the field's own values: the member grammar and the conflict rule stay in
+/// one place, and this site does not select the field's values itself.
 fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
-    let values = envelope
-        .headers
-        .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
-        .map(|(_, value)| value.as_str());
-    qpx_core::http_content_length::declared_content_length_in_values(values)
+    let named = envelope.headers.iter().map(|(name, value)| (name, value));
+    qpx_core::http_content_length::declared_content_length_in_named_values(named)
         .ok()
         .flatten()
 }

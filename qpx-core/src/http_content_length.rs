@@ -159,12 +159,13 @@ pub enum ContentLengthError {
 /// has the field dropped rather than the response refused.
 ///
 /// The cache reads the declaration through the owner as well:
-/// `qpxd-cache/src/entry.rs` hands the stored response's Content-Length
-/// values to the owner's value-level entry point, and the test helper in
-/// `qpxd-cache/src/util.rs` hands the header map to it. A leading plus sign
-/// is refused there too, so a stored response that declares its length that
-/// way declares no length: the cache falls back to the stored body's length,
-/// and the helper reports no cacheable length.
+/// `qpxd-cache/src/entry.rs` hands the stored response's named header
+/// values to the owner's named-value entry point, which finds the field's
+/// own values, and the test helper in `qpxd-cache/src/util.rs` hands the
+/// header map to it. A leading plus sign is refused there too, so a stored
+/// response that declares its length that way declares no length: the cache
+/// falls back to the stored body's length, and the helper reports no
+/// cacheable length.
 ///
 /// The cache backend reads the declaration through the owner as well:
 /// `qpxd-cache/src/backend_http.rs` hands the response's header map to it,
