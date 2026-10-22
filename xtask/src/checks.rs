@@ -1305,6 +1305,13 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// its own holds that name as well, so the copy names the entry too,
 /// and a site that copies the field's name holds the field's name, so
 /// the copy names the field.
+/// The gate reads a comparison that stands in a condition of its own as
+/// deciding about the field when the branch it guards skips the entry:
+/// the site moved on, so the comparison did not find the entry. A
+/// condition that holds more than the comparison cannot be read that
+/// way, because the gate cannot say which part of it skips the entry,
+/// so a comparison inside such a condition still finds the field's own
+/// entry: the code after the branch may hold it.
 /// What the gate cannot see is a site that finds the field's entry by a
 /// name it builds at runtime, a site whose helper that found the entry
 /// stands in another file, and a site that takes the value under a
@@ -1514,10 +1521,16 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// helper of the same file that found it hands it to its caller, which
 /// binds the result, so the value the site takes under any of those
 /// names is the field's value. A comparison that decides about the
-/// field instead does not select it: a comparison that
-/// is not equal, and a comparison whose branch skips the entry, decide
-/// about the field, so a site that skips the field and takes another
-/// header's value is not a reader.
+/// field instead does not select it: a comparison whose branch skips
+/// the entry decides about the field, so a site that skips the field
+/// and takes another header's value is not a reader. A comparison that
+/// is not equal reads the other way round when the branch skips the
+/// entry, because the entry that reaches the code after the branch is
+/// the field's own. A comparison that stands in a condition that holds
+/// more than the comparison is not read as deciding about the field at
+/// all: the rule cannot say which part of the condition skips the
+/// entry, so the comparison finds the field's own entry, and the code
+/// after the branch may hold it.
 ///
 /// The rule follows a binding of a header entry's name as well: a site
 /// that binds the entry's name to a name of its own and compares that
@@ -1536,10 +1549,8 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 ///
 /// What the rule cannot see is a site that finds the field's entry by a
 /// name it builds at runtime, a site whose helper that found the entry
-/// stands in another file, a site that takes the value under a member
-/// of another name, and a comparison inside a condition that holds
-/// more than the comparison, whose branch the rule cannot read as
-/// skipping the entry.
+/// stands in another file, and a site that takes the value under a
+/// member of another name.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -1761,6 +1772,14 @@ struct ContentLengthReaderFacts {
     /// reads the other way round: an equal comparison excludes the entry
     /// and a comparison that is not equal selects it.
     skipping_condition: bool,
+    /// Whether the current condition holds more than the comparison.
+    ///
+    /// The rule reads a branch as skipping the entry only when the
+    /// condition holds nothing but the comparison, so a comparison that
+    /// stands inside a condition that holds more cannot be read as
+    /// deciding about the field: the code after the branch may still
+    /// hold the field's own entry, so the comparison finds it.
+    compound_condition: bool,
     /// The function turns text into a number.
     parses_integer: bool,
     /// The function calls the owner.
@@ -2053,14 +2072,19 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // A comparison that guards a branch that skips the entry decides
         // about the field rather than finding its entry, so the
         // comparison in the condition reads the other way round. A
-        // condition that holds more than the comparison is left alone:
-        // the rule cannot say which part of it skips the entry.
-        let skipping = is_field_comparison(&node.cond, &self.field_aliases)
-            && self.branch_skips_the_entry(&node.then_branch);
+        // condition that holds more than the comparison cannot be read
+        // that way: the rule cannot say which part of it skips the
+        // entry, so the comparison in it still finds the field's own
+        // entry, and the code after the branch may hold it.
+        let comparison_only = is_field_comparison(&node.cond, &self.field_aliases);
+        let skipping = comparison_only && self.branch_skips_the_entry(&node.then_branch);
         let saved = self.skipping_condition;
+        let saved_compound = self.compound_condition;
         self.skipping_condition = saved || skipping;
+        self.compound_condition = !comparison_only;
         self.visit_expr(&node.cond);
         self.skipping_condition = saved;
+        self.compound_condition = saved_compound;
         self.visit_block(&node.then_branch);
         if let Some((_, else_branch)) = &node.else_branch {
             self.visit_expr(else_branch);
@@ -2202,7 +2226,7 @@ impl ContentLengthReaderFacts {
     /// way round: an equal comparison excludes the entry, and a
     /// comparison that is not equal selects it.
     fn record_selection(&mut self, is_equal: bool, base: Option<String>) {
-        if is_equal != self.skipping_condition {
+        if self.compound_condition || is_equal != self.skipping_condition {
             self.selects_field = true;
             if let Some(base) = base {
                 self.selected_bases.push(self.resolve_entry_alias(&base));
@@ -9055,6 +9079,153 @@ fn other_value(headers: &[Header<'_>]) -> Option<&[u8]> {
                 .unwrap()
                 .is_empty(),
             "a site that skips the field's entry does not read the declaration"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_comparison_inside_a_compound_condition() {
+        // A condition that holds more than the comparison cannot be read
+        // as skipping the entry, so the comparison in it still finds the
+        // field's own entry: the code after the branch may hold it.
+        let and_condition = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<String> {
+    for (name, value) in headers.iter() {
+        if name != CONTENT_LENGTH && !value.is_empty() {
+            continue;
+        }
+        return Some(value.to_str().ok()?.to_string());
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &and_condition.0,
+                &and_condition.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the condition holds the comparison with an
+        // or.
+        let or_condition = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<String> {
+    for (name, value) in headers.iter() {
+        if name != CONTENT_LENGTH || value.is_empty() {
+            continue;
+        }
+        return Some(value.to_str().ok()?.to_string());
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &or_condition.0,
+                &or_condition.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the comparison is an equal one inside a
+        // condition that holds more.
+        let equal_condition = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<String> {
+    for (name, value) in headers.iter() {
+        if name == CONTENT_LENGTH && !value.is_empty() {
+            continue;
+        }
+        return Some(value.to_str().ok()?.to_string());
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &equal_condition.0,
+                &equal_condition.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A condition that holds another field's name does not find the
+        // field's own entry.
+        let other_field = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn other_value(headers: &HeaderMap) -> Option<String> {
+    for (name, value) in headers.iter() {
+        if name != CONTENT_TYPE && !value.is_empty() {
+            continue;
+        }
+        return Some(value.to_str().ok()?.to_string());
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other_field.0, &other_field.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a condition that holds another field's name does not find the field's own entry"
+        );
+
+        // The value has to come from the entry the comparison found: a
+        // site that compares the field's name inside a condition that
+        // holds more and takes another entry's value does not read the
+        // declaration.
+        let another_entry = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn other_value(headers: &HeaderMap, other: &HeaderMap) -> Option<String> {
+    for header in headers.iter() {
+        if header.name != CONTENT_LENGTH && !header.name.is_empty() {
+            continue;
+        }
+    }
+    other
+        .get("x-other")
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.to_string())
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &another_entry.0,
+                &another_entry.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a site that takes another entry's value does not read the declaration"
         );
     }
 }

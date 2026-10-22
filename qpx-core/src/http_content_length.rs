@@ -232,10 +232,16 @@ pub enum ContentLengthError {
 /// value when the site selects the field's own entry, and a comparison
 /// of a header's name with the field's name is what selects it. A
 /// comparison that decides about the field instead does not select it: a
-/// comparison that is not equal, and a comparison whose branch skips the
-/// entry, decide about the field, so a site that skips the field and
-/// takes another header's value is not a reader. The value has to come
-/// from the entry the comparison found: the gate reads the `value`
+/// comparison whose branch skips the entry decides about the field, so a
+/// site that skips the field and takes another header's value is not a
+/// reader. A comparison that is not equal reads the other way round when
+/// the branch skips the entry, because the entry that reaches the code
+/// after the branch is the field's own. A comparison that stands in a
+/// condition that holds more than the comparison is not read as deciding
+/// about the field at all: the gate cannot say which part of the
+/// condition skips the entry, so the comparison finds the field's own
+/// entry, and the code after the branch may hold it. The value has to
+/// come from the entry the comparison found: the gate reads the `value`
 /// member only when the site takes it under the name it compared or
 /// under a name the entry travels to, so a site that compares the
 /// field's name and takes another entry's value is not a reader
