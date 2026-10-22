@@ -201,6 +201,17 @@ pub enum ContentLengthError {
 /// reads the declaration inline today: the response compression test,
 /// the last one, reads it through the owner as well.
 ///
+/// The gate asks a second question that does not depend on the name of a
+/// helper: in the shipped code, does any site read the field's value? The
+/// owner reads it and no other shipped site does, so a read of the value
+/// is a violation on its own. That is what catches the readers the naming
+/// rule cannot see: a site that reads the value and hands it to another
+/// function, and a site whose helper carries a name the workspace has
+/// never used. Test code is not part of that question, because a test
+/// observes the value to assert on what the proxy put on the wire rather
+/// than to decide what the proxy does; a test that reads the value and
+/// turns it into a number is still inside the gate.
+///
 /// The test helpers read the declaration through the owner as well:
 /// `qpxd/src/test_util.rs` and `qpxd/tests/http_rfc/mod.rs` read a raw
 /// head rather than a header map, so they hand the head's lines to the

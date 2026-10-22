@@ -1258,6 +1258,16 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// value and turns text into a number. Such a body must reach the owner
 /// alone: a function that calls the owner and still reads the field on its
 /// own is a violation as well.
+///
+/// The gate also asks a question that does not depend on the name of a
+/// helper at all: in the shipped code, does any function read the field's
+/// value? The owner reads it, and no other shipped site does, so a read of
+/// the value is a violation on its own. That catches the readers the
+/// naming rule cannot see: a site that reads the value and hands it to
+/// another function, and a site whose helper has a name the workspace has
+/// never used. Test code is not part of that rule: a test observes the
+/// value to assert on what the proxy put on the wire, and it does not
+/// decide what the proxy does.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1285,9 +1295,13 @@ fn check_content_length_single_owner(root: &Path) -> Result<()> {
             }
         }
     }
+    let listed = content_length_listed_sites(&owner);
     let mut violations = content_length_single_owner_violations(&owner, &files);
     for (path, content) in &files {
         violations.extend(content_length_inline_reader_violations(path, content)?);
+        violations.extend(content_length_production_value_reader_violations(
+            path, content, &listed,
+        )?);
     }
     if !violations.is_empty() {
         bail!(
@@ -1384,17 +1398,18 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// reads the declaration itself, and must reach the owner alone.
 ///
 /// The rule is what it says and no more. It sees a read of the field
-/// through `get`, `get_all` and `contains_key`, and it sees a comparison
-/// of a header name with the field's name. It sees a parse whose type is
-/// written and a parse whose type is inferred, because the field's value
-/// is a length either way. It does not see a reader that lives outside a
-/// function body, and it reads a function's body as one whole rather than
-/// tying a parse to the read it belongs to.
+/// through `get`, `get_all` and `contains_key`, a read of the field
+/// through an index, and it sees a comparison of a header name with the
+/// field's name. It sees a parse whose type is written and a parse whose
+/// type is inferred, because the field's value is a length either way. It
+/// does not see a reader that lives outside a function body, and it reads
+/// a function's body as one whole rather than tying a parse to the read
+/// it belongs to.
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
     let mut violations = Vec::new();
-    for (name, facts) in content_length_reader_facts(&syntax) {
+    for (name, facts) in content_length_reader_facts(path, &syntax) {
         if !facts.reads_field || !facts.parses_integer {
             continue;
         }
@@ -1410,10 +1425,62 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
     Ok(violations)
 }
 
+/// The violations of a shipped site that reads the declared Content-Length's
+/// value.
+///
+/// The field's value is read in one place: the owner. A site that reads the
+/// value itself interprets the declaration on its own, whether it turns the
+/// value into a number in the same body or hands the value to another
+/// function that does, so the rule sees the read and not the parse that may
+/// follow it. A read of the value is therefore a violation on its own, and
+/// a site that reads the value and calls the owner as well is a violation
+/// too, because the owner is the only reader.
+///
+/// The rule covers the shipped code. Test code observes the field's value to
+/// assert on what the proxy put on the wire, and it does not decide what the
+/// proxy does, so a test that observes the value is not a violation here; a
+/// test that interprets the declaration is still a violation, because the
+/// inline rule sees a body that reads the value and turns it into a number.
+///
+/// The owner names the sites that read the declaration themselves, so a site
+/// the owner names is not a violation.
+fn content_length_production_value_reader_violations(
+    path: &str,
+    content: &str,
+    listed: &[String],
+) -> Result<Vec<String>> {
+    if listed.iter().any(|site| site == path) {
+        return Ok(Vec::new());
+    }
+    let syntax = syn::parse_file(content)
+        .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
+    let mut violations = Vec::new();
+    for (name, facts) in content_length_reader_facts(path, &syntax) {
+        if !facts.reads_value || facts.test_code {
+            continue;
+        }
+        let detail = if facts.calls_owner {
+            "as well as calling the owner; it must read the declaration through the owner alone"
+        } else {
+            "itself; it must call the owner"
+        };
+        violations.push(format!(
+            "{path}: the function {name} reads the declared Content-Length's value {detail}"
+        ));
+    }
+    Ok(violations)
+}
+
 /// The functions of a file and what each of them says about the declared
 /// Content-Length.
-fn content_length_reader_facts(syntax: &syn::File) -> Vec<(String, ContentLengthReaderFacts)> {
-    let mut collector = ContentLengthFunctionCollector::default();
+fn content_length_reader_facts(
+    path: &str,
+    syntax: &syn::File,
+) -> Vec<(String, ContentLengthReaderFacts)> {
+    let mut collector = ContentLengthFunctionCollector {
+        test_file: is_test_file(Path::new(path)),
+        ..ContentLengthFunctionCollector::default()
+    };
     collector.visit_file(syntax);
     collector.facts
 }
@@ -1423,10 +1490,21 @@ fn content_length_reader_facts(syntax: &syn::File) -> Vec<(String, ContentLength
 struct ContentLengthReaderFacts {
     /// The function reads the field's value.
     reads_field: bool,
+    /// The function reads the field's value through a header map.
+    ///
+    /// This is the read itself, without the parse that may follow it: a
+    /// site that reads the value and hands it to another function reads
+    /// the declaration on its own just as a site that parses it does.
+    reads_value: bool,
     /// The function turns text into a number.
     parses_integer: bool,
     /// The function calls the owner.
     calls_owner: bool,
+    /// The function is test code.
+    ///
+    /// Test code observes the field's value to assert on what the proxy
+    /// put on the wire; it does not decide what the proxy does.
+    test_code: bool,
 }
 
 /// The collector of the functions of a file.
@@ -1436,6 +1514,10 @@ struct ContentLengthReaderFacts {
 #[derive(Default)]
 struct ContentLengthFunctionCollector {
     facts: Vec<(String, ContentLengthReaderFacts)>,
+    /// How many `#[cfg(test)]` modules the collector is inside.
+    test_depth: usize,
+    /// Whether the file itself holds test code.
+    test_file: bool,
 }
 
 impl Visit<'_> for ContentLengthFunctionCollector {
@@ -1455,12 +1537,27 @@ impl Visit<'_> for ContentLengthFunctionCollector {
         }
         syn::visit::visit_trait_item_fn(self, node);
     }
+
+    fn visit_item_mod(&mut self, node: &syn::ItemMod) {
+        // A module marked `#[cfg(test)]` holds test code, so the
+        // functions in it are test code as well.
+        if has_cfg_test(&node.attrs) {
+            self.test_depth += 1;
+            syn::visit::visit_item_mod(self, node);
+            self.test_depth -= 1;
+            return;
+        }
+        syn::visit::visit_item_mod(self, node);
+    }
 }
 
 impl ContentLengthFunctionCollector {
     /// The facts of one function, taken from its body.
     fn record(&mut self, name: String, block: &syn::Block) {
-        let mut facts = ContentLengthReaderFacts::default();
+        let mut facts = ContentLengthReaderFacts {
+            test_code: self.test_file || self.test_depth > 0,
+            ..ContentLengthReaderFacts::default()
+        };
         facts.visit_block(block);
         self.facts.push((name, facts));
     }
@@ -1474,6 +1571,12 @@ impl Visit<'_> for ContentLengthReaderFacts {
             && names_field
         {
             self.reads_field = true;
+        }
+        // A read of the field's value through the header map is the read
+        // itself: whether the value is turned into a number here or
+        // handed to another function, the site reads the declaration.
+        if CONTENT_LENGTH_READ_METHODS.contains(&method.as_str()) && names_field {
+            self.reads_value = true;
         }
         if method == "parse" {
             match &node.turbofish {
@@ -1515,6 +1618,15 @@ impl Visit<'_> for ContentLengthReaderFacts {
             }
         }
         syn::visit::visit_expr_call(self, node);
+    }
+
+    fn visit_expr_index(&mut self, node: &syn::ExprIndex) {
+        // An indexed read of the field's value is a read of it as well.
+        if names_content_length_field(&node.index) {
+            self.reads_field = true;
+            self.reads_value = true;
+        }
+        syn::visit::visit_expr_index(self, node);
     }
 
     fn visit_expr_binary(&mut self, node: &syn::ExprBinary) {
@@ -5617,6 +5729,147 @@ fn set_length(headers: &mut HeaderMap, body: &[u8]) {
                 .unwrap()
                 .is_empty(),
             "a function that writes the field is not a reader"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_shipped_site_that_reads_the_field_value() {
+        // A site that reads the field's value and hands it to another
+        // function reads the declaration itself, and the naming rule
+        // cannot see it: no body both reads the value and turns it into
+        // a number.
+        let split = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    field_text(headers).and_then(|value| value.parse().ok())
+}
+
+fn field_text(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_inline_reader_violations(&split.0, &split.1)
+                .unwrap()
+                .is_empty(),
+            "the naming rule cannot see a reader that splits the read and the parse"
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&split.0, &split.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function field_text reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A site that calls the owner and reads the value as well is a
+        // violation too: the owner is the only reader.
+        let half_folded = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn observed_size(headers: &HeaderMap) -> Option<u64> {
+    let declared = qpx_core::http_content_length::declared_content_length(headers).ok().flatten();
+    let own = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok());
+    declared.or(own.and_then(|value| value.parse().ok()))
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&half_folded.0, &half_folded.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function observed_size reads the declared Content-Length's value as well as calling the owner; it must read the declaration through the owner alone"
+            ]
+        );
+
+        // An indexed read of the field's value is a read of it as well.
+        let indexed = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers[CONTENT_LENGTH].to_str().ok()?.parse().ok()
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&indexed.0, &indexed.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&indexed.0, &indexed.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // Test code observes the field's value to assert on what the
+        // proxy put on the wire, so it is not a violation.
+        let in_test_file = (
+            "qpxd/src/http/body/size/tests.rs".to_string(),
+            split.1.clone(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &in_test_file.0,
+                &in_test_file.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "test code may observe the field's value"
+        );
+
+        // A test module inside a shipped file is test code as well.
+        let in_test_module = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn observed_size(headers: &HeaderMap) -> Option<u64> {
+    qpx_core::http_content_length::declared_content_length(headers).ok().flatten()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn declared_length(headers: &HeaderMap) -> Option<u64> {
+        headers
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.parse().ok())
+    }
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &in_test_module.0,
+                &in_test_module.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a test module inside a shipped file is test code"
+        );
+
+        // A site the owner names is not a violation: the owner says what
+        // that site does differently.
+        let listed = vec!["qpxd/src/http/body/size/io.rs".to_string()];
+        assert!(
+            content_length_production_value_reader_violations(&split.0, &split.1, &listed)
+                .unwrap()
+                .is_empty(),
+            "a site the owner names may read the declaration"
         );
     }
 
