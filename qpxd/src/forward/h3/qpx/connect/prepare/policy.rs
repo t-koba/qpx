@@ -1,13 +1,13 @@
 use super::{
     ConnectPolicyContext, EvaluatedConnectPolicy, PrepareQpxConnectInput, PreparedQpxConnect,
 };
+use crate::forward::h3::connect::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
-use crate::http::dispatch::{DispatchConnectRuleContextInput, build_dispatch_connect_rule_context};
 use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{
-    blocked_response as blocked, forbidden_response as forbidden, http_version_label,
+    blocked_response as blocked, forbidden_response as forbidden,
     too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
@@ -36,14 +36,12 @@ pub(super) async fn evaluate_connect_policy(
     let state = handler.runtime.state();
     #[cfg(feature = "auth-basic")]
     let proxy_name = state.plan.identity.proxy_name.as_ref();
-    let ctx = build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
+    let ctx = build_h3_connect_rule_context(H3ConnectRuleContextInput {
         remote_ip: conn.remote_addr.ip(),
         port: context.port,
         host: context.host.as_str(),
         path: context.audit_path.as_deref(),
         authority: context.req_authority.as_str(),
-        http_version: http_version_label(http::Version::HTTP_3),
-        alpn: Some("h3"),
         destination: &context.destination,
         headers: &context.sanitized_headers,
         identity: &context.identity,
