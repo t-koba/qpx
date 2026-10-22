@@ -312,10 +312,30 @@ pub(super) fn request_is_retryable(
     method: &http::Method,
     body_threshold_bytes: usize,
 ) -> bool {
-    req.version() == http::Version::HTTP_11
-        && is_retryable_method(method)
-        && (!request_may_have_body(req)
-            || content_length(req).is_some_and(|len| len <= body_threshold_bytes as u64))
+    if req.version() != http::Version::HTTP_11 || !is_retryable_method(method) {
+        return false;
+    }
+    if !http_body::Body::is_end_stream(req.body()) {
+        // A body that has not ended may carry anything, and the length it
+        // declares is the one the threshold applies to.
+        return content_length(req).is_some_and(|len| len <= body_threshold_bytes as u64);
+    }
+    if req.headers().contains_key(TRANSFER_ENCODING) {
+        // A chunked body has no declared length, so the threshold cannot be
+        // applied to it and the request is not retried.
+        return false;
+    }
+    // The declaration answers both questions this decision asks - whether
+    // the request may carry a body, and whether that body is within the
+    // threshold - so it is read once and both answers come from that read.
+    let declared = qpx_core::http_content_length::declared_content_length(req.headers());
+    if !declaration_allows_a_body(declared) {
+        return true;
+    }
+    match declared {
+        Ok(Some(length)) => length <= body_threshold_bytes as u64,
+        Ok(None) | Err(_) => false,
+    }
 }
 
 fn is_retryable_method(method: &http::Method) -> bool {
@@ -323,17 +343,25 @@ fn is_retryable_method(method: &http::Method) -> bool {
 }
 
 pub(super) fn request_may_have_body(req: &Request<Body>) -> bool {
-    if !http_body::Body::is_end_stream(req.body()) {
+    if !http_body::Body::is_end_stream(req.body()) || req.headers().contains_key(TRANSFER_ENCODING)
+    {
         return true;
     }
-    if req.headers().contains_key(TRANSFER_ENCODING) {
-        return true;
-    }
-    match qpx_core::http_content_length::declared_content_length(req.headers()) {
+    declaration_allows_a_body(qpx_core::http_content_length::declared_content_length(
+        req.headers(),
+    ))
+}
+
+/// Whether the declaration says the request may carry a body.
+///
+/// A declaration the grammar does not have names no length, so the request
+/// is treated as one that may carry a body.
+fn declaration_allows_a_body(
+    declared: Result<Option<u64>, qpx_core::http_content_length::ContentLengthError>,
+) -> bool {
+    match declared {
         Ok(Some(length)) => length > 0,
         Ok(None) => false,
-        // A declaration the grammar does not have names no length, so the
-        // request is treated as one that may carry a body.
         Err(_) => true,
     }
 }
@@ -488,6 +516,31 @@ mod tests {
             .expect("request");
         assert!(!request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(request_may_have_body(&req));
+    }
+
+    #[test]
+    fn a_chunked_request_is_not_retried() {
+        let req = Request::builder()
+            .method(http::Method::PUT)
+            .uri("http://example.test/upload")
+            .header(TRANSFER_ENCODING, "chunked")
+            .body(Body::from("0123456789abcdef"))
+            .expect("request");
+        assert!(!request_is_retryable(&req, &http::Method::PUT, 16));
+        assert!(request_may_have_body(&req));
+    }
+
+    #[test]
+    fn a_live_body_is_retried_within_the_threshold() {
+        let (_sender, body) = Body::channel();
+        let req = Request::builder()
+            .method(http::Method::PUT)
+            .uri("http://example.test/upload")
+            .header(CONTENT_LENGTH, "16")
+            .body(body)
+            .expect("request");
+        assert!(request_is_retryable(&req, &http::Method::PUT, 16));
+        assert!(!request_is_retryable(&req, &http::Method::PUT, 15));
     }
 
     #[test]
