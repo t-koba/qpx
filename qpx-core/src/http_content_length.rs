@@ -462,9 +462,9 @@ mod tests {
 
     #[test]
     fn declared_content_length_in_named_values_reports_a_value_that_is_not_text_first() {
-        // The values are read before the members are merged, so a value
-        // that is not text is reported before a conflict among the values
-        // that are text.
+        // A value that cannot be read is the error even when an earlier
+        // value names two different lengths: the value that is not text is
+        // refused before the conflict is reported.
         assert_eq!(
             declared_content_length_in_named_values([
                 (&b"Content-Length"[..], &b"5, 6"[..]),
@@ -475,17 +475,30 @@ mod tests {
     }
 
     #[test]
-    fn declared_content_length_in_named_values_reports_a_non_text_value_before_a_conflict() {
-        // The values are read as text before the members are merged, so a
-        // value that cannot be read is the error even when an earlier
-        // value names two different lengths.
-        assert_eq!(
-            declared_content_length_in_named_values([
-                (&b"Content-Length"[..], &b"5, 6"[..]),
-                (&b"content-length"[..], &[0xff][..]),
-            ]),
-            Err(ContentLengthError::InvalidHeader)
-        );
+    fn the_entry_points_report_the_same_error_where_they_can_both_report_one() {
+        // The record says the two entry points report the same error
+        // wherever both of them can report one, so the same field is read
+        // through each of them and the answers are compared.
+        for values in [
+            &["5"][..],
+            &["5, 5"][..],
+            &["5, 6"][..],
+            &["x"][..],
+            &["x", "5, 6"][..],
+            &["5, 6", "x"][..],
+            &["+5"][..],
+        ] {
+            let mut headers = HeaderMap::new();
+            let mut named = Vec::new();
+            for value in values.iter().copied() {
+                headers.append(CONTENT_LENGTH, HeaderValue::from_static(value));
+                named.push((&b"content-length"[..], value.as_bytes()));
+            }
+            let by_value = declared_content_length_in_values(values.iter().copied());
+            let by_name = declared_content_length_in_named_values(named.clone());
+            assert_eq!(by_name, by_value, "{values:?}");
+            assert_eq!(declared_content_length(&headers), by_name, "{values:?}");
+        }
     }
 
     #[test]
