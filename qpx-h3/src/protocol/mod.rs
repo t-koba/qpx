@@ -1,6 +1,8 @@
 use crate::H3Result as Result;
 use anyhow::anyhow;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
+use tokio::time::timeout;
 
 mod control;
 mod settings;
@@ -17,6 +19,63 @@ pub use control::{PriorityUpdates, StreamPriority};
 #[cfg(test)]
 pub(crate) use settings::decode_settings_frame;
 pub(crate) use settings::{PeerSettings, decode_settings_frame_from_reader};
+
+/// Opens the three HTTP/3 critical unidirectional streams and sends SETTINGS.
+pub(crate) async fn open_critical_streams(
+    connection: &quinn::Connection,
+    timeout_dur: Duration,
+    settings_payload: &[u8],
+) -> Result<(quinn::SendStream, quinn::SendStream, quinn::SendStream)> {
+    let mut control = timeout(timeout_dur, connection.open_uni())
+        .await
+        .map_err(|_| anyhow!("HTTP/3 control stream open timed out"))?
+        .map_err(anyhow::Error::from)?;
+    timeout(timeout_dur, write_varint(&mut control, STREAM_CONTROL))
+        .await
+        .map_err(|_| anyhow!("HTTP/3 control stream type write timed out"))??;
+    timeout(
+        timeout_dur,
+        write_frame(&mut control, FRAME_SETTINGS, settings_payload),
+    )
+    .await
+    .map_err(|_| anyhow!("HTTP/3 SETTINGS frame write timed out"))??;
+    timeout(timeout_dur, control.flush())
+        .await
+        .map_err(|_| anyhow!("HTTP/3 control stream flush timed out"))?
+        .map_err(anyhow::Error::from)?;
+
+    let mut encoder = timeout(timeout_dur, connection.open_uni())
+        .await
+        .map_err(|_| anyhow!("QPACK encoder stream open timed out"))?
+        .map_err(anyhow::Error::from)?;
+    timeout(
+        timeout_dur,
+        write_varint(&mut encoder, STREAM_QPACK_ENCODER),
+    )
+    .await
+    .map_err(|_| anyhow!("QPACK encoder stream type write timed out"))??;
+    timeout(timeout_dur, encoder.flush())
+        .await
+        .map_err(|_| anyhow!("QPACK encoder stream flush timed out"))?
+        .map_err(anyhow::Error::from)?;
+
+    let mut decoder = timeout(timeout_dur, connection.open_uni())
+        .await
+        .map_err(|_| anyhow!("QPACK decoder stream open timed out"))?
+        .map_err(anyhow::Error::from)?;
+    timeout(
+        timeout_dur,
+        write_varint(&mut decoder, STREAM_QPACK_DECODER),
+    )
+    .await
+    .map_err(|_| anyhow!("QPACK decoder stream type write timed out"))??;
+    timeout(timeout_dur, decoder.flush())
+        .await
+        .map_err(|_| anyhow!("QPACK decoder stream flush timed out"))?
+        .map_err(anyhow::Error::from)?;
+
+    Ok((control, encoder, decoder))
+}
 
 pub(crate) const FRAME_DATA: u64 = 0x0;
 pub(crate) const FRAME_HEADERS: u64 = 0x1;

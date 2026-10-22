@@ -6,14 +6,13 @@ use crate::protocol::{
     H3_STREAM_CREATION_ERROR, PeerControlState, PeerSettings, STREAM_CONTROL, STREAM_PUSH,
     STREAM_QPACK_DECODER, STREAM_QPACK_ENCODER, STREAM_WEBTRANSPORT_BIDI, STREAM_WEBTRANSPORT_UNI,
     decode_settings_frame_from_reader, discard_frame_payload, read_frame_header,
-    read_frame_header_after_idle, read_varint, write_frame, write_varint,
+    read_frame_header_after_idle, read_varint,
 };
 use crate::qpack::QpackConnection;
 use crate::server::{Protocol, Settings};
 use crate::transport::{BidiStream, RequestStream, UniRecvStream};
 use anyhow::anyhow;
 use std::sync::Arc;
-use tokio::io::AsyncWriteExt;
 use tokio::sync::{Semaphore, mpsc};
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, timeout};
@@ -95,57 +94,8 @@ pub(super) async fn open_critical_streams(
     connection: &quinn::Connection,
     settings: &Settings,
 ) -> Result<(quinn::SendStream, quinn::SendStream, quinn::SendStream)> {
-    let timeout_dur = settings.read_timeout;
-    let mut control = timeout(timeout_dur, connection.open_uni())
-        .await
-        .map_err(|_| anyhow!("HTTP/3 control stream open timed out"))?
-        .map_err(anyhow::Error::from)?;
-    timeout(timeout_dur, write_varint(&mut control, STREAM_CONTROL))
-        .await
-        .map_err(|_| anyhow!("HTTP/3 control stream type write timed out"))??;
     let payload = crate::server::encode_settings(settings);
-    timeout(
-        timeout_dur,
-        write_frame(&mut control, FRAME_SETTINGS, &payload),
-    )
-    .await
-    .map_err(|_| anyhow!("HTTP/3 SETTINGS frame write timed out"))??;
-    timeout(timeout_dur, control.flush())
-        .await
-        .map_err(|_| anyhow!("HTTP/3 control stream flush timed out"))?
-        .map_err(anyhow::Error::from)?;
-
-    let mut encoder = timeout(timeout_dur, connection.open_uni())
-        .await
-        .map_err(|_| anyhow!("QPACK encoder stream open timed out"))?
-        .map_err(anyhow::Error::from)?;
-    timeout(
-        timeout_dur,
-        write_varint(&mut encoder, STREAM_QPACK_ENCODER),
-    )
-    .await
-    .map_err(|_| anyhow!("QPACK encoder stream type write timed out"))??;
-    timeout(timeout_dur, encoder.flush())
-        .await
-        .map_err(|_| anyhow!("QPACK encoder stream flush timed out"))?
-        .map_err(anyhow::Error::from)?;
-
-    let mut decoder = timeout(timeout_dur, connection.open_uni())
-        .await
-        .map_err(|_| anyhow!("QPACK decoder stream open timed out"))?
-        .map_err(anyhow::Error::from)?;
-    timeout(
-        timeout_dur,
-        write_varint(&mut decoder, STREAM_QPACK_DECODER),
-    )
-    .await
-    .map_err(|_| anyhow!("QPACK decoder stream type write timed out"))??;
-    timeout(timeout_dur, decoder.flush())
-        .await
-        .map_err(|_| anyhow!("QPACK decoder stream flush timed out"))?
-        .map_err(anyhow::Error::from)?;
-
-    Ok((control, encoder, decoder))
+    crate::protocol::open_critical_streams(connection, settings.read_timeout, &payload).await
 }
 
 pub(super) async fn recv_response_with_interim(
