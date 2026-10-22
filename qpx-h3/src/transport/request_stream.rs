@@ -7,11 +7,10 @@ use crate::qpack::QpackConnection;
 use anyhow::anyhow;
 use bytes::Bytes;
 use std::time::Duration;
-use tokio::time::timeout;
 
 use super::{
-    MESSAGE_DATA_CHUNK_BYTES, RequestRecvStream, RequestSendStream, RequestStreamConfig,
-    ResponseSendState, abort_bidi_stream, declared_response_body_length, stop_recv_stream,
+    RequestRecvStream, RequestSendStream, RequestStreamConfig, ResponseSendState,
+    abort_bidi_stream, declared_response_body_length, stop_recv_stream,
 };
 
 /// Combined HTTP/3 request stream.
@@ -304,21 +303,12 @@ impl RequestStream {
     }
 
     async fn read_pending_data_chunk(&mut self) -> Result<Option<Bytes>> {
-        if self.pending_data_frame_bytes == 0 {
-            return Ok(None);
-        }
-        let want = self.pending_data_frame_bytes.min(MESSAGE_DATA_CHUNK_BYTES);
-        let chunk = timeout(self.read_timeout, self.recv.read_chunk(want, true))
-            .await
-            .map_err(|_| anyhow!("timed out reading DATA frame payload"))??
-            .ok_or_else(|| anyhow!("truncated DATA frame payload"))?;
-        if chunk.bytes.is_empty() {
-            return Err(anyhow!("truncated DATA frame payload").into());
-        }
-        self.pending_data_frame_bytes = self
-            .pending_data_frame_bytes
-            .saturating_sub(chunk.bytes.len());
-        Ok(Some(chunk.bytes))
+        super::read_pending_data_chunk(
+            &mut self.recv,
+            self.read_timeout,
+            &mut self.pending_data_frame_bytes,
+        )
+        .await
     }
 
     pub(crate) async fn recv_response_head(&mut self) -> Result<Option<http::Response<()>>> {

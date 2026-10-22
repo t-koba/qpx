@@ -193,6 +193,26 @@ pub(super) async fn discard_frame_payload(
     Ok(())
 }
 
+pub(super) async fn read_pending_data_chunk(
+    recv: &mut quinn::RecvStream,
+    read_timeout: Duration,
+    pending_data_frame_bytes: &mut usize,
+) -> Result<Option<Bytes>> {
+    if *pending_data_frame_bytes == 0 {
+        return Ok(None);
+    }
+    let want = (*pending_data_frame_bytes).min(MESSAGE_DATA_CHUNK_BYTES);
+    let chunk = timeout(read_timeout, recv.read_chunk(want, true))
+        .await
+        .map_err(|_| anyhow!("timed out reading DATA frame payload"))??
+        .ok_or_else(|| anyhow!("truncated DATA frame payload"))?;
+    if chunk.bytes.is_empty() {
+        return Err(anyhow!("truncated DATA frame payload").into());
+    }
+    *pending_data_frame_bytes = (*pending_data_frame_bytes).saturating_sub(chunk.bytes.len());
+    Ok(Some(chunk.bytes))
+}
+
 /// Writes one HEADERS frame.
 pub(super) async fn send_headers(send: &mut quinn::SendStream, payload: &[u8]) -> Result<()> {
     write_frame(send, FRAME_HEADERS, payload).await
