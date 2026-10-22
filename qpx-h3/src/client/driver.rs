@@ -573,12 +573,5 @@ fn is_client_initiated_bidi_stream_id(stream_id: u64) -> bool {
 
 fn close_connection(conn: &quinn::Connection, close: ConnectionClose) {
     tracing::warn!(code = close.code, message = %close.message, "qpx-h3 client closing connection");
-    if let Ok(code) = quinn::VarInt::from_u64(close.code) {
-        conn.close(code, close.message.as_bytes());
-    } else {
-        conn.close(
-            quinn::VarInt::from_u32(H3_MESSAGE_ERROR as u32),
-            b"invalid close code",
-        );
-    }
+    crate::protocol::close_quic_connection(conn, &close);
 }

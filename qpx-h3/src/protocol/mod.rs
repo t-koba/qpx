@@ -6,7 +6,7 @@ mod control;
 mod settings;
 
 pub(crate) use control::{
-    ConnectionClose, PeerControlState, control_frame_payload_is_known,
+    ConnectionClose, PeerControlState, close_quic_connection, control_frame_payload_is_known,
     validate_message_stream_frame,
 };
 #[cfg(test)]

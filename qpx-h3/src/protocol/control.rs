@@ -70,6 +70,18 @@ impl ConnectionClose {
     }
 }
 
+/// Closes a QUIC connection according to an HTTP/3 connection-close.
+pub(crate) fn close_quic_connection(conn: &quinn::Connection, close: &ConnectionClose) {
+    if let Ok(code) = quinn::VarInt::from_u64(close.code) {
+        conn.close(code, close.message.as_bytes());
+    } else {
+        conn.close(
+            quinn::VarInt::from_u32(super::H3_MESSAGE_ERROR as u32),
+            b"invalid close code",
+        );
+    }
+}
+
 #[derive(Debug, Default)]
 struct PeerControlInner {
     control_stream_seen: bool,
