@@ -1,5 +1,5 @@
 use crate::H3Result as Result;
-use crate::protocol::{FRAME_DATA, FRAME_HEADERS};
+use crate::protocol::{FRAME_DATA, FRAME_HEADERS, write_frame};
 use anyhow::anyhow;
 use std::time::Duration;
 
@@ -38,6 +38,108 @@ pub(super) struct ResponseSendState {
     head_request: bool,
     declared_content_length: Option<u64>,
     sent_body_bytes: u64,
+}
+
+use crate::qpack::encode_response_head;
+use crate::qpack::encode_trailers;
+use bytes::Bytes;
+
+/// Sends the response head of an HTTP/3 request stream.
+///
+/// The rules here are the ones every HTTP/3 response follows: the head
+/// comes first, a body may follow only if the head allows one, and the
+/// declared length must match what is sent.
+pub(super) async fn send_response_head(
+    send: &mut quinn::SendStream,
+    response_state: &mut Option<ResponseSendState>,
+    response: &http::Response<()>,
+) -> Result<()> {
+    let mut response = response.clone();
+    let Some(state) = response_state.as_mut() else {
+        return Err(
+            anyhow!("HTTP/3 response HEADERS can only be sent by server response streams").into(),
+        );
+    };
+    if state.final_sent {
+        return Err(anyhow!("HTTP/3 final response HEADERS already sent").into());
+    }
+    let body_allowed = crate::response::sanitize_streaming_response_head_for_h3(&mut response)?;
+    state.response_started = true;
+    if let Some(body_allowed) = body_allowed {
+        state.final_sent = true;
+        state.body_allowed = body_allowed && !state.head_request;
+        state.declared_content_length = if state.body_allowed {
+            crate::response::parse_content_length(response.headers())?
+        } else {
+            None
+        };
+    }
+    let payload = encode_response_head(&response);
+    send_headers(send, &payload).await
+}
+
+/// Sends one DATA frame of an HTTP/3 response.
+pub(super) async fn send_response_data(
+    send: &mut quinn::SendStream,
+    response_state: &mut Option<ResponseSendState>,
+    payload: Bytes,
+) -> Result<()> {
+    if let Some(state) = response_state.as_ref() {
+        if !state.final_sent {
+            return Err(anyhow!("HTTP/3 DATA cannot precede final response HEADERS").into());
+        }
+        if !state.body_allowed {
+            return Err(anyhow!("HTTP/3 DATA is not allowed for this response").into());
+        }
+    }
+    if let Some(state) = response_state.as_mut() {
+        enforce_response_content_length_send(state, payload.len())?;
+    }
+    write_frame(send, FRAME_DATA, payload.as_ref()).await
+}
+
+/// Sends the response trailers of an HTTP/3 request stream.
+pub(super) async fn send_response_trailers(
+    send: &mut quinn::SendStream,
+    response_state: &mut Option<ResponseSendState>,
+    trailers: &http::HeaderMap,
+) -> Result<()> {
+    let mut trailers = trailers.clone();
+    if let Some(state) = response_state.as_ref() {
+        if !state.final_sent {
+            return Err(anyhow!("HTTP/3 trailers cannot precede final response HEADERS").into());
+        }
+        if !state.body_allowed {
+            return Err(anyhow!("HTTP/3 trailers are not allowed for this response").into());
+        }
+        enforce_response_content_length_complete(state)?;
+        crate::response::sanitize_trailers_for_h3(&mut trailers)?;
+    }
+    let payload = encode_trailers(&trailers);
+    send_headers(send, &payload).await
+}
+
+/// Finishes an HTTP/3 response stream.
+pub(super) async fn finish_response(
+    send: &mut quinn::SendStream,
+    response_state: &Option<ResponseSendState>,
+) -> Result<()> {
+    if let Some(state) = response_state.as_ref()
+        && state.response_started
+        && !state.final_sent
+    {
+        return Err(anyhow!("HTTP/3 response ended without final response HEADERS").into());
+    }
+    if let Some(state) = response_state.as_ref() {
+        enforce_response_content_length_complete(state)?;
+    }
+    send.finish()?;
+    Ok(())
+}
+
+/// Writes one HEADERS frame.
+pub(super) async fn send_headers(send: &mut quinn::SendStream, payload: &[u8]) -> Result<()> {
+    write_frame(send, FRAME_HEADERS, payload).await
 }
 
 fn enforce_body_frame(

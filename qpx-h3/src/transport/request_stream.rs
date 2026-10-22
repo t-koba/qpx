@@ -1,9 +1,9 @@
 use crate::H3Result as Result;
 use crate::protocol::{
     FRAME_DATA, FRAME_HEADERS, H3_FRAME_UNEXPECTED, H3_MESSAGE_ERROR, H3_REQUEST_CANCELLED,
-    read_varint, validate_message_stream_frame, write_frame,
+    read_varint, validate_message_stream_frame,
 };
-use crate::qpack::{QpackConnection, encode_response_head, encode_trailers};
+use crate::qpack::QpackConnection;
 use anyhow::anyhow;
 use bytes::Bytes;
 use std::time::Duration;
@@ -12,9 +12,8 @@ use tokio::time::timeout;
 use super::{
     MESSAGE_DATA_CHUNK_BYTES, RequestRecvStream, RequestSendStream, RequestStreamConfig,
     ResponseSendState, abort_bidi_stream, declared_response_body_length,
-    enforce_body_content_length_complete, enforce_body_frame,
-    enforce_response_content_length_complete, enforce_response_content_length_send,
-    max_message_frame_payload_bytes, stop_recv_stream,
+    enforce_body_content_length_complete, enforce_body_frame, max_message_frame_payload_bytes,
+    stop_recv_stream,
 };
 
 /// Combined HTTP/3 request stream.
@@ -120,34 +119,12 @@ impl RequestStream {
     }
 
     pub(crate) async fn send_headers(&mut self, payload: &[u8]) -> Result<()> {
-        write_frame(&mut self.send, FRAME_HEADERS, payload).await
+        super::send_headers(&mut self.send, payload).await
     }
 
     /// Sends response headers.
     pub async fn send_response_head(&mut self, response: &http::Response<()>) -> Result<()> {
-        let mut response = response.clone();
-        let Some(state) = self.response_state.as_mut() else {
-            return Err(anyhow!(
-                "HTTP/3 response HEADERS can only be sent by server response streams"
-            )
-            .into());
-        };
-        if state.final_sent {
-            return Err(anyhow!("HTTP/3 final response HEADERS already sent").into());
-        }
-        let body_allowed = crate::response::sanitize_streaming_response_head_for_h3(&mut response)?;
-        state.response_started = true;
-        if let Some(body_allowed) = body_allowed {
-            state.final_sent = true;
-            state.body_allowed = body_allowed && !state.head_request;
-            state.declared_content_length = if state.body_allowed {
-                crate::response::parse_content_length(response.headers())?
-            } else {
-                None
-            };
-        }
-        let payload = encode_response_head(&response);
-        self.send_headers(&payload).await
+        super::send_response_head(&mut self.send, &mut self.response_state, response).await
     }
 
     /// Sends a complete response.
@@ -169,52 +146,17 @@ impl RequestStream {
 
     /// Sends response trailers.
     pub async fn send_trailers(&mut self, trailers: &http::HeaderMap) -> Result<()> {
-        let mut trailers = trailers.clone();
-        if let Some(state) = self.response_state.as_ref() {
-            if !state.final_sent {
-                return Err(
-                    anyhow!("HTTP/3 trailers cannot precede final response HEADERS").into(),
-                );
-            }
-            if !state.body_allowed {
-                return Err(anyhow!("HTTP/3 trailers are not allowed for this response").into());
-            }
-            enforce_response_content_length_complete(state)?;
-            crate::response::sanitize_trailers_for_h3(&mut trailers)?;
-        }
-        let payload = encode_trailers(&trailers);
-        self.send_headers(&payload).await
+        super::send_response_trailers(&mut self.send, &mut self.response_state, trailers).await
     }
 
     /// Sends one DATA frame.
     pub async fn send_data(&mut self, payload: Bytes) -> Result<()> {
-        if let Some(state) = self.response_state.as_ref() {
-            if !state.final_sent {
-                return Err(anyhow!("HTTP/3 DATA cannot precede final response HEADERS").into());
-            }
-            if !state.body_allowed {
-                return Err(anyhow!("HTTP/3 DATA is not allowed for this response").into());
-            }
-        }
-        if let Some(state) = self.response_state.as_mut() {
-            enforce_response_content_length_send(state, payload.len())?;
-        }
-        write_frame(&mut self.send, FRAME_DATA, payload.as_ref()).await
+        super::send_response_data(&mut self.send, &mut self.response_state, payload).await
     }
 
     /// Finishes the stream.
     pub async fn finish(&mut self) -> Result<()> {
-        if let Some(state) = self.response_state.as_ref()
-            && state.response_started
-            && !state.final_sent
-        {
-            return Err(anyhow!("HTTP/3 response ended without final response HEADERS").into());
-        }
-        if let Some(state) = self.response_state.as_ref() {
-            enforce_response_content_length_complete(state)?;
-        }
-        self.send.finish()?;
-        Ok(())
+        super::finish_response(&mut self.send, &self.response_state).await
     }
 
     /// Receives one DATA frame payload.
