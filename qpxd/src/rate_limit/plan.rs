@@ -144,6 +144,25 @@ pub(crate) struct RateLimiters {
     profiles: HashMap<String, RateLimitSet>,
 }
 
+/// The request-scope rate-limit admission for one request.
+///
+/// The caller's identity and matched rule form the rate-limit key, and the
+/// selected plan's request limits are collected and acquired against it. A
+/// `retry_after` means the request is over the limit and the caller answers
+/// it with a 429.
+pub(crate) fn admit_request(
+    limiters: &RateLimiters,
+    plan: &CompiledRateLimitPlan,
+    remote_ip: std::net::IpAddr,
+    identity: &crate::policy_context::ResolvedIdentity,
+    matched_rule: Option<&str>,
+) -> Result<(RateLimitContext, RequestLimitAcquire)> {
+    let ctx = RateLimitContext::from_identity(remote_ip, identity, matched_rule, None);
+    let acquired =
+        limiters.collect_checked_plan_request(plan, None, TransportScope::Request, &ctx, 1)?;
+    Ok((ctx, acquired))
+}
+
 impl RateLimiters {
     pub(crate) fn from_config<'a>(
         _listeners: impl IntoIterator<Item = &'a IngressEdgeConfig>,

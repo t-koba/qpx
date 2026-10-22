@@ -233,6 +233,69 @@ fn initial_profile_check_also_enforces_route_limit() {
 }
 
 #[test]
+fn admit_request_keys_the_admission_by_identity_and_matched_rule() {
+    // A route limit of one request per window, so the second request from
+    // the same key is over the limit.
+    let route_config = RateLimitConfig {
+        enabled: true,
+        experimental_rate_limit_fields: false,
+        apply_to: vec![RateLimitApplyTo::Request],
+        key: "route".to_string(),
+        requests: Some(qpx_core::config::RateLimitRequestsConfig {
+            rps: None,
+            burst: None,
+            quota: Some(qpx_core::config::RateLimitQuotaConfig {
+                interval_secs: 60,
+                amount: Some(1),
+            }),
+        }),
+        traffic: None,
+        sessions: None,
+    };
+    let plan = CompiledRateLimitPlan::from_sets(
+        RateLimitSet::from_config(Some(&route_config)),
+        RateLimitSet::default(),
+    );
+    let limiters = RateLimiters::from_config(
+        std::iter::empty::<&IngressEdgeConfig>(),
+        &[] as &[RateLimitProfileConfig],
+    );
+    let identity = crate::policy_context::ResolvedIdentity {
+        user: Some("alice".to_string()),
+        groups: Vec::new(),
+        roles: Vec::new(),
+        entitlements: Vec::new(),
+        device_id: None,
+        posture: Vec::new(),
+        tenant: None,
+        auth_strength: None,
+        idp: None,
+        identity_source: None,
+    };
+    let ip = "192.0.2.10".parse().expect("ip");
+
+    let (_, first) = admit_request(&limiters, &plan, ip, &identity, Some("rule-a"))
+        .expect("admit first request");
+    assert_eq!(first.retry_after, None);
+
+    // The same key is over the limit on the second request.
+    let (_, second) = admit_request(&limiters, &plan, ip, &identity, Some("rule-a"))
+        .expect("admit second request");
+    assert!(
+        second.retry_after.is_some(),
+        "the second request under the same key must be over the limit"
+    );
+
+    // A different matched rule is a different key, so it is admitted again.
+    let (_, other_rule) = admit_request(&limiters, &plan, ip, &identity, Some("rule-b"))
+        .expect("admit request under another rule");
+    assert_eq!(
+        other_rule.retry_after, None,
+        "a different matched rule must key separately"
+    );
+}
+
+#[test]
 fn experimental_rate_limit_fields_describe_rejected_fixed_quota() {
     let config = RateLimitConfig {
         enabled: true,

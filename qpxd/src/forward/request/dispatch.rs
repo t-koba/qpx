@@ -13,7 +13,6 @@ use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
 };
 use crate::http::protocol::base_fields::BaseRequestFields;
-use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use anyhow::anyhow;
 use hyper::{Request, Response};
@@ -381,17 +380,18 @@ async fn prepare_forward_request(
         .execution_plan_for_rule(matched_rule.as_deref())
         .clone();
     let cache_policy = selected_plan.cache.clone();
-    let request_limit_ctx =
-        RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
-    let crate::rate_limit::RequestLimitAcquire {
-        limits: request_limits,
-        retry_after,
-    } = state.policy.rate_limiters.collect_checked_plan_request(
+    let (
+        request_limit_ctx,
+        crate::rate_limit::RequestLimitAcquire {
+            limits: request_limits,
+            retry_after,
+        },
+    ) = crate::rate_limit::admit_request(
+        &state.policy.rate_limiters,
         &selected_plan.rate_limits,
-        None,
-        TransportScope::Request,
-        &request_limit_ctx,
-        1,
+        remote_addr.ip(),
+        &identity,
+        matched_rule.as_deref(),
     )?;
     if let Some(retry_after) = retry_after {
         let response = rate_limit_response_for_parts_with_limits(

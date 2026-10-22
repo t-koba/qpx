@@ -4,7 +4,6 @@ use crate::http::dispatch::{
     DispatchAuditInput, ProxyKind, build_dispatch_audit_context,
     rate_limit_response_for_parts_with_limits,
 };
-use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::Result;
 use hyper::Request;
 use qpx_http::body::Body;
@@ -69,17 +68,18 @@ pub(super) fn build_transparent_prepared(
         request_rpc,
     } = policy_evaluation;
     let proxy_name = proxy_name_owned.as_str();
-    let request_limit_ctx =
-        RateLimitContext::from_identity(remote_addr.ip(), &identity, matched_rule.as_deref(), None);
-    let crate::rate_limit::RequestLimitAcquire {
-        limits: request_limits,
-        retry_after,
-    } = state.policy.rate_limiters.collect_checked_plan_request(
+    let (
+        request_limit_ctx,
+        crate::rate_limit::RequestLimitAcquire {
+            limits: request_limits,
+            retry_after,
+        },
+    ) = crate::rate_limit::admit_request(
+        &state.policy.rate_limiters,
         &selected_plan.rate_limits,
-        None,
-        TransportScope::Request,
-        &request_limit_ctx,
-        1,
+        remote_addr.ip(),
+        &identity,
+        matched_rule.as_deref(),
     )?;
     if let Some(retry_after) = retry_after {
         let response = rate_limit_response_for_parts_with_limits(
