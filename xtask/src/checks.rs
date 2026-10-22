@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use syn::parse::Parser;
 use syn::visit::Visit;
 use syn::{GenericArgument, PathArguments, ReturnType, Type, Visibility};
 
@@ -1314,11 +1315,18 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// way, because the gate cannot say which part of it skips the entry,
 /// so a comparison inside such a condition still finds the field's own
 /// entry: the code after the branch may hold it.
+///
+/// The gate follows a name the site builds at runtime as well: a site
+/// that builds the field's name with a constructor or with a macro and
+/// finds the field's own entry with the built name reads the
+/// declaration, so the gate reads the text the site writes out and
+/// follows it back to the field.
 /// What the gate cannot see is a site that finds the field's entry by a
-/// name it builds at runtime, and a site that takes the value under a
-/// member of another name. A helper of another file that found the
-/// entry is seen when the caller calls it by the name it is defined
-/// with; a call through another name is not seen.
+/// name it builds at runtime whose text the gate cannot read, and a site
+/// that takes the value under a member of another name. A helper
+/// of another file that found the entry is seen when the caller calls it
+/// by the name it is defined with; a call through another name is not
+/// seen.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1436,6 +1444,21 @@ const CONTENT_LENGTH_NAME_COPY_METHODS: [&str; 7] = [
     "to_uppercase",
 ];
 
+/// The constructors that build a name at runtime from text.
+///
+/// A site that builds the field's name at runtime and finds the field's
+/// own entry with the built name reads the declaration, so the gate
+/// follows the built name back to the text it was built from. The
+/// constructors are named by the type and the method, so a constructor
+/// of another type is not one of them.
+const CONTENT_LENGTH_NAME_BUILDERS: [&str; 5] = [
+    "String::from",
+    "HeaderName::from_bytes",
+    "HeaderName::from_lowercase",
+    "HeaderName::try_from",
+    "Cow::Borrowed",
+];
+
 /// The field's name, as a header spells it.
 const CONTENT_LENGTH_FIELD: &str = "content-length";
 
@@ -1462,13 +1485,14 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// through `get`, `get_all` and `contains_key`, a read of the field
 /// through an index, and it sees a comparison of a header name with the
 /// field's name. It sees the field named through a reference, through the
-/// constant's text, through a name built from the text and through a copy
-/// the site made of the text. It sees a parse whose type is written and a
+/// constant's text, through a name built from the text, through a copy
+/// the site made of the text and through a name the site builds at
+/// runtime from that text. It sees a parse whose type is written and a
 /// parse whose type is inferred, because the field's value is a length
 /// either way. It does not see a reader that lives outside a function
-/// body, it does not see a name the site builds at runtime, and it reads
-/// a function's body as one whole rather than tying a parse to the read it
-/// belongs to.
+/// body, it does not see a name the site builds at runtime whose text the
+/// gate cannot read, and it reads a function's body as one whole
+/// rather than tying a parse to the read it belongs to.
 #[cfg(test)]
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
@@ -1559,11 +1583,17 @@ fn content_length_inline_reader_facts_violations(
 /// name is followed wherever the path spells it, so a reader cannot hide
 /// behind a binding or a constant of its own.
 ///
+/// The rule follows a name the site builds at runtime as well: a site
+/// that builds the field's name with a constructor or with a macro and
+/// finds the field's own entry with the built name reads the
+/// declaration, so the rule reads the text the site writes out and
+/// follows it back to the field.
+///
 /// What the rule cannot see is a site that finds the field's entry by a
-/// name it builds at runtime, and a site that takes the value under a
-/// member of another name. A helper of another file that found the entry
-/// is seen when the caller calls it by the name it is defined with; a
-/// call through another name is not seen.
+/// name it builds at runtime whose text the gate cannot read, and a site
+/// that takes the value under a member of another name. A helper of
+/// another file that found the entry is seen when the caller calls it by
+/// the name it is defined with; a call through another name is not seen.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -2598,6 +2628,11 @@ impl Visit<'_> for SkipFinder {
 /// the field through `&CONTENT_LENGTH`, through `CONTENT_LENGTH.as_str()`
 /// or through a name built from `"content-length"` names the field as
 /// well.
+///
+/// A name the site builds at runtime from the field's text names the
+/// field as well: the gate reads the text the site writes out, so a name
+/// built by a constructor or by a macro from the field's own text names
+/// the field.
 fn names_content_length_field(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Path(path) => path
@@ -2622,16 +2657,132 @@ fn names_content_length_field(expr: &syn::Expr) -> bool {
         }
         // A name built from the field's text names the field.
         syn::Expr::Call(call) => {
-            let builds_a_name = matches!(&*call.func, syn::Expr::Path(path)
-                if path
-                    .path
-                    .segments
-                    .last()
-                    .is_some_and(|segment| segment.ident == "from_static"));
+            let builds_a_name = builds_a_name_at_runtime(call);
             builds_a_name && call.args.first().is_some_and(names_content_length_field)
         }
+        // A name the site builds at runtime from the field's text names
+        // the field as well.
+        syn::Expr::Macro(mac) => macro_builds_content_length_field(&mac.mac),
         _ => false,
     }
+}
+
+/// Whether a call builds a name at runtime from text.
+///
+/// A name built by `from_static` is a name whatever the type is, and the
+/// constructors the workspace can reach are named by their type and
+/// their method, so a constructor of another type is not one of them.
+fn builds_a_name_at_runtime(call: &syn::ExprCall) -> bool {
+    let syn::Expr::Path(path) = &*call.func else {
+        return false;
+    };
+    let idents: Vec<String> = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect();
+    if idents.last().is_some_and(|last| last == "from_static") {
+        return true;
+    }
+    let Some(first) = idents.len().checked_sub(2) else {
+        return false;
+    };
+    let callee = format!(
+        "{type_name}::{method}",
+        type_name = idents[first],
+        method = idents[first + 1]
+    );
+    CONTENT_LENGTH_NAME_BUILDERS.contains(&callee.as_str())
+}
+
+/// Whether a macro builds the field's name at runtime.
+///
+/// A site that builds the field's name with a macro and finds the field's
+/// own entry with the built name reads the declaration, so the gate reads
+/// the text the macro builds when the site writes that text out.
+fn macro_builds_content_length_field(mac: &syn::Macro) -> bool {
+    let Some(name) = mac
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+    else {
+        return false;
+    };
+    let Some(arguments) = macro_arguments(mac) else {
+        return false;
+    };
+    let built = match name.as_str() {
+        "concat" => concat_built_text(&arguments),
+        "format" => format_built_text(&arguments),
+        _ => None,
+    };
+    built.is_some_and(|text| text.eq_ignore_ascii_case(CONTENT_LENGTH_FIELD))
+}
+
+/// The arguments a macro call holds.
+fn macro_arguments(mac: &syn::Macro) -> Option<Vec<syn::Expr>> {
+    let parser = syn::punctuated::Punctuated::<syn::Expr, syn::Token![,]>::parse_terminated;
+    let parsed = parser.parse2(mac.tokens.clone()).ok()?;
+    Some(parsed.into_iter().collect())
+}
+
+/// The text a `concat!` builds, when the site writes that text out.
+fn concat_built_text(arguments: &[syn::Expr]) -> Option<String> {
+    let mut built = String::new();
+    for argument in arguments {
+        let syn::Expr::Lit(literal) = argument else {
+            return None;
+        };
+        let syn::Lit::Str(text) = &literal.lit else {
+            return None;
+        };
+        built.push_str(&text.value());
+    }
+    Some(built)
+}
+
+/// The text a `format!` builds, when the site writes that text out.
+///
+/// A format string that holds a placeholder takes the text of the
+/// argument that fills it, so the built text is known when the argument
+/// is written out as well. An argument that is not written out is known
+/// only when it names the field itself, because then the built text is
+/// the field's name.
+fn format_built_text(arguments: &[syn::Expr]) -> Option<String> {
+    let syn::Expr::Lit(literal) = arguments.first()? else {
+        return None;
+    };
+    let syn::Lit::Str(format) = &literal.lit else {
+        return None;
+    };
+    let format = format.value();
+    let mut built = String::new();
+    let mut pieces = format.split("{}");
+    built.push_str(pieces.next()?);
+    let mut rest = arguments.get(1..)?;
+    for piece in pieces {
+        let argument = rest.first()?;
+        rest = &rest[1..];
+        match argument {
+            syn::Expr::Lit(literal) => {
+                let syn::Lit::Str(text) = &literal.lit else {
+                    return None;
+                };
+                built.push_str(&text.value());
+            }
+            argument if names_content_length_field(argument) => {
+                built.push_str(CONTENT_LENGTH_FIELD);
+            }
+            _ => return None,
+        }
+        built.push_str(piece);
+    }
+    if !rest.is_empty() {
+        return None;
+    }
+    Some(built)
 }
 
 /// Whether an expression names the field, directly or through a binding
@@ -9426,6 +9577,182 @@ fn other_value(headers: &HeaderMap, other: &HeaderMap) -> Option<String> {
             .unwrap()
             .is_empty(),
             "a site that takes another entry's value does not read the declaration"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_name_the_site_builds_at_runtime() {
+        // A site that builds the field's name at runtime and reads the
+        // field through that name reads the declaration.
+        let built = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    let name = String::from("content-length");
+    headers.get(&name).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&built.0, &built.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&built.0, &built.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site builds the name with a macro.
+        let formatted = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let name = format!("content-length");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&formatted.0, &formatted.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site writes the name out in pieces.
+        let concatenated = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let name = concat!("content-", "length");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &concatenated.0,
+                &concatenated.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site formats the name out of a piece it
+        // writes down.
+        let formatted_piece = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let name = format!("content-{}", "length");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &formatted_piece.0,
+                &formatted_piece.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site compares the name with a method.
+        let compared = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    let name = String::from("content-length");
+    for header in headers {
+        if header.name.eq_ignore_ascii_case(&name) {
+            return Some(header.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&compared.0, &compared.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A site that builds another header's name at runtime does not
+        // read the declaration.
+        let other = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn other_value(headers: &[(String, String)]) -> Option<String> {
+    let name = String::from("content-type");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other.0, &other.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a name built at runtime for another field is not a reader"
+        );
+
+        // A site that builds the field's name at runtime and removes the
+        // field does not read the declaration either.
+        let removing = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn strips(headers: &mut HeaderMap) {
+    let name = String::from("content-length");
+    headers.remove(&name);
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&removing.0, &removing.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a site that removes the field does not read the declaration"
         );
     }
 }
