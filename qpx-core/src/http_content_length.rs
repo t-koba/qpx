@@ -387,8 +387,8 @@ pub enum ContentLengthError {
 /// guard judges a request's framing by the length the field declares and
 /// not by the text of its values. A comma list of equal members is one
 /// length there now, so two values that declare the same length are no
-/// longer refused as a conflict, which is the reading RFC 9112 section
-/// 6.3 allows a recipient to take of duplicated values. Two values that
+/// longer refused as a conflict, which is the reading RFC 9110 section
+/// 8.6 allows a recipient to take of an equal-member comma list. Two values that
 /// disagree are a conflict, so such a request is refused as one, and so is
 /// one value that names two lengths. A declaration the owner refuses - a
 /// member that is not digits, a leading plus sign, a value that is not
