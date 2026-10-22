@@ -1385,10 +1385,11 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 ///
 /// The rule is what it says and no more. It sees a read of the field
 /// through `get`, `get_all` and `contains_key`, and it sees a comparison
-/// of a header name with the field's name. It does not see a parse whose
-/// integer type is inferred rather than written, it does not see a reader
-/// that lives outside a function body, and it reads a function's body as
-/// one whole rather than tying a parse to the read it belongs to.
+/// of a header name with the field's name. It sees a parse whose type is
+/// written and a parse whose type is inferred, because the field's value
+/// is a length either way. It does not see a reader that lives outside a
+/// function body, and it reads a function's body as one whole rather than
+/// tying a parse to the read it belongs to.
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
@@ -1474,11 +1475,20 @@ impl Visit<'_> for ContentLengthReaderFacts {
         {
             self.reads_field = true;
         }
-        if method == "parse"
-            && let Some(turbofish) = &node.turbofish
-            && names_integer_type(&turbofish.args)
-        {
-            self.parses_integer = true;
+        if method == "parse" {
+            match &node.turbofish {
+                // A parse that names its type turns text into a number when
+                // the type is an integer.
+                Some(turbofish) if names_integer_type(&turbofish.args) => {
+                    self.parses_integer = true;
+                }
+                // A parse that leaves its type to be inferred turns text into
+                // a number as well. The gate cannot tell what the number
+                // is, and the field's value is a length, so it reads the
+                // parse as a length.
+                None => self.parses_integer = true,
+                _ => {}
+            }
         }
         syn::visit::visit_expr_method_call(self, node);
     }
@@ -5419,6 +5429,49 @@ fn declared_length(headers: &[(String, String)]) -> usize {
             [
                 "qpxd/tests/http_rfc/mod.rs: the function declared_length reads the declared Content-Length inline; it must call the owner"
             ]
+        );
+
+        // A reader whose parse leaves the type to be inferred is seen as
+        // well: the gate cannot tell what the number is, and the field's
+        // value is a length.
+        let inferred = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn observed_size(headers: &HeaderMap) -> Option<u64> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&inferred.0, &inferred.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function observed_size reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+
+        // A parse that names a type that is not a number is not a reader:
+        // the gate reads a written type as it is written.
+        let not_a_number = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_text(headers: &HeaderMap) -> Option<String> {
+    headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.parse::<String>().unwrap_or_default())
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_inline_reader_violations(&not_a_number.0, &not_a_number.1)
+                .unwrap()
+                .is_empty(),
+            "a parse that names a type that is not a number is not a reader"
         );
 
         // A reader that calls the owner is not a violation.

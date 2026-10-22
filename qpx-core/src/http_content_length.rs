@@ -195,9 +195,11 @@ pub enum ContentLengthError {
 /// them, and it looks inside a function's body as well, so a site that
 /// reads the declaration inline is inside the gate too: a function that
 /// reads the field's value and turns text into a number reads the
-/// declaration itself, and it must reach the owner alone. No site reads
-/// the declaration inline today: the request guard, the last one, reads it
-/// through the owner as well.
+/// declaration itself, and it must reach the owner alone. The gate sees
+/// that number whether the parse names its type or leaves it to be
+/// inferred, so a reader cannot hide behind an inferred type. No site
+/// reads the declaration inline today: the response compression test,
+/// the last one, reads it through the owner as well.
 ///
 /// The test helpers read the declaration through the owner as well:
 /// `qpxd/src/test_util.rs` and `qpxd/tests/http_rfc/mod.rs` read a raw
@@ -206,6 +208,14 @@ pub enum ContentLengthError {
 /// comma list of equal members is one length there now, so such a head
 /// declares the length of the body it carries, and a declaration the owner
 /// refuses names no length, so the helper reads no body.
+///
+/// The response compression test reads the declaration through the owner as
+/// well: `qpxd/src/http/modules/response_compression/tests.rs` hands the
+/// header map to it, so the length the test compares with the body's own
+/// length is the length the field declares. A comma list of equal members
+/// is one length there now, so such a response declares the length of the
+/// body it carries, and a declaration the owner refuses names no length,
+/// so the test sees no length to compare.
 ///
 /// The access log reads the declaration through the owner as well:
 /// `qpxd/src/reverse/listener/raw_http1.rs` and

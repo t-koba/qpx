@@ -579,19 +579,14 @@ async fn dictionary_compression_drops_both_digest_fields_and_no_transform_preser
         Some(&HeaderValue::from_static("dcb"))
     );
     assert_digest_fields_absent(compressed.headers());
-    let compressed_length: usize = compressed
-        .headers()
-        .get(CONTENT_LENGTH)
-        .expect("dictionary compression sets length")
-        .to_str()
-        .expect("length value")
-        .parse()
-        .expect("length parses");
+    let compressed_length = declared_content_length(compressed.headers())
+        .expect("dictionary compression sets a readable length")
+        .expect("dictionary compression declares a length");
     let compressed_body = to_bytes(compressed.into_body())
         .await
         .expect("dictionary body");
     assert_eq!(
-        compressed_body.len(),
+        u64::try_from(compressed_body.len()).expect("body length"),
         compressed_length,
         "dictionary length must match encoded body"
     );
@@ -622,13 +617,10 @@ async fn dictionary_compression_drops_both_digest_fields_and_no_transform_preser
         "no-transform dictionary response must stay identity"
     );
     assert_eq!(
-        unchanged
-            .headers()
-            .get(CONTENT_LENGTH)
-            .expect("no-transform preserves length")
-            .to_str()
-            .expect("length value"),
-        "frequent words from a response".len().to_string(),
+        declared_content_length(unchanged.headers())
+            .expect("no-transform preserves a readable length")
+            .expect("no-transform preserves a length"),
+        u64::try_from("frequent words from a response".len()).expect("origin length"),
         "no-transform must preserve the origin length"
     );
     let unchanged_body = to_bytes(unchanged.into_body())
@@ -741,13 +733,10 @@ async fn ordinary_compression_strips_length_and_etag_unless_no_transform() {
         "no-transform response must not gain content encoding"
     );
     assert_eq!(
-        unchanged
-            .headers()
-            .get(CONTENT_LENGTH)
-            .expect("no-transform preserves length")
-            .to_str()
-            .expect("length value"),
-        BODY.len().to_string(),
+        declared_content_length(unchanged.headers())
+            .expect("no-transform preserves a readable length")
+            .expect("no-transform preserves a length"),
+        u64::try_from(BODY.len()).expect("origin length"),
         "no-transform must preserve the origin length"
     );
     assert_eq!(
