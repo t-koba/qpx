@@ -4,6 +4,7 @@ use crate::http::body::size::observed_request_size;
 use crate::http::dispatch::{
     DispatchAuditInput, DispatchGuardInput, ProxyKind, build_dispatch_audit_context,
 };
+use crate::http::policy::guard::request_body_observation_limit;
 use crate::http::policy::response_policy::{ResponseRuleCandidates, response_request_obs};
 use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
@@ -111,10 +112,10 @@ pub(super) fn request_observation_limit(
     guard: Option<&crate::http::policy::guard::CompiledHttpGuardProfile>,
     state: &crate::runtime::RuntimeState,
 ) -> usize {
-    let default_limit = guard
-        .and_then(|profile| profile.request_body_observation_cap())
-        .map(|cap| cap.min(state.plan.limits.body.max_observed_request_body_bytes))
-        .unwrap_or(state.plan.limits.body.max_observed_request_body_bytes);
+    let default_limit = request_body_observation_limit(
+        guard,
+        state.plan.limits.body.max_observed_request_body_bytes,
+    );
     edge.request_body_observation_limit(default_limit)
 }
 

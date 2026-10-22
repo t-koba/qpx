@@ -16,6 +16,7 @@ use crate::http::dispatch::{
     request_body_too_large_response,
 };
 use crate::http::pipeline::PolicyStage;
+use crate::http::policy::guard::request_body_observation_limit;
 use crate::http::policy::response_policy::response_request_obs;
 use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
@@ -104,10 +105,10 @@ async fn execute_mitm_request(
     let response_candidates_for_request = response_engine
         .map(|engine| engine.candidate_profile(prefilter_ctx.clone()))
         .unwrap_or_default();
-    let max_observed_request_body_bytes = http_guard
-        .and_then(|profile| profile.request_body_observation_cap())
-        .map(|cap| cap.min(state.plan.limits.body.max_observed_request_body_bytes))
-        .unwrap_or(state.plan.limits.body.max_observed_request_body_bytes);
+    let max_observed_request_body_bytes = request_body_observation_limit(
+        http_guard,
+        state.plan.limits.body.max_observed_request_body_bytes,
+    );
     let max_observed_request_body_bytes =
         base_plan.request_body_observation_limit(max_observed_request_body_bytes);
     let request_version_for_observation = req.version();

@@ -1,6 +1,7 @@
 use super::mirrors::request_seed;
 use super::{InterimList, ReverseConnInfo, empty_interim_response};
 use crate::http::dispatch::annotated_max_forwards_response;
+use crate::http::policy::guard::request_body_observation_limit;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::reverse::ReloadableReverse;
@@ -419,10 +420,8 @@ async fn execute_reverse_request(
     }
     let resolution_override = route.plan.destination_resolution.as_ref();
     let route_http_guard = route.plan.guard.as_deref();
-    let route_max_observed_request_body_bytes = route_http_guard
-        .and_then(|profile| profile.request_body_observation_cap())
-        .map(|cap| cap.min(max_observed_request_body_bytes))
-        .unwrap_or(max_observed_request_body_bytes);
+    let route_max_observed_request_body_bytes =
+        request_body_observation_limit(route_http_guard, max_observed_request_body_bytes);
     let override_key = destination_override_key(resolution_override);
     let request_destination = request_destination_cache
         .get(override_key)

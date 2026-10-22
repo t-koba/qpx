@@ -1,4 +1,5 @@
 use super::*;
+use qpx_core::config::HttpGuardLimitsConfig;
 
 #[test]
 fn header_normalization_trims_only_http_ows() {
@@ -33,6 +34,36 @@ fn guard_detects_conflicting_content_length() {
     );
     let reject = profile.evaluate_request(&req).expect("guard");
     assert!(reject.is_some());
+}
+
+#[test]
+fn request_body_observation_limit_only_lowers_the_base_limit() {
+    // No guard: the base limit stands unchanged.
+    assert_eq!(request_body_observation_limit(None, 4096), 4096);
+
+    // A guard cap below the base limit lowers it.
+    let capped = profile_with_body_bytes(1024);
+    assert_eq!(request_body_observation_limit(Some(&capped), 4096), 1024);
+
+    // A guard cap above the base limit never raises it.
+    let generous = profile_with_body_bytes(8192);
+    assert_eq!(request_body_observation_limit(Some(&generous), 4096), 4096);
+}
+
+fn profile_with_body_bytes(body_bytes: usize) -> CompiledHttpGuardProfile {
+    CompiledHttpGuardProfile {
+        profile: HttpGuardProfileConfig {
+            name: "capped".to_string(),
+            normalize: Default::default(),
+            protocol_safety: Default::default(),
+            limits: HttpGuardLimitsConfig {
+                body_bytes: Some(body_bytes),
+                ..Default::default()
+            },
+            json: Default::default(),
+            multipart: Default::default(),
+        },
+    }
 }
 
 fn strict_profile() -> CompiledHttpGuardProfile {

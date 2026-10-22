@@ -26,6 +26,21 @@ pub(crate) struct HttpGuardReject {
     pub(crate) body: String,
 }
 
+/// The request-body observation limit for a request under `guard`.
+///
+/// The guard's own body cap may only lower the base limit the plan allows,
+/// never raise it, so the effective limit is the smaller of the two. A
+/// guard without a body cap leaves the base limit unchanged.
+pub(crate) fn request_body_observation_limit(
+    guard: Option<&CompiledHttpGuardProfile>,
+    base_limit: usize,
+) -> usize {
+    guard
+        .and_then(|profile| profile.request_body_observation_cap())
+        .map(|cap| cap.min(base_limit))
+        .unwrap_or(base_limit)
+}
+
 pub(crate) fn compile_http_guard_profile(
     profile: &HttpGuardProfileConfig,
 ) -> Arc<CompiledHttpGuardProfile> {

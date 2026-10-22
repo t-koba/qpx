@@ -2,6 +2,7 @@ use super::InlineCache;
 use crate::http::body::observation::RequestObservationPlan;
 use crate::http::body::size::observed_request_size;
 use crate::http::dispatch::request_body_too_large_response;
+use crate::http::policy::guard::request_body_observation_limit;
 use crate::http::policy::response_policy::response_request_obs;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::policy_context::authentication_response_for_error;
@@ -191,10 +192,10 @@ pub(super) async fn scan_reverse_routes(
         if route_needs_observation || selection.collect_observation_from_remaining {
             if route.matches_without_request_body_observation(&ctx) {
                 selection.collect_observation_from_remaining = true;
-                let mut route_limit = route_http_guard
-                    .and_then(|profile| profile.request_body_observation_cap())
-                    .unwrap_or(state.plan.limits.body.max_observed_request_body_bytes)
-                    .min(state.plan.limits.body.max_observed_request_body_bytes);
+                let mut route_limit = request_body_observation_limit(
+                    route_http_guard,
+                    state.plan.limits.body.max_observed_request_body_bytes,
+                );
                 route_limit = route.plan.request_body_observation_limit(route_limit);
                 selection.max_observed_request_body_bytes =
                     selection.max_observed_request_body_bytes.min(route_limit);

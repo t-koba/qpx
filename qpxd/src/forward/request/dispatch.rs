@@ -7,6 +7,7 @@ use crate::http::dispatch::{
     request_body_too_large_response,
 };
 use crate::http::pipeline::PolicyStage;
+use crate::http::policy::guard::request_body_observation_limit;
 use crate::http::policy::response_policy::response_request_obs;
 use crate::http::policy::rule_context::{
     RequestRuleContextInput, build_request_rule_match_context,
@@ -197,11 +198,10 @@ async fn prepare_forward_request(
         .as_deref()
         .map(|engine| engine.candidate_profile(prefilter_ctx.clone()))
         .unwrap_or_default();
-    let edge_body_limit = state.plan.limits.body.max_observed_request_body_bytes;
-    let max_observed_request_body_bytes = http_guard
-        .and_then(|profile| profile.request_body_observation_cap())
-        .unwrap_or(edge_body_limit)
-        .min(edge_body_limit);
+    let max_observed_request_body_bytes = request_body_observation_limit(
+        http_guard,
+        state.plan.limits.body.max_observed_request_body_bytes,
+    );
     let max_observed_request_body_bytes =
         compiled_edge.request_body_observation_limit(max_observed_request_body_bytes);
     let body_read_timeout =
