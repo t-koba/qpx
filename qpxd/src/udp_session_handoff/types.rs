@@ -108,6 +108,26 @@ pub(super) struct PersistedTransparentUdpSessionRestore {
     pub(super) rate_limit_ctx: RateLimitContext,
 }
 
+impl PersistedTransparentUdpSessionRestore {
+    pub(super) fn into_restore(self, socket: std::net::UdpSocket) -> TransparentUdpSessionRestore {
+        TransparentUdpSessionRestore {
+            session_id: self.session_id,
+            socket,
+            upstream_local_addr: self.upstream_local_addr,
+            upstream_peer_addr: self.upstream_peer_addr,
+            client_addr: self.client_addr,
+            target_key: self.target_key,
+            last_seen_ms: self.last_seen_ms,
+            client_cid_len: self.client_cid_len,
+            server_cid_len: self.server_cid_len,
+            cids: self.cids,
+            matched_rule: self.matched_rule,
+            rate_limit_profile: self.rate_limit_profile,
+            rate_limit_ctx: self.rate_limit_ctx,
+        }
+    }
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub(super) struct PersistedReversePassthroughListenerRestore {
     pub(super) name: String,

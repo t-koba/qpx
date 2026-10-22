@@ -204,21 +204,7 @@ fn from_persisted_handoff(persisted: PersistedUdpSessionHandoff) -> Result<UdpSe
                 session.upstream_local_addr,
                 session.upstream_peer_addr,
             )?;
-            sessions.push(TransparentUdpSessionRestore {
-                session_id: session.session_id,
-                socket,
-                upstream_local_addr: session.upstream_local_addr,
-                upstream_peer_addr: session.upstream_peer_addr,
-                client_addr: session.client_addr,
-                target_key: session.target_key,
-                last_seen_ms: session.last_seen_ms,
-                client_cid_len: session.client_cid_len,
-                server_cid_len: session.server_cid_len,
-                cids: session.cids,
-                matched_rule: session.matched_rule,
-                rate_limit_profile: session.rate_limit_profile,
-                rate_limit_ctx: session.rate_limit_ctx,
-            });
+            sessions.push(session.into_restore(socket));
         }
         state.insert_transparent(
             listener.name,
