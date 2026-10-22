@@ -473,6 +473,53 @@ async fn static_response_recycles_header_storage() {
     assert!(raw.ends_with(b"OK"));
 }
 
+/// The content-length field lines of a response head.
+fn content_length_lines(head: &[u8]) -> Vec<String> {
+    std::str::from_utf8(head)
+        .expect("ASCII head")
+        .lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+        .map(str::to_string)
+        .collect()
+}
+
+#[tokio::test]
+async fn static_response_writes_one_canonical_content_length_line() {
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // a comma list of equal members leaves as one field line whose value
+    // is the resolved decimal, and two field lines of that name leave as
+    // one as well.
+    for values in [vec!["42, 42"], vec!["42", "42"]] {
+        let mut headers = HeaderMap::with_capacity(4);
+        for value in &values {
+            headers.append(CONTENT_LENGTH, HeaderValue::from_str(value).expect("value"));
+        }
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let mut client = client.expect("connect");
+        let (mut server, _) = accepted.expect("accept");
+        let mut head_buf = BytesMut::new();
+        send_static_http1_response(
+            &mut server,
+            &Method::GET,
+            StatusCode::OK,
+            headers,
+            Bytes::from_static(&[b'x'; 42]),
+            true,
+            &mut head_buf,
+        )
+        .await
+        .expect("send static response");
+
+        let mut raw = vec![0; head_buf.len() + 42];
+        client.read_exact(&mut raw).await.expect("read response");
+        assert_eq!(content_length_lines(&raw), vec!["content-length: 42"]);
+    }
+}
+
 #[tokio::test]
 async fn finalized_raw_response_head_uses_direct_http1_serialization() {
     let (mut client, server) = tokio::io::duplex(4096);

@@ -252,7 +252,14 @@ pub enum ContentLengthError {
 /// follows a constant or a static that holds the field's name as well,
 /// so a reader cannot hide behind a constant of its own either, and it
 /// follows an import that gives the field's name a name of its own, so
-/// a reader cannot hide behind a renamed import either. A constant of
+/// a reader cannot hide behind a renamed import either. The imports of
+/// a nested module are the file's imports too, so the gate reads them
+/// as well; an import inside a function body is not one of them,
+/// because it is a name that one function holds and not a name the file
+/// holds. The name an import brings the field's name under is followed
+/// for the whole file, so a nested module that uses that name for
+/// something else is read as a reader of the declaration; the gate errs
+/// towards seeing a read. A constant of
 /// another file of the workspace that holds the field's name is
 /// followed as well: the gate reads the constants of the workspace's
 /// files, so a site that imports such a constant holds the field's name

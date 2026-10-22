@@ -94,6 +94,14 @@ pub(crate) async fn send_static_http1_response(
     if status_has_no_body {
         if request_method != Method::HEAD {
             headers.remove(CONTENT_LENGTH);
+        } else if let Some(length) = declared_length {
+            // RFC 9110 section 8.6: the value a sender writes is one
+            // decimal, so the length a HEAD response carries leaves in
+            // the field's canonical form.
+            headers.insert(
+                CONTENT_LENGTH,
+                qpx_core::http_content_length::canonical_content_length_value(length),
+            );
         }
         headers.remove(TRANSFER_ENCODING);
         headers.remove(TRAILER);
@@ -114,21 +122,19 @@ pub(crate) async fn send_static_http1_response(
                     .map_err(|error| anyhow!("invalid static response content length: {error}"))?,
             );
         }
+        if let Some(length) = declared_length {
+            // RFC 9110 section 8.6: the value a sender writes is one
+            // decimal, so a declaration that reached this writer leaves
+            // in the field's canonical form - one field whose value is
+            // the resolved decimal - instead of the value it was
+            // received with.
+            headers.insert(
+                CONTENT_LENGTH,
+                qpx_core::http_content_length::canonical_content_length_value(length),
+            );
+        }
         headers.remove(TRANSFER_ENCODING);
         headers.remove(TRAILER);
-    }
-    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
-    // a declaration that reached this writer leaves in the field's
-    // canonical form - one field whose value is the resolved decimal -
-    // instead of the value it was received with. A field that is not
-    // here stays away.
-    if let Some(length) = declared_length
-        && headers.contains_key(CONTENT_LENGTH)
-    {
-        headers.insert(
-            CONTENT_LENGTH,
-            qpx_core::http_content_length::canonical_content_length_value(length),
-        );
     }
     let keep_alive = request_keep_alive
         && request_method != Method::CONNECT

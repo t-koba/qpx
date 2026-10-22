@@ -1304,7 +1304,14 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// name under a name of its own reads the declaration through that
 /// name, so the gate reads the imports of the file and follows the name
 /// the import gives the field's name, whether the import renames the
-/// name or imports it under the name it is spelled with.
+/// name or imports it under the name it is spelled with. The imports
+/// of a nested module are the file's imports too, so they are read as
+/// well, the way the constants of a nested module are read. An import
+/// inside a function body is not one of them: it is a name that one
+/// function holds, not a name the file holds. The name an import
+/// brings the field's name under is followed for the whole file, so a
+/// nested module that uses that name for something else is read as a
+/// reader of the declaration; the gate errs towards seeing a read.
 /// The gate follows a binding of a header entry's name as well: a site
 /// that binds the entry's name to a name of its own and compares that
 /// name with the field's name compares the entry's name, so the
@@ -1868,15 +1875,33 @@ fn content_length_workspace_violations(
 /// A site that imports the field's name under a name of its own reads
 /// the declaration through that name, so the gate reads the imports of
 /// the file and follows the name the import gives the field's name.
+///
+/// The imports of a nested module are the file's imports too, so they
+/// are read as well, the way the rule reads the constants of a nested
+/// module. An import inside a function body is not one of them: it is a
+/// name that one function holds, not a name the file holds.
 fn content_length_imported_names(syntax: &syn::File) -> Vec<String> {
     let mut names = Vec::new();
-    for item in &syntax.items {
-        let syn::Item::Use(item) = item else {
-            continue;
-        };
-        collect_imported_names(&item.tree, &mut names);
-    }
+    collect_imported_names_of_items(&syntax.items, &mut names);
     names
+}
+
+/// The names the imports of a list of items bring the field's name under.
+///
+/// A module's own imports and the imports of the modules inside it are
+/// read, so a nested module's import is followed as well.
+fn collect_imported_names_of_items(items: &[syn::Item], names: &mut Vec<String>) {
+    for item in items {
+        match item {
+            syn::Item::Use(item) => collect_imported_names(&item.tree, names),
+            syn::Item::Mod(item) => {
+                if let Some((_, items)) = &item.content {
+                    collect_imported_names_of_items(items, names);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The names one import brings the field's name under.
@@ -10648,6 +10673,49 @@ fn declared_length(headers: &HeaderMap) -> Option<u64> {
             [
                 "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
             ]
+        );
+
+        // The same read when the import stands in a nested module: the
+        // module's import is the file's import too, so the name it
+        // brings the field's name under is followed.
+        let nested = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+mod inner {
+    use http::header::CONTENT_LENGTH as LENGTH;
+
+    pub fn declared_length(headers: &HeaderMap) -> Option<u64> {
+        headers.get(LENGTH).and_then(|value| value.to_str().ok()?.parse().ok())
+    }
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&nested.0, &nested.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // An import inside a function body is not one of the file's
+        // imports: it is a name that one function holds, so the gate
+        // does not follow it.
+        let in_function = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    use http::header::CONTENT_LENGTH as LENGTH;
+    headers.get(LENGTH).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&in_function.0, &in_function.1, &[])
+                .unwrap()
+                .is_empty(),
+            "an import inside a function body is not followed"
         );
 
         // The same read when the import stands in a group.
