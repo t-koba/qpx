@@ -1275,13 +1275,16 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// entry in a list of header entries: a site that compares a header's
 /// name with the field's name and, in the same body, takes the value of
 /// a header entry finds that entry itself, and a second reading of the
-/// field is what this owner removes. The second shape is seen when the
-/// entry is taken apart in a closure that receives it as a pair and uses
-/// its second element, so a site that takes the value another way is
-/// beyond it. What the gate cannot see is a site that finds the field's
-/// entry by a name it holds in a variable of its own, and a site whose
-/// name comparison and whose taken value stand in two different
-/// functions.
+/// field is what this owner removes. The second shape is seen however
+/// the entry's value is taken: by a closure that receives the entry as
+/// a pair and uses its second element, by the second element of the
+/// pair, and by the `value` member of the entry whose name the
+/// comparison found. What the gate cannot see is a site that finds the
+/// field's entry by a name it holds in a variable of its own, a site
+/// whose name comparison and whose taken value stand in two different
+/// functions, a site that takes the value under a member of another
+/// name, and a site that takes the `value` member of an entry whose
+/// name it compares under a name of its own.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1454,6 +1457,17 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// its own, and a site that reads the value and calls the owner as well
 /// is a violation too, because the owner is the only reader.
 ///
+/// The value is taken out of the entry in more than one way, and the rule
+/// sees them all: by a closure that receives the entry as a pair and uses
+/// its second element, by the second element of the pair, and by the
+/// `value` member of the entry whose name the comparison found. What the
+/// rule cannot see is a site that finds the field's entry by a name it
+/// holds in a variable of its own, a site whose name comparison and whose
+/// taken value stand in two different functions, a site that takes the
+/// value under a member of another name, and a site that takes the
+/// `value` member of an entry whose name it compares under a name of its
+/// own.
+///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
 /// proxy does, so a test that observes the value is not a violation here; a
@@ -1525,6 +1539,23 @@ struct ContentLengthReaderFacts {
     /// receives such a pair and uses its second element takes that
     /// entry's value.
     takes_entry_value: bool,
+    /// The function takes the second element of a pair.
+    ///
+    /// A header entry that is a pair holds its value as the pair's
+    /// second element, so taking that element takes the entry's value.
+    takes_pair_element: bool,
+    /// The names a header's name is compared under.
+    ///
+    /// The name a site compares with the field's name is the name of the
+    /// entry it found, and the entry's value is taken under a name of its
+    /// own, so the two names tell whether the value belongs to the entry
+    /// the site found.
+    compared_bases: Vec<String>,
+    /// The names a `value` member is taken under.
+    ///
+    /// A header entry that is a struct holds its value under `value`, so
+    /// a site that takes that member takes the entry's value.
+    value_bases: Vec<String>,
     /// The function turns text into a number.
     parses_integer: bool,
     /// The function calls the owner.
@@ -1591,7 +1622,16 @@ impl ContentLengthFunctionCollector {
         // A site that finds the field's own entry by comparing a header's
         // name with the field's name and then takes that entry's value
         // reads the declaration's value: the owner is the only reader.
-        if facts.compares_field && facts.takes_entry_value {
+        // The value is taken by a closure that receives the entry as a
+        // pair, by the second element of the pair, or by the `value`
+        // member of the entry the comparison found.
+        let same_entry = facts
+            .compared_bases
+            .iter()
+            .any(|base| facts.value_bases.iter().any(|value| value == base));
+        if facts.compares_field
+            && (facts.takes_entry_value || facts.takes_pair_element || same_entry)
+        {
             facts.reads_value = true;
         }
         self.facts.push((name, facts));
@@ -1612,6 +1652,16 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // by the receiver.
         if method.starts_with("eq") && (names_field || names_content_length_field(&node.receiver)) {
             self.compares_field = true;
+            // The name of the entry the site found is the other side of
+            // the comparison.
+            let compared = if names_field {
+                &node.receiver
+            } else {
+                node.args.first().unwrap_or(&node.receiver)
+            };
+            if let Some(base) = expression_base_name(compared) {
+                self.compared_bases.push(base);
+            }
         }
         // A read of the field's value through the header map is the read
         // itself: whether the value is turned into a number here or
@@ -1676,6 +1726,16 @@ impl Visit<'_> for ContentLengthReaderFacts {
         {
             self.reads_field = true;
             self.compares_field = true;
+            // The name of the entry the site found is the other side of
+            // the comparison.
+            let compared = if names_content_length_field(&node.left) {
+                &node.right
+            } else {
+                &node.left
+            };
+            if let Some(base) = expression_base_name(compared) {
+                self.compared_bases.push(base);
+            }
         }
         syn::visit::visit_expr_binary(self, node);
     }
@@ -1692,6 +1752,22 @@ impl Visit<'_> for ContentLengthReaderFacts {
             self.takes_entry_value = true;
         }
         syn::visit::visit_expr_closure(self, node);
+    }
+
+    fn visit_expr_field(&mut self, node: &syn::ExprField) {
+        // The value of a header entry is held under a member: a struct
+        // entry holds it under `value`, and a pair holds it as its second
+        // element.
+        match &node.member {
+            syn::Member::Named(ident) if ident == "value" => {
+                if let Some(base) = expression_base_name(&node.base) {
+                    self.value_bases.push(base);
+                }
+            }
+            syn::Member::Unnamed(index) if index.index == 1 => self.takes_pair_element = true,
+            _ => {}
+        }
+        syn::visit::visit_expr_field(self, node);
     }
 
     fn visit_item_fn(&mut self, _node: &syn::ItemFn) {
@@ -1748,13 +1824,34 @@ fn names_content_length_field(expr: &syn::Expr) -> bool {
     }
 }
 
+/// The name an expression stands under.
+///
+/// The name a header entry is held under is the name the entry's own
+/// expression stands under, so the name of `header.name` is `header` and
+/// the name of `header` is `header`.
+fn expression_base_name(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::Path(path) => {
+            if path.qself.is_none() && path.path.segments.len() == 1 {
+                Some(path.path.segments[0].ident.to_string())
+            } else {
+                None
+            }
+        }
+        syn::Expr::Field(field) => expression_base_name(&field.base),
+        syn::Expr::Reference(reference) => expression_base_name(&reference.expr),
+        _ => None,
+    }
+}
+
 /// Whether a closure takes the value of a header entry.
 ///
 /// A header entry is a pair of a name and a value, so a closure that
 /// receives such a pair and uses its second element takes that entry's
 /// value. A closure that receives the pair but leaves the value unused
-/// looks at the name alone, and a closure that receives one thing is not
-/// looking at an entry at all.
+/// looks at the name alone. A closure that receives one thing does not
+/// take the pair apart, but the value may still be taken out of the entry
+/// by a member, which the rule sees in its own right.
 fn closure_takes_entry_value(closure: &syn::ExprClosure) -> bool {
     if closure.inputs.len() != 1 {
         return false;
@@ -6168,6 +6265,76 @@ fn stored_type(envelope: &CachedResponseEnvelope) -> Option<&str> {
                 .unwrap()
                 .is_empty(),
             "another field's name is not the field"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_site_that_takes_the_entry_value_by_a_member() {
+        // A site that finds the field's own entry and takes the entry's
+        // `value` member reads the declaration's value: the owner is the
+        // only reader.
+        let member = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
+        .map(|header| header.value)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&member.0, &member.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the entry is a pair and the value is its
+        // second element.
+        let pair = (
+            "qpxd/src/reverse/transport/raw_http1.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(&str, &str)]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
+        .map(|entry| entry.1)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&pair.0, &pair.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/raw_http1.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A member of another name is not the value.
+        let other_member = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_name(headers: &[Header<'_>]) -> Option<&str> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
+        .map(|header| header.name)
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &other_member.0,
+                &other_member.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a member of another name is not the value"
         );
     }
 

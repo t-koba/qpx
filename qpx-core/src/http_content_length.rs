@@ -216,7 +216,11 @@ pub enum ContentLengthError {
 /// name and takes the value of a header entry in the same body finds that
 /// entry itself, which is the second reading of the field this owner
 /// removes, so the cache hands the owner the stored response's named
-/// values rather than selecting the field's values on its own. Test code
+/// values rather than selecting the field's values on its own. The gate
+/// sees the value however it is taken out of the entry: by a closure
+/// that receives the entry as a pair, by the second element of the pair,
+/// and by the `value` member of the entry whose name the comparison
+/// found. Test code
 /// is not part of that question, because a test
 /// observes the value to assert on what the proxy put on the wire rather
 /// than to decide what the proxy does; a test that reads the value and
