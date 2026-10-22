@@ -368,7 +368,11 @@ where
     ))
 }
 
-fn connect_tls_fingerprints_required(runtime: &Runtime, listener_name: &str) -> bool {
+/// Whether a forward plan or listener connection filter needs CONNECT TLS fingerprints.
+pub(in crate::forward) fn connect_tls_fingerprints_required(
+    runtime: &Runtime,
+    listener_name: &str,
+) -> bool {
     let state = runtime.state();
     state
         .plan

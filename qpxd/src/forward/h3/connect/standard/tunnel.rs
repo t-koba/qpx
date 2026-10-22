@@ -1,11 +1,12 @@
-use crate::forward::connect::{ConnectPolicyInput, decide_connect_action_from_client_hello};
+use crate::forward::connect::{
+    ConnectPolicyInput, connect_tls_fingerprints_required, decide_connect_action_from_client_hello,
+};
 #[cfg(feature = "mitm")]
 use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
 use crate::http3::h3_buf_to_bytes;
 use crate::http3::server::H3ServerRequestStream;
-use crate::runtime::PlanFlags;
 #[cfg(feature = "mitm")]
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream, prewarm_mitm_cert};
 use crate::tls::{
@@ -97,7 +98,7 @@ pub(super) async fn prepare_h3_connect_stream(
     let peek_timeout =
         Duration::from_millis(runtime.state().plan.limits.timeouts.tls_peek_timeout_ms);
     let sniff = sniff_h3_connect_client_hello(&mut req_stream, peek_timeout).await?;
-    let include_fingerprints = h3_connect_tls_fingerprints_required(runtime, ctx.listener_name);
+    let include_fingerprints = connect_tls_fingerprints_required(runtime, ctx.listener_name);
     let client_hello = looks_like_tls_client_hello(&sniff)
         .then(|| extract_client_hello_info_with_fingerprints(&sniff, include_fingerprints))
         .flatten();
@@ -164,24 +165,6 @@ async fn sniff_h3_connect_client_hello(
             return Ok(out);
         }
     }
-}
-
-fn h3_connect_tls_fingerprints_required(
-    runtime: &crate::runtime::Runtime,
-    listener_name: &str,
-) -> bool {
-    let state = runtime.state();
-    state
-        .plan
-        .forward_edge(listener_name)
-        .map(|edge| edge.flags.contains(PlanFlags::TLS_FINGERPRINT))
-        .unwrap_or(false)
-        || state
-            .policy
-            .connection_filters_by_listener
-            .get(listener_name)
-            .map(|engine| engine.any_rule_requires_tls_fingerprint())
-            .unwrap_or(false)
 }
 
 #[cfg(feature = "mitm")]

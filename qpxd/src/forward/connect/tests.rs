@@ -93,6 +93,18 @@ fn connect_runtime() -> Runtime {
     .expect("runtime")
 }
 
+#[test]
+fn connect_tls_fingerprint_requirement_uses_the_compiled_forward_plan() {
+    let runtime = connect_runtime();
+    assert_eq!(
+        super::tunnel::connect_tls_fingerprints_required(&runtime, "forward"),
+        cfg!(feature = "mitm"),
+    );
+    assert!(!super::tunnel::connect_tls_fingerprints_required(
+        &runtime, "missing"
+    ));
+}
+
 #[cfg(feature = "mitm")]
 #[tokio::test]
 async fn connect_client_hello_policy_can_upgrade_tunnel_to_inspect() {

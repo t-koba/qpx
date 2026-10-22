@@ -54,6 +54,12 @@ pub(super) use self::inspect::{
     decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
     listener_upstream_trust,
 };
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
+pub(in crate::forward) use self::tunnel::connect_tls_fingerprints_required;
 use self::tunnel::{TunnelConnectContext, tunnel_connect};
 
 /// Initial Connect-only plan limits (scope `Connect`, cost 1); the context feeds profile merging.
