@@ -1472,10 +1472,14 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// `value` member of the entry whose name the comparison found. The value
 /// is the field's value when the site selects the field's own entry, and
 /// a comparison of a header's name with the field's name is what selects
-/// it. A comparison that decides about the field instead does not select
-/// it: a comparison that is not equal, and a comparison whose branch
-/// skips the entry, decide about the field, so a site that skips the
-/// field and takes another header's value is not a reader.
+/// it. The value has to come from the entry the comparison found: the
+/// rule reads the `value` member only when the site takes it under the
+/// name it compared, so a site that compares the field's name and takes
+/// another entry's value is not a reader either. A comparison that
+/// decides about the field instead does not select it: a comparison that
+/// is not equal, and a comparison whose branch skips the entry, decide
+/// about the field, so a site that skips the field and takes another
+/// header's value is not a reader.
 ///
 /// The rule follows the name the site holds for the field: the field's
 /// name itself, a name the site binds the field's name to, and a name the
@@ -6863,6 +6867,35 @@ fn declared_name(headers: &[Header<'_>]) -> Option<&str> {
             .unwrap()
             .is_empty(),
             "a member of another name is not the value"
+        );
+
+        // The value has to come from the entry the comparison found: a
+        // site that compares the field's name and takes another entry's
+        // value does not read the declaration.
+        let another_entry = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn other_value(headers: &[Header<'_>], other: &Header<'_>) -> Option<&str> {
+    if headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
+    {
+        return Some(other.value);
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &another_entry.0,
+                &another_entry.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a site that compares the field's name and takes another entry's value is not a reader"
         );
     }
 
