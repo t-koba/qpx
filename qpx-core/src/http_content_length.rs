@@ -250,6 +250,12 @@ pub enum ContentLengthError {
 /// name of its own and compares that name with the field's name
 /// compares the entry's name, so the binding stands for the entry the
 /// name came from and the value the site takes is that entry's value.
+/// The gate follows a copy of a name as well: a site that copies the
+/// name of the entry it holds holds that entry's name, so the
+/// comparison under the copy finds that entry and the value the site
+/// takes is that entry's value, and a site that copies the field's own
+/// name holds the field's name, so a read through that copy reads the
+/// declaration.
 /// Test code is not
 /// part of that question, because a test observes the value to assert on
 /// what the proxy put on the wire rather than to decide what the proxy

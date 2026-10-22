@@ -1301,7 +1301,10 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// that binds the entry's name to a name of its own and compares that
 /// name with the field's name compares the entry's name, so the
 /// comparison finds that entry and the value the site takes is that
-/// entry's value.
+/// entry's value. A site that copies the entry's name into a name of
+/// its own holds that name as well, so the copy names the entry too,
+/// and a site that copies the field's name holds the field's name, so
+/// the copy names the field.
 /// What the gate cannot see is a site that finds the field's entry by a
 /// name it builds at runtime, a site whose helper that found the entry
 /// stands in another file, and a site that takes the value under a
@@ -1413,6 +1416,21 @@ fn content_length_listed_sites(owner: &str) -> Vec<String> {
 /// The methods that read a header's value.
 const CONTENT_LENGTH_READ_METHODS: [&str; 3] = ["get", "get_all", "contains_key"];
 
+/// The methods that copy a header entry's name into a name of their own.
+///
+/// A site that copies the name of the entry it holds holds that entry's
+/// name, so the gate follows the copy back to the entry the name came
+/// from.
+const CONTENT_LENGTH_NAME_COPY_METHODS: [&str; 7] = [
+    "to_string",
+    "to_owned",
+    "clone",
+    "to_ascii_lowercase",
+    "to_ascii_uppercase",
+    "to_lowercase",
+    "to_uppercase",
+];
+
 /// The field's name, as a header spells it.
 const CONTENT_LENGTH_FIELD: &str = "content-length";
 
@@ -1439,12 +1457,13 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// through `get`, `get_all` and `contains_key`, a read of the field
 /// through an index, and it sees a comparison of a header name with the
 /// field's name. It sees the field named through a reference, through the
-/// constant's text and through a name built from the text. It sees a
-/// parse whose type is written and a parse whose type is inferred,
-/// because the field's value is a length either way. It does not see a
-/// reader that lives outside a function body, it does not see a name the
-/// site builds at runtime, and it reads a function's body as one whole
-/// rather than tying a parse to the read it belongs to.
+/// constant's text, through a name built from the text and through a copy
+/// the site made of the text. It sees a parse whose type is written and a
+/// parse whose type is inferred, because the field's value is a length
+/// either way. It does not see a reader that lives outside a function
+/// body, it does not see a name the site builds at runtime, and it reads
+/// a function's body as one whole rather than tying a parse to the read it
+/// belongs to.
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
@@ -1504,7 +1523,10 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// that binds the entry's name to a name of its own and compares that
 /// name with the field's name compares the entry's name, so the binding
 /// stands for the entry the name came from, and the value the site
-/// takes is that entry's value.
+/// takes is that entry's value. A site that copies the entry's name
+/// into a name of its own holds that name as well, so the copy names
+/// the entry too, and a site that copies the field's name holds the
+/// field's name, so the copy names the field.
 ///
 /// The rule follows the name the site holds for the field: the field's
 /// name itself, a name the site binds the field's name to, and a name the
@@ -1515,10 +1537,9 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// What the rule cannot see is a site that finds the field's entry by a
 /// name it builds at runtime, a site whose helper that found the entry
 /// stands in another file, a site that takes the value under a member
-/// of another name, a site that copies a header entry's name through an
-/// expression of its own that the rule does not follow, and a
-/// comparison inside a condition that holds more than the comparison,
-/// whose branch the rule cannot read as skipping the entry.
+/// of another name, and a comparison inside a condition that holds
+/// more than the comparison, whose branch the rule cannot read as
+/// skipping the entry.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -1899,7 +1920,11 @@ impl Visit<'_> for ContentLengthReaderFacts {
         if let Some(initializer) = &node.init
             && let syn::Pat::Ident(binding) = &node.pat
             && binding.subpat.is_none()
-            && let Some(target) = entry_name_alias_target(&initializer.expr, &self.entry_names)
+            && let Some(target) = entry_name_alias_target(
+                &initializer.expr,
+                &self.entry_names,
+                &self.entry_name_aliases,
+            )
         {
             self.entry_name_aliases
                 .push((binding.ident.to_string(), target));
@@ -1932,7 +1957,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
             } else {
                 node.args.first().unwrap_or(&node.receiver)
             };
-            self.record_selection(true, expression_base_name(compared));
+            self.record_selection(true, compared_entry_base(compared));
         }
         // A read of the field's value through the header map is the read
         // itself: whether the value is turned into a number here or
@@ -2006,7 +2031,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
             };
             self.record_selection(
                 matches!(node.op, syn::BinOp::Eq(_)),
-                expression_base_name(compared),
+                compared_entry_base(compared),
             );
         }
         syn::visit::visit_expr_binary(self, node);
@@ -2191,19 +2216,7 @@ impl ContentLengthReaderFacts {
     /// compares that name, so the comparison finds the entry the name
     /// came from and the value the site takes is that entry's value.
     fn resolve_entry_alias(&self, base: &str) -> String {
-        let mut resolved = base.to_string();
-        for _ in 0..8 {
-            let Some(target) = self
-                .entry_name_aliases
-                .iter()
-                .find(|(alias, _)| alias == &resolved)
-                .map(|(_, target)| target.clone())
-            else {
-                break;
-            };
-            resolved = target;
-        }
-        resolved
+        resolve_alias_chain(base, &self.entry_name_aliases)
     }
 
     /// Whether a branch skips the entry it guards.
@@ -2467,7 +2480,9 @@ fn names_content_length_field(expr: &syn::Expr) -> bool {
         syn::Expr::Reference(reference) => names_content_length_field(&reference.expr),
         // The constant's text names the field.
         syn::Expr::MethodCall(call) => {
-            call.method == "as_str" && names_content_length_field(&call.receiver)
+            (call.method == "as_str"
+                || CONTENT_LENGTH_NAME_COPY_METHODS.contains(&call.method.to_string().as_str()))
+                && names_content_length_field(&call.receiver)
         }
         // A name built from the field's text names the field.
         syn::Expr::Call(call) => {
@@ -2535,7 +2550,11 @@ fn expression_base_name(expr: &syn::Expr) -> Option<String> {
 /// of that member stands for the entry, and a loop that walks a list of
 /// header entries binds the entry's name to a name of its own, so a
 /// binding of that name stands for the entry's name.
-fn entry_name_alias_target(expr: &syn::Expr, entry_names: &[String]) -> Option<String> {
+fn entry_name_alias_target(
+    expr: &syn::Expr,
+    entry_names: &[String],
+    entry_name_aliases: &[(String, String)],
+) -> Option<String> {
     match expr {
         syn::Expr::Field(field) => match &field.member {
             syn::Member::Named(ident) if ident == "name" => expression_base_name(&field.base),
@@ -2544,17 +2563,68 @@ fn entry_name_alias_target(expr: &syn::Expr, entry_names: &[String]) -> Option<S
         syn::Expr::Path(path) => {
             if path.qself.is_none() && path.path.segments.len() == 1 {
                 let name = path.path.segments[0].ident.to_string();
-                entry_names.contains(&name).then_some(name)
+                if entry_names.contains(&name) {
+                    return Some(name);
+                }
+                // A name that already stands for an entry stands for the
+                // same entry when it is copied.
+                let resolved = resolve_alias_chain(&name, entry_name_aliases);
+                (resolved != name).then_some(resolved)
             } else {
                 None
             }
         }
-        syn::Expr::Reference(reference) => entry_name_alias_target(&reference.expr, entry_names),
+        syn::Expr::Reference(reference) => {
+            entry_name_alias_target(&reference.expr, entry_names, entry_name_aliases)
+        }
         syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
-            entry_name_alias_target(&unary.expr, entry_names)
+            entry_name_alias_target(&unary.expr, entry_names, entry_name_aliases)
+        }
+        // A copy of the name holds the name it was made from, so the
+        // entry the copy came from is the entry the copy stands for.
+        syn::Expr::MethodCall(call)
+            if CONTENT_LENGTH_NAME_COPY_METHODS.contains(&call.method.to_string().as_str()) =>
+        {
+            entry_name_alias_target(&call.receiver, entry_names, entry_name_aliases)
         }
         _ => None,
     }
+}
+
+/// The entry a compared name stands for.
+///
+/// The name a site compares with the field's name is the name of the
+/// entry it found, and the site may hold that name in a copy of its own,
+/// so the entry is found through the copy as well.
+fn compared_entry_base(expr: &syn::Expr) -> Option<String> {
+    match expr {
+        syn::Expr::MethodCall(call)
+            if CONTENT_LENGTH_NAME_COPY_METHODS.contains(&call.method.to_string().as_str()) =>
+        {
+            compared_entry_base(&call.receiver)
+        }
+        _ => expression_base_name(expr),
+    }
+}
+
+/// The entry a name stands for, through the names it was bound under.
+///
+/// A name the site bound stands for the entry it came from, and a name
+/// bound to that name stands for the same entry, so the chain is
+/// followed to the entry at its end.
+fn resolve_alias_chain(base: &str, aliases: &[(String, String)]) -> String {
+    let mut resolved = base.to_string();
+    for _ in 0..8 {
+        let Some(target) = aliases
+            .iter()
+            .find(|(alias, _)| alias == &resolved)
+            .map(|(_, target)| target.clone())
+        else {
+            break;
+        };
+        resolved = target;
+    }
+    resolved
 }
 
 /// Whether a closure takes the value of a header entry.
@@ -8830,6 +8900,161 @@ fn other_value(headers: &[Header<'_>]) -> Option<&[u8]> {
                 .unwrap()
                 .is_empty(),
             "a helper that finds another header's entry does not hand the field's entry over"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_site_that_copies_the_entry_name() {
+        // A site that copies the name of the entry it holds holds that
+        // entry's name, so the comparison under the copy finds the entry
+        // and the value the site takes is that entry's value.
+        let copied = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        let name = header.name.to_string();
+        if name.eq_ignore_ascii_case("content-length") {
+            return Some(header.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&copied.0, &copied.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the comparison itself holds the copy.
+        let inline = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        if header.name.to_string().eq_ignore_ascii_case("content-length") {
+            return Some(header.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&inline.0, &inline.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the copy is a copy of a name the site
+        // already bound.
+        let twice = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        let name = header.name.to_string();
+        let key = name.clone();
+        if key.eq_ignore_ascii_case("content-length") {
+            return Some(header.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&twice.0, &twice.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_field_through_a_copy_of_its_name() {
+        // A site that copies the field's name holds that name, so a read
+        // through the copy reads the declaration.
+        let copied = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    let name = "content-length".to_string();
+    headers.get(&name).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&copied.0, &copied.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&copied.0, &copied.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_allows_a_site_that_copies_another_name() {
+        // A site that copies the name of another header's entry and
+        // compares it with another field does not read the declaration.
+        let other = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn other_value(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        let name = header.name.to_string();
+        if name.eq_ignore_ascii_case("content-type") {
+            return Some(header.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other.0, &other.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a copy of another header's name compared with another field is not a reader"
+        );
+
+        // A site that copies the field's name, skips the entry and takes
+        // another header's value does not read the declaration either.
+        let skipping = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn other_value(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        let name = header.name.to_string();
+        if name.eq_ignore_ascii_case("content-length") {
+            continue;
+        }
+        return Some(header.value);
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&skipping.0, &skipping.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a site that skips the field's entry does not read the declaration"
         );
     }
 }
