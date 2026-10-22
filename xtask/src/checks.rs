@@ -1341,10 +1341,15 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// name it builds at runtime from text the site did not write out - a
 /// piece that arrives at runtime - and a site that takes the value under
 /// a member of an entry the comparison did not find. A constant of
-/// another file that holds the field's name is not followed either: the
-/// gate reads the constants of the file it reads, so a site that keeps
-/// the field's name in a constant of another module holds a name the
-/// gate does not know. A helper
+/// another file of the workspace that holds the field's name is
+/// followed: the gate reads the constants of the workspace's files, so a
+/// site that imports such a constant holds the field's name under the
+/// name the import gives it, and the import may rename it. The gate
+/// matches that constant by its name and not by the path the import
+/// takes, so a constant of a crate outside the workspace is not
+/// followed, a name one file holds the field's name under and another
+/// file holds another value under is not followed either, and a
+/// constant an import reaches through a glob is not followed. A helper
 /// of another file that found the entry is seen when the caller calls it
 /// by the name it is defined with; a call through another name is not
 /// seen. A member that holds the entry's name under a name the gate does
@@ -1523,16 +1528,18 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// parse whose type is inferred, because the field's value is a length
 /// either way. It does not see a reader that lives outside a function
 /// body, it does not see a name the site builds at runtime from text the
-/// site did not write out, it does not see a constant of another file
-/// that holds the field's name, and it reads a function's body as one
-/// whole rather than tying a parse to the read it belongs to.
+/// site did not write out, and it reads a function's body as one whole
+/// rather than tying a parse to the read it belongs to. Read on its own
+/// it does not see a constant of another file that holds the field's
+/// name, because it reads one file; the gate itself reads the
+/// workspace's files together and does see that constant.
 #[cfg(test)]
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
     Ok(content_length_inline_reader_facts_violations(
         path,
-        &content_length_reader_facts(path, &syntax),
+        &content_length_reader_facts_with(path, &syntax, &[]),
     ))
 }
 
@@ -1632,11 +1639,17 @@ fn content_length_inline_reader_facts_violations(
 /// What the rule cannot see is a site that finds the field's entry by a
 /// name it builds at runtime from text the site did not write out - a
 /// piece that arrives at runtime - and a site that takes the value under
-/// a member of an entry the comparison did not find. A constant of
-/// another file that holds the field's name is not followed either: the
-/// rule reads the constants of the file it reads, so a site that keeps
-/// the field's name in a constant of another module holds a name the
-/// rule does not know. A helper of
+/// a member of an entry the comparison did not find. Read on its own it
+/// does not see a constant of another file that holds the field's name,
+/// because it reads one file; the gate itself reads the workspace's
+/// files together and does see that constant, so a site that imports
+/// such a constant holds the field's name under the name the import
+/// gives it, and the import may rename it. The gate matches that
+/// constant by its name and not by the path the import takes, so a
+/// constant of a crate outside the workspace is not followed, a name
+/// one file holds the field's name under and another file holds another
+/// value under is not followed either, and a constant an import reaches
+/// through a glob is not followed. A helper of
 /// another file that found the entry is seen when the caller calls it by
 /// the name it is defined with; a call through another name is not seen.
 /// A member that holds the entry's name under a name the rule does not
@@ -1664,7 +1677,7 @@ fn content_length_production_value_reader_violations(
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
     Ok(content_length_production_value_reader_facts_violations(
         path,
-        &content_length_reader_facts(path, &syntax),
+        &content_length_reader_facts_with(path, &syntax, &[]),
         listed,
     ))
 }
@@ -1706,12 +1719,22 @@ type ContentLengthFileFacts = Vec<(String, ContentLengthReaderFacts)>;
 type ContentLengthWorkspaceFacts = Vec<(String, ContentLengthFileFacts)>;
 
 /// The functions of a file and what each of them says about the declared
-/// Content-Length.
-fn content_length_reader_facts(path: &str, syntax: &syn::File) -> ContentLengthFileFacts {
+/// Content-Length, with the names a constant of another file brings into
+/// the file.
+///
+/// A constant of another file that holds the field's name names the field
+/// in the file that imports it, so a read through that name reads the
+/// declaration.
+fn content_length_reader_facts_with(
+    path: &str,
+    syntax: &syn::File,
+    imported_constants: &[String],
+) -> ContentLengthFileFacts {
     let mut collector = ContentLengthFunctionCollector {
         test_file: is_test_file(Path::new(path)),
         field_name_constants: content_length_field_name_constants(syntax),
         field_name_imports: content_length_imported_names(syntax),
+        imported_constants: imported_constants.to_vec(),
         ..ContentLengthFunctionCollector::default()
     };
     collector.visit_file(syntax);
@@ -1768,11 +1791,25 @@ fn content_length_follow_the_entry_across_functions(
 fn content_length_workspace_facts(
     files: &[(String, String)],
 ) -> Result<ContentLengthWorkspaceFacts> {
-    let mut parsed = Vec::new();
+    let mut syntaxes = Vec::new();
     for (path, content) in files {
         let syntax = syn::parse_file(content)
             .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
-        parsed.push((path.clone(), content_length_reader_facts(path, &syntax)));
+        syntaxes.push((path.clone(), syntax));
+    }
+    // A constant of another file that holds the field's name names the
+    // field in the file that imports it, so the constants of the
+    // workspace are read before the files that import them.
+    let workspace_constants = content_length_workspace_field_constants(&syntaxes);
+    let crate_names = content_length_crate_names(&syntaxes);
+    let mut parsed = Vec::new();
+    for (path, syntax) in &syntaxes {
+        let imported =
+            content_length_imported_field_constants(syntax, &workspace_constants, &crate_names);
+        parsed.push((
+            path.clone(),
+            content_length_reader_facts_with(path, syntax, &imported),
+        ));
     }
     // The helpers that found the field's own entry in the shipped code.
     // A helper that compares a header's name with the field's name found
@@ -1871,6 +1908,150 @@ fn collect_imported_names(tree: &syn::UseTree, names: &mut Vec<String>) {
     }
 }
 
+/// The names the constants of the workspace hold the field's name under.
+///
+/// A constant of another file that holds the field's name names the field
+/// in the file that imports it, so the gate reads the constants of every
+/// file of the workspace. A name that two files define is not followed:
+/// one of the two holds another value, so the gate cannot say which one
+/// an import names.
+fn content_length_workspace_field_constants(files: &[(String, syn::File)]) -> Vec<String> {
+    let mut holding = Vec::new();
+    let mut other = Vec::new();
+    for (_, syntax) in files {
+        for (name, holds) in content_length_constants(syntax) {
+            if holds {
+                if !holding.contains(&name) {
+                    holding.push(name);
+                }
+            } else if !other.contains(&name) {
+                other.push(name);
+            }
+        }
+    }
+    holding
+        .into_iter()
+        .filter(|name| !other.contains(name))
+        .collect()
+}
+
+/// The names the crates of the workspace are known by in a path.
+///
+/// A crate of the workspace is named by its directory with the dashes
+/// spelled as underscores, so an import that starts with one of these
+/// names names something of the workspace.
+fn content_length_crate_names(files: &[(String, syn::File)]) -> Vec<String> {
+    let mut names = Vec::new();
+    for (path, _) in files {
+        let Some((crate_dir, _)) = path.split_once('/') else {
+            continue;
+        };
+        let name = crate_dir.replace('-', "_");
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// The names a file imports a constant of the workspace under.
+///
+/// A constant of another file that holds the field's name names the field
+/// in the file that imports it, so the name the import gives the constant
+/// is a name of the field.
+///
+/// An import of a crate outside the workspace is not followed: the crate
+/// is not part of the workspace the gate reads, so the gate cannot say
+/// what its constant holds.
+fn content_length_imported_field_constants(
+    syntax: &syn::File,
+    workspace_constants: &[String],
+    crate_names: &[String],
+) -> Vec<String> {
+    let mut names = Vec::new();
+    for imported in content_length_imported_constants(syntax) {
+        if !content_length_import_is_internal(&imported.root, crate_names) {
+            continue;
+        }
+        if !workspace_constants.contains(&imported.source) {
+            continue;
+        }
+        if !names.contains(&imported.local) {
+            names.push(imported.local);
+        }
+    }
+    names
+}
+
+/// Whether an import names something of the workspace.
+///
+/// An import that starts with `crate`, `self` or `super` names something
+/// of the crate the file belongs to, and an import that starts with the
+/// name of a crate of the workspace names something of that crate.
+fn content_length_import_is_internal(root: &str, crate_names: &[String]) -> bool {
+    matches!(root, "crate" | "self" | "super") || crate_names.iter().any(|name| name == root)
+}
+
+/// A constant a file imports.
+struct ImportedConstant {
+    /// The name the import gives the constant in this file.
+    local: String,
+    /// The name the constant is defined with.
+    source: String,
+    /// The first segment of the path the import names.
+    root: String,
+}
+
+/// The constants a file imports.
+fn content_length_imported_constants(syntax: &syn::File) -> Vec<ImportedConstant> {
+    let mut names = Vec::new();
+    for item in &syntax.items {
+        let syn::Item::Use(item) = item else {
+            continue;
+        };
+        let mut prefix = Vec::new();
+        collect_imported_constants(&item.tree, &mut prefix, &mut names);
+    }
+    names
+}
+
+/// The constants one import brings into the file.
+///
+/// The path the import names is read segment by segment, so the first
+/// segment says whether the import names something of the workspace and
+/// the last segment says which constant is imported. An import that
+/// renames the constant brings it in under the name it is renamed to.
+fn collect_imported_constants(
+    tree: &syn::UseTree,
+    prefix: &mut Vec<String>,
+    names: &mut Vec<ImportedConstant>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_imported_constants(&path.tree, prefix, names);
+            prefix.pop();
+        }
+        syn::UseTree::Name(name) => names.push(ImportedConstant {
+            local: name.ident.to_string(),
+            source: name.ident.to_string(),
+            root: prefix.first().cloned().unwrap_or_default(),
+        }),
+        syn::UseTree::Rename(rename) => names.push(ImportedConstant {
+            local: rename.rename.to_string(),
+            source: rename.ident.to_string(),
+            root: prefix.first().cloned().unwrap_or_default(),
+        }),
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                let mut item_prefix = prefix.clone();
+                collect_imported_constants(tree, &mut item_prefix, names);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
 /// The names a file holds the field's name under in a constant or a static.
 ///
 /// A site that keeps the field's name in a constant of its own and reads
@@ -1878,34 +2059,45 @@ fn collect_imported_names(tree: &syn::UseTree, names: &mut Vec<String>) {
 /// follows the name the constant is held under the way it follows a local
 /// binding of the field's name.
 fn content_length_field_name_constants(syntax: &syn::File) -> Vec<String> {
+    content_length_constants(syntax)
+        .into_iter()
+        .filter(|(_, holds)| *holds)
+        .map(|(name, _)| name)
+        .collect()
+}
+
+/// The names the constants and the statics of a file are defined with, and
+/// whether each of them holds the field's name.
+fn content_length_constants(syntax: &syn::File) -> Vec<(String, bool)> {
     let mut names = Vec::new();
     for item in &syntax.items {
-        collect_field_name_constants(item, &mut names);
+        collect_constants(item, &mut names);
     }
     names
 }
 
-/// The names the items of a file hold the field's name under.
+/// The names the constants and the statics of an item are defined with, and
+/// whether each of them holds the field's name.
 ///
 /// A constant or a static whose value is the field's name names the field,
-/// so the gate follows the name it is held under.
-fn collect_field_name_constants(item: &syn::Item, names: &mut Vec<String>) {
+/// so the gate follows the name it is held under. A constant whose value is
+/// something else names something else, so the gate knows that the name is
+/// not the field's when another file defines it as well.
+fn collect_constants(item: &syn::Item, names: &mut Vec<(String, bool)>) {
     let (ident, value) = match item {
         syn::Item::Const(item) => (&item.ident, &item.expr),
         syn::Item::Static(item) => (&item.ident, &item.expr),
         syn::Item::Mod(item) => {
             if let Some((_, items)) = &item.content {
                 for inner in items {
-                    collect_field_name_constants(inner, names);
+                    collect_constants(inner, names);
                 }
             }
             return;
         }
         _ => return,
     };
-    if names_content_length_field(value) {
-        names.push(ident.to_string());
-    }
+    names.push((ident.to_string(), names_content_length_field(value)));
 }
 
 /// What a function says about the declared Content-Length.
@@ -2104,6 +2296,12 @@ struct ContentLengthFunctionCollector {
     field_name_constants: Vec<String>,
     /// The names the file imports the field's name under.
     field_name_imports: Vec<String>,
+    /// The names the file imports a constant of another file under.
+    ///
+    /// A constant of another file that holds the field's name names the
+    /// field in the file that imports it, so the name the import gives it
+    /// is a name of the field.
+    imported_constants: Vec<String>,
 }
 
 impl Visit<'_> for ContentLengthFunctionCollector {
@@ -2142,6 +2340,7 @@ impl ContentLengthFunctionCollector {
     fn record(&mut self, name: String, block: &syn::Block) {
         let mut aliases = self.field_name_constants.clone();
         aliases.extend(self.field_name_imports.iter().cloned());
+        aliases.extend(self.imported_constants.iter().cloned());
         let mut facts = ContentLengthReaderFacts {
             test_code: self.test_file || self.test_depth > 0,
             field_names: FieldNames {
@@ -10544,6 +10743,161 @@ fn declared_length(headers: &HeaderMap) -> Option<u64> {
                 .unwrap()
                 .is_empty(),
             "a name the site imports for another field is not a reader"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_constant_of_another_file() {
+        // A site that keeps the field's name in a constant of another
+        // file and reads the field through that constant reads the
+        // declaration.
+        let constants = (
+            "qpxd/src/http/consts.rs".to_string(),
+            r#"
+pub const LENGTH_HEADER: &str = "content-length";
+"#
+            .to_string(),
+        );
+        let reader = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use crate::http::consts::LENGTH_HEADER;
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(LENGTH_HEADER).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_workspace_violations(&[constants.clone(), reader.clone()], &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner",
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner",
+            ]
+        );
+
+        // The same read when the import renames the constant.
+        let renamed = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use crate::http::consts::LENGTH_HEADER as LENGTH;
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(LENGTH).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_workspace_violations(&[constants.clone(), renamed.clone()], &[])
+                .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner",
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner",
+            ]
+        );
+
+        // The same read when the site finds the field's own entry with
+        // the imported constant.
+        let found = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+use crate::http::consts::LENGTH_HEADER;
+
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    for (header_name, value) in headers {
+        if header_name == LENGTH_HEADER {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_workspace_violations(&[constants.clone(), found.clone()], &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner",
+            ]
+        );
+
+        // A constant of another file that holds another value does not
+        // name the field.
+        let another_value = (
+            "qpxd/src/http/consts.rs".to_string(),
+            r#"
+pub const LENGTH_HEADER: &str = "x-length";
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_workspace_violations(&[another_value, reader.clone()], &[])
+                .unwrap()
+                .is_empty(),
+            "a constant of another file that holds another value does not name the field"
+        );
+
+        // A constant of a crate outside the workspace is not followed:
+        // the gate does not read that crate, so it cannot say what the
+        // constant holds.
+        let outside = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use external_crate::LENGTH_HEADER;
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(LENGTH_HEADER).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_workspace_violations(&[constants.clone(), outside.clone()], &[])
+                .unwrap()
+                .is_empty(),
+            "a constant of a crate outside the workspace is not followed"
+        );
+
+        // A constant an import reaches through a glob is not followed:
+        // the import does not name the constant.
+        let glob = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use crate::http::consts::*;
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(LENGTH_HEADER).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_workspace_violations(&[constants.clone(), glob.clone()], &[])
+                .unwrap()
+                .is_empty(),
+            "a constant an import reaches through a glob is not followed"
+        );
+
+        // A name two files define is not followed: one of the two holds
+        // another value, so the gate cannot say which one the import
+        // names.
+        let ambiguous = (
+            "qpxd/src/http/other_consts.rs".to_string(),
+            r#"
+pub const LENGTH_HEADER: &str = "x-length";
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_workspace_violations(
+                &[constants.clone(), ambiguous, reader.clone()],
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a name two files define is not followed"
         );
     }
 }
