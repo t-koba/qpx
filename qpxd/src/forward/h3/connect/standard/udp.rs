@@ -9,7 +9,7 @@ mod upstream;
 
 use self::chained::relay_h3_connect_udp_stream_chained;
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
-use super::super::apply_connect_udp_bandwidth_controls;
+use super::super::{apply_connect_udp_bandwidth_controls, forward_udp_capsules};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::protocol::common::too_many_requests_response as too_many_requests;
 use crate::http::protocol::l7::finalize_response_with_headers;
@@ -400,21 +400,7 @@ async fn relay_h3_connect_udp_stream(
                     Some(chunk) => {
                         let bytes = h3_buf_to_bytes(chunk);
                         capsule_buf.push(bytes, connect_udp_cfg.max_capsule_buffer_bytes)?;
-                        while let Some((capsule_type, payload)) = capsule_buf.take_next()? {
-                            if capsule_type != 0 {
-                                continue;
-                            }
-                            let Some(datagram_payload) = decode_connect_udp_payload(payload.as_ref()) else {
-                                continue;
-                            };
-                            apply_connect_udp_bandwidth_controls(
-                                &rate_limit_ctx,
-                                &request_limits,
-                                datagram_payload.len(),
-                            )
-                            .await?;
-                            udp.send(datagram_payload).await?;
-                        }
+                        forward_udp_capsules(&mut capsule_buf, &udp, &rate_limit_ctx, &request_limits).await?;
                         idle_deadline
                             .as_mut()
                             .reset(crate::runtime::tokio_deadline_after(idle_timeout));

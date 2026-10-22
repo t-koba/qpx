@@ -1,4 +1,4 @@
-use super::super::connect::apply_connect_udp_bandwidth_controls;
+use super::super::connect::{apply_connect_udp_bandwidth_controls, forward_udp_capsules};
 use crate::http3::capsule::{
     CapsuleBuffer, decode_connect_udp_payload, decode_quic_varint, encode_capsule_header,
     encode_datagram_capsule_context_header, encode_datagram_capsule_header,
@@ -384,21 +384,7 @@ pub(super) async fn relay_qpx_connect_udp_stream(
                 match recv? {
                     Some(chunk) => {
                         capsule_buf.push(chunk, connect_udp_cfg.max_capsule_buffer_bytes)?;
-                        while let Some((capsule_type, payload)) = capsule_buf.take_next()? {
-                            if capsule_type != 0 {
-                                continue;
-                            }
-                            let Some(datagram_payload) = decode_connect_udp_payload(payload.as_ref()) else {
-                                continue;
-                            };
-                            apply_connect_udp_bandwidth_controls(
-                                &rate_limit_ctx,
-                                &request_limits,
-                                datagram_payload.len(),
-                            )
-                            .await?;
-                            udp.send(datagram_payload).await?;
-                        }
+                        forward_udp_capsules(&mut capsule_buf, &udp, &rate_limit_ctx, &request_limits).await?;
                         idle_deadline
                             .as_mut()
                             .reset(crate::runtime::tokio_deadline_after(idle_timeout));

@@ -72,6 +72,34 @@ pub(in crate::forward::h3) mod udp {
     pub(in crate::forward::h3) use super::standard::udp::handle_h3_connect_udp;
 }
 
+/// Forwards valid UDP datagrams carried in complete CONNECT-UDP capsules.
+#[cfg(feature = "http3")]
+pub(super) async fn forward_udp_capsules(
+    capsule_buf: &mut crate::http3::capsule::CapsuleBuffer,
+    udp: &tokio::net::UdpSocket,
+    rate_limit_ctx: &crate::rate_limit::RateLimitContext,
+    request_limits: &crate::rate_limit::AppliedRateLimits,
+) -> anyhow::Result<()> {
+    while let Some((capsule_type, payload)) = capsule_buf.take_next()? {
+        if capsule_type != 0 {
+            continue;
+        }
+        let Some(datagram_payload) =
+            crate::http3::capsule::decode_connect_udp_payload(payload.as_ref())
+        else {
+            continue;
+        };
+        apply_connect_udp_bandwidth_controls(
+            rate_limit_ctx,
+            request_limits,
+            datagram_payload.len(),
+        )
+        .await?;
+        udp.send(datagram_payload).await?;
+    }
+    Ok(())
+}
+
 #[cfg(feature = "http3")]
 pub(super) async fn apply_connect_udp_bandwidth_controls(
     ctx: &crate::rate_limit::RateLimitContext,
