@@ -868,12 +868,39 @@ fn serialize_upstream_request_head(
     out.extend_from_slice(b" ");
     out.extend_from_slice(target.as_bytes());
     out.extend_from_slice(b" HTTP/1.1\r\n");
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // the declaration leaves in the field's canonical form - one field
+    // line whose value is the resolved decimal - at the position of the
+    // first line that carried it, and every further line that carried it
+    // is dropped. A declaration the owner refuses names no length, so
+    // the field leaves as it was received: this path does not refuse a
+    // declaration the owner refuses, it only writes the resolved length
+    // when there is one.
+    let canonical_content_length = match raw_declared_content_length(headers) {
+        Ok(Some(length)) => {
+            Some(qpx_core::http_content_length::canonical_content_length_value(length))
+        }
+        Ok(None) | Err(_) => None,
+    };
+    let mut content_length_written = false;
     for header in headers {
         let name = header.name.as_bytes();
         if name.eq_ignore_ascii_case(b"host")
             || is_hop_by_hop_header(name)
             || raw_has_connection_token(headers, name)
         {
+            continue;
+        }
+        if name.eq_ignore_ascii_case(b"content-length") {
+            match canonical_content_length.as_ref() {
+                Some(value) => {
+                    if !content_length_written {
+                        content_length_written = true;
+                        append_header_line(&mut out, name, value.as_bytes());
+                    }
+                }
+                None => append_header_line(&mut out, name, header.value),
+            }
             continue;
         }
         append_header_line(&mut out, name, header.value);
@@ -1116,6 +1143,98 @@ mod tests {
         assert!(text.contains("Via: 1.1 qpx\r\n"));
         assert!(!text.contains("X-Private"));
         assert!(!text.contains("Connection"));
+    }
+
+    /// The content-length field lines of a serialized request head.
+    ///
+    /// The field's name is matched case-insensitively, as HTTP requires,
+    /// and the carriage return of the line ending is not part of the
+    /// value.
+    fn content_length_lines(head: &str) -> Vec<String> {
+        head.lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn serialized_raw_request_writes_one_canonical_content_length_line_for_a_comma_list() {
+        // RFC 9110 section 8.6: the value a sender writes is one decimal,
+        // so a comma list of equal members leaves as one field line whose
+        // value is the resolved decimal, at the place of the first line
+        // that carried the field.
+        let headers = [
+            httparse::Header {
+                name: "Content-Length",
+                value: b"42, 42",
+            },
+            httparse::Header {
+                name: "X-After",
+                value: b"kept",
+            },
+        ];
+        let serialized =
+            serialize_upstream_request_head("GET", "/path", &headers, "127.0.0.1:80", "qpx")
+                .expect("serialized request");
+        let text = std::str::from_utf8(serialized.as_ref()).expect("UTF-8 request");
+
+        assert_eq!(content_length_lines(text), vec!["Content-Length: 42"]);
+        assert!(text.contains("Content-Length: 42\r\nX-After: kept\r\n"));
+    }
+
+    #[test]
+    fn serialized_raw_request_writes_one_canonical_content_length_line_for_two_values() {
+        // RFC 9110 section 8.6: the field is one field, so two lines that
+        // carried it leave as one line whose value is the resolved
+        // decimal.
+        let headers = [
+            httparse::Header {
+                name: "Content-Length",
+                value: b"42",
+            },
+            httparse::Header {
+                name: "Content-Length",
+                value: b"42",
+            },
+        ];
+        let serialized =
+            serialize_upstream_request_head("GET", "/path", &headers, "127.0.0.1:80", "qpx")
+                .expect("serialized request");
+        let text = std::str::from_utf8(serialized.as_ref()).expect("UTF-8 request");
+
+        assert_eq!(content_length_lines(text), vec!["Content-Length: 42"]);
+    }
+
+    #[test]
+    fn serialized_raw_request_keeps_a_single_content_length_value() {
+        // A value that already is the canonical one reaches the wire as
+        // it was received.
+        let headers = [httparse::Header {
+            name: "Content-Length",
+            value: b"42",
+        }];
+        let serialized =
+            serialize_upstream_request_head("GET", "/path", &headers, "127.0.0.1:80", "qpx")
+                .expect("serialized request");
+        let text = std::str::from_utf8(serialized.as_ref()).expect("UTF-8 request");
+
+        assert_eq!(content_length_lines(text), vec!["Content-Length: 42"]);
+    }
+
+    #[test]
+    fn serialized_raw_request_does_not_invent_a_content_length() {
+        // A request that carried no field carries none on the wire.
+        let headers = [httparse::Header {
+            name: "X-After",
+            value: b"kept",
+        }];
+        let serialized =
+            serialize_upstream_request_head("GET", "/path", &headers, "127.0.0.1:80", "qpx")
+                .expect("serialized request");
+        let text = std::str::from_utf8(serialized.as_ref()).expect("UTF-8 request");
+
+        assert!(content_length_lines(text).is_empty());
     }
 
     #[test]

@@ -49,8 +49,22 @@ pub(crate) fn sanitize_streaming_response_head_for_h3(
         return Ok(Some(false));
     }
     sanitize_h3_regular_headers(head.headers_mut());
-    if parse_content_length(head.headers()).is_err() {
-        head.headers_mut().remove(http::header::CONTENT_LENGTH);
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // a declaration that reached this writer leaves in the field's
+    // canonical form - one field whose value is the resolved decimal.
+    // A declaration the owner refuses names no length, so the field is
+    // dropped rather than sent as it was received.
+    match parse_content_length(head.headers()) {
+        Ok(Some(length)) => {
+            head.headers_mut().insert(
+                http::header::CONTENT_LENGTH,
+                qpx_core::http_content_length::canonical_content_length_value(length),
+            );
+        }
+        Ok(None) => {}
+        Err(_) => {
+            head.headers_mut().remove(http::header::CONTENT_LENGTH);
+        }
     }
     validate_h3_regular_headers(head.headers())?;
     Ok(Some(true))

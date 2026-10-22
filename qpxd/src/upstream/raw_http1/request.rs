@@ -57,7 +57,16 @@ where
         {
             headers.insert(TRAILER, value);
         }
-    } else if declared_length.is_none() {
+    } else if let Some(length) = declared_length {
+        // RFC 9110 section 8.6: the value a sender writes is one decimal,
+        // so the declaration leaves in the field's canonical form - one
+        // field line whose value is the resolved decimal - instead of the
+        // value the request carried.
+        headers.insert(
+            CONTENT_LENGTH,
+            qpx_core::http_content_length::canonical_content_length_value(length),
+        );
+    } else {
         headers.remove(CONTENT_LENGTH);
     }
 

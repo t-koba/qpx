@@ -171,19 +171,8 @@ pub(crate) async fn send_h2_response_with_interim(
     } else {
         parts.headers
     };
-    let declared_length = if no_body {
-        if request_method == hyper::Method::HEAD {
-            qpx_http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
-            if parse_declared_content_length(&headers).is_err() {
-                headers.remove(http::header::CONTENT_LENGTH);
-            }
-        } else {
-            qpx_http::protocol::semantics::strip_message_body_headers(&mut headers);
-        }
-        None
-    } else {
-        parse_declared_content_length(&headers)?
-    };
+    let declared_length =
+        prepare_h2_response_content_length(&mut headers, no_body, request_method)?;
     let flow_control_body =
         declared_length.is_none_or(|length| length > H2_DIRECT_SEND_BODY_MAX_BYTES);
     let mut scheduler_buffer_budget = if flow_control_body {
@@ -414,6 +403,53 @@ pub(crate) async fn send_h2_response_with_interim(
     }
 
     Ok(())
+}
+
+/// The declared Content-Length of the response the HTTP/2 writer sends.
+///
+/// RFC 9110 section 8.6 gives the field the grammar `1*DIGIT`, so the
+/// value a sender writes is one decimal, and the declaration the
+/// response carried is replaced with a single instance of the resolved
+/// decimal: the field leaves as one field whose value is that decimal,
+/// never as two fields and never as a value the grammar does not have.
+///
+/// A response that carries no body keeps no field, except for the
+/// response to a HEAD request, which carries the length the matching
+/// GET response would have. A declaration the owner refuses names no
+/// length, so the field is dropped rather than sent as it was received.
+fn prepare_h2_response_content_length(
+    headers: &mut http::HeaderMap,
+    no_body: bool,
+    request_method: &hyper::Method,
+) -> Result<Option<u64>> {
+    if no_body {
+        if request_method == hyper::Method::HEAD {
+            qpx_http::protocol::semantics::strip_message_body_framing_headers(headers);
+            match parse_declared_content_length(headers) {
+                Ok(Some(length)) => {
+                    headers.insert(
+                        http::header::CONTENT_LENGTH,
+                        qpx_core::http_content_length::canonical_content_length_value(length),
+                    );
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    headers.remove(http::header::CONTENT_LENGTH);
+                }
+            }
+        } else {
+            qpx_http::protocol::semantics::strip_message_body_headers(headers);
+        }
+        return Ok(None);
+    }
+    let declared_length = parse_declared_content_length(headers)?;
+    if let Some(length) = declared_length {
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            qpx_core::http_content_length::canonical_content_length_value(length),
+        );
+    }
+    Ok(declared_length)
 }
 
 fn h2_scheduler_buffer_budget(active_streams: usize) -> usize {

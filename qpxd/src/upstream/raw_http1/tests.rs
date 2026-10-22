@@ -699,6 +699,82 @@ async fn response_body_relay_exits_when_downstream_body_is_dropped() {
     );
 }
 
+/// The content-length field lines of a written request.
+///
+/// The field's name is matched case-insensitively, as HTTP requires, and
+/// the carriage return of the line ending is not part of the value.
+fn content_length_lines(head: &str) -> Vec<String> {
+    head.lines()
+        .map(|line| line.trim_end_matches('\r'))
+        .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+        .map(str::to_string)
+        .collect()
+}
+
+/// Writes a request that declares a length of 42 and returns the bytes
+/// that reached the wire.
+async fn write_request_with_content_length(headers: HeaderMap) -> String {
+    let body = Body::replay(Bytes::from(vec![b'x'; 42]), None);
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri("/upload")
+        .body(body)
+        .expect("request");
+    *request.headers_mut() = headers;
+    let mut written = Vec::new();
+    let mut head = BytesMut::new();
+    super::request::write_http1_request(&mut written, request, &mut head)
+        .await
+        .expect("written request");
+    String::from_utf8(written).expect("UTF-8 request")
+}
+
+#[tokio::test]
+async fn write_http1_request_writes_one_canonical_content_length_line_for_a_comma_list() {
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // a comma list of equal members leaves as one field line whose value
+    // is the resolved decimal.
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("42, 42"));
+
+    let written = write_request_with_content_length(headers).await;
+
+    assert_eq!(content_length_lines(&written), vec!["content-length: 42"]);
+}
+
+#[tokio::test]
+async fn write_http1_request_writes_one_canonical_content_length_line_for_two_values() {
+    // RFC 9110 section 8.6: the field is one field, so two values that
+    // carried it leave as one line whose value is the resolved decimal.
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("42"));
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("42"));
+
+    let written = write_request_with_content_length(headers).await;
+
+    assert_eq!(content_length_lines(&written), vec!["content-length: 42"]);
+}
+
+#[tokio::test]
+async fn write_http1_request_keeps_a_single_content_length_value() {
+    // A value that already is the canonical one reaches the wire as it
+    // was received.
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_LENGTH, HeaderValue::from_static("42"));
+
+    let written = write_request_with_content_length(headers).await;
+
+    assert_eq!(content_length_lines(&written), vec!["content-length: 42"]);
+}
+
+#[tokio::test]
+async fn write_http1_request_does_not_invent_a_content_length() {
+    // A request that carried no field carries none on the wire.
+    let written = write_request_with_content_length(HeaderMap::new()).await;
+
+    assert!(content_length_lines(&written).is_empty());
+}
+
 #[tokio::test]
 async fn write_http1_request_announces_chunked_request_trailers() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

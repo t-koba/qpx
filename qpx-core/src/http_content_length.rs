@@ -14,8 +14,22 @@
 //! values, and one for a sequence of named header values, so a site that
 //! reads raw header lines reaches the owner as well and does not select
 //! the field's values itself.
+//!
+//! The field has a sending half as well, and the owner holds it too.
+//! RFC 9110 section 8.6 gives the field the grammar `1*DIGIT`, so the
+//! value a sender writes is one decimal; the receiving half above reads
+//! a comma list of equal members as one length, and such a list is a
+//! value that does not match the grammar a sender writes. The section's
+//! sender rule forbids forwarding a value that does not match that
+//! grammar, and the section's one exception lets a recipient of an
+//! equal-member comma list either reject the message or replace that
+//! value with a single instance of the decimal value. qpx replaces it,
+//! so every writer emits one field line whose value is the resolved
+//! decimal, and the owner holds the value that is written as well as the
+//! reading of the value that was received.
 
 use http::HeaderMap;
+use http::HeaderValue;
 use http::header::CONTENT_LENGTH;
 use thiserror::Error;
 
@@ -57,6 +71,12 @@ pub enum ContentLengthError {
 /// RFC 9110 section 8.6: every value is a comma-separated list of `1*DIGIT`
 /// members, and every member of every value declares the same length, so a
 /// value that names two different lengths is a conflict rather than a choice.
+///
+/// The field's sending half belongs to the owner as well: the grammar a
+/// sender writes is one decimal, so the value the owner writes for a
+/// resolved length is a single instance of that decimal, and a writer
+/// that replaces the declaration it received with it emits one field
+/// line whose value is the resolved decimal.
 ///
 /// The owner sits beside the member grammar it uses, so the HTTP/1 and
 /// HTTP/2 codecs, the HTTP/3 codec and listener, the cache, the upstream
@@ -378,6 +398,12 @@ fn merge_value(value: &str, declared: &mut Option<u64>) -> Result<(), ContentLen
 /// is a comma-separated list of `1*DIGIT` members (RFC 9110 section 8.6),
 /// so two different lengths are a conflict rather than a choice.
 ///
+/// The field's sending half belongs to the owner as well: the grammar a
+/// sender writes is one decimal, so the value the owner writes for a
+/// resolved length is a single instance of that decimal, and a writer
+/// that replaces the declaration it received with it emits one field
+/// line whose value is the resolved decimal.
+///
 /// A site that reads the declaration from raw header lines has no header
 /// map to hand the owner, so it hands the values instead: the member
 /// grammar and the conflict rule stay in one place.
@@ -392,6 +418,12 @@ pub fn declared_content_length_in_values<'a>(
 }
 
 /// The Content-Length that a sequence of named header values declares.
+///
+/// The field's sending half belongs to the owner as well: the grammar a
+/// sender writes is one decimal, so the value the owner writes for a
+/// resolved length is a single instance of that decimal, and a writer
+/// that replaces the declaration it received with it emits one field
+/// line whose value is the resolved decimal.
 ///
 /// A site that reads raw header lines has no header map to hand the
 /// owner, so it hands the lines themselves: the owner finds the field's
@@ -440,10 +472,47 @@ where
     }
 }
 
+/// The canonical field value for a resolved length.
+///
+/// RFC 9110 section 8.6 gives the field the grammar `1*DIGIT`, so the
+/// value a sender writes is one decimal and nothing else. The same
+/// section's sender rule forbids forwarding a value that does not match
+/// that grammar, and the section's one exception lets a recipient of an
+/// equal-member comma list either reject the message or replace that
+/// value with a single instance of the decimal value. qpx replaces it,
+/// so a writer emits one field line whose value is the resolved decimal.
+///
+/// The value belongs to the owner, so a writer does not format the
+/// decimal itself: a writer that has resolved a length asks the owner
+/// for the value of that length and writes what the owner gives it.
+pub fn canonical_content_length_value(length: u64) -> HeaderValue {
+    HeaderValue::from(length)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use http::HeaderValue;
+
+    #[test]
+    fn canonical_content_length_value_writes_one_decimal() {
+        // The value a sender writes is one decimal, so the owner writes
+        // the resolved length as that decimal and nothing else.
+        assert_eq!(
+            canonical_content_length_value(42).to_str().expect("text"),
+            "42"
+        );
+        assert_eq!(
+            canonical_content_length_value(0).to_str().expect("text"),
+            "0"
+        );
+        assert_eq!(
+            canonical_content_length_value(u64::MAX)
+                .to_str()
+                .expect("text"),
+            "18446744073709551615"
+        );
+    }
 
     #[test]
     fn declared_content_length_reads_every_member_of_every_value() {

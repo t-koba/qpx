@@ -124,13 +124,33 @@ impl RawHttp1ResponseHead {
         let mut header_lines = take_header_buffer(header_capacity);
         let mut proxy_status = None;
         let mut has_date = false;
+        // RFC 9110 section 8.6: the value a sender writes is one decimal,
+        // so the field leaves in the canonical form - one field line
+        // whose value is the resolved decimal - at the position of the
+        // first line that carried it, and every further line that carried
+        // it is dropped.
+        let canonical_content_length =
+            content_length.map(qpx_core::http_content_length::canonical_content_length_value);
+        let mut content_length_written = false;
 
         for header in headers {
             let name = header.name.as_bytes();
             if is_sanitized_hop_header(name, preserve_proxy_auth)
                 || (has_connection_header && raw_has_connection_token(headers, name))
-                || (strip_content_length && name.eq_ignore_ascii_case(b"content-length"))
             {
+                continue;
+            }
+            if name.eq_ignore_ascii_case(b"content-length") {
+                if strip_content_length {
+                    continue;
+                }
+                // The owner resolved the declaration before this loop, so
+                // a line that carries the field's name always has a
+                // resolved length.
+                if !content_length_written && let Some(value) = canonical_content_length.as_ref() {
+                    content_length_written = true;
+                    append_header_line(&mut header_lines, name, value.as_bytes());
+                }
                 continue;
             }
             if name.eq_ignore_ascii_case(b"proxy-status") {
@@ -411,6 +431,114 @@ mod tests {
         assert!(!materialized.contains_key("x-hop"));
         assert_eq!(raw.framing(), RawHttp1BodyFraming::ContentLength(4));
         assert!(raw.upstream_keep_alive());
+    }
+
+    /// The content-length field lines of a head.
+    ///
+    /// The field's name is matched case-insensitively, as HTTP requires,
+    /// and the carriage return of the line ending is not part of the
+    /// value.
+    fn content_length_lines(head: &str) -> Vec<String> {
+        head.lines()
+            .map(|line| line.trim_end_matches('\r'))
+            .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn raw_head_writes_one_canonical_content_length_line_for_a_comma_list() {
+        // RFC 9110 section 8.6: the value a sender writes is one decimal,
+        // so a comma list of equal members leaves as one field line whose
+        // value is the resolved decimal, at the place of the first line
+        // that carried the field.
+        let headers = [
+            httparse::Header {
+                name: "Content-Length",
+                value: b"42, 42",
+            },
+            httparse::Header {
+                name: "X-After",
+                value: b"kept",
+            },
+        ];
+        let mut raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("raw head");
+        raw.finalize("qpx");
+        let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+        assert_eq!(content_length_lines(encoded), vec!["Content-Length: 42"]);
+        assert!(encoded.contains("Content-Length: 42\r\nX-After: kept\r\n"));
+    }
+
+    #[test]
+    fn raw_head_writes_one_canonical_content_length_line_for_two_values() {
+        // RFC 9110 section 8.6: the field is one field, so two lines that
+        // carried it leave as one line whose value is the resolved
+        // decimal.
+        let headers = [
+            httparse::Header {
+                name: "Content-Length",
+                value: b"42",
+            },
+            httparse::Header {
+                name: "Content-Length",
+                value: b"42",
+            },
+        ];
+        let mut raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("raw head");
+        raw.finalize("qpx");
+        let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+        assert_eq!(content_length_lines(encoded), vec!["Content-Length: 42"]);
+    }
+
+    #[test]
+    fn raw_head_keeps_a_single_content_length_value() {
+        // A value that already is the canonical one reaches the wire as
+        // it was received.
+        let headers = [httparse::Header {
+            name: "Content-Length",
+            value: b"42",
+        }];
+        let mut raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("raw head");
+        raw.finalize("qpx");
+        let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+        assert_eq!(content_length_lines(encoded), vec!["Content-Length: 42"]);
+    }
+
+    #[test]
+    fn raw_head_does_not_invent_a_content_length() {
+        // A head that carried no field carries none on the wire.
+        let headers = [httparse::Header {
+            name: "Content-Type",
+            value: b"text/plain",
+        }];
+        let mut raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("raw head");
+        raw.finalize("qpx");
+        let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+        assert!(content_length_lines(encoded).is_empty());
     }
 
     #[test]

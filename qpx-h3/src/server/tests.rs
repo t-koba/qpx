@@ -54,6 +54,37 @@ fn sanitize_interim_rejects_final_status_in_interim_slot() {
 }
 
 #[test]
+fn sanitize_streaming_response_writes_one_canonical_content_length() {
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // a comma list of equal members leaves as one field whose value is
+    // the resolved decimal.
+    let mut response = http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(http::header::CONTENT_LENGTH, "42, 42")
+        .body(())
+        .expect("response");
+
+    let body_allowed = sanitize_streaming_response_head_for_h3(&mut response).expect("sanitize");
+
+    assert_eq!(body_allowed, Some(true));
+    assert_eq!(
+        response
+            .headers()
+            .get_all(http::header::CONTENT_LENGTH)
+            .iter()
+            .count(),
+        1
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(http::header::CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some("42")
+    );
+}
+
+#[test]
 fn sanitize_streaming_response_preserves_valid_content_length() {
     let mut response = http::Response::builder()
         .status(http::StatusCode::OK)

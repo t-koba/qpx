@@ -274,6 +274,121 @@ async fn send_h2_response_strips_body_framing_for_no_body_status() {
     assert!(to_bytes(body.into_body()).await.expect("body").is_empty());
 }
 
+/// Serves one HTTP/2 response with the given headers and returns the
+/// content-length fields the client received.
+///
+/// The HTTP/2 writer sends a header list rather than field lines, so the
+/// fixture reads the fields of the head the client received.
+async fn received_h2_content_length_fields(headers: http::HeaderMap) -> Vec<String> {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let addr: SocketAddr = listener.local_addr().expect("addr");
+    tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.expect("accept");
+        let mut conn = h2::server::handshake(socket).await.expect("handshake");
+        while let Some(result) = conn.accept().await {
+            let (_request, respond) = result.expect("request");
+            let headers = headers.clone();
+            tokio::spawn(async move {
+                let mut response = Response::builder()
+                    .status(StatusCode::OK)
+                    .body(Body::from("x".repeat(42)))
+                    .expect("response");
+                *response.headers_mut() = headers;
+                send_h2_response_with_interim(
+                    respond,
+                    response,
+                    &[],
+                    &hyper::Method::GET,
+                    false,
+                    H2_BODY_IDLE_TIMEOUT,
+                    1,
+                )
+                .await
+                .expect("send response");
+            });
+        }
+    });
+
+    let socket = TcpStream::connect(addr).await.expect("connect");
+    let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+
+    let mut client = client.ready().await.expect("ready");
+    let request = ::http::Request::builder()
+        .method("GET")
+        .uri("https://reverse_edges.test/asset")
+        .body(())
+        .expect("request");
+    let (response_future, _) = client.send_request(request, true).expect("send");
+    let response = response_future.await.expect("response");
+    response
+        .headers()
+        .get_all(http::header::CONTENT_LENGTH)
+        .iter()
+        .map(|value| value.to_str().expect("text value").to_string())
+        .collect()
+}
+
+#[tokio::test]
+async fn h2_response_writes_one_canonical_content_length_field_for_a_comma_list() {
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // a comma list of equal members leaves as one field whose value is
+    // the resolved decimal.
+    let mut headers = http::HeaderMap::new();
+    headers.append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("42, 42"),
+    );
+
+    let fields = received_h2_content_length_fields(headers).await;
+
+    assert_eq!(fields, vec!["42"]);
+}
+
+#[tokio::test]
+async fn h2_response_writes_one_canonical_content_length_field_for_two_values() {
+    // RFC 9110 section 8.6: the field is one field, so two values that
+    // carried it leave as one field whose value is the resolved decimal.
+    let mut headers = http::HeaderMap::new();
+    headers.append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("42"),
+    );
+    headers.append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("42"),
+    );
+
+    let fields = received_h2_content_length_fields(headers).await;
+
+    assert_eq!(fields, vec!["42"]);
+}
+
+#[tokio::test]
+async fn h2_response_keeps_a_single_content_length_value() {
+    // A value that already is the canonical one reaches the wire as it
+    // was received.
+    let mut headers = http::HeaderMap::new();
+    headers.append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("42"),
+    );
+
+    let fields = received_h2_content_length_fields(headers).await;
+
+    assert_eq!(fields, vec!["42"]);
+}
+
+#[tokio::test]
+async fn h2_response_does_not_invent_a_content_length() {
+    // A response that carried no field carries none on the wire.
+    let fields = received_h2_content_length_fields(http::HeaderMap::new()).await;
+
+    assert!(fields.is_empty());
+}
+
 #[tokio::test]
 async fn empty_h2_response_releases_inflight_immediately() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

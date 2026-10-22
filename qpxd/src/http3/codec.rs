@@ -105,22 +105,45 @@ pub(crate) fn prepare_h3_response_head(
         || parts.status == http::StatusCode::NO_CONTENT
         || parts.status == http::StatusCode::NOT_MODIFIED
         || parts.status == http::StatusCode::RESET_CONTENT;
+    // RFC 9110 section 8.6 gives the field the grammar `1*DIGIT`, so the
+    // value a sender writes is one decimal, and the declaration the
+    // response carried is replaced with a single instance of the resolved
+    // decimal: the field leaves as one field whose value is that decimal,
+    // never as two fields and never as a value the grammar does not have.
     let content_length = if no_body {
         if *request_method == http::Method::HEAD {
             qpx_http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
-            if parse_content_length_fields(&headers).is_err() {
-                headers.remove(http::header::CONTENT_LENGTH);
+            match parse_content_length_fields(&headers) {
+                Ok(Some(length)) => {
+                    headers.insert(
+                        http::header::CONTENT_LENGTH,
+                        qpx_core::http_content_length::canonical_content_length_value(length),
+                    );
+                }
+                Ok(None) => {}
+                Err(_) => {
+                    headers.remove(http::header::CONTENT_LENGTH);
+                }
             }
         } else {
             qpx_http::protocol::semantics::strip_message_body_headers(&mut headers);
         }
         parse_content_length_fields(&headers).ok().flatten()
     } else {
-        let content_length = parse_content_length_fields(&headers);
-        if content_length.is_err() {
-            headers.remove(http::header::CONTENT_LENGTH);
+        match parse_content_length_fields(&headers) {
+            Ok(Some(length)) => {
+                headers.insert(
+                    http::header::CONTENT_LENGTH,
+                    qpx_core::http_content_length::canonical_content_length_value(length),
+                );
+                Some(length)
+            }
+            Ok(None) => None,
+            Err(_) => {
+                headers.remove(http::header::CONTENT_LENGTH);
+                None
+            }
         }
-        content_length.ok().flatten()
     };
 
     let mut out = Http1Response::builder().status(status).body(())?;
@@ -207,6 +230,102 @@ mod tests {
                 .headers()
                 .contains_key(::http::header::CONTENT_LENGTH)
         );
+    }
+
+    /// The content-length fields of a prepared head.
+    ///
+    /// The HTTP/3 writer sends a header list rather than field lines, so
+    /// the fixture reads the fields of the head the writer prepares.
+    fn content_length_fields(head: &::http::HeaderMap) -> Vec<String> {
+        head.get_all(::http::header::CONTENT_LENGTH)
+            .iter()
+            .map(|value| value.to_str().expect("text value").to_string())
+            .collect()
+    }
+
+    #[test]
+    fn h3_response_head_preparation_writes_one_canonical_content_length_field_for_a_comma_list() {
+        // RFC 9110 section 8.6: the value a sender writes is one decimal,
+        // so a comma list of equal members leaves as one field whose value
+        // is the resolved decimal.
+        let mut response = ::http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+        response.headers_mut().append(
+            ::http::header::CONTENT_LENGTH,
+            ::http::HeaderValue::from_static("42, 42"),
+        );
+
+        let (parts, _) = response.into_parts();
+        let prepared =
+            prepare_h3_response_head(&parts, &::http::Method::GET).expect("prepare head");
+
+        assert_eq!(prepared.content_length, Some(42));
+        assert_eq!(content_length_fields(prepared.head.headers()), vec!["42"]);
+    }
+
+    #[test]
+    fn h3_response_head_preparation_writes_one_canonical_content_length_field_for_two_values() {
+        // RFC 9110 section 8.6: the field is one field, so two values
+        // that carried it leave as one field whose value is the resolved
+        // decimal.
+        let mut response = ::http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+        response.headers_mut().append(
+            ::http::header::CONTENT_LENGTH,
+            ::http::HeaderValue::from_static("42"),
+        );
+        response.headers_mut().append(
+            ::http::header::CONTENT_LENGTH,
+            ::http::HeaderValue::from_static("42"),
+        );
+
+        let (parts, _) = response.into_parts();
+        let prepared =
+            prepare_h3_response_head(&parts, &::http::Method::GET).expect("prepare head");
+
+        assert_eq!(prepared.content_length, Some(42));
+        assert_eq!(content_length_fields(prepared.head.headers()), vec!["42"]);
+    }
+
+    #[test]
+    fn h3_response_head_preparation_keeps_a_single_content_length_value() {
+        // A value that already is the canonical one reaches the wire as
+        // it was received.
+        let mut response = ::http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+        response.headers_mut().append(
+            ::http::header::CONTENT_LENGTH,
+            ::http::HeaderValue::from_static("42"),
+        );
+
+        let (parts, _) = response.into_parts();
+        let prepared =
+            prepare_h3_response_head(&parts, &::http::Method::GET).expect("prepare head");
+
+        assert_eq!(prepared.content_length, Some(42));
+        assert_eq!(content_length_fields(prepared.head.headers()), vec!["42"]);
+    }
+
+    #[test]
+    fn h3_response_head_preparation_does_not_invent_a_content_length() {
+        // A response that carried no field carries none on the wire.
+        let response = ::http::Response::builder()
+            .status(200)
+            .body(())
+            .expect("response");
+
+        let (parts, _) = response.into_parts();
+        let prepared =
+            prepare_h3_response_head(&parts, &::http::Method::GET).expect("prepare head");
+
+        assert_eq!(prepared.content_length, None);
+        assert!(content_length_fields(prepared.head.headers()).is_empty());
     }
 
     #[test]
