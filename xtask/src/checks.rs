@@ -1460,13 +1460,20 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// The value is taken out of the entry in more than one way, and the rule
 /// sees them all: by a closure that receives the entry as a pair and uses
 /// its second element, by the second element of the pair, and by the
-/// `value` member of the entry whose name the comparison found. What the
-/// rule cannot see is a site that finds the field's entry by a name it
-/// holds in a variable of its own, a site whose name comparison and whose
-/// taken value stand in two different functions, a site that takes the
-/// value under a member of another name, and a site that takes the
-/// `value` member of an entry whose name it compares under a name of its
-/// own.
+/// `value` member of the entry whose name the comparison found. The value
+/// is the field's value when the site selects the field's own entry, and
+/// a comparison of a header's name with the field's name is what selects
+/// it. A comparison that decides about the field instead does not select
+/// it: a comparison that is not equal, and a comparison whose branch
+/// skips the entry, decide about the field, so a site that skips the
+/// field and takes another header's value is not a reader. What the rule
+/// cannot see is a site that finds the field's entry by a name it holds in
+/// a variable of its own, a site whose name comparison and whose taken
+/// value stand in two different functions, a site that takes the value
+/// under a member of another name, a site that takes the `value` member
+/// of an entry whose name it compares under a name of its own, and a
+/// comparison inside a condition that holds more than the comparison,
+/// whose branch the rule cannot read as skipping the entry.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -1528,11 +1535,15 @@ struct ContentLengthReaderFacts {
     /// site that reads the value and hands it to another function reads
     /// the declaration on its own just as a site that parses it does.
     reads_value: bool,
-    /// The function compares a header's name with the field's name.
+    /// The function selects the field's own entry.
     ///
-    /// The comparison is what finds the field's own entry in a list of
-    /// header entries, so it is the first half of a read of the value.
-    compares_field: bool,
+    /// A comparison of a header's name with the field's name is what
+    /// finds the field's own entry in a list of header entries, so it is
+    /// the first half of a read of the value. A comparison that decides
+    /// about the field instead does not find the entry: a comparison
+    /// that is not equal, and a comparison whose branch skips the
+    /// entry, decide about the field.
+    selects_field: bool,
     /// The function takes the value of a header entry.
     ///
     /// A header entry is a pair of a name and a value, so a closure that
@@ -1544,13 +1555,14 @@ struct ContentLengthReaderFacts {
     /// A header entry that is a pair holds its value as the pair's
     /// second element, so taking that element takes the entry's value.
     takes_pair_element: bool,
-    /// The names a header's name is compared under.
+    /// The names a header's name is compared under, in a comparison that
+    /// selects the field's own entry.
     ///
     /// The name a site compares with the field's name is the name of the
     /// entry it found, and the entry's value is taken under a name of its
     /// own, so the two names tell whether the value belongs to the entry
     /// the site found.
-    compared_bases: Vec<String>,
+    selected_bases: Vec<String>,
     /// The names a `value` member is taken under.
     ///
     /// A header entry that is a struct holds its value under `value`, so
@@ -1570,6 +1582,19 @@ struct ContentLengthReaderFacts {
     /// A name that appears as an expression is a name the function
     /// reads, so the names tell whether a name a pattern bound is used.
     used_names: Vec<String>,
+    /// The names a header entry's value is bound under.
+    ///
+    /// A pattern that binds an entry's pair binds its value under a name
+    /// of its own, so the names tell whether a branch that skips the
+    /// entry takes the value it guards.
+    bound_value_names: Vec<String>,
+    /// Whether a comparison in the current condition skips the entry.
+    ///
+    /// A comparison that guards a branch that skips the entry decides
+    /// about the field rather than finding its entry, so the comparison
+    /// reads the other way round: an equal comparison excludes the entry
+    /// and a comparison that is not equal selects it.
+    skipping_condition: bool,
     /// The function turns text into a number.
     parses_integer: bool,
     /// The function calls the owner.
@@ -1639,12 +1664,15 @@ impl ContentLengthFunctionCollector {
         // The value is taken by a closure that receives the entry as a
         // pair, by the second element of the pair, by the `value`
         // member of the entry the comparison found, or by a pattern that
-        // binds the entry's pair.
+        // binds the entry's pair. A comparison that decides about the
+        // field rather than finding its entry does not find the value
+        // either, so a site that skips the field and takes another
+        // header's value is not a reader.
         let same_entry = facts
-            .compared_bases
+            .selected_bases
             .iter()
             .any(|base| facts.value_bases.iter().any(|value| value == base));
-        if facts.compares_field
+        if facts.selects_field
             && (facts.takes_entry_value
                 || facts.takes_pair_element
                 || same_entry
@@ -1669,7 +1697,6 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // field's own entry, whether the field is named by the argument or
         // by the receiver.
         if method.starts_with("eq") && (names_field || names_content_length_field(&node.receiver)) {
-            self.compares_field = true;
             // The name of the entry the site found is the other side of
             // the comparison.
             let compared = if names_field {
@@ -1677,9 +1704,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
             } else {
                 node.args.first().unwrap_or(&node.receiver)
             };
-            if let Some(base) = expression_base_name(compared) {
-                self.compared_bases.push(base);
-            }
+            self.record_selection(true, expression_base_name(compared));
         }
         // A read of the field's value through the header map is the read
         // itself: whether the value is turned into a number here or
@@ -1743,7 +1768,6 @@ impl Visit<'_> for ContentLengthReaderFacts {
             && (names_content_length_field(&node.left) || names_content_length_field(&node.right))
         {
             self.reads_field = true;
-            self.compares_field = true;
             // The name of the entry the site found is the other side of
             // the comparison.
             let compared = if names_content_length_field(&node.left) {
@@ -1751,9 +1775,10 @@ impl Visit<'_> for ContentLengthReaderFacts {
             } else {
                 &node.left
             };
-            if let Some(base) = expression_base_name(compared) {
-                self.compared_bases.push(base);
-            }
+            self.record_selection(
+                matches!(node.op, syn::BinOp::Eq(_)),
+                expression_base_name(compared),
+            );
         }
         syn::visit::visit_expr_binary(self, node);
     }
@@ -1770,6 +1795,24 @@ impl Visit<'_> for ContentLengthReaderFacts {
         syn::visit::visit_expr_path(self, node);
     }
 
+    fn visit_expr_if(&mut self, node: &syn::ExprIf) {
+        // A comparison that guards a branch that skips the entry decides
+        // about the field rather than finding its entry, so the
+        // comparison in the condition reads the other way round. A
+        // condition that holds more than the comparison is left alone:
+        // the rule cannot say which part of it skips the entry.
+        let skipping =
+            is_field_comparison(&node.cond) && self.branch_skips_the_entry(&node.then_branch);
+        let saved = self.skipping_condition;
+        self.skipping_condition = saved || skipping;
+        self.visit_expr(&node.cond);
+        self.skipping_condition = saved;
+        self.visit_block(&node.then_branch);
+        if let Some((_, else_branch)) = &node.else_branch {
+            self.visit_expr(else_branch);
+        }
+    }
+
     fn visit_expr_for_loop(&mut self, node: &syn::ExprForLoop) {
         // A loop that walks a list of header entries and binds an
         // entry's pair reads the field's value when it compares the
@@ -1778,14 +1821,19 @@ impl Visit<'_> for ContentLengthReaderFacts {
         if let Some((name, value)) = pair_binding_names(&node.pat) {
             let mut scope = ContentLengthReaderFacts {
                 test_code: self.test_code,
+                bound_value_names: vec![value.clone()],
                 ..ContentLengthReaderFacts::default()
             };
             scope.visit_block(&node.body);
-            let compares_its_own = scope.compared_bases.contains(&name);
+            let selects_its_own = scope.selected_bases.contains(&name);
             let uses_its_own = scope.used_names.contains(&value);
-            if compares_its_own && uses_its_own {
+            if selects_its_own && uses_its_own {
                 self.takes_pattern_entry_value = true;
             }
+            // The name the pattern bound the value under is a name the
+            // function reads, so a branch that takes it reads the value
+            // and does not skip the entry.
+            self.bound_value_names.push(value);
         }
         syn::visit::visit_expr_for_loop(self, node);
     }
@@ -1823,6 +1871,53 @@ impl Visit<'_> for ContentLengthReaderFacts {
     fn visit_trait_item_fn(&mut self, _node: &syn::TraitItemFn) {}
 }
 
+/// The facts of a function, and what they add up to.
+impl ContentLengthReaderFacts {
+    /// Records a comparison of a header's name with the field's name.
+    ///
+    /// A comparison finds the field's own entry, so it selects it. A
+    /// comparison that guards a branch that skips the entry decides
+    /// about the field instead, and the two comparisons read the other
+    /// way round: an equal comparison excludes the entry, and a
+    /// comparison that is not equal selects it.
+    fn record_selection(&mut self, is_equal: bool, base: Option<String>) {
+        if is_equal != self.skipping_condition {
+            self.selects_field = true;
+            if let Some(base) = base {
+                self.selected_bases.push(base);
+            }
+        }
+    }
+
+    /// Whether a branch skips the entry it guards.
+    ///
+    /// A branch that leaves the iteration without taking the value skips
+    /// the entry: the site decided about the field and moves on. A branch
+    /// that takes the value reads it, so it does not skip.
+    fn branch_skips_the_entry(&self, block: &syn::Block) -> bool {
+        if !block_skips_entry(block) {
+            return false;
+        }
+        !self.branch_takes_the_value(block)
+    }
+
+    /// Whether a branch takes the value of the entry it guards.
+    fn branch_takes_the_value(&self, block: &syn::Block) -> bool {
+        let mut scope = ContentLengthReaderFacts {
+            test_code: self.test_code,
+            ..ContentLengthReaderFacts::default()
+        };
+        scope.visit_block(block);
+        if !scope.value_bases.is_empty() || scope.takes_pair_element || scope.takes_entry_value {
+            return true;
+        }
+        scope
+            .used_names
+            .iter()
+            .any(|name| self.bound_value_names.contains(name))
+    }
+}
+
 /// The names a header entry's pair is bound under.
 ///
 /// A header entry is a pair of a name and a value, so a pattern that
@@ -1846,6 +1941,64 @@ fn pair_binding_names(pat: &syn::Pat) -> Option<(String, String)> {
         return None;
     }
     Some((name.ident.to_string(), value.ident.to_string()))
+}
+
+/// Whether a condition is a comparison of a header's name with the
+/// field's name.
+///
+/// The rule reads the comparison in a condition the other way round when
+/// the branch it guards skips the entry, and it can only say that about a
+/// condition that holds the comparison and nothing else.
+fn is_field_comparison(expr: &syn::Expr) -> bool {
+    match expr {
+        syn::Expr::Paren(paren) => is_field_comparison(&paren.expr),
+        syn::Expr::Binary(binary) => {
+            matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
+                && (names_content_length_field(&binary.left)
+                    || names_content_length_field(&binary.right))
+        }
+        syn::Expr::MethodCall(call) => {
+            call.method.to_string().starts_with("eq")
+                && (call.args.iter().any(names_content_length_field)
+                    || names_content_length_field(&call.receiver))
+        }
+        _ => false,
+    }
+}
+
+/// Whether a block leaves the iteration it guards.
+///
+/// A `continue` or a `break` leaves the iteration. A `continue` or a
+/// `break` of a loop inside the block belongs to that loop, so the
+/// search does not enter a nested loop or a closure.
+fn block_skips_entry(block: &syn::Block) -> bool {
+    let mut finder = SkipFinder { skips: false };
+    finder.visit_block(block);
+    finder.skips
+}
+
+/// The search for a block that leaves its iteration.
+struct SkipFinder {
+    /// Whether the block leaves the iteration.
+    skips: bool,
+}
+
+impl Visit<'_> for SkipFinder {
+    fn visit_expr_break(&mut self, _node: &syn::ExprBreak) {
+        self.skips = true;
+    }
+
+    fn visit_expr_continue(&mut self, _node: &syn::ExprContinue) {
+        self.skips = true;
+    }
+
+    fn visit_expr_closure(&mut self, _node: &syn::ExprClosure) {}
+
+    fn visit_expr_for_loop(&mut self, _node: &syn::ExprForLoop) {}
+
+    fn visit_expr_while(&mut self, _node: &syn::ExprWhile) {}
+
+    fn visit_expr_loop(&mut self, _node: &syn::ExprLoop) {}
 }
 
 /// Whether an expression names the Content-Length field.
@@ -6425,6 +6578,110 @@ fn declared_name(headers: &[Header<'_>]) -> Option<&str> {
             .unwrap()
             .is_empty(),
             "a member of another name is not the value"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_site_that_skips_the_field() {
+        // A site that compares the field's name to skip it and takes
+        // another header's pair value does not read the field's value:
+        // the comparison decides about the field, it does not find the
+        // field's own entry.
+        let skipping = (
+            "qpxd/src/upstream/raw_http1/response.rs".to_string(),
+            r#"
+fn other_header_value(headers: &HeaderMap) -> Option<String> {
+    let mut found: Option<String> = None;
+    for (name, value) in headers.iter() {
+        if name == CONTENT_LENGTH {
+            continue;
+        }
+        let pair = (name, value);
+        found = Some(pair.1.to_str().ok()?.to_string());
+    }
+    found
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&skipping.0, &skipping.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a site that skips the field and takes another header's value is not a reader"
+        );
+
+        // The same site when it takes the field's own entry's value is a
+        // reader.
+        let own = (
+            "qpxd/src/upstream/raw_http1/response.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<String> {
+    for (name, value) in headers.iter() {
+        if name == CONTENT_LENGTH {
+            let pair = (name, value);
+            return Some(pair.1.to_str().ok()?.to_string());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&own.0, &own.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/response.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A comparison that is not equal and skips the entry selects it,
+        // because the entry that reaches the code is the field's own.
+        let not_equal = (
+            "qpxd/src/upstream/raw_http1/response.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<String> {
+    for (name, value) in headers.iter() {
+        if name != CONTENT_LENGTH {
+            continue;
+        }
+        return Some(value.to_str().ok()?.to_string());
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&not_equal.0, &not_equal.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/response.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A comparison that is not equal and does not skip the entry
+        // decides about the field, so the value it takes is another
+        // header's value.
+        let excludes = (
+            "qpxd/src/upstream/raw_http1/response.rs".to_string(),
+            r#"
+fn other_header_value(headers: &HeaderMap) -> Option<String> {
+    for (name, value) in headers.iter() {
+        if name != CONTENT_LENGTH {
+            return Some(value.to_str().ok()?.to_string());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&excludes.0, &excludes.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a comparison that is not equal and does not skip the entry decides about the field"
         );
     }
 

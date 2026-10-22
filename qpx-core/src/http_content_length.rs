@@ -222,7 +222,13 @@ pub enum ContentLengthError {
 /// by the `value` member of the entry whose name the comparison found,
 /// and by a pattern that binds the entry's pair, where the name the
 /// pattern bound is the name the comparison uses and the value the
-/// pattern bound is the value that is taken. Test code is not part of
+/// pattern bound is the value that is taken. The value is the field's
+/// value when the site selects the field's own entry, and a comparison
+/// of a header's name with the field's name is what selects it. A
+/// comparison that decides about the field instead does not select it: a
+/// comparison that is not equal, and a comparison whose branch skips the
+/// entry, decide about the field, so a site that skips the field and
+/// takes another header's value is not a reader. Test code is not part of
 /// that question, because a test observes the value to assert on what
 /// the proxy put on the wire rather than to decide what the proxy does;
 /// a test that reads the value and turns it into a number is still
