@@ -219,12 +219,14 @@ pub enum ContentLengthError {
 /// values rather than selecting the field's values on its own. The gate
 /// sees the value however it is taken out of the entry: by a closure
 /// that receives the entry as a pair, by the second element of the pair,
-/// and by the `value` member of the entry whose name the comparison
-/// found. Test code
-/// is not part of that question, because a test
-/// observes the value to assert on what the proxy put on the wire rather
-/// than to decide what the proxy does; a test that reads the value and
-/// turns it into a number is still inside the gate.
+/// by the `value` member of the entry whose name the comparison found,
+/// and by a pattern that binds the entry's pair, where the name the
+/// pattern bound is the name the comparison uses and the value the
+/// pattern bound is the value that is taken. Test code is not part of
+/// that question, because a test observes the value to assert on what
+/// the proxy put on the wire rather than to decide what the proxy does;
+/// a test that reads the value and turns it into a number is still
+/// inside the gate.
 ///
 /// The test helpers read the declaration through the owner as well:
 /// `qpxd/src/test_util.rs` and `qpxd/tests/http_rfc/mod.rs` read a raw

@@ -1556,6 +1556,20 @@ struct ContentLengthReaderFacts {
     /// A header entry that is a struct holds its value under `value`, so
     /// a site that takes that member takes the entry's value.
     value_bases: Vec<String>,
+    /// The function takes the value of an entry it bound by a pattern.
+    ///
+    /// A header entry is a pair of a name and a value, so a pattern that
+    /// binds the pair's two elements binds the entry's name and the
+    /// entry's value. The scope that binds them decides whether the
+    /// value is the field's own: the name the scope compares with the
+    /// field's name must be the name the pattern bound, and the value
+    /// the pattern bound must be used in that scope.
+    takes_pattern_entry_value: bool,
+    /// The names the function's expressions use.
+    ///
+    /// A name that appears as an expression is a name the function
+    /// reads, so the names tell whether a name a pattern bound is used.
+    used_names: Vec<String>,
     /// The function turns text into a number.
     parses_integer: bool,
     /// The function calls the owner.
@@ -1623,14 +1637,18 @@ impl ContentLengthFunctionCollector {
         // name with the field's name and then takes that entry's value
         // reads the declaration's value: the owner is the only reader.
         // The value is taken by a closure that receives the entry as a
-        // pair, by the second element of the pair, or by the `value`
-        // member of the entry the comparison found.
+        // pair, by the second element of the pair, by the `value`
+        // member of the entry the comparison found, or by a pattern that
+        // binds the entry's pair.
         let same_entry = facts
             .compared_bases
             .iter()
             .any(|base| facts.value_bases.iter().any(|value| value == base));
         if facts.compares_field
-            && (facts.takes_entry_value || facts.takes_pair_element || same_entry)
+            && (facts.takes_entry_value
+                || facts.takes_pair_element
+                || same_entry
+                || facts.takes_pattern_entry_value)
         {
             facts.reads_value = true;
         }
@@ -1744,7 +1762,32 @@ impl Visit<'_> for ContentLengthReaderFacts {
         if is_content_length_owner_call(&node.path) {
             self.calls_owner = true;
         }
+        // A single-segment path is a name the expression reads.
+        if node.path.segments.len() == 1 {
+            self.used_names
+                .push(node.path.segments[0].ident.to_string());
+        }
         syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_for_loop(&mut self, node: &syn::ExprForLoop) {
+        // A loop that walks a list of header entries and binds an
+        // entry's pair reads the field's value when it compares the
+        // name it bound with the field's name and uses the value it
+        // bound.
+        if let Some((name, value)) = pair_binding_names(&node.pat) {
+            let mut scope = ContentLengthReaderFacts {
+                test_code: self.test_code,
+                ..ContentLengthReaderFacts::default()
+            };
+            scope.visit_block(&node.body);
+            let compares_its_own = scope.compared_bases.contains(&name);
+            let uses_its_own = scope.used_names.contains(&value);
+            if compares_its_own && uses_its_own {
+                self.takes_pattern_entry_value = true;
+            }
+        }
+        syn::visit::visit_expr_for_loop(self, node);
     }
 
     fn visit_expr_closure(&mut self, node: &syn::ExprClosure) {
@@ -1778,6 +1821,31 @@ impl Visit<'_> for ContentLengthReaderFacts {
     fn visit_impl_item_fn(&mut self, _node: &syn::ImplItemFn) {}
 
     fn visit_trait_item_fn(&mut self, _node: &syn::TraitItemFn) {}
+}
+
+/// The names a header entry's pair is bound under.
+///
+/// A header entry is a pair of a name and a value, so a pattern that
+/// binds the pair's two elements binds the entry's name and the entry's
+/// value. The first element is the name and the second is the value,
+/// because that is the order a header entry is written in.
+fn pair_binding_names(pat: &syn::Pat) -> Option<(String, String)> {
+    let syn::Pat::Tuple(tuple) = pat else {
+        return None;
+    };
+    if tuple.elems.len() != 2 {
+        return None;
+    }
+    let syn::Pat::Ident(name) = &tuple.elems[0] else {
+        return None;
+    };
+    let syn::Pat::Ident(value) = &tuple.elems[1] else {
+        return None;
+    };
+    if name.subpat.is_some() || value.subpat.is_some() {
+        return None;
+    }
+    Some((name.ident.to_string(), value.ident.to_string()))
 }
 
 /// Whether an expression names the Content-Length field.
@@ -6289,6 +6357,28 @@ fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
             content_length_production_value_reader_violations(&member.0, &member.1, &[]).unwrap(),
             [
                 "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when a loop binds the entry's pair.
+        let bound = (
+            "qpxd/src/upstream/raw_http1/response.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(&str, &str)]) -> Option<&str> {
+    for (name, value) in headers {
+        if name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()) {
+            return Some(value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&bound.0, &bound.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/response.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
             ]
         );
 
