@@ -1,8 +1,6 @@
 use super::{Protocol, Settings};
 use crate::H3Result as Result;
-use crate::protocol::{
-    ConnectionClose, FRAME_DATA, FRAME_HEADERS, read_varint, write_frame,
-};
+use crate::protocol::{ConnectionClose, FRAME_DATA, FRAME_HEADERS, read_varint, write_frame};
 use crate::qpack::encode_response_head;
 use crate::transport::RequestStreamConfig;
 use anyhow::anyhow;
