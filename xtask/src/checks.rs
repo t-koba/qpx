@@ -1356,7 +1356,10 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// another file of the workspace that holds the field's name is
 /// followed: the gate reads the constants of the workspace's files, so a
 /// site that imports such a constant holds the field's name under the
-/// name the import gives it, and the import may rename it. The gate
+/// name the import gives it, and the import may rename it. The import
+/// that brings such a constant in is read the way the field's own
+/// imports are read, so an import in a nested module is followed too.
+/// The gate
 /// matches that constant by its name and not by the path the import
 /// takes, so a constant of a crate outside the workspace is not
 /// followed, a name one file holds the field's name under and another
@@ -2058,14 +2061,29 @@ struct ImportedConstant {
 /// The constants a file imports.
 fn content_length_imported_constants(syntax: &syn::File) -> Vec<ImportedConstant> {
     let mut names = Vec::new();
-    for item in &syntax.items {
-        let syn::Item::Use(item) = item else {
-            continue;
-        };
-        let mut prefix = Vec::new();
-        collect_imported_constants(&item.tree, &mut prefix, &mut names);
-    }
+    collect_imported_constants_of_items(&syntax.items, &mut names);
     names
+}
+
+/// The constants the imports of a list of items bring into the file.
+///
+/// A module's own imports and the imports of the modules inside it are
+/// read, so a nested module's import is followed as well.
+fn collect_imported_constants_of_items(items: &[syn::Item], names: &mut Vec<ImportedConstant>) {
+    for item in items {
+        match item {
+            syn::Item::Use(item) => {
+                let mut prefix = Vec::new();
+                collect_imported_constants(&item.tree, &mut prefix, names);
+            }
+            syn::Item::Mod(item) => {
+                if let Some((_, items)) = &item.content {
+                    collect_imported_constants_of_items(items, names);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// The constants one import brings into the file.
@@ -11079,6 +11097,30 @@ fn declared_length(headers: &HeaderMap) -> Option<u64> {
         );
         assert_eq!(
             content_length_workspace_violations(&[constants.clone(), reader.clone()], &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner",
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner",
+            ]
+        );
+
+        // The same read when the import stands in a nested module: the
+        // module's import is the file's import too, so the constant it
+        // brings in names the field.
+        let nested = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+mod inner {
+    use crate::http::consts::LENGTH_HEADER;
+
+    pub fn declared_length(headers: &HeaderMap) -> Option<u64> {
+        headers.get(LENGTH_HEADER).and_then(|value| value.to_str().ok()?.parse().ok())
+    }
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_workspace_violations(&[constants.clone(), nested.clone()], &[]).unwrap(),
             [
                 "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner",
                 "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner",
