@@ -22,7 +22,7 @@ pub(crate) fn sanitize_trailers_for_h3(trailers: &mut http::HeaderMap) -> Result
     trailers.remove(http::header::CONTENT_LENGTH);
     let mut removed = Vec::new();
     for name in trailers.keys() {
-        if is_prohibited_trailer_field(name.as_str()) {
+        if crate::qpack_fields::is_prohibited_trailer_field(name.as_str()) {
             removed.push(name.clone());
         }
     }
@@ -103,51 +103,6 @@ fn validate_h3_regular_headers(headers: &http::HeaderMap) -> Result<()> {
             .map_err(|err| anyhow!(err.to_string()))?;
     }
     Ok(())
-}
-
-fn is_prohibited_trailer_field(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-connection"
-            | "proxy-authorization"
-            | "proxy-authenticate"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    ) {
-        return true;
-    }
-    matches!(
-        lower.as_str(),
-        "content-length"
-            | "host"
-            | "authorization"
-            | "www-authenticate"
-            | "authentication-info"
-            | "cookie"
-            | "set-cookie"
-            | "expect"
-            | "range"
-            | "if-match"
-            | "if-none-match"
-            | "if-modified-since"
-            | "if-unmodified-since"
-            | "if-range"
-            | "max-forwards"
-            | "cache-control"
-            | "expires"
-            | "pragma"
-            | "age"
-            | "content-type"
-            | "content-encoding"
-            | "content-language"
-            | "content-location"
-            | "content-range"
-    )
 }
 
 #[cfg(test)]

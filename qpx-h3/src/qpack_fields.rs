@@ -24,6 +24,55 @@ pub(crate) fn validate_h3_regular_field(
     }
 }
 
+/// Whether a field may not appear in HTTP/3 trailers.
+///
+/// The connection-specific fields, and the fields that describe the message
+/// body or the connection itself, are not allowed there.
+pub(crate) fn is_prohibited_trailer_field(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    if matches!(
+        lower.as_str(),
+        "connection"
+            | "keep-alive"
+            | "proxy-connection"
+            | "proxy-authorization"
+            | "proxy-authenticate"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    ) {
+        return true;
+    }
+    matches!(
+        lower.as_str(),
+        "content-length"
+            | "host"
+            | "authorization"
+            | "www-authenticate"
+            | "authentication-info"
+            | "cookie"
+            | "set-cookie"
+            | "expect"
+            | "range"
+            | "if-match"
+            | "if-none-match"
+            | "if-modified-since"
+            | "if-unmodified-since"
+            | "if-range"
+            | "max-forwards"
+            | "cache-control"
+            | "expires"
+            | "pragma"
+            | "age"
+            | "content-type"
+            | "content-encoding"
+            | "content-language"
+            | "content-location"
+            | "content-range"
+    )
+}
+
 pub(crate) fn validate_h3_response_field(
     name: &str,
     value: &[u8],
@@ -70,51 +119,6 @@ pub(crate) fn append_header(headers: &mut HeaderMap, name: &str, value: &[u8]) -
     }
     headers.append(name, value);
     Ok(())
-}
-
-fn is_prohibited_trailer_field(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    if matches!(
-        lower.as_str(),
-        "connection"
-            | "keep-alive"
-            | "proxy-connection"
-            | "proxy-authorization"
-            | "proxy-authenticate"
-            | "te"
-            | "trailer"
-            | "transfer-encoding"
-            | "upgrade"
-    ) {
-        return true;
-    }
-    matches!(
-        lower.as_str(),
-        "content-length"
-            | "host"
-            | "authorization"
-            | "www-authenticate"
-            | "authentication-info"
-            | "cookie"
-            | "set-cookie"
-            | "expect"
-            | "range"
-            | "if-match"
-            | "if-none-match"
-            | "if-modified-since"
-            | "if-unmodified-since"
-            | "if-range"
-            | "max-forwards"
-            | "cache-control"
-            | "expires"
-            | "pragma"
-            | "age"
-            | "content-type"
-            | "content-encoding"
-            | "content-language"
-            | "content-location"
-            | "content-range"
-    )
 }
 
 fn te_value_allows_only_trailers(value: &[u8]) -> bool {
