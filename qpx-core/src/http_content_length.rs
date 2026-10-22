@@ -321,8 +321,11 @@ pub enum ContentLengthError {
 /// binds, a pattern that binds the search's result holds it as well,
 /// and a helper that found it hands it to its caller, which binds the
 /// result, so the value the site takes under any of those names is the
-/// field's value. The helper may stand in another file, because the
-/// gate reads the files of the workspace together. The gate follows a
+/// field's value. A caller that takes the value out of the result the
+/// helper hands it reads the value as well, whether it destructures the
+/// pair or a closure receives it. The helper may stand in another
+/// file, because the gate reads the files of the workspace together.
+/// The gate follows a
 /// binding of a header entry's name as well: a site that binds the
 /// entry's name to a name of its own and compares that name with the
 /// field's name compares the entry's name, so the binding stands for

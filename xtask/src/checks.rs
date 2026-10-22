@@ -1289,7 +1289,10 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// found it hands it to its caller, which binds the result. The
 /// helper may stand in another file: the gate reads the files of the
 /// workspace together, so the helpers that found the field's own entry
-/// are known before the files that call them are read.
+/// are known before the files that call them are read. A caller that
+/// takes the value out of the result the helper hands it reads the
+/// value as well, whether it destructures the pair or a closure
+/// receives it.
 ///
 /// The gate follows a binding of the field's name as well: a site that
 /// binds the field's name to a name of its own and reads the field
@@ -1783,6 +1786,16 @@ fn content_length_follow_the_entry_across_functions(
                 facts.field_entry_names.push(binding);
             }
         }
+        for (value, callee) in facts.finder_value_calls.clone() {
+            if finders.contains(&callee) && facts.used_names.contains(&value) {
+                facts.reads_value = true;
+            }
+        }
+        for callee in facts.finder_value_closures.clone() {
+            if finders.contains(&callee) {
+                facts.reads_value = true;
+            }
+        }
     }
 }
 
@@ -1847,6 +1860,16 @@ fn content_length_workspace_facts(
             for (binding, callee) in facts.finder_calls.clone() {
                 if finders.contains(&callee) && !facts.field_entry_names.contains(&binding) {
                     facts.field_entry_names.push(binding);
+                }
+            }
+            for (value, callee) in facts.finder_value_calls.clone() {
+                if finders.contains(&callee) && facts.used_names.contains(&value) {
+                    facts.reads_value = true;
+                }
+            }
+            for callee in facts.finder_value_closures.clone() {
+                if finders.contains(&callee) {
+                    facts.reads_value = true;
                 }
             }
             facts.finish();
@@ -2210,6 +2233,19 @@ struct ContentLengthReaderFacts {
     /// caller, so the names tell whether a binding holds the entry the
     /// comparison found.
     finder_calls: Vec<(String, String)>,
+    /// The names a call takes the entry's value under, and the helper the
+    /// call names.
+    ///
+    /// A helper that finds the field's own entry hands that entry to its
+    /// caller, so a caller that takes the value out of the result - by
+    /// destructuring the pair - takes the field's value.
+    finder_value_calls: Vec<(String, String)>,
+    /// The helpers whose result a closure takes the entry's value of.
+    ///
+    /// A helper that finds the field's own entry hands that entry to its
+    /// caller, so a closure that receives the result and takes the value
+    /// out of it takes the field's value.
+    finder_value_closures: Vec<String>,
     /// The names a pair's second element is taken under.
     ///
     /// A header entry that is a pair holds its value as the pair's
@@ -2459,6 +2495,26 @@ impl Visit<'_> for ContentLengthReaderFacts {
         {
             self.finder_calls.push((binding.ident.to_string(), callee));
         }
+        // A caller that takes the value out of the result the helper
+        // hands it takes the entry's value, so the name the value is
+        // bound under is recorded with the helper the call names.
+        if let Some(initializer) = &node.init
+            && let syn::Pat::Tuple(tuple) = &node.pat
+            && tuple.elems.len() == 2
+            && let syn::Pat::Ident(value) = &tuple.elems[1]
+            && value.subpat.is_none()
+            && let syn::Expr::Call(call) = unwrapped_expr(&initializer.expr)
+            && let syn::Expr::Path(path) = &*call.func
+            && path.qself.is_none()
+            && let Some(callee) = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+        {
+            self.finder_value_calls
+                .push((value.ident.to_string(), callee));
+        }
         // A binding of a header entry's name stands for the entry the
         // name came from, so a comparison under the binding compares
         // that entry's name and finds that entry.
@@ -2478,6 +2534,17 @@ impl Visit<'_> for ContentLengthReaderFacts {
     }
 
     fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        // A closure that receives the result of a call to a helper and
+        // takes the value out of it takes the entry's value the helper
+        // found, so the helper is recorded.
+        if let Some(callee) = call_helper_name(&node.receiver)
+            && node.args.iter().any(|argument| match argument {
+                syn::Expr::Closure(closure) => closure_takes_entry_value(closure),
+                _ => false,
+            })
+        {
+            self.finder_value_closures.push(callee);
+        }
         let method = node.method.to_string();
         let names_field = node
             .args
@@ -3502,6 +3569,27 @@ fn resolve_alias_chain(base: &str, aliases: &[(String, String)]) -> String {
         resolved = target;
     }
     resolved
+}
+
+/// The helper a call names, when the call is a call of a name.
+///
+/// A call to a helper hands the helper's result to the caller, so the
+/// name of the helper is what tells whether the result is the entry the
+/// helper found.
+fn call_helper_name(expr: &syn::Expr) -> Option<String> {
+    let syn::Expr::Call(call) = unwrapped_expr(expr) else {
+        return None;
+    };
+    let syn::Expr::Path(path) = &*call.func else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    path.path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
 }
 
 /// Whether a closure takes the value of a header entry.
@@ -9831,6 +9919,66 @@ fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
             content_length_production_value_reader_violations(&pattern.0, &pattern.1, &[]).unwrap(),
             [
                 "qpxd/src/reverse/transport/raw_http1.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_value_taken_out_of_a_helper_that_found_the_entry() {
+        // A helper that finds the field's own entry hands that entry to
+        // its caller, so a caller that takes the value out of the result
+        // reads the declaration.
+        let destructured = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn content_length_entry(headers: &[(&str, &str)]) -> Option<(&str, &str)> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .copied()
+}
+
+fn declared_length(headers: &[(&str, &str)]) -> Option<u64> {
+    let (_, value) = content_length_entry(headers)?;
+    value.parse::<u64>().ok()
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &destructured.0,
+                &destructured.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when a closure takes the value out of the
+        // result.
+        let closed = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn content_length_entry(headers: &[(&str, &str)]) -> Option<(&str, &str)> {
+    headers
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+        .copied()
+}
+
+fn declared_length(headers: &[(&str, &str)]) -> Option<u64> {
+    content_length_entry(headers).and_then(|(_, value)| value.parse::<u64>().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&closed.0, &closed.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
             ]
         );
     }
