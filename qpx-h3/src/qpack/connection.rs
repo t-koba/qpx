@@ -10,6 +10,10 @@ use super::{
     DECODER_INSTRUCTION_QUEUE_DEPTH, DecodedRequestHead, DecodedResponseHead, HeaderDecodeError,
 };
 use crate::H3Result as Result;
+use crate::protocol::{
+    ConnectionClose, H3_CLOSED_CRITICAL_STREAM, PeerControlState, QPACK_ENCODER_STREAM_ERROR,
+    STREAM_QPACK_DECODER, STREAM_QPACK_ENCODER,
+};
 use anyhow::anyhow;
 use bytes::Bytes;
 use http::HeaderMap;
@@ -98,6 +102,45 @@ impl QpackConnection {
                     .await
                     .map_err(|err| EncoderStreamError::invalid(err.to_string()))?;
             }
+        }
+    }
+
+    pub(crate) async fn consume_peer_uni_stream(
+        &self,
+        stream_type: u64,
+        mut recv: quinn::RecvStream,
+        control_state: &PeerControlState,
+    ) -> std::result::Result<(), ConnectionClose> {
+        match stream_type {
+            STREAM_QPACK_ENCODER => {
+                control_state.register_encoder_stream().await?;
+                self.process_encoder_stream(recv)
+                    .await
+                    .map_err(|err| match err {
+                        EncoderStreamError::Closed(message) => {
+                            ConnectionClose::new(H3_CLOSED_CRITICAL_STREAM, message)
+                        }
+                        EncoderStreamError::Invalid(message) => {
+                            ConnectionClose::new(QPACK_ENCODER_STREAM_ERROR, message)
+                        }
+                    })
+            }
+            STREAM_QPACK_DECODER => {
+                control_state.register_decoder_stream().await?;
+                let mut buf = [0u8; 4096];
+                loop {
+                    let Some(_) = recv.read(&mut buf).await.map_err(|err| {
+                        ConnectionClose::new(H3_CLOSED_CRITICAL_STREAM, err.to_string())
+                    })?
+                    else {
+                        return Err(ConnectionClose::new(
+                            H3_CLOSED_CRITICAL_STREAM,
+                            "peer closed QPACK decoder stream",
+                        ));
+                    };
+                }
+            }
+            _ => unreachable!("only QPACK unidirectional stream types are handled"),
         }
     }
 

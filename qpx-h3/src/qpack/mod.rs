@@ -15,7 +15,6 @@ mod static_table;
 mod tests;
 
 pub(crate) use connection::QpackConnection;
-pub(crate) use encoder_stream::EncoderStreamError;
 
 pub(crate) use crate::qpack_fields::validate_h3_regular_field;
 #[cfg(test)]

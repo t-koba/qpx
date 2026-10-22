@@ -336,27 +336,10 @@ async fn route_uni_stream(
                 }
             }
         }
-        STREAM_QPACK_ENCODER => {
-            control_state.register_encoder_stream().await?;
+        STREAM_QPACK_ENCODER | STREAM_QPACK_DECODER => {
             qpack
-                .process_encoder_stream(recv)
-                .await
-                .map_err(|err| match err {
-                    crate::qpack::EncoderStreamError::Closed(message) => {
-                        ConnectionClose::new(H3_CLOSED_CRITICAL_STREAM, message)
-                    }
-                    crate::qpack::EncoderStreamError::Invalid(message) => {
-                        ConnectionClose::new(crate::protocol::QPACK_ENCODER_STREAM_ERROR, message)
-                    }
-                })?;
-        }
-        STREAM_QPACK_DECODER => {
-            control_state.register_decoder_stream().await?;
-            consume_qpack_decoder_stream(&mut recv).await?;
-            return Err(ConnectionClose::new(
-                H3_CLOSED_CRITICAL_STREAM,
-                "peer closed QPACK decoder stream",
-            ));
+                .consume_peer_uni_stream(stream_type, recv, &control_state)
+                .await?;
         }
         STREAM_PUSH => {
             return Err(ConnectionClose::new(
@@ -375,21 +358,6 @@ async fn route_uni_stream(
         }
     }
     Ok(())
-}
-
-async fn consume_qpack_decoder_stream(
-    recv: &mut quinn::RecvStream,
-) -> std::result::Result<(), ConnectionClose> {
-    let mut buf = [0u8; 4096];
-    loop {
-        let Some(_) = recv
-            .read(&mut buf)
-            .await
-            .map_err(|err| ConnectionClose::new(H3_CLOSED_CRITICAL_STREAM, err.to_string()))?
-        else {
-            return Ok(());
-        };
-    }
 }
 
 async fn route_bidi_stream(

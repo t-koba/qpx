@@ -2,9 +2,10 @@ use super::{
     FRAME_CANCEL_PUSH, FRAME_DATA, FRAME_GOAWAY, FRAME_MAX_PUSH_ID, FRAME_PING,
     FRAME_PRIORITY_UPDATE_PUSH, FRAME_PRIORITY_UPDATE_REQUEST, FRAME_PUSH_PROMISE,
     FRAME_WINDOW_UPDATE, H3_EXCESSIVE_LOAD, H3_FRAME_ERROR, H3_FRAME_UNEXPECTED, H3_ID_ERROR,
-    MAX_BUFFERED_PRIORITY_UPDATES, PeerControlState, StreamPriority, decode_settings_frame,
-    encode_varint, parse_priority, push_varint, read_frame, read_frame_header_after_idle,
-    read_varint_slice, validate_control_stream_frame, validate_message_stream_frame,
+    H3_STREAM_CREATION_ERROR, MAX_BUFFERED_PRIORITY_UPDATES, PeerControlState, StreamPriority,
+    decode_settings_frame, encode_varint, parse_priority, push_varint, read_frame,
+    read_frame_header_after_idle, read_varint_slice, validate_control_stream_frame,
+    validate_message_stream_frame,
 };
 use std::time::Duration;
 use tokio::io::AsyncWriteExt;
@@ -127,6 +128,18 @@ async fn control_state_rejects_malformed_goaway_payload() {
         .await
         .unwrap_err();
     assert_eq!(err.code, H3_FRAME_ERROR);
+}
+
+#[tokio::test]
+async fn control_state_rejects_duplicate_qpack_streams() {
+    let state = PeerControlState::default();
+    state.register_encoder_stream().await.unwrap();
+    state.register_decoder_stream().await.unwrap();
+
+    let err = state.register_encoder_stream().await.unwrap_err();
+    assert_eq!(err.code, H3_STREAM_CREATION_ERROR);
+    let err = state.register_decoder_stream().await.unwrap_err();
+    assert_eq!(err.code, H3_STREAM_CREATION_ERROR);
 }
 
 #[tokio::test]
