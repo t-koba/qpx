@@ -22,6 +22,8 @@ pub(crate) mod metrics;
 ))]
 pub(crate) mod priority;
 #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
+pub(crate) mod qpx_listener;
+#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 pub(crate) mod qpx_stream;
 #[cfg(feature = "http3")]
 pub(crate) mod quic;

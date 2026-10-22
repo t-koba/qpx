@@ -3,6 +3,7 @@ use super::streaming::ReverseH3RequestPeer;
 pub(crate) use super::terminate_socket::prepare_reverse_terminate_socket;
 pub(crate) use super::terminate_tls::build_reverse_tls_config;
 use crate::http::body::size::set_observed_request_size;
+use crate::http3::qpx_listener::serve_qpx_h3_endpoint;
 use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
 use crate::reverse::transport::{self, ReverseConnInfo};
 use crate::runtime::ResolvedStreamingLimits;
@@ -20,7 +21,7 @@ pub(crate) async fn run_http3_terminate(
     reverse: ReverseEdgeConfig,
     listen_addr: SocketAddr,
     reverse_rt: ReloadableReverse,
-    mut shutdown: watch::Receiver<SidecarControl>,
+    shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
     let tls_config = build_reverse_tls_config(&reverse)?;
@@ -47,45 +48,15 @@ pub(crate) async fn run_http3_terminate(
     // "reverse TLS listener starting" line.
     info!(label = "reverse-terminate", "HTTP/3 listener starting");
 
-    loop {
-        let connecting = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || shutdown.borrow().should_stop() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            connecting = endpoint.accept() => connecting,
-        };
-        let Some(connecting) = connecting else {
-            break;
-        };
-        let permit = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || shutdown.borrow().should_stop() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            permit = connection_semaphore.clone().acquire_owned() => Some(permit?),
-        };
-        let Some(permit) = permit else {
-            break;
-        };
-        let handler = handler.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            if let Err(err) =
-                qpx_h3::serve_connection(connecting, listen_addr.port(), handler).await
-            {
-                warn!(error = ?err, "reverse HTTP/3 qpx-h3 connection failed");
-            }
-        });
-    }
-
-    Ok(())
+    serve_qpx_h3_endpoint(
+        endpoint,
+        listen_addr,
+        handler,
+        connection_semaphore,
+        shutdown,
+        "reverse HTTP/3 qpx-h3 connection failed",
+    )
+    .await
 }
 
 #[derive(Clone)]

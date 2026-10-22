@@ -1,4 +1,5 @@
 use super::server_tls::build_forward_tls_config;
+use crate::http3::qpx_listener::serve_qpx_h3_endpoint;
 use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
@@ -9,7 +10,7 @@ use qpx_core::config::{
 use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
-use tracing::{info, warn};
+use tracing::info;
 
 mod connect;
 mod connect_upstream;
@@ -26,7 +27,7 @@ pub(crate) async fn run_http3_listener(
     listener: IngressEdgeConfig,
     runtime: Runtime,
     http3_cfg: Http3IngressEdgeConfig,
-    mut shutdown: watch::Receiver<SidecarControl>,
+    shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
     let listen_addr: SocketAddr = http3_cfg
@@ -83,43 +84,13 @@ pub(crate) async fn run_http3_listener(
     // same field, so a reader can compare the two backends.
     info!(label = "forward", "HTTP/3 listener starting");
 
-    loop {
-        let connecting = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || shutdown.borrow().should_stop() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            connecting = endpoint.accept() => connecting,
-        };
-        let Some(connecting) = connecting else {
-            break;
-        };
-        let permit = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || shutdown.borrow().should_stop() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            permit = connection_semaphore.clone().acquire_owned() => Some(permit?),
-        };
-        let Some(permit) = permit else {
-            break;
-        };
-        let handler = handler.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            if let Err(err) =
-                qpx_h3::serve_connection(connecting, listen_addr.port(), handler).await
-            {
-                warn!(error = ?err, "forward HTTP/3 qpx-h3 connection failed");
-            }
-        });
-    }
-
-    Ok(())
+    serve_qpx_h3_endpoint(
+        endpoint,
+        listen_addr,
+        handler,
+        connection_semaphore,
+        shutdown,
+        "forward HTTP/3 qpx-h3 connection failed",
+    )
+    .await
 }
