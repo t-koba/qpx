@@ -78,6 +78,61 @@ pub(crate) fn parse_quic_short_dcid(packet: &[u8], dcid_len: u8) -> Option<QuicC
     QuicConnectionId::from_slice(&packet[1..1 + dcid_len])
 }
 
+/// Connection ids and directional cid-length hints learned from one packet.
+/// Session indexes apply these observations while retaining ownership of their
+/// own session and index state.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct QuicPacketCidObservation {
+    pub(crate) connection_ids: [Option<QuicConnectionId>; 2],
+    pub(crate) client_cid_len: Option<u8>,
+    pub(crate) server_cid_len: Option<u8>,
+}
+
+/// Extract the connection ids learned from a client-to-server QUIC packet.
+pub(crate) fn observe_client_quic_packet(
+    packet: &[u8],
+    server_cid_len: Option<u8>,
+) -> QuicPacketCidObservation {
+    if let Some(long) = parse_quic_long_header(packet) {
+        return QuicPacketCidObservation {
+            connection_ids: [long.dcid, long.scid],
+            client_cid_len: (long.scid_len > 0).then_some(long.scid_len),
+            server_cid_len: None,
+        };
+    }
+
+    QuicPacketCidObservation {
+        connection_ids: [
+            server_cid_len.and_then(|len| parse_quic_short_dcid(packet, len)),
+            None,
+        ],
+        ..QuicPacketCidObservation::default()
+    }
+}
+
+/// Extract the connection ids and directional cid-length hints learned from
+/// a server-to-client QUIC packet.
+pub(crate) fn observe_upstream_quic_packet(
+    packet: &[u8],
+    client_cid_len: Option<u8>,
+) -> QuicPacketCidObservation {
+    if let Some(long) = parse_quic_long_header(packet) {
+        return QuicPacketCidObservation {
+            connection_ids: [long.dcid, long.scid],
+            client_cid_len: (long.dcid_len > 0).then_some(long.dcid_len),
+            server_cid_len: (long.scid_len > 0).then_some(long.scid_len),
+        };
+    }
+
+    QuicPacketCidObservation {
+        connection_ids: [
+            client_cid_len.and_then(|len| parse_quic_short_dcid(packet, len)),
+            None,
+        ],
+        ..QuicPacketCidObservation::default()
+    }
+}
+
 pub(crate) fn is_quic_long_header(packet: &[u8]) -> bool {
     packet.first().is_some_and(|first| (first & 0x80) != 0)
 }
@@ -138,6 +193,60 @@ mod tests {
             packet.extend(vec![byte; len as usize]);
         }
         packet
+    }
+
+    #[test]
+    fn packet_cid_observations_preserve_directional_lengths() {
+        let client_packet = long_packet(0xc0, 1, 3, 2);
+        let client = observe_client_quic_packet(&client_packet, None);
+        let client_header = parse_quic_long_header(&client_packet).unwrap();
+        assert_eq!(
+            client.connection_ids,
+            [client_header.dcid, client_header.scid]
+        );
+        assert_eq!(client.client_cid_len, Some(2));
+        assert_eq!(client.server_cid_len, None);
+
+        let upstream_packet = long_packet(0xc0, 1, 3, 2);
+        let upstream = observe_upstream_quic_packet(&upstream_packet, None);
+        let upstream_header = parse_quic_long_header(&upstream_packet).unwrap();
+        assert_eq!(
+            upstream.connection_ids,
+            [upstream_header.dcid, upstream_header.scid]
+        );
+        assert_eq!(upstream.client_cid_len, Some(3));
+        assert_eq!(upstream.server_cid_len, Some(2));
+
+        let zero_scid_packet = long_packet(0xc0, 1, 3, 0);
+        let zero_scid = observe_client_quic_packet(&zero_scid_packet, None);
+        assert_eq!(zero_scid.client_cid_len, None);
+    }
+
+    #[test]
+    fn short_packet_cid_observations_require_the_opposite_direction_length() {
+        let packet = [0x40, 0xa1, 0xb2, 0xc3];
+        let client = observe_client_quic_packet(&packet, Some(2));
+        assert_eq!(client.connection_ids[0], parse_quic_short_dcid(&packet, 2));
+        assert_eq!(client.connection_ids[1], None);
+        assert_eq!(client.client_cid_len, None);
+        assert_eq!(client.server_cid_len, None);
+        assert_eq!(
+            observe_client_quic_packet(&packet, None).connection_ids,
+            [None, None]
+        );
+
+        let upstream = observe_upstream_quic_packet(&packet, Some(3));
+        assert_eq!(
+            upstream.connection_ids[0],
+            parse_quic_short_dcid(&packet, 3)
+        );
+        assert_eq!(upstream.connection_ids[1], None);
+        assert_eq!(upstream.client_cid_len, None);
+        assert_eq!(upstream.server_cid_len, None);
+        assert_eq!(
+            observe_upstream_quic_packet(&packet, None).connection_ids,
+            [None, None]
+        );
     }
 
     #[test]

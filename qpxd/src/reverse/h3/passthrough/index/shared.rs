@@ -9,7 +9,8 @@ use tokio::sync::mpsc;
 use super::session::{PassthroughSession, SessionTouch};
 use crate::http3::quic_packet::{
     QuicConnectionId, connection_id_len_bit, find_by_known_connection_id_len,
-    parse_quic_long_header, parse_quic_short_dcid,
+    observe_client_quic_packet, observe_upstream_quic_packet, parse_quic_long_header,
+    parse_quic_short_dcid,
 };
 
 const MAX_CIDS_PER_SESSION: usize = 32;
@@ -191,24 +192,9 @@ impl SharedSessionIndex {
         let Some(session) = self.session(session_id) else {
             return;
         };
-        let Some(server_cid_len) = session.server_cid_len() else {
-            if let Some(long) = parse_quic_long_header(packet) {
-                self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
-                if long.scid_len > 0 {
-                    session.set_client_cid_len(long.scid_len);
-                }
-            }
-            return;
-        };
-
-        if let Some(long) = parse_quic_long_header(packet) {
-            self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
-            if long.scid_len > 0 {
-                session.set_client_cid_len(long.scid_len);
-            }
-        } else if let Some(cid) = parse_quic_short_dcid(packet, server_cid_len) {
-            self.register_cids(session_id, std::iter::once(cid));
-        }
+        let observation = observe_client_quic_packet(packet, session.server_cid_len());
+        self.register_cids(session_id, observation.connection_ids.into_iter().flatten());
+        session.set_client_cid_len_if_some(observation.client_cid_len);
     }
 
     pub(in crate::reverse::h3::passthrough) fn observe_upstream_packet(
@@ -219,20 +205,16 @@ impl SharedSessionIndex {
         let Some(session) = self.session(session_id) else {
             return;
         };
-        let client_cid_len = session.client_cid_len();
-        if let Some(long) = parse_quic_long_header(packet) {
-            self.register_cids(session_id, [long.dcid, long.scid].into_iter().flatten());
-            if long.scid_len > 0 {
-                session.set_server_cid_len(long.scid_len);
-                self.record_known_server_cid_len(long.scid_len);
-            }
-            if session.client_cid_len().is_none() && long.dcid_len > 0 {
-                session.set_client_cid_len(long.dcid_len);
-            }
-        } else if let Some(len) = client_cid_len
-            && let Some(cid) = parse_quic_short_dcid(packet, len)
+        let observation = observe_upstream_quic_packet(packet, session.client_cid_len());
+        self.register_cids(session_id, observation.connection_ids.into_iter().flatten());
+        if let Some(len) = observation.server_cid_len {
+            session.set_server_cid_len(len);
+            self.record_known_server_cid_len(len);
+        }
+        if let Some(len) = observation.client_cid_len
+            && session.client_cid_len().is_none()
         {
-            self.register_cids(session_id, std::iter::once(cid));
+            session.set_client_cid_len(len);
         }
     }
 
