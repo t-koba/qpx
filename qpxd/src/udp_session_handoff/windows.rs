@@ -225,19 +225,7 @@ fn from_persisted_handoff(persisted: PersistedUdpSessionHandoff) -> Result<UdpSe
                 session.upstream_local_addr,
                 session.upstream_peer_addr,
             )?;
-            sessions.push(ReversePassthroughSessionRestore {
-                session_id: session.session_id,
-                socket,
-                upstream_local_addr: session.upstream_local_addr,
-                upstream_peer_addr: session.upstream_peer_addr,
-                client_addr: session.client_addr,
-                last_seen_ms: session.last_seen_ms,
-                bytes_in: session.bytes_in,
-                bytes_out: session.bytes_out,
-                client_cid_len: session.client_cid_len,
-                server_cid_len: session.server_cid_len,
-                cids: session.cids,
-            });
+            sessions.push(session.into_restore(socket));
         }
         state.insert_reverse_passthrough(
             listener.name,

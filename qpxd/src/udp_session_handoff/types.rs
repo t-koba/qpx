@@ -154,6 +154,27 @@ pub(super) struct PersistedReversePassthroughSessionRestore {
     pub(super) cids: Vec<ExportedQuicConnectionId>,
 }
 
+impl PersistedReversePassthroughSessionRestore {
+    pub(super) fn into_restore(
+        self,
+        socket: std::net::UdpSocket,
+    ) -> ReversePassthroughSessionRestore {
+        ReversePassthroughSessionRestore {
+            session_id: self.session_id,
+            socket,
+            upstream_local_addr: self.upstream_local_addr,
+            upstream_peer_addr: self.upstream_peer_addr,
+            client_addr: self.client_addr,
+            last_seen_ms: self.last_seen_ms,
+            bytes_in: self.bytes_in,
+            bytes_out: self.bytes_out,
+            client_cid_len: self.client_cid_len,
+            server_cid_len: self.server_cid_len,
+            cids: self.cids,
+        }
+    }
+}
+
 #[cfg(windows)]
 #[derive(Debug)]
 pub(super) struct WindowsUdpSessionPreparedHandoff {
@@ -211,4 +232,55 @@ pub(super) struct WindowsReversePassthroughSessionRestore {
     pub(super) client_cid_len: Option<u8>,
     pub(super) server_cid_len: Option<u8>,
     pub(super) cids: Vec<ExportedQuicConnectionId>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::UdpSocket;
+
+    #[test]
+    fn reverse_passthrough_persisted_fields_map_to_restore() {
+        let socket = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let socket_addr = socket.local_addr().unwrap();
+        let cid = ExportedQuicConnectionId {
+            len: 3,
+            bytes: [7; 20],
+        };
+        let restored = PersistedReversePassthroughSessionRestore {
+            session_id: 42,
+            #[cfg(unix)]
+            fd: 8,
+            #[cfg(windows)]
+            socket: vec![1, 2],
+            upstream_local_addr: "127.0.0.1:5001".parse().unwrap(),
+            upstream_peer_addr: "127.0.0.1:5002".parse().unwrap(),
+            client_addr: "127.0.0.1:5003".parse().unwrap(),
+            last_seen_ms: 987,
+            bytes_in: 1234,
+            bytes_out: 5678,
+            client_cid_len: Some(3),
+            server_cid_len: Some(4),
+            cids: vec![cid],
+        }
+        .into_restore(socket);
+
+        assert_eq!(restored.session_id, 42);
+        assert_eq!(restored.socket.local_addr().unwrap(), socket_addr);
+        assert_eq!(
+            restored.upstream_local_addr,
+            "127.0.0.1:5001".parse().unwrap()
+        );
+        assert_eq!(
+            restored.upstream_peer_addr,
+            "127.0.0.1:5002".parse().unwrap()
+        );
+        assert_eq!(restored.client_addr, "127.0.0.1:5003".parse().unwrap());
+        assert_eq!(restored.last_seen_ms, 987);
+        assert_eq!(restored.bytes_in, 1234);
+        assert_eq!(restored.bytes_out, 5678);
+        assert_eq!(restored.client_cid_len, Some(3));
+        assert_eq!(restored.server_cid_len, Some(4));
+        assert_eq!(restored.cids, vec![cid]);
+    }
 }
