@@ -1300,6 +1300,11 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// field's name in a constant of its own and reads the field through
 /// that constant reads the declaration, and a comparison under the
 /// constant is a comparison of a header's name with the field's name.
+/// The gate follows an import as well: a site that imports the field's
+/// name under a name of its own reads the declaration through that
+/// name, so the gate reads the imports of the file and follows the name
+/// the import gives the field's name, whether the import renames the
+/// name or imports it under the name it is spelled with.
 /// The gate follows a binding of a header entry's name as well: a site
 /// that binds the entry's name to a name of its own and compares that
 /// name with the field's name compares the entry's name, so the
@@ -1335,7 +1340,11 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// What the gate cannot see is a site that finds the field's entry by a
 /// name it builds at runtime from text the site did not write out - a
 /// piece that arrives at runtime - and a site that takes the value under
-/// a member of an entry the comparison did not find. A helper
+/// a member of an entry the comparison did not find. A constant of
+/// another file that holds the field's name is not followed either: the
+/// gate reads the constants of the file it reads, so a site that keeps
+/// the field's name in a constant of another module holds a name the
+/// gate does not know. A helper
 /// of another file that found the entry is seen when the caller calls it
 /// by the name it is defined with; a call through another name is not
 /// seen. A member that holds the entry's name under a name the gate does
@@ -1476,6 +1485,14 @@ const CONTENT_LENGTH_NAME_BUILDERS: [&str; 5] = [
 /// The field's name, as a header spells it.
 const CONTENT_LENGTH_FIELD: &str = "content-length";
 
+/// The name the field's name is spelled with where a header crate keeps
+/// it.
+///
+/// A path whose last segment is this name names the field, so an import
+/// of such a path brings the field's name into the file under the name
+/// the import gives it.
+const CONTENT_LENGTH_CONSTANT: &str = "CONTENT_LENGTH";
+
 /// The module the owner is reached through.
 const CONTENT_LENGTH_OWNER_MODULE: &str = "http_content_length";
 
@@ -1500,13 +1517,15 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// through an index, and it sees a comparison of a header name with the
 /// field's name. It sees the field named through a reference, through the
 /// constant's text, through a name built from the text, through a copy
-/// the site made of the text and through a name the site builds at
-/// runtime from that text. It sees a parse whose type is written and a
+/// the site made of the text, through a name the site builds at
+/// runtime from that text and through a name the site imported the
+/// field's name under. It sees a parse whose type is written and a
 /// parse whose type is inferred, because the field's value is a length
 /// either way. It does not see a reader that lives outside a function
 /// body, it does not see a name the site builds at runtime from text the
-/// site did not write out, and it reads a function's body as one whole
-/// rather than tying a parse to the read it belongs to.
+/// site did not write out, it does not see a constant of another file
+/// that holds the field's name, and it reads a function's body as one
+/// whole rather than tying a parse to the read it belongs to.
 #[cfg(test)]
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
@@ -1596,10 +1615,11 @@ fn content_length_inline_reader_facts_violations(
 /// field's name, so the copy names the field.
 ///
 /// The rule follows the name the site holds for the field: the field's
-/// name itself, a name the site binds the field's name to, and a name the
-/// site keeps the field's name in a constant or a static of its own. The
+/// name itself, a name the site binds the field's name to, a name the
+/// site keeps the field's name in a constant or a static of its own, and
+/// a name the site imports the field's name under. The
 /// name is followed wherever the path spells it, so a reader cannot hide
-/// behind a binding or a constant of its own.
+/// behind a binding, a constant or an import of its own.
 ///
 /// The rule follows a name the site builds at runtime as well: a site
 /// that builds the field's name with a constructor or with a macro and
@@ -1612,7 +1632,11 @@ fn content_length_inline_reader_facts_violations(
 /// What the rule cannot see is a site that finds the field's entry by a
 /// name it builds at runtime from text the site did not write out - a
 /// piece that arrives at runtime - and a site that takes the value under
-/// a member of an entry the comparison did not find. A helper of
+/// a member of an entry the comparison did not find. A constant of
+/// another file that holds the field's name is not followed either: the
+/// rule reads the constants of the file it reads, so a site that keeps
+/// the field's name in a constant of another module holds a name the
+/// rule does not know. A helper of
 /// another file that found the entry is seen when the caller calls it by
 /// the name it is defined with; a call through another name is not seen.
 /// A member that holds the entry's name under a name the rule does not
@@ -1687,6 +1711,7 @@ fn content_length_reader_facts(path: &str, syntax: &syn::File) -> ContentLengthF
     let mut collector = ContentLengthFunctionCollector {
         test_file: is_test_file(Path::new(path)),
         field_name_constants: content_length_field_name_constants(syntax),
+        field_name_imports: content_length_imported_names(syntax),
         ..ContentLengthFunctionCollector::default()
     };
     collector.visit_file(syntax);
@@ -1799,6 +1824,51 @@ fn content_length_workspace_violations(
         ));
     }
     Ok(violations)
+}
+
+/// The names a file imports the field's name under.
+///
+/// A site that imports the field's name under a name of its own reads
+/// the declaration through that name, so the gate reads the imports of
+/// the file and follows the name the import gives the field's name.
+fn content_length_imported_names(syntax: &syn::File) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in &syntax.items {
+        let syn::Item::Use(item) = item else {
+            continue;
+        };
+        collect_imported_names(&item.tree, &mut names);
+    }
+    names
+}
+
+/// The names one import brings the field's name under.
+///
+/// An import of the field's name brings it under the name the import
+/// gives it: the name it is renamed to when the import renames it, and
+/// the name it is spelled with otherwise. An import of a group is read
+/// part by part, and an import of a prefix is read through to the name
+/// it ends in.
+fn collect_imported_names(tree: &syn::UseTree, names: &mut Vec<String>) {
+    match tree {
+        syn::UseTree::Path(path) => collect_imported_names(&path.tree, names),
+        syn::UseTree::Name(name) => {
+            if name.ident == CONTENT_LENGTH_CONSTANT {
+                names.push(name.ident.to_string());
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            if rename.ident == CONTENT_LENGTH_CONSTANT {
+                names.push(rename.rename.to_string());
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_imported_names(tree, names);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
 }
 
 /// The names a file holds the field's name under in a constant or a static.
@@ -2032,6 +2102,8 @@ struct ContentLengthFunctionCollector {
     /// The names the file holds the field's name under in a constant or a
     /// static.
     field_name_constants: Vec<String>,
+    /// The names the file imports the field's name under.
+    field_name_imports: Vec<String>,
 }
 
 impl Visit<'_> for ContentLengthFunctionCollector {
@@ -2068,10 +2140,12 @@ impl Visit<'_> for ContentLengthFunctionCollector {
 impl ContentLengthFunctionCollector {
     /// The facts of one function, taken from its body.
     fn record(&mut self, name: String, block: &syn::Block) {
+        let mut aliases = self.field_name_constants.clone();
+        aliases.extend(self.field_name_imports.iter().cloned());
         let mut facts = ContentLengthReaderFacts {
             test_code: self.test_file || self.test_depth > 0,
             field_names: FieldNames {
-                aliases: self.field_name_constants.clone(),
+                aliases,
                 ..FieldNames::default()
             },
             ..ContentLengthReaderFacts::default()
@@ -2753,7 +2827,7 @@ fn names_content_length_field(expr: &syn::Expr) -> bool {
             .path
             .segments
             .last()
-            .is_some_and(|segment| segment.ident == "CONTENT_LENGTH"),
+            .is_some_and(|segment| segment.ident == CONTENT_LENGTH_CONSTANT),
         syn::Expr::Lit(lit) => match &lit.lit {
             syn::Lit::Str(value) => value.value().eq_ignore_ascii_case(CONTENT_LENGTH_FIELD),
             syn::Lit::ByteStr(value) => value
@@ -10346,6 +10420,130 @@ fn declared_length(headers: &[(String, String)]) -> Option<String> {
                 .unwrap()
                 .is_empty(),
             "a name built from a bound piece of another field is not a reader"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_name_the_site_imports_under_another_name() {
+        // A site that imports the field's name under a name of its own
+        // reads the declaration through that name.
+        let renamed = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use http::header::CONTENT_LENGTH as LENGTH;
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(LENGTH).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&renamed.0, &renamed.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&renamed.0, &renamed.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the import stands in a group.
+        let grouped = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use http::header::{CONTENT_LENGTH as LENGTH, HOST};
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(LENGTH).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&grouped.0, &grouped.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site takes the imported name by a
+        // reference.
+        let referenced = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use http::header::CONTENT_LENGTH as LENGTH;
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(&LENGTH).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&referenced.0, &referenced.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site finds the field's own entry with
+        // the imported name.
+        let found = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+use http::header::CONTENT_LENGTH as LENGTH;
+
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    for (header_name, value) in headers {
+        if header_name == LENGTH {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&found.0, &found.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A site that imports another name under that name does not read
+        // the declaration.
+        let another_name = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+use http::header::HOST as LENGTH;
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    headers.get(LENGTH).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &another_name.0,
+                &another_name.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a name the site imports for another field is not a reader"
+        );
+        assert!(
+            content_length_inline_reader_violations(&another_name.0, &another_name.1)
+                .unwrap()
+                .is_empty(),
+            "a name the site imports for another field is not a reader"
         );
     }
 }

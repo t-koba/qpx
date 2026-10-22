@@ -216,7 +216,12 @@ pub enum ContentLengthError {
 /// reads the field through that binding reads the declaration, so a
 /// reader cannot hide behind a name the site holds of its own. The gate
 /// follows a constant or a static that holds the field's name as well,
-/// so a reader cannot hide behind a constant of its own either. The gate
+/// so a reader cannot hide behind a constant of its own either, and it
+/// follows an import that gives the field's name a name of its own, so
+/// a reader cannot hide behind a renamed import either. A constant of
+/// another file is not followed: the gate reads the constants of the
+/// file it reads, so a site that keeps the field's name in a constant
+/// of another module holds a name the gate does not know. The gate
 /// sees a value taken out of the field's own
 /// entry as well: a site that compares a header's name with the field's
 /// name and takes the value of a header entry in the same body finds that
