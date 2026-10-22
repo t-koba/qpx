@@ -1517,9 +1517,8 @@ const CONTENT_LENGTH_CONSTANT: &str = "CONTENT_LENGTH";
 const CONTENT_LENGTH_OWNER_MODULE: &str = "http_content_length";
 
 /// The entry points the owner has.
-const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
+const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 2] = [
     "declared_content_length",
-    "declared_content_length_in_values",
     "declared_content_length_in_named_values",
 ];
 
@@ -8124,7 +8123,10 @@ fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
         .iter()
         .filter(|(name, _)| name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
         .map(|(_, value)| value.as_str());
-    qpx_core::http_content_length::declared_content_length_in_values(values)
+    let _ = values.next();
+    qpx_core::http_content_length::declared_content_length_in_named_values(
+        envelope.headers.iter().map(|(name, value)| (name, value)),
+    )
         .ok()
         .flatten()
 }

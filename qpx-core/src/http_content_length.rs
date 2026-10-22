@@ -15,10 +15,9 @@
 //! declaration, so the HTTP stack and the IPC gateway read the field the
 //! same way instead of each keeping its own interpretation.
 //!
-//! The owner has an entry point for a header map, one for the field's
-//! values, and one for a sequence of named header values, so a site that
-//! reads raw header lines reaches the owner as well and does not select
-//! the field's values itself.
+//! The owner has an entry point for a header map and one for a sequence
+//! of named header values, so a site that reads raw header lines reaches
+//! the owner as well and does not select the field's values itself.
 //!
 //! The field has a sending half as well, and the owner holds it too.
 //! The section's sender rule forbids forwarding a value that does not
@@ -447,19 +446,6 @@ fn merge_value(value: &str, declared: &mut Option<u64>) -> Result<(), ContentLen
 /// that replaces the declaration it received with it emits one field
 /// line whose value is the resolved decimal.
 ///
-/// A site that reads the declaration from raw header lines has no header
-/// map to hand the owner, so it hands the values instead: the member
-/// grammar and the conflict rule stay in one place.
-pub fn declared_content_length_in_values<'a>(
-    values: impl IntoIterator<Item = &'a str>,
-) -> Result<Option<u64>, ContentLengthError> {
-    let mut declared = None::<u64>;
-    for value in values {
-        merge_value(value, &mut declared)?;
-    }
-    Ok(declared)
-}
-
 /// The Content-Length that a sequence of named header values declares.
 ///
 /// The field's sending half belongs to the owner as well: the grammar a
@@ -483,10 +469,7 @@ pub fn declared_content_length_in_values<'a>(
 /// A value that is not text is refused before a conflict is reported, even
 /// when the conflict is in an earlier value: the values are read as text
 /// first and the members are merged afterwards, so the first value that
-/// cannot be read is the error. The value-level entry point merges as it
-/// goes and stops at the first member it cannot read, and it cannot be
-/// given a value that is not text at all, so the two entry points report
-/// the same error wherever both of them can report one.
+/// cannot be read is the error.
 pub fn declared_content_length_in_named_values<'a, N, V>(
     headers: impl IntoIterator<Item = (&'a N, &'a V)>,
 ) -> Result<Option<u64>, ContentLengthError>
@@ -609,34 +592,6 @@ mod tests {
     }
 
     #[test]
-    fn declared_content_length_in_values_reads_every_member_of_every_value() {
-        assert_eq!(
-            declared_content_length_in_values(["42", "42, 42"]),
-            Ok(Some(42))
-        );
-        assert_eq!(
-            declared_content_length_in_values(Vec::<&str>::new()),
-            Ok(None)
-        );
-    }
-
-    #[test]
-    fn declared_content_length_in_values_rejects_a_member_that_is_not_digits() {
-        for values in [
-            vec!["+5"],
-            vec!["5, +5"],
-            vec![""],
-            vec!["4,"],
-            vec!["4,,4"],
-        ] {
-            assert_eq!(
-                declared_content_length_in_values(values),
-                Err(ContentLengthError::InvalidValue)
-            );
-        }
-    }
-
-    #[test]
     fn declared_content_length_in_named_values_reads_the_field_by_its_name() {
         assert_eq!(
             declared_content_length_in_named_values([
@@ -654,6 +609,22 @@ mod tests {
             declared_content_length_in_named_values([("Content-Type", "text/plain")]),
             Ok(None)
         );
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_rejects_a_member_that_is_not_digits() {
+        for values in [
+            vec![("Content-Length", "+5")],
+            vec![("Content-Length", "5, +5")],
+            vec![("Content-Length", "")],
+            vec![("Content-Length", "4,")],
+            vec![("Content-Length", "4,,4")],
+        ] {
+            assert_eq!(
+                declared_content_length_in_named_values(values),
+                Err(ContentLengthError::InvalidValue)
+            );
+        }
     }
 
     #[test]
@@ -697,52 +668,6 @@ mod tests {
                 (&b"content-length"[..], &[0xff][..]),
             ]),
             Err(ContentLengthError::InvalidHeader)
-        );
-    }
-
-    #[test]
-    fn the_entry_points_report_the_same_error_where_they_can_both_report_one() {
-        // The record says the two entry points report the same error
-        // wherever both of them can report one, so the same field is read
-        // through each of them and the answers are compared.
-        for values in [
-            &["5"][..],
-            &["5, 5"][..],
-            &["5, 6"][..],
-            &["x"][..],
-            &["x", "5, 6"][..],
-            &["5, 6", "x"][..],
-            &["+5"][..],
-        ] {
-            let mut headers = HeaderMap::new();
-            let mut named = Vec::new();
-            for value in values.iter().copied() {
-                headers.append(CONTENT_LENGTH, HeaderValue::from_static(value));
-                named.push((&b"content-length"[..], value.as_bytes()));
-            }
-            let by_value = declared_content_length_in_values(values.iter().copied());
-            let by_name = declared_content_length_in_named_values(named.clone());
-            assert_eq!(by_name, by_value, "{values:?}");
-            assert_eq!(declared_content_length(&headers), by_name, "{values:?}");
-        }
-    }
-
-    #[test]
-    fn declared_content_length_in_values_reports_a_conflict_before_a_later_invalid_member() {
-        // The value-level entry point merges as it goes, so it stops at
-        // the first member it cannot read: a conflict in an earlier value
-        // is reported before a later value's invalid member.
-        assert_eq!(
-            declared_content_length_in_values(["5, 6", "+5"]),
-            Err(ContentLengthError::Conflicting)
-        );
-    }
-
-    #[test]
-    fn declared_content_length_in_values_rejects_conflicting_members() {
-        assert_eq!(
-            declared_content_length_in_values(["5", "6"]),
-            Err(ContentLengthError::Conflicting)
         );
     }
 
