@@ -1,16 +1,15 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::super::parse::{format_authority, validate_h3_connect_head};
+use super::super::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use super::target::{H3ConnectTargetInput, prepare_h3_connect_target};
 use super::{H3PolicyResponseContext, PreparedH3Connect, send_h3_policy_response};
 use crate::destination::DestinationInputs;
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
-use crate::http::dispatch::{
-    DispatchConnectRuleContextInput, DispatchOutcome, build_dispatch_connect_rule_context,
-};
+use crate::http::dispatch::DispatchOutcome;
 use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{
-    blocked_response as blocked, forbidden_response as forbidden, http_version_label,
+    blocked_response as blocked, forbidden_response as forbidden,
     too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
@@ -231,14 +230,12 @@ pub(crate) async fn prepare_h3_connect_request(
             response
         }};
     }
-    let ctx = build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
+    let ctx = build_h3_connect_rule_context(H3ConnectRuleContextInput {
         remote_ip: conn.remote_addr.ip(),
         port,
         host: host.as_str(),
         path: audit_path.as_deref(),
         authority: req_authority.as_str(),
-        http_version: http_version_label(http::Version::HTTP_3),
-        alpn: Some("h3"),
         destination: &destination,
         headers: &sanitized_headers,
         identity: &identity,

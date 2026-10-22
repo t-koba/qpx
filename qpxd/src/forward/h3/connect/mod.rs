@@ -1,5 +1,54 @@
 pub(super) mod parse;
 
+use crate::http::dispatch::{DispatchConnectRuleContextInput, build_dispatch_connect_rule_context};
+use crate::http::protocol::common::http_version_label;
+use qpx_core::rules::RuleMatchContext;
+
+/// The parts of an HTTP/3 CONNECT request that its rule context carries.
+pub(super) struct H3ConnectRuleContextInput<'a> {
+    pub(super) remote_ip: std::net::IpAddr,
+    pub(super) port: u16,
+    pub(super) host: &'a str,
+    pub(super) path: Option<&'a str>,
+    pub(super) authority: &'a str,
+    pub(super) destination: &'a crate::destination::DestinationMetadata,
+    pub(super) headers: &'a http::HeaderMap,
+    pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
+}
+
+/// The rule context for an HTTP/3 CONNECT request.
+///
+/// Both HTTP/3 backends judge a CONNECT request against the same context:
+/// the same method, the same HTTP/3 version label and the same "h3" ALPN.
+/// The parts that differ - where the request came from and what it carries -
+/// are the caller's to pass in.
+pub(super) fn build_h3_connect_rule_context<'a>(
+    input: H3ConnectRuleContextInput<'a>,
+) -> RuleMatchContext<'a> {
+    let H3ConnectRuleContextInput {
+        remote_ip,
+        port,
+        host,
+        path,
+        authority,
+        destination,
+        headers,
+        identity,
+    } = input;
+    build_dispatch_connect_rule_context(DispatchConnectRuleContextInput {
+        remote_ip,
+        port,
+        host,
+        path,
+        authority,
+        http_version: http_version_label(http::Version::HTTP_3),
+        alpn: Some("h3"),
+        destination,
+        headers,
+        identity,
+    })
+}
+
 #[cfg(all(
     feature = "http3",
     feature = "http3-backend-h3",
