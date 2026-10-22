@@ -14,7 +14,7 @@ use qpx_http::body::Body;
 use std::net::SocketAddr;
 use tokio::sync::watch;
 use tokio::time::{Duration, Instant};
-use tracing::warn;
+use tracing::{info, warn};
 
 pub(crate) async fn run_http3_terminate(
     reverse: ReverseEdgeConfig,
@@ -39,6 +39,15 @@ pub(crate) async fn run_http3_terminate(
         reverse: reverse_rt,
     };
     let connection_semaphore = handler.reverse.runtime.state().connection_semaphore.clone();
+
+    // The h3 backend logs the same line when its listener starts, so a
+    // Chromium timeout in either backend can be told apart from a listener
+    // that never came up.
+    info!(
+        reverse = %reverse.name,
+        addr = %listen_addr,
+        "reverse HTTP/3 listener starting"
+    );
 
     loop {
         let connecting = tokio::select! {
