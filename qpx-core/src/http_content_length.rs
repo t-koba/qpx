@@ -228,7 +228,14 @@ pub enum ContentLengthError {
 /// by the `value` member of the entry whose name the comparison found,
 /// and by a pattern that binds the entry's pair, where the name the
 /// pattern bound is the name the comparison uses and the value the
-/// pattern bound is the value that is taken. The value is the field's
+/// pattern bound is the value that is taken. The gate follows the member
+/// the value is held under as well: a header entry holds its name and
+/// its value under members of its own, so a site that finds the field's
+/// own entry and takes a member of it that is not the member holding the
+/// name reads the declaration's value, and a reader cannot hide behind a
+/// member the gate has not seen. The member the comparison used is the
+/// name, so a site that takes that member takes the name and not the
+/// value. The value is the field's
 /// value when the site selects the field's own entry, and a comparison
 /// of a header's name with the field's name is what selects it. A
 /// comparison that decides about the field instead does not select it: a
@@ -241,8 +248,8 @@ pub enum ContentLengthError {
 /// about the field at all: the gate cannot say which part of the
 /// condition skips the entry, so the comparison finds the field's own
 /// entry, and the code after the branch may hold it. The value has to
-/// come from the entry the comparison found: the gate reads the `value`
-/// member only when the site takes it under the name it compared or
+/// come from the entry the comparison found: the gate reads a member of
+/// the entry only when the site takes it under the name it compared or
 /// under a name the entry travels to, so a site that compares the
 /// field's name and takes another entry's value is not a reader
 /// either. The gate follows the entry as it travels: a binding of the
