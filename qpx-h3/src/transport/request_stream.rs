@@ -11,8 +11,7 @@ use tokio::time::timeout;
 
 use super::{
     MESSAGE_DATA_CHUNK_BYTES, RequestRecvStream, RequestSendStream, RequestStreamConfig,
-    ResponseSendState, abort_bidi_stream, declared_response_body_length,
-    enforce_body_content_length_complete, enforce_body_frame, stop_recv_stream,
+    ResponseSendState, abort_bidi_stream, declared_response_body_length, stop_recv_stream,
 };
 
 /// Combined HTTP/3 request stream.
@@ -222,45 +221,26 @@ impl RequestStream {
     }
 
     fn enforce_received_data_frame_len(&mut self, len: usize) -> Result<()> {
-        if self.receives_response_body {
-            if !self.response_head_received {
-                return Err(anyhow!(
-                    "HTTP/3 response DATA cannot be received before response HEADERS"
-                )
-                .into());
-            }
-            enforce_body_frame(
-                None,
-                self.declared_response_body_bytes,
-                &mut self.received_response_body_bytes,
-                len,
-                "response",
-            )
-        } else {
-            enforce_body_frame(
-                self.max_request_body_bytes,
-                self.declared_request_body_bytes,
-                &mut self.received_request_body_bytes,
-                len,
-                "request",
-            )
-        }
+        super::enforce_received_data_frame_len(
+            self.receives_response_body,
+            self.response_head_received,
+            self.max_request_body_bytes,
+            self.declared_request_body_bytes,
+            &mut self.received_request_body_bytes,
+            self.declared_response_body_bytes,
+            &mut self.received_response_body_bytes,
+            len,
+        )
     }
 
     fn enforce_received_content_length_complete(&self) -> Result<()> {
-        if self.receives_response_body {
-            enforce_body_content_length_complete(
-                self.declared_response_body_bytes,
-                self.received_response_body_bytes,
-                "response",
-            )
-        } else {
-            enforce_body_content_length_complete(
-                self.declared_request_body_bytes,
-                self.received_request_body_bytes,
-                "request",
-            )
-        }
+        super::enforce_received_content_length_complete(
+            self.receives_response_body,
+            self.declared_request_body_bytes,
+            self.received_request_body_bytes,
+            self.declared_response_body_bytes,
+            self.received_response_body_bytes,
+        )
     }
 
     /// Receives trailers, if present.

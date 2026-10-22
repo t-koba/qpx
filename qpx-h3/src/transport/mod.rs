@@ -242,6 +242,62 @@ fn enforce_body_content_length_complete(
     }
     Ok(())
 }
+#[allow(clippy::too_many_arguments)]
+pub(super) fn enforce_received_data_frame_len(
+    receives_response_body: bool,
+    response_head_received: bool,
+    max_request_body_bytes: Option<usize>,
+    declared_request_body_bytes: Option<u64>,
+    received_request_body_bytes: &mut usize,
+    declared_response_body_bytes: Option<u64>,
+    received_response_body_bytes: &mut usize,
+    len: usize,
+) -> Result<()> {
+    if receives_response_body {
+        if !response_head_received {
+            return Err(
+                anyhow!("HTTP/3 response DATA cannot be received before response HEADERS").into(),
+            );
+        }
+        enforce_body_frame(
+            None,
+            declared_response_body_bytes,
+            received_response_body_bytes,
+            len,
+            "response",
+        )
+    } else {
+        enforce_body_frame(
+            max_request_body_bytes,
+            declared_request_body_bytes,
+            received_request_body_bytes,
+            len,
+            "request",
+        )
+    }
+}
+
+pub(super) fn enforce_received_content_length_complete(
+    receives_response_body: bool,
+    declared_request_body_bytes: Option<u64>,
+    received_request_body_bytes: usize,
+    declared_response_body_bytes: Option<u64>,
+    received_response_body_bytes: usize,
+) -> Result<()> {
+    if receives_response_body {
+        enforce_body_content_length_complete(
+            declared_response_body_bytes,
+            received_response_body_bytes,
+            "response",
+        )
+    } else {
+        enforce_body_content_length_complete(
+            declared_request_body_bytes,
+            received_request_body_bytes,
+            "request",
+        )
+    }
+}
 
 fn declared_response_body_length(
     response: &http::Response<()>,
