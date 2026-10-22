@@ -1,7 +1,7 @@
 use crate::H3Result as Result;
 use crate::protocol::{
     FRAME_DATA, FRAME_HEADERS, H3_FRAME_UNEXPECTED, H3_MESSAGE_ERROR, H3_REQUEST_CANCELLED,
-    read_varint, validate_message_stream_frame,
+    validate_message_stream_frame,
 };
 use crate::qpack::QpackConnection;
 use anyhow::anyhow;
@@ -11,7 +11,7 @@ use tokio::time::timeout;
 
 use super::{
     MESSAGE_DATA_CHUNK_BYTES, ResponseSendState, enforce_body_content_length_complete,
-    enforce_body_frame, max_message_frame_payload_bytes, stop_recv_stream,
+    enforce_body_frame, stop_recv_stream,
 };
 
 /// Send half of an HTTP/3 request stream.
@@ -84,38 +84,20 @@ impl RequestRecvStream {
     }
 
     async fn read_next_frame_header(&mut self) -> Result<Option<(u64, usize)>> {
-        let Some(ty) = read_varint(&mut self.recv).await? else {
-            return Ok(None);
-        };
-        let len = read_varint(&mut self.recv)
-            .await?
-            .ok_or_else(|| anyhow!("truncated frame length"))?;
-        let max_payload_bytes = max_message_frame_payload_bytes(
-            ty,
-            self.max_frame_payload_bytes,
-            self.max_non_data_frame_payload_bytes,
-            self.max_field_section_bytes,
-        );
-        if len > max_payload_bytes as u64 {
-            return Err(anyhow!(
-                "HTTP/3 frame 0x{ty:x} payload length {len} exceeds limit {max_payload_bytes}"
-            )
-            .into());
+        let limits = self.frame_payload_limits();
+        super::read_next_frame_header(&mut self.recv, limits).await
+    }
+
+    fn frame_payload_limits(&self) -> super::FramePayloadLimits {
+        super::FramePayloadLimits {
+            max_frame_payload_bytes: self.max_frame_payload_bytes,
+            max_non_data_frame_payload_bytes: self.max_non_data_frame_payload_bytes,
+            max_field_section_bytes: self.max_field_section_bytes,
         }
-        Ok(Some((ty, len as usize)))
     }
 
     async fn discard_frame_payload(&mut self, len: usize) -> Result<()> {
-        let mut remaining = len;
-        let mut buf = [0u8; 8192];
-        while remaining > 0 {
-            let want = remaining.min(buf.len());
-            timeout(self.read_timeout, self.recv.read_exact(&mut buf[..want]))
-                .await
-                .map_err(|_| anyhow!("timed out discarding frame payload"))??;
-            remaining -= want;
-        }
-        Ok(())
+        super::discard_frame_payload(&mut self.recv, self.read_timeout, len).await
     }
 
     async fn read_pending_data_chunk(&mut self) -> Result<Option<Bytes>> {

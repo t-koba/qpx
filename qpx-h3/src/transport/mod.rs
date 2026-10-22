@@ -1,7 +1,8 @@
 use crate::H3Result as Result;
-use crate::protocol::{FRAME_DATA, FRAME_HEADERS, write_frame};
+use crate::protocol::{FRAME_DATA, FRAME_HEADERS, read_varint, write_frame};
 use anyhow::anyhow;
 use std::time::Duration;
+use tokio::time::timeout;
 
 mod datagram;
 mod metrics;
@@ -134,6 +135,61 @@ pub(super) async fn finish_response(
         enforce_response_content_length_complete(state)?;
     }
     send.finish()?;
+    Ok(())
+}
+
+/// The limits that decide how large a frame's payload may be.
+#[derive(Debug, Clone, Copy)]
+pub(super) struct FramePayloadLimits {
+    pub(super) max_frame_payload_bytes: usize,
+    pub(super) max_non_data_frame_payload_bytes: usize,
+    pub(super) max_field_section_bytes: usize,
+}
+
+/// Reads the header of the next frame on an HTTP/3 stream.
+///
+/// The header is the frame's type and its payload length, and a frame whose
+/// payload is larger than its limit is refused before any of it is read.
+pub(super) async fn read_next_frame_header(
+    recv: &mut quinn::RecvStream,
+    limits: FramePayloadLimits,
+) -> Result<Option<(u64, usize)>> {
+    let Some(ty) = read_varint(recv).await? else {
+        return Ok(None);
+    };
+    let len = read_varint(recv)
+        .await?
+        .ok_or_else(|| anyhow!("truncated frame length"))?;
+    let max_payload_bytes = max_message_frame_payload_bytes(
+        ty,
+        limits.max_frame_payload_bytes,
+        limits.max_non_data_frame_payload_bytes,
+        limits.max_field_section_bytes,
+    );
+    if len > max_payload_bytes as u64 {
+        return Err(anyhow!(
+            "HTTP/3 frame 0x{ty:x} payload length {len} exceeds limit {max_payload_bytes}"
+        )
+        .into());
+    }
+    Ok(Some((ty, len as usize)))
+}
+
+/// Discards a frame's payload without reading it into memory.
+pub(super) async fn discard_frame_payload(
+    recv: &mut quinn::RecvStream,
+    read_timeout: Duration,
+    len: usize,
+) -> Result<()> {
+    let mut remaining = len;
+    let mut buf = [0u8; 8192];
+    while remaining > 0 {
+        let want = remaining.min(buf.len());
+        timeout(read_timeout, recv.read_exact(&mut buf[..want]))
+            .await
+            .map_err(|_| anyhow!("timed out discarding frame payload"))??;
+        remaining -= want;
+    }
     Ok(())
 }
 
