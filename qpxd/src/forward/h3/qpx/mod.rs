@@ -79,6 +79,9 @@ pub(crate) async fn run_http3_listener(
         connect_ip = handler.connect_ip.enabled,
         "forward HTTP/3 listener starting (qpx-h3)"
     );
+    // The h3 backend logs this same line when its listener starts, with the
+    // same field, so a reader can compare the two backends.
+    info!(label = "forward", "HTTP/3 listener starting");
 
     loop {
         let connecting = tokio::select! {

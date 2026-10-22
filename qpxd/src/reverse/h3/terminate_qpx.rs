@@ -40,14 +40,12 @@ pub(crate) async fn run_http3_terminate(
     };
     let connection_semaphore = handler.reverse.runtime.state().connection_semaphore.clone();
 
-    // The h3 backend logs the same line when its listener starts, so a
-    // Chromium timeout in either backend can be told apart from a listener
-    // that never came up.
-    info!(
-        reverse = %reverse.name,
-        addr = %listen_addr,
-        "reverse HTTP/3 listener starting"
-    );
+    // The h3 backend logs this same line when its listener starts, with the
+    // same field, so a reader can compare the two backends: a Chromium
+    // timeout in either one can be told apart from a listener that never
+    // came up. The reverse edge's own name and address are in the sibling
+    // "reverse TLS listener starting" line.
+    info!(label = "reverse-terminate", "HTTP/3 listener starting");
 
     loop {
         let connecting = tokio::select! {

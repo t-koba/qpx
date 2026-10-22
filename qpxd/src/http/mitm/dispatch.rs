@@ -28,7 +28,6 @@ use crate::http::protocol::common::forbidden_response as forbidden;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
-use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
 use hyper::client::conn::http1::SendRequest;
@@ -351,21 +350,18 @@ async fn execute_mitm_request(
         .plan
         .ingress_edge_execution_plan(route.listener_name, matched_rule.as_deref())
         .ok_or_else(|| anyhow!("compiled MITM listener execution plan not found"))?;
-    let request_limit_ctx = RateLimitContext::from_identity(
+    let (
+        request_limit_ctx,
+        crate::rate_limit::RequestLimitAcquire {
+            limits: mut request_limits,
+            retry_after,
+        },
+    ) = crate::rate_limit::admit_request(
+        &state.policy.rate_limiters,
+        &selected_plan.rate_limits,
         route.src_addr.ip(),
         &identity,
         matched_rule.as_deref(),
-        None,
-    );
-    let crate::rate_limit::RequestLimitAcquire {
-        limits: mut request_limits,
-        retry_after,
-    } = state.policy.rate_limiters.collect_checked_plan_request(
-        &selected_plan.rate_limits,
-        None,
-        TransportScope::Request,
-        &request_limit_ctx,
-        1,
     )?;
     let decision_service = if early_response.is_none() {
         Some(
