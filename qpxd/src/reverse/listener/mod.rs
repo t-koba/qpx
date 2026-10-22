@@ -5,7 +5,7 @@ use super::{
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
-use crate::server::connection_permit::acquire_connection_permit;
+use crate::server::connection_permit::accept_tcp_with_connection_permit;
 use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
@@ -163,27 +163,14 @@ pub(super) async fn run_reverse_http_acceptor(
 ) -> Result<()> {
     let semaphore = reverse.runtime.state().connection_semaphore.clone();
     loop {
-        let permit = acquire_connection_permit(&semaphore, &mut shutdown).await?;
-        let Some(permit) = permit else {
-            break;
-        };
-        let accepted = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            accepted = listener.accept() => match accepted {
-                Ok(accepted) => Some(accepted),
-                Err(err) => {
-                    warn!(error = ?err, "reverse accept failed");
-                    continue;
-                }
-            }
-        };
-        let Some((stream, remote_addr)) = accepted else {
+        let Some((permit, stream, remote_addr)) = accept_tcp_with_connection_permit(
+            &listener,
+            &semaphore,
+            &mut shutdown,
+            "reverse accept failed",
+        )
+        .await?
+        else {
             break;
         };
         let _ = stream.set_nodelay(true);

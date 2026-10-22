@@ -5,7 +5,7 @@ use crate::http::codec::interim::{
 use crate::http::metrics as http_metrics;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
-use crate::server::connection_permit::acquire_connection_permit;
+use crate::server::connection_permit::accept_tcp_with_connection_permit;
 #[cfg(feature = "http3")]
 use crate::server::control::SidecarControl;
 use crate::tcp_bindings::filter::{
@@ -111,27 +111,14 @@ async fn run_forward_acceptor(
 ) -> Result<()> {
     let semaphore = runtime.state().connection_semaphore.clone();
     loop {
-        let permit = acquire_connection_permit(&semaphore, &mut shutdown).await?;
-        let Some(permit) = permit else {
-            break;
-        };
-        let accepted = tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    None
-                } else {
-                    continue;
-                }
-            }
-            accepted = tcp_listener.accept() => match accepted {
-                Ok(accepted) => Some(accepted),
-                Err(err) => {
-                    warn!(error = ?err, "forward accept failed");
-                    continue;
-                }
-            }
-        };
-        let Some((stream, remote_addr)) = accepted else {
+        let Some((permit, stream, remote_addr)) = accept_tcp_with_connection_permit(
+            &tcp_listener,
+            &semaphore,
+            &mut shutdown,
+            "forward accept failed",
+        )
+        .await?
+        else {
             break;
         };
         let _ = stream.set_nodelay(true);
