@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::sync::{Mutex, Notify};
+use tokio::time::timeout;
 
 use super::settings::PeerSettings;
 use super::settings::read_varint_from_payload;
@@ -706,4 +708,32 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
 
 fn is_client_initiated_bidi_stream_id(stream_id: u64) -> bool {
     stream_id & 0b11 == 0
+}
+
+/// Discards up to `max_bytes` from an HTTP/3 unidirectional stream.
+pub(crate) async fn discard_uni_stream(
+    recv: &mut quinn::RecvStream,
+    max_bytes: usize,
+    read_timeout: Duration,
+    error_code: u64,
+    label: &'static str,
+) -> std::result::Result<(), ConnectionClose> {
+    let mut discarded = 0usize;
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = timeout(read_timeout, recv.read(&mut buf))
+            .await
+            .map_err(|_| ConnectionClose::new(error_code, format!("{label} timed out")))?
+            .map_err(|err| ConnectionClose::new(error_code, err.to_string()))?;
+        let Some(n) = n else {
+            return Ok(());
+        };
+        discarded = discarded.saturating_add(n);
+        if discarded > max_bytes {
+            return Err(ConnectionClose::new(
+                error_code,
+                format!("{label} exceeded discard limit"),
+            ));
+        }
+    }
 }

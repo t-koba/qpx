@@ -297,40 +297,13 @@ async fn consume_qpack_decoder_stream(
     }
 }
 
-async fn discard_uni_stream(
-    recv: &mut quinn::RecvStream,
-    max_bytes: usize,
-    read_timeout: Duration,
-    error_code: u64,
-    label: &'static str,
-) -> std::result::Result<(), ConnectionClose> {
-    let mut discarded = 0usize;
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = timeout(read_timeout, recv.read(&mut buf))
-            .await
-            .map_err(|_| ConnectionClose::new(error_code, format!("{label} timed out")))?
-            .map_err(|err| ConnectionClose::new(error_code, err.to_string()))?;
-        let Some(n) = n else {
-            return Ok(());
-        };
-        discarded = discarded.saturating_add(n);
-        if discarded > max_bytes {
-            return Err(ConnectionClose::new(
-                error_code,
-                format!("{label} exceeded discard limit"),
-            ));
-        }
-    }
-}
-
 async fn ignore_unknown_uni_stream(
     recv: &mut quinn::RecvStream,
     max_bytes: usize,
     read_timeout: Duration,
     label: &'static str,
 ) {
-    if let Err(err) = discard_uni_stream(
+    if let Err(err) = crate::protocol::discard_uni_stream(
         recv,
         max_bytes,
         read_timeout,
