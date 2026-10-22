@@ -215,6 +215,8 @@ pub enum ContentLengthError {
 /// well: a site that binds the field's name to a name of its own and
 /// reads the field through that binding reads the declaration, so a
 /// reader cannot hide behind a name the site holds of its own. The gate
+/// follows a constant or a static that holds the field's name as well,
+/// so a reader cannot hide behind a constant of its own either. The gate
 /// sees a value taken out of the field's own
 /// entry as well: a site that compares a header's name with the field's
 /// name and takes the value of a header entry in the same body finds that

@@ -1285,11 +1285,15 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// binds the field's name to a name of its own and reads the field
 /// through that binding reads the declaration, so the binding names the
 /// field, and a comparison under the binding is a comparison of a
-/// header's name with the field's name. What the gate cannot see is a
-/// site that finds the field's entry by a name it holds in a variable of
-/// its own that it did not bind from the field's name, a site whose name
-/// comparison and whose taken value stand in two different functions,
-/// and a site that takes the value under a member of another name.
+/// header's name with the field's name. It follows a constant or a
+/// static that holds the field's name as well, so a site that keeps the
+/// field's name in a constant of its own and reads the field through
+/// that constant reads the declaration, and a comparison under the
+/// constant is a comparison of a header's name with the field's name.
+/// What the gate cannot see is a site that finds the field's entry by a
+/// name it builds at runtime, a site whose name comparison and whose
+/// taken value stand in two different functions, and a site that takes
+/// the value under a member of another name.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1427,8 +1431,8 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// parse whose type is written and a parse whose type is inferred,
 /// because the field's value is a length either way. It does not see a
 /// reader that lives outside a function body, it does not see a name the
-/// site holds in a variable of its own, and it reads a function's body as
-/// one whole rather than tying a parse to the read it belongs to.
+/// site builds at runtime, and it reads a function's body as one whole
+/// rather than tying a parse to the read it belongs to.
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
@@ -1471,13 +1475,20 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// it. A comparison that decides about the field instead does not select
 /// it: a comparison that is not equal, and a comparison whose branch
 /// skips the entry, decide about the field, so a site that skips the
-/// field and takes another header's value is not a reader. What the rule
-/// cannot see is a site that finds the field's entry by a name it holds in
-/// a variable of its own, a site whose name comparison and whose taken
-/// value stand in two different functions, a site that takes the value
-/// under a member of another name, a site that takes the `value` member
-/// of an entry whose name it compares under a name of its own, and a
-/// comparison inside a condition that holds more than the comparison,
+/// field and takes another header's value is not a reader.
+///
+/// The rule follows the name the site holds for the field: the field's
+/// name itself, a name the site binds the field's name to, and a name the
+/// site keeps the field's name in a constant or a static of its own. The
+/// name is followed wherever the path spells it, so a reader cannot hide
+/// behind a binding or a constant of its own.
+///
+/// What the rule cannot see is a site that finds the field's entry by a
+/// name it builds at runtime, a site whose name comparison and whose
+/// taken value stand in two different functions, a site that takes the
+/// value under a member of another name, a site that takes the `value`
+/// member of an entry whose name it compares under a name of its own, and
+/// a comparison inside a condition that holds more than the comparison,
 /// whose branch the rule cannot read as skipping the entry.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
@@ -1523,10 +1534,48 @@ fn content_length_reader_facts(
 ) -> Vec<(String, ContentLengthReaderFacts)> {
     let mut collector = ContentLengthFunctionCollector {
         test_file: is_test_file(Path::new(path)),
+        field_name_constants: content_length_field_name_constants(syntax),
         ..ContentLengthFunctionCollector::default()
     };
     collector.visit_file(syntax);
     collector.facts
+}
+
+/// The names a file holds the field's name under in a constant or a static.
+///
+/// A site that keeps the field's name in a constant of its own and reads
+/// the field through that constant reads the declaration, so the gate
+/// follows the name the constant is held under the way it follows a local
+/// binding of the field's name.
+fn content_length_field_name_constants(syntax: &syn::File) -> Vec<String> {
+    let mut names = Vec::new();
+    for item in &syntax.items {
+        collect_field_name_constants(item, &mut names);
+    }
+    names
+}
+
+/// The names the items of a file hold the field's name under.
+///
+/// A constant or a static whose value is the field's name names the field,
+/// so the gate follows the name it is held under.
+fn collect_field_name_constants(item: &syn::Item, names: &mut Vec<String>) {
+    let (ident, value) = match item {
+        syn::Item::Const(item) => (&item.ident, &item.expr),
+        syn::Item::Static(item) => (&item.ident, &item.expr),
+        syn::Item::Mod(item) => {
+            if let Some((_, items)) = &item.content {
+                for inner in items {
+                    collect_field_name_constants(inner, names);
+                }
+            }
+            return;
+        }
+        _ => return,
+    };
+    if names_content_length_field(value) {
+        names.push(ident.to_string());
+    }
 }
 
 /// What a function says about the declared Content-Length.
@@ -1628,6 +1677,9 @@ struct ContentLengthFunctionCollector {
     test_depth: usize,
     /// Whether the file itself holds test code.
     test_file: bool,
+    /// The names the file holds the field's name under in a constant or a
+    /// static.
+    field_name_constants: Vec<String>,
 }
 
 impl Visit<'_> for ContentLengthFunctionCollector {
@@ -1666,6 +1718,7 @@ impl ContentLengthFunctionCollector {
     fn record(&mut self, name: String, block: &syn::Block) {
         let mut facts = ContentLengthReaderFacts {
             test_code: self.test_file || self.test_depth > 0,
+            field_aliases: self.field_name_constants.clone(),
             ..ContentLengthReaderFacts::default()
         };
         facts.visit_block(block);
@@ -2101,8 +2154,8 @@ fn names_content_length_field_or_alias(expr: &syn::Expr, aliases: &[String]) -> 
 /// seeing a read of the field.
 fn alias_base_name(expr: &syn::Expr, aliases: &[String]) -> Option<String> {
     match expr {
-        syn::Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
-            let name = path.path.segments[0].ident.to_string();
+        syn::Expr::Path(path) if path.qself.is_none() => {
+            let name = path.path.segments.last()?.ident.to_string();
             aliases.contains(&name).then_some(name)
         }
         syn::Expr::Reference(reference) => alias_base_name(&reference.expr, aliases),
@@ -6552,6 +6605,79 @@ fn declared_type(headers: &HeaderMap) -> Option<&HeaderValue> {
                 .unwrap()
                 .is_empty(),
             "a binding of another field's name is not the field"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_field_through_a_constant_of_its_name() {
+        // A site that keeps the field's name in a constant of its own and
+        // reads the field through that constant reads the declaration.
+        let by_constant = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+const LENGTH_FIELD: &str = "content-length";
+
+fn declared_length(headers: &HeaderMap) -> Option<&HeaderValue> {
+    headers.get(LENGTH_FIELD)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&by_constant.0, &by_constant.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A constant that holds the field's constant names the field as
+        // well, so a site that reads the field through that constant reads
+        // the declaration.
+        let by_constant_of_the_constant = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+const LENGTH_FIELD: &str = CONTENT_LENGTH.as_str();
+
+fn declared_length(headers: &HeaderMap) -> Option<&HeaderValue> {
+    headers.get(LENGTH_FIELD)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &by_constant_of_the_constant.0,
+                &by_constant_of_the_constant.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A constant that holds another field's name is not the field.
+        let other_constant = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+const TYPE_FIELD: &str = "content-type";
+
+fn declared_type(headers: &HeaderMap) -> Option<&HeaderValue> {
+    headers.get(TYPE_FIELD)
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &other_constant.0,
+                &other_constant.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a constant that holds another field's name is not the field"
         );
     }
 
