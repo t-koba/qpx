@@ -446,6 +446,16 @@ fn prepare_h3_origin_request(
         .uri(parts.uri.to_string())
         .body(())?;
     *out.headers_mut() = http_headers_to_h1(&parts.headers)?;
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // the declaration leaves in the field's canonical form. RFC 9114
+    // section 4.1.2 makes a comma list of lengths malformed in HTTP/3, so
+    // the field the origin receives is the one the section allows.
+    if let Some(length) = declared_length {
+        out.headers_mut().insert(
+            http::header::CONTENT_LENGTH,
+            qpx_core::http_content_length::canonical_content_length_value(length),
+        );
+    }
     Ok((out, body, declared_length))
 }
 

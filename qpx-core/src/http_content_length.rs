@@ -44,12 +44,12 @@
 //! The writers that write it are the ones this tree owns: the HTTP/1
 //! request writer, the HTTP/1 raw response relay, the reverse raw
 //! HTTP/1 fast path, the HTTP/1 response writers to the client, the
-//! HTTP/2 response writer, the HTTP/3 response head preparation and the
-//! HTTP/3 library's response head sanitizer. A path that hands a header
-//! map to another library's writer - the HTTP/1 client library, and the
-//! HTTP/2 and HTTP/3 client libraries - leaves that library to write
-//! the values the map holds, so a declaration those paths carry is not
-//! written by qpx in the canonical form.
+//! HTTP/2 request and response writers, the HTTP/3 request and response
+//! writers, and the HTTP/3 library's response head sanitizer. A path
+//! that hands a header map to another library's writer - the HTTP/1
+//! client library - leaves that library to write the values the map
+//! holds, so a declaration those paths carry is not written by qpx in
+//! the canonical form.
 
 use http::HeaderMap;
 use http::HeaderValue;

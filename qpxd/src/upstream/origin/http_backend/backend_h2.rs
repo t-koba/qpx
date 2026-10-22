@@ -75,6 +75,16 @@ pub(super) async fn send_h2_request_with_sender(
         .uri(http_uri_to_http1_uri(&parts.uri)?)
         .body(())?;
     *request.headers_mut() = http_headers_to_h1(&parts.headers)?;
+    // RFC 9110 section 8.6: the value a sender writes is one decimal, so
+    // the declaration leaves in the field's canonical form. RFC 9113
+    // section 8.1.1 makes a comma list of lengths malformed in HTTP/2, so
+    // the field the origin receives is the one the section allows.
+    if let Some(length) = declared_length {
+        request.headers_mut().insert(
+            http::header::CONTENT_LENGTH,
+            qpx_core::http_content_length::canonical_content_length_value(length),
+        );
+    }
     *request.version_mut() = ::http::Version::HTTP_2;
 
     let (mut response, mut send_stream) = sender.send_request(request, false)?;
