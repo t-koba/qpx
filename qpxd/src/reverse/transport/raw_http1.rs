@@ -980,6 +980,17 @@ mod tests {
     }
 
     #[test]
+    fn raw_request_finds_the_declared_length_whatever_the_field_name_says() {
+        // The owner matches the field's name case-insensitively, so a
+        // request that spells it in lower case declares the same length.
+        let declared_body = [httparse::Header {
+            name: "content-length",
+            value: b"16",
+        }];
+        assert!(request_has_body_or_expect(&declared_body));
+    }
+
+    #[test]
     fn raw_request_treats_a_signed_content_length_as_may_carry_a_body() {
         // The owner's grammar has no signed member, so the declaration names
         // no length and the request is treated as one that may carry a body.

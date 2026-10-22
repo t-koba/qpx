@@ -462,6 +462,24 @@ mod tests {
     }
 
     #[test]
+    fn raw_head_finds_the_declared_length_whatever_the_field_name_says() {
+        // The owner matches the field's name case-insensitively, so a head
+        // that spells it in lower case declares the same length.
+        let headers = [httparse::Header {
+            name: "content-length",
+            value: b"4",
+        }];
+        let raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("raw head");
+        assert_eq!(raw.framing(), RawHttp1BodyFraming::ContentLength(4));
+    }
+
+    #[test]
     fn connection_nominated_proxy_status_is_not_forwarded() {
         let headers = [
             httparse::Header {
