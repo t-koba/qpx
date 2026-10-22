@@ -1,21 +1,19 @@
 use super::{
     ConnectPolicyContext, EvaluatedConnectPolicy, PrepareQpxConnectInput, PreparedQpxConnect,
 };
+use crate::forward::connect::apply_connect_decision_service;
 use crate::forward::h3::connect::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::http::local_response::finalized_local_response;
+#[cfg(feature = "auth-basic")]
+use crate::http::protocol::common::forbidden_response as forbidden;
 use crate::http::protocol::common::{
-    blocked_response as blocked, forbidden_response as forbidden,
-    too_many_requests_response as too_many_requests,
+    blocked_response as blocked, too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
-use crate::policy_context::{
-    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode,
-    enforce_decision_service, prepare_decision_service_allow,
-};
-use crate::rate_limit::TransportScope;
+use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use anyhow::{Result, anyhow};
 use hyper::StatusCode;
 use qpx_core::config::ActionKind;
@@ -249,61 +247,32 @@ pub(super) async fn apply_connect_rate_limits(
     .await?;
     let (decision_service_policy_id, log_context) =
         decision_service.tagged_log_context(&identity, matched_rule_name, None);
-    let (response_headers, timeout_override, rate_limit_profile) = match decision_service {
-        DecisionServiceEnforcement::Continue(allow) => {
-            let allow =
-                prepare_decision_service_allow(allow, DecisionServiceMode::ForwardConnect, None)?;
-            let rate_limit_profile = allow.rate_limit_profile.clone();
-            if let Some(retry_after) = request_limits.merge_profile_and_check(
-                &state.policy.rate_limiters,
-                rate_limit_profile.as_deref(),
-                TransportScope::Connect,
-                &request_limit_ctx,
-                1,
-            )? {
-                send_rate_limited!(
-                    retry_after,
-                    &request_limits,
+    let (response_headers, timeout_override, rate_limit_profile) =
+        match apply_connect_decision_service(
+            decision_service,
+            http::Version::HTTP_3,
+            proxy_name,
+            state.messages.forbidden.as_str(),
+            &state.policy.rate_limiters,
+            &mut request_limits,
+            &request_limit_ctx,
+            &mut action,
+        )? {
+            std::ops::ControlFlow::Continue(allow) => (
+                allow.headers,
+                allow.timeout_override,
+                allow.rate_limit_profile,
+            ),
+            std::ops::ControlFlow::Break((response, outcome)) => {
+                send_policy_response!(
+                    response,
+                    outcome,
                     decision_service_policy_id.as_deref(),
                     &log_context
                 );
                 return Ok(None);
             }
-            allow.apply_action_overrides(&mut action);
-            (allow.headers, allow.timeout_override, rate_limit_profile)
-        }
-        DecisionServiceEnforcement::Deny(deny) => {
-            let response = if let Some(local) = deny.local_response.as_ref() {
-                finalized_local_response(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name,
-                    local,
-                    deny.headers.as_deref(),
-                )?
-            } else {
-                finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name,
-                    forbidden(state.messages.forbidden.as_str()),
-                    deny.headers.as_deref(),
-                    false,
-                )
-            };
-            send_policy_response!(
-                response,
-                if deny.local_response.is_some() {
-                    crate::http::dispatch::DispatchOutcome::DecisionServiceLocalResponse
-                } else {
-                    crate::http::dispatch::DispatchOutcome::DecisionServiceDeny
-                },
-                decision_service_policy_id.as_deref(),
-                &log_context
-            );
-            return Ok(None);
-        }
-    };
+        };
 
     if send_connect_local_action(SendConnectLocalActionInput {
         req_stream,

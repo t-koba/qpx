@@ -407,18 +407,8 @@ fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
     let runtime = connect_runtime();
     let state = runtime.state();
     let identity = crate::policy_context::ResolvedIdentity::default();
-    let log_context = identity.to_log_context(None, None, None);
-    let audit = ConnectAuditContext {
-        state: &state,
-        listener_name: "forward",
-        remote_ip: SocketAddr::from(([127, 0, 0, 1], 12345)).ip(),
-        audit_host: "example.com",
-        path: None,
-        matched_rule: None,
-        decision_service_policy_id: None,
-        log_context: &log_context,
-    };
-    let request_limit_ctx = RateLimitContext::from_identity(audit.remote_ip, &identity, None, None);
+    let remote_ip = SocketAddr::from(([127, 0, 0, 1], 12345)).ip();
+    let request_limit_ctx = RateLimitContext::from_identity(remote_ip, &identity, None, None);
     let mut request_limits = crate::rate_limit::AppliedRateLimits::default();
     let mut action = ActionConfig {
         kind: ActionKind::Tunnel,
@@ -435,10 +425,11 @@ fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
         ),
         http::Version::HTTP_11,
         "qpx",
+        state.messages.forbidden.as_str(),
+        &state.policy.rate_limiters,
         &mut request_limits,
         &request_limit_ctx,
         &mut action,
-        &audit,
     )
     .expect("allow result");
     assert!(matches!(
@@ -454,18 +445,58 @@ fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
         ),
         http::Version::HTTP_11,
         "qpx",
+        state.messages.forbidden.as_str(),
+        &state.policy.rate_limiters,
         &mut request_limits,
         &request_limit_ctx,
         &mut action,
-        &audit,
     )
     .expect("deny result");
     match deny {
-        std::ops::ControlFlow::Break(response) => {
+        std::ops::ControlFlow::Break((response, outcome)) => {
             assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+            assert!(matches!(
+                outcome,
+                crate::http::dispatch::DispatchOutcome::DecisionServiceDeny
+            ));
         }
         std::ops::ControlFlow::Continue(_) => {
             panic!("deny enforcement must return a response")
+        }
+    }
+
+    let deny_local = apply_connect_decision_service(
+        crate::policy_context::DecisionServiceEnforcement::Deny(
+            crate::policy_context::DecisionServiceDeny {
+                local_response: Some(qpx_core::config::LocalResponseConfig {
+                    status: 418,
+                    body: String::new(),
+                    content_type: None,
+                    headers: std::collections::HashMap::new(),
+                    rpc: None,
+                }),
+                ..Default::default()
+            },
+        ),
+        http::Version::HTTP_11,
+        "qpx",
+        state.messages.forbidden.as_str(),
+        &state.policy.rate_limiters,
+        &mut request_limits,
+        &request_limit_ctx,
+        &mut action,
+    )
+    .expect("deny local result");
+    match deny_local {
+        std::ops::ControlFlow::Break((response, outcome)) => {
+            assert_eq!(response.status().as_u16(), 418);
+            assert!(matches!(
+                outcome,
+                crate::http::dispatch::DispatchOutcome::DecisionServiceLocalResponse
+            ));
+        }
+        std::ops::ControlFlow::Continue(_) => {
+            panic!("deny with local response must return a response")
         }
     }
 }

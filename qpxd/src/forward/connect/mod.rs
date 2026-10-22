@@ -46,7 +46,7 @@ pub(in crate::forward) mod udp_upstream;
 
 use self::audit::ConnectAuditContext;
 use self::connect_h2::handle_h2_extended_connect;
-use self::decision_service::apply_connect_decision_service;
+pub(super) use self::decision_service::apply_connect_decision_service;
 #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 pub(super) use self::inspect::listener_upstream_tls_settings;
 pub(super) use self::inspect::{
@@ -280,13 +280,20 @@ pub(super) async fn handle_connect(
         decision_service,
         req_version,
         proxy_name,
+        state.messages.forbidden.as_str(),
+        &state.policy.rate_limiters,
         &mut request_limits,
         &request_limit_ctx,
         &mut action,
-        &audit,
     )? {
         std::ops::ControlFlow::Continue(allow) => (allow.headers, allow.timeout_override),
-        std::ops::ControlFlow::Break(response) => return Ok(response),
+        std::ops::ControlFlow::Break((mut response, outcome)) => {
+            // Preserve the existing H1/H2 behavior for profile-based rate limits.
+            if !matches!(outcome, DispatchOutcome::RateLimited) {
+                audit.annotate(&mut response, outcome);
+            }
+            return Ok(response);
+        }
     };
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)

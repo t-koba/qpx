@@ -4,24 +4,25 @@ use super::super::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use super::target::{H3ConnectTargetInput, prepare_h3_connect_target};
 use super::{H3PolicyResponseContext, PreparedH3Connect, send_h3_policy_response};
 use crate::destination::DestinationInputs;
+use crate::forward::connect::apply_connect_decision_service;
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::local_response::finalized_local_response;
+#[cfg(feature = "auth-basic")]
+use crate::http::protocol::common::forbidden_response as forbidden;
 use crate::http::protocol::common::{
-    blocked_response as blocked, forbidden_response as forbidden,
-    too_many_requests_response as too_many_requests,
+    blocked_response as blocked, too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http3::codec::h1_headers_to_http;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
 use crate::policy_context::{
-    DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
-    authentication_response_for_error, enforce_decision_service, prepare_decision_service_allow,
-    resolve_identity_for_request, sanitize_headers_for_policy,
+    DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
+    authentication_response_for_error, enforce_decision_service, resolve_identity_for_request,
+    sanitize_headers_for_policy,
 };
-use crate::rate_limit::TransportScope;
 use anyhow::{Result, anyhow};
 use qpx_core::config::{ActionKind, ConnectUdpConfig};
 use tracing::warn;
@@ -354,62 +355,32 @@ pub(crate) async fn prepare_h3_connect_request(
     .await?;
     let (decision_service_policy_id, log_context) =
         decision_service.tagged_log_context(&identity, matched_rule_name, None);
-    let (response_headers, timeout_override, rate_limit_profile) = match decision_service {
-        DecisionServiceEnforcement::Continue(allow) => {
-            let allow =
-                prepare_decision_service_allow(allow, DecisionServiceMode::ForwardConnect, None)?;
-            let rate_limit_profile = allow.rate_limit_profile.clone();
-            if let Some(retry_after) = request_limits.merge_profile_and_check(
-                &state.policy.rate_limiters,
-                rate_limit_profile.as_deref(),
-                TransportScope::Connect,
-                &request_limit_ctx,
-                1,
-            )? {
-                let response = rate_limited_response!(retry_after, &request_limits);
+    let (response_headers, timeout_override, rate_limit_profile) =
+        match apply_connect_decision_service(
+            decision_service,
+            http::Version::HTTP_3,
+            proxy_name,
+            state.messages.forbidden.as_str(),
+            &state.policy.rate_limiters,
+            &mut request_limits,
+            &request_limit_ctx,
+            &mut action,
+        )? {
+            std::ops::ControlFlow::Continue(allow) => (
+                allow.headers,
+                allow.timeout_override,
+                allow.rate_limit_profile,
+            ),
+            std::ops::ControlFlow::Break((response, outcome)) => {
                 respond_with_policy!(
                     response,
-                    DispatchOutcome::RateLimited,
+                    outcome,
                     matched_rule_name,
                     decision_service_policy_id.as_deref(),
                     &log_context
                 );
             }
-            allow.apply_action_overrides(&mut action);
-            (allow.headers, allow.timeout_override, rate_limit_profile)
-        }
-        DecisionServiceEnforcement::Deny(deny) => {
-            let response = if let Some(local) = deny.local_response.as_ref() {
-                finalized_local_response(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name,
-                    local,
-                    deny.headers.as_deref(),
-                )?
-            } else {
-                finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
-                    proxy_name,
-                    forbidden(state.messages.forbidden.as_str()),
-                    deny.headers.as_deref(),
-                    false,
-                )
-            };
-            respond_with_policy!(
-                response,
-                if deny.local_response.is_some() {
-                    DispatchOutcome::DecisionServiceLocalResponse
-                } else {
-                    DispatchOutcome::DecisionServiceDeny
-                },
-                matched_rule_name,
-                decision_service_policy_id.as_deref(),
-                &log_context
-            );
-        }
-    };
+        };
 
     match action.kind {
         ActionKind::Block => {

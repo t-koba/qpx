@@ -281,13 +281,20 @@ pub(super) async fn handle_h2_extended_connect(
         decision_service,
         req_version,
         proxy_name,
+        state.messages.forbidden.as_str(),
+        &state.policy.rate_limiters,
         &mut request_limits,
         &request_limit_ctx,
         &mut action,
-        &audit,
     )? {
         std::ops::ControlFlow::Continue(allow) => (allow.headers, allow.timeout_override),
-        std::ops::ControlFlow::Break(response) => return Ok(response),
+        std::ops::ControlFlow::Break((mut response, outcome)) => {
+            // Preserve the existing H1/H2 behavior for profile-based rate limits.
+            if !matches!(outcome, DispatchOutcome::RateLimited) {
+                audit.annotate(&mut response, outcome);
+            }
+            return Ok(response);
+        }
     };
     macro_rules! connect_response {
         ($base:expr, $outcome:expr) => {{
