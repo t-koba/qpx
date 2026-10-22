@@ -333,7 +333,9 @@ pub enum ContentLengthError {
 /// comparison under the copy finds that entry and the value the site
 /// takes is that entry's value, and a site that copies the field's own
 /// name holds the field's name, so a read through that copy reads the
-/// declaration.
+/// declaration. A copy of a name the site holds is that name, so a copy
+/// of a binding of the field's name and a copy of a constant the site
+/// keeps the field's name in name the field as well.
 /// The gate follows a name the site builds at runtime as well: a site
 /// that builds the field's name with a constructor or with a macro and
 /// finds the field's own entry with the built name reads the

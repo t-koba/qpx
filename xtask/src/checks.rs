@@ -1319,7 +1319,9 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// entry's value. A site that copies the entry's name into a name of
 /// its own holds that name as well, so the copy names the entry too,
 /// and a site that copies the field's name holds the field's name, so
-/// the copy names the field.
+/// the copy names the field. A copy of a name the site holds is that
+/// name, so a copy of a binding of the field's name and a copy of a
+/// constant the site keeps the field's name in name the field as well.
 /// The gate reads a comparison that stands in a condition of its own as
 /// deciding about the field when the branch it guards skips the entry:
 /// the site moved on, so the comparison did not find the entry. A
@@ -1626,7 +1628,10 @@ fn content_length_inline_reader_facts_violations(
 /// takes is that entry's value. A site that copies the entry's name
 /// into a name of its own holds that name as well, so the copy names
 /// the entry too, and a site that copies the field's name holds the
-/// field's name, so the copy names the field.
+/// field's name, so the copy names the field. A copy of a name the site
+/// holds is that name, so a copy of a binding of the field's name and a
+/// copy of a constant the site keeps the field's name in name the field
+/// as well.
 ///
 /// The rule follows the name the site holds for the field: the field's
 /// name itself, a name the site binds the field's name to, a name the
@@ -3334,8 +3339,27 @@ fn built_text_of(expr: &syn::Expr, names: &FieldNames) -> Option<String> {
 fn names_content_length_field_or_alias(expr: &syn::Expr, names: &FieldNames) -> bool {
     names_content_length_field(expr)
         || alias_base_name(expr, names).is_some()
+        || field_name_copy_base_name(expr, names).is_some()
         || built_text_of(expr, names)
             .is_some_and(|text| text.eq_ignore_ascii_case(CONTENT_LENGTH_FIELD))
+}
+
+/// The name a copy of a name the site holds stands under.
+///
+/// A site that copies a name it holds holds that name, so a copy of a
+/// binding of the field's name names the field, and a read through the
+/// copy reads the declaration. The copy is taken by a method that copies
+/// text, the same methods the field's own rule follows, so a copy taken
+/// another way is not a copy the gate reads.
+fn field_name_copy_base_name(expr: &syn::Expr, names: &FieldNames) -> Option<String> {
+    let syn::Expr::MethodCall(call) = expr else {
+        return None;
+    };
+    let method = call.method.to_string();
+    if method != "as_str" && !CONTENT_LENGTH_NAME_COPY_METHODS.contains(&method.as_str()) {
+        return None;
+    }
+    alias_base_name(&call.receiver, names)
 }
 
 /// The name a binding of the field's name is used under.
@@ -10027,6 +10051,74 @@ fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
             content_length_production_value_reader_violations(&twice.0, &twice.1, &[]).unwrap(),
             [
                 "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_field_through_a_copy_of_a_bound_name() {
+        // A site that copies a name it bound holds that name, so a read
+        // through the copy reads the declaration - the copy is taken of
+        // the binding, not of the literal.
+        let copied = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    let name = "content-length".to_string();
+    let copy = name.clone();
+    headers.get(&copy).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&copied.0, &copied.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the copy is taken of a constant the site
+        // keeps the field's name in.
+        let copied_constant = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+const LENGTH: &str = "content-length";
+
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    let copy = LENGTH.to_string();
+    headers.get(&copy).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &copied_constant.0,
+                &copied_constant.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site takes the name's text directly.
+        let taken = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    let name = "content-length".to_string();
+    headers.get(name.as_str()).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&taken.0, &taken.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
             ]
         );
     }
