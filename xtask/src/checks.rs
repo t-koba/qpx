@@ -1290,6 +1290,11 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// field's name in a constant of its own and reads the field through
 /// that constant reads the declaration, and a comparison under the
 /// constant is a comparison of a header's name with the field's name.
+/// The gate follows a binding of a header entry's name as well: a site
+/// that binds the entry's name to a name of its own and compares that
+/// name with the field's name compares the entry's name, so the
+/// comparison finds that entry and the value the site takes is that
+/// entry's value.
 /// What the gate cannot see is a site that finds the field's entry by a
 /// name it builds at runtime, a site whose name comparison and whose
 /// taken value stand in two different functions, and a site that takes
@@ -1481,6 +1486,12 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// about the field, so a site that skips the field and takes another
 /// header's value is not a reader.
 ///
+/// The rule follows a binding of a header entry's name as well: a site
+/// that binds the entry's name to a name of its own and compares that
+/// name with the field's name compares the entry's name, so the binding
+/// stands for the entry the name came from, and the value the site
+/// takes is that entry's value.
+///
 /// The rule follows the name the site holds for the field: the field's
 /// name itself, a name the site binds the field's name to, and a name the
 /// site keeps the field's name in a constant or a static of its own. The
@@ -1490,10 +1501,10 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// What the rule cannot see is a site that finds the field's entry by a
 /// name it builds at runtime, a site whose name comparison and whose
 /// taken value stand in two different functions, a site that takes the
-/// value under a member of another name, a site that takes the `value`
-/// member of an entry whose name it compares under a name of its own, and
-/// a comparison inside a condition that holds more than the comparison,
-/// whose branch the rule cannot read as skipping the entry.
+/// value under a member of another name, a site that copies a header
+/// entry's name through an expression of its own that the rule does not
+/// follow, and a comparison inside a condition that holds more than the
+/// comparison, whose branch the rule cannot read as skipping the entry.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -1668,6 +1679,19 @@ struct ContentLengthReaderFacts {
     /// the field through that name reads the declaration, so the gate
     /// follows the binding.
     field_aliases: Vec<String>,
+    /// The names a header entry's name is bound under, and the entry each
+    /// of them stands for.
+    ///
+    /// A site that binds a header entry's name to a name of its own and
+    /// compares that name with the field's name compares the entry's
+    /// name, so the binding stands for the entry the name came from.
+    entry_name_aliases: Vec<(String, String)>,
+    /// The names a loop binds a header entry's name to.
+    ///
+    /// A loop that walks a list of header entries binds the entry's name
+    /// to a name of its own, so a binding of that name stands for the
+    /// entry's name as well.
+    entry_names: Vec<String>,
 }
 
 /// The collector of the functions of a file.
@@ -1763,6 +1787,17 @@ impl Visit<'_> for ContentLengthReaderFacts {
             && binding.subpat.is_none()
         {
             self.field_aliases.push(binding.ident.to_string());
+        }
+        // A binding of a header entry's name stands for the entry the
+        // name came from, so a comparison under the binding compares
+        // that entry's name and finds that entry.
+        if let Some(initializer) = &node.init
+            && let syn::Pat::Ident(binding) = &node.pat
+            && binding.subpat.is_none()
+            && let Some(target) = entry_name_alias_target(&initializer.expr, &self.entry_names)
+        {
+            self.entry_name_aliases
+                .push((binding.ident.to_string(), target));
         }
         syn::visit::visit_local(self, node);
     }
@@ -1912,6 +1947,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
                 test_code: self.test_code,
                 bound_value_names: vec![value.clone()],
                 field_aliases: self.field_aliases.clone(),
+                entry_names: vec![name.clone()],
                 ..ContentLengthReaderFacts::default()
             };
             scope.visit_block(&node.body);
@@ -1974,9 +2010,30 @@ impl ContentLengthReaderFacts {
         if is_equal != self.skipping_condition {
             self.selects_field = true;
             if let Some(base) = base {
-                self.selected_bases.push(base);
+                self.selected_bases.push(self.resolve_entry_alias(&base));
             }
         }
+    }
+
+    /// The entry a compared name stands for.
+    ///
+    /// A site that binds a header entry's name to a name of its own
+    /// compares that name, so the comparison finds the entry the name
+    /// came from and the value the site takes is that entry's value.
+    fn resolve_entry_alias(&self, base: &str) -> String {
+        let mut resolved = base.to_string();
+        for _ in 0..8 {
+            let Some(target) = self
+                .entry_name_aliases
+                .iter()
+                .find(|(alias, _)| alias == &resolved)
+                .map(|(_, target)| target.clone())
+            else {
+                break;
+            };
+            resolved = target;
+        }
+        resolved
     }
 
     /// Whether a branch skips the entry it guards.
@@ -2181,6 +2238,34 @@ fn expression_base_name(expr: &syn::Expr) -> Option<String> {
         }
         syn::Expr::Field(field) => expression_base_name(&field.base),
         syn::Expr::Reference(reference) => expression_base_name(&reference.expr),
+        _ => None,
+    }
+}
+
+/// The entry a binding of a header entry's name stands for.
+///
+/// A header entry holds its name under a member of its own, so a binding
+/// of that member stands for the entry, and a loop that walks a list of
+/// header entries binds the entry's name to a name of its own, so a
+/// binding of that name stands for the entry's name.
+fn entry_name_alias_target(expr: &syn::Expr, entry_names: &[String]) -> Option<String> {
+    match expr {
+        syn::Expr::Field(field) => match &field.member {
+            syn::Member::Named(ident) if ident == "name" => expression_base_name(&field.base),
+            _ => None,
+        },
+        syn::Expr::Path(path) => {
+            if path.qself.is_none() && path.path.segments.len() == 1 {
+                let name = path.path.segments[0].ident.to_string();
+                entry_names.contains(&name).then_some(name)
+            } else {
+                None
+            }
+        }
+        syn::Expr::Reference(reference) => entry_name_alias_target(&reference.expr, entry_names),
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+            entry_name_alias_target(&unary.expr, entry_names)
+        }
         _ => None,
     }
 }
@@ -6896,6 +6981,82 @@ fn other_value(headers: &[Header<'_>], other: &Header<'_>) -> Option<&str> {
             .unwrap()
             .is_empty(),
             "a site that compares the field's name and takes another entry's value is not a reader"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_site_that_binds_the_entry_name() {
+        // A site that binds a header entry's name to a name of its own
+        // and compares that name with the field's name compares the
+        // entry's name, so the value it takes is the field's value.
+        let bound = (
+            "qpxd/src/reverse/transport/raw_http1.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(&str, &str)]) -> Option<&str> {
+    for (name, value) in headers {
+        let entry_name = *name;
+        if entry_name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()) {
+            return Some(value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&bound.0, &bound.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/raw_http1.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the value is the entry's `value` member.
+        let member = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        let entry_name = header.name;
+        if entry_name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()) {
+            return Some(header.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&member.0, &member.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A binding of the entry's name that is compared with another
+        // header's name is not a comparison with the field's name, so the
+        // value it takes is another header's value.
+        let other_name = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn other_header_value(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        let entry_name = header.name;
+        if entry_name.eq_ignore_ascii_case("content-type") {
+            return Some(header.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other_name.0, &other_name.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a comparison with another header's name does not find the field's entry"
         );
     }
 

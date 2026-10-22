@@ -238,10 +238,15 @@ pub enum ContentLengthError {
 /// from the entry the comparison found: the gate reads the `value`
 /// member only when the site takes it under the name it compared, so a
 /// site that compares the field's name and takes another entry's value
-/// is not a reader either. Test code is not part of that question, because
-/// a test observes the value to assert on what the proxy put on the wire
-/// rather than to decide what the proxy does; a test that reads the value
-/// and turns it into a number is still inside the gate.
+/// is not a reader either. The gate follows a binding of a header
+/// entry's name as well: a site that binds the entry's name to a name of
+/// its own and compares that name with the field's name compares the
+/// entry's name, so the binding stands for the entry the name came from
+/// and the value the site takes is that entry's value. Test code is not
+/// part of that question, because a test observes the value to assert on
+/// what the proxy put on the wire rather than to decide what the proxy
+/// does; a test that reads the value and turns it into a number is still
+/// inside the gate.
 ///
 /// The test helpers read the declaration through the owner as well:
 /// `qpxd/src/test_util.rs` and `qpxd/tests/http_rfc/mod.rs` read a raw
