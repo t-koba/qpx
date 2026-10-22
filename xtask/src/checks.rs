@@ -1320,7 +1320,12 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// that builds the field's name with a constructor or with a macro and
 /// finds the field's own entry with the built name reads the
 /// declaration, so the gate reads the text the site writes out and
-/// follows it back to the field.
+/// follows it back to the field. The text the site writes out may stand
+/// under a name of its own: a site that binds a piece of the field's
+/// name and builds the name from that piece reads the declaration, so
+/// the gate reads the text a binding holds as well, whether the name is
+/// built by a macro that takes the piece by its name or by adding the
+/// piece to another piece.
 /// The gate follows the member the value is held under as well: a
 /// header entry holds its name and its value under members of its own,
 /// so a site that finds the field's own entry and takes a member of it
@@ -1328,9 +1333,9 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// value. The member the comparison used is the name, so a site that
 /// takes that member takes the name and not the value.
 /// What the gate cannot see is a site that finds the field's entry by a
-/// name it builds at runtime whose text the gate cannot read, and a site
-/// that takes the value under a member of an entry the comparison did
-/// not find. A helper
+/// name it builds at runtime from text the site did not write out - a
+/// piece that arrives at runtime - and a site that takes the value under
+/// a member of an entry the comparison did not find. A helper
 /// of another file that found the entry is seen when the caller calls it
 /// by the name it is defined with; a call through another name is not
 /// seen. A member that holds the entry's name under a name the gate does
@@ -1499,8 +1504,8 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// runtime from that text. It sees a parse whose type is written and a
 /// parse whose type is inferred, because the field's value is a length
 /// either way. It does not see a reader that lives outside a function
-/// body, it does not see a name the site builds at runtime whose text the
-/// gate cannot read, and it reads a function's body as one whole
+/// body, it does not see a name the site builds at runtime from text the
+/// site did not write out, and it reads a function's body as one whole
 /// rather than tying a parse to the read it belongs to.
 #[cfg(test)]
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
@@ -1600,12 +1605,14 @@ fn content_length_inline_reader_facts_violations(
 /// that builds the field's name with a constructor or with a macro and
 /// finds the field's own entry with the built name reads the
 /// declaration, so the rule reads the text the site writes out and
-/// follows it back to the field.
+/// follows it back to the field. The text the site writes out may stand
+/// under a name of its own, so the rule reads the text a binding holds
+/// as well and follows a name the site builds from that piece.
 ///
 /// What the rule cannot see is a site that finds the field's entry by a
-/// name it builds at runtime whose text the gate cannot read, and a site
-/// that takes the value under a member of an entry the comparison did
-/// not find. A helper of
+/// name it builds at runtime from text the site did not write out - a
+/// piece that arrives at runtime - and a site that takes the value under
+/// a member of an entry the comparison did not find. A helper of
 /// another file that found the entry is seen when the caller calls it by
 /// the name it is defined with; a call through another name is not seen.
 /// A member that holds the entry's name under a name the rule does not
@@ -1961,12 +1968,15 @@ struct ContentLengthReaderFacts {
     /// Test code observes the field's value to assert on what the proxy
     /// put on the wire; it does not decide what the proxy does.
     test_code: bool,
-    /// The names the function binds the field's name to.
+    /// The names the function binds the field's name to, and the pieces
+    /// of text it binds to a name of its own.
     ///
     /// A site that binds the field's name to a name of its own and reads
     /// the field through that name reads the declaration, so the gate
-    /// follows the binding.
-    field_aliases: Vec<String>,
+    /// follows the binding. A site that binds a piece of text it wrote
+    /// out holds that text, so a name built from that piece is a name
+    /// the gate can read.
+    field_names: FieldNames,
     /// The names a header entry's name is bound under, and the entry each
     /// of them stands for.
     ///
@@ -1980,6 +1990,32 @@ struct ContentLengthReaderFacts {
     /// to a name of its own, so a binding of that name stands for the
     /// entry's name as well.
     entry_names: Vec<String>,
+}
+
+/// The names a function binds the field's name to, and the pieces of
+/// text it binds to a name of its own.
+///
+/// A binding of the field's name stands for the field itself. A binding
+/// of a piece of text holds that text, and the site wrote it out, so a
+/// name the site builds from that piece is a name the gate can read.
+#[derive(Default, Clone)]
+struct FieldNames {
+    /// The names that stand for the field's name.
+    aliases: Vec<String>,
+    /// The names that stand for a piece of text, and the text each of
+    /// them holds.
+    texts: Vec<(String, String)>,
+}
+
+impl FieldNames {
+    /// The text a name holds, when the name stands for a piece of text
+    /// the site wrote out.
+    fn text_of(&self, name: &str) -> Option<&str> {
+        self.texts
+            .iter()
+            .find(|(bound, _)| bound == name)
+            .map(|(_, text)| text.as_str())
+    }
 }
 
 /// The collector of the functions of a file.
@@ -2034,7 +2070,10 @@ impl ContentLengthFunctionCollector {
     fn record(&mut self, name: String, block: &syn::Block) {
         let mut facts = ContentLengthReaderFacts {
             test_code: self.test_file || self.test_depth > 0,
-            field_aliases: self.field_name_constants.clone(),
+            field_names: FieldNames {
+                aliases: self.field_name_constants.clone(),
+                ..FieldNames::default()
+            },
             ..ContentLengthReaderFacts::default()
         };
         facts.visit_block(block);
@@ -2042,7 +2081,7 @@ impl ContentLengthFunctionCollector {
         // entry, so the value the site takes under the name the closure
         // binds is the field's value.
         let mut chains = ContentLengthEntryChainCollector {
-            field_aliases: facts.field_aliases.clone(),
+            field_names: facts.field_names.clone(),
             ..ContentLengthEntryChainCollector::default()
         };
         chains.visit_block(block);
@@ -2061,11 +2100,23 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // field as well, so a site that reads the field through the
         // binding reads the declaration.
         if let Some(initializer) = &node.init
-            && names_content_length_field(&initializer.expr)
+            && names_content_length_field_or_alias(&initializer.expr, &self.field_names)
             && let syn::Pat::Ident(binding) = &node.pat
             && binding.subpat.is_none()
         {
-            self.field_aliases.push(binding.ident.to_string());
+            self.field_names.aliases.push(binding.ident.to_string());
+        }
+        // A binding of a piece of text the site wrote out holds that
+        // text, so a name the site builds from it is a name the gate
+        // can read.
+        if let Some(initializer) = &node.init
+            && let syn::Pat::Ident(binding) = &node.pat
+            && binding.subpat.is_none()
+            && let Some(text) = built_text_of(&initializer.expr, &self.field_names)
+        {
+            self.field_names
+                .texts
+                .push((binding.ident.to_string(), text));
         }
         // A binding of the entry the comparison found holds that entry
         // under a name of its own, so the value the site takes under
@@ -2081,7 +2132,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // name of its own as well, so the value the site takes under
         // that name is the field's value.
         if let Some(initializer) = &node.init
-            && search_entry_name(&initializer.expr, &self.field_aliases).is_some()
+            && search_entry_name(&initializer.expr, &self.field_names).is_some()
         {
             let names = pattern_binding_names(&node.pat);
             if names.len() == 1 {
@@ -2128,7 +2179,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
         let names_field = node
             .args
             .iter()
-            .any(|argument| names_content_length_field_or_alias(argument, &self.field_aliases));
+            .any(|argument| names_content_length_field_or_alias(argument, &self.field_names));
         if (CONTENT_LENGTH_READ_METHODS.contains(&method.as_str()) || method.starts_with("eq"))
             && names_field
         {
@@ -2139,7 +2190,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // by the receiver.
         if method.starts_with("eq")
             && (names_field
-                || names_content_length_field_or_alias(&node.receiver, &self.field_aliases))
+                || names_content_length_field_or_alias(&node.receiver, &self.field_names))
         {
             // The name of the entry the site found is the other side of
             // the comparison.
@@ -2200,7 +2251,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
 
     fn visit_expr_index(&mut self, node: &syn::ExprIndex) {
         // An indexed read of the field's value is a read of it as well.
-        if names_content_length_field_or_alias(&node.index, &self.field_aliases) {
+        if names_content_length_field_or_alias(&node.index, &self.field_names) {
             self.reads_field = true;
             self.reads_value = true;
         }
@@ -2209,13 +2260,13 @@ impl Visit<'_> for ContentLengthReaderFacts {
 
     fn visit_expr_binary(&mut self, node: &syn::ExprBinary) {
         if matches!(node.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
-            && (names_content_length_field_or_alias(&node.left, &self.field_aliases)
-                || names_content_length_field_or_alias(&node.right, &self.field_aliases))
+            && (names_content_length_field_or_alias(&node.left, &self.field_names)
+                || names_content_length_field_or_alias(&node.right, &self.field_names))
         {
             self.reads_field = true;
             // The name of the entry the site found is the other side of
             // the comparison.
-            let compared = if names_content_length_field_or_alias(&node.left, &self.field_aliases) {
+            let compared = if names_content_length_field_or_alias(&node.left, &self.field_names) {
                 &node.right
             } else {
                 &node.left
@@ -2245,7 +2296,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
         // that way: the rule cannot say which part of it skips the
         // entry, so the comparison in it still finds the field's own
         // entry, and the code after the branch may hold it.
-        let comparison_only = is_field_comparison(&node.cond, &self.field_aliases);
+        let comparison_only = is_field_comparison(&node.cond, &self.field_names);
         let skipping = comparison_only && self.branch_skips_the_entry(&node.then_branch);
         let saved = self.skipping_condition;
         let saved_compound = self.compound_condition;
@@ -2269,7 +2320,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
             let mut scope = ContentLengthReaderFacts {
                 test_code: self.test_code,
                 bound_value_names: vec![value.clone()],
-                field_aliases: self.field_aliases.clone(),
+                field_names: self.field_names.clone(),
                 entry_names: vec![name.clone()],
                 ..ContentLengthReaderFacts::default()
             };
@@ -2464,7 +2515,7 @@ impl ContentLengthReaderFacts {
     fn branch_takes_the_value(&self, block: &syn::Block) -> bool {
         let mut scope = ContentLengthReaderFacts {
             test_code: self.test_code,
-            field_aliases: self.field_aliases.clone(),
+            field_names: self.field_names.clone(),
             ..ContentLengthReaderFacts::default()
         };
         scope.visit_block(block);
@@ -2487,7 +2538,7 @@ impl ContentLengthReaderFacts {
 #[derive(Default)]
 struct ContentLengthEntryChainCollector {
     /// The names the file holds the field's name under.
-    field_aliases: Vec<String>,
+    field_names: FieldNames,
     /// The names the entry is held under.
     names: Vec<String>,
 }
@@ -2497,7 +2548,7 @@ impl Visit<'_> for ContentLengthEntryChainCollector {
         // A closure that receives the entry a search found holds that
         // entry, so the value it takes is the field's value.
         if let Some(param) = closure_param_name(node.args.first())
-            && search_entry_name(&node.receiver, &self.field_aliases).is_some()
+            && search_entry_name(&node.receiver, &self.field_names).is_some()
         {
             self.names.push(param);
         }
@@ -2540,7 +2591,7 @@ fn closure_param_name(argument: Option<&syn::Expr>) -> Option<String> {
 /// A search compares a header's name with the field's name, so the
 /// entry it finds is the field's own entry, and the closure the search
 /// takes binds that entry under a name of its own.
-fn search_entry_name(expr: &syn::Expr, field_aliases: &[String]) -> Option<String> {
+fn search_entry_name(expr: &syn::Expr, names: &FieldNames) -> Option<String> {
     let syn::Expr::MethodCall(call) = unwrapped_expr(expr) else {
         return None;
     };
@@ -2553,7 +2604,7 @@ fn search_entry_name(expr: &syn::Expr, field_aliases: &[String]) -> Option<Strin
     };
     let name = closure_param_name(Some(argument))?;
     let mut scope = ContentLengthReaderFacts {
-        field_aliases: field_aliases.to_vec(),
+        field_names: names.clone(),
         ..ContentLengthReaderFacts::default()
     };
     scope.visit_expr(&closure.body);
@@ -2626,21 +2677,21 @@ fn pair_binding_names(pat: &syn::Pat) -> Option<(String, String)> {
 /// The rule reads the comparison in a condition the other way round when
 /// the branch it guards skips the entry, and it can only say that about a
 /// condition that holds the comparison and nothing else.
-fn is_field_comparison(expr: &syn::Expr, aliases: &[String]) -> bool {
+fn is_field_comparison(expr: &syn::Expr, names: &FieldNames) -> bool {
     match expr {
-        syn::Expr::Paren(paren) => is_field_comparison(&paren.expr, aliases),
+        syn::Expr::Paren(paren) => is_field_comparison(&paren.expr, names),
         syn::Expr::Binary(binary) => {
             matches!(binary.op, syn::BinOp::Eq(_) | syn::BinOp::Ne(_))
-                && (names_content_length_field_or_alias(&binary.left, aliases)
-                    || names_content_length_field_or_alias(&binary.right, aliases))
+                && (names_content_length_field_or_alias(&binary.left, names)
+                    || names_content_length_field_or_alias(&binary.right, names))
         }
         syn::Expr::MethodCall(call) => {
             call.method.to_string().starts_with("eq")
                 && (call
                     .args
                     .iter()
-                    .any(|argument| names_content_length_field_or_alias(argument, aliases))
-                    || names_content_length_field_or_alias(&call.receiver, aliases))
+                    .any(|argument| names_content_length_field_or_alias(argument, names))
+                    || names_content_length_field_or_alias(&call.receiver, names))
         }
         _ => false,
     }
@@ -2765,23 +2816,22 @@ fn builds_a_name_at_runtime(call: &syn::ExprCall) -> bool {
 /// own entry with the built name reads the declaration, so the gate reads
 /// the text the macro builds when the site writes that text out.
 fn macro_builds_content_length_field(mac: &syn::Macro) -> bool {
-    let Some(name) = mac
-        .path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
-    else {
-        return false;
-    };
-    let Some(arguments) = macro_arguments(mac) else {
-        return false;
-    };
-    let built = match name.as_str() {
+    macro_built_text(mac, &FieldNames::default())
+        .is_some_and(|text| text.eq_ignore_ascii_case(CONTENT_LENGTH_FIELD))
+}
+
+/// The text a macro builds, when the site wrote that text out.
+///
+/// The macro is named by its own name, so a macro that builds something
+/// else is not one of them.
+fn macro_built_text(mac: &syn::Macro, names: &FieldNames) -> Option<String> {
+    let name = mac.path.segments.last()?.ident.to_string();
+    let arguments = macro_arguments(mac)?;
+    match name.as_str() {
         "concat" => concat_built_text(&arguments),
-        "format" => format_built_text(&arguments),
+        "format" => format_built_text(&arguments, names),
         _ => None,
-    };
-    built.is_some_and(|text| text.eq_ignore_ascii_case(CONTENT_LENGTH_FIELD))
+    }
 }
 
 /// The arguments a macro call holds.
@@ -2810,10 +2860,12 @@ fn concat_built_text(arguments: &[syn::Expr]) -> Option<String> {
 ///
 /// A format string that holds a placeholder takes the text of the
 /// argument that fills it, so the built text is known when the argument
-/// is written out as well. An argument that is not written out is known
-/// only when it names the field itself, because then the built text is
-/// the field's name.
-fn format_built_text(arguments: &[syn::Expr]) -> Option<String> {
+/// is written out as well. A placeholder that names a piece of text
+/// takes the text of the binding it names, so a site that writes the
+/// name out in pieces and binds those pieces names the field as well.
+/// An argument that is not written out is known only when it names the
+/// field itself, because then the built text is the field's name.
+fn format_built_text(arguments: &[syn::Expr], names: &FieldNames) -> Option<String> {
     let syn::Expr::Lit(literal) = arguments.first()? else {
         return None;
     };
@@ -2821,31 +2873,158 @@ fn format_built_text(arguments: &[syn::Expr]) -> Option<String> {
         return None;
     };
     let format = format.value();
-    let mut built = String::new();
-    let mut pieces = format.split("{}");
-    built.push_str(pieces.next()?);
-    let mut rest = arguments.get(1..)?;
-    for piece in pieces {
-        let argument = rest.first()?;
-        rest = &rest[1..];
+    // The arguments the site writes out: the positional ones in the
+    // order they are written and the named ones under their names.
+    let mut positional: Vec<&syn::Expr> = Vec::new();
+    let mut named: Vec<(String, &syn::Expr)> = Vec::new();
+    for argument in arguments.get(1..)? {
         match argument {
-            syn::Expr::Lit(literal) => {
-                let syn::Lit::Str(text) = &literal.lit else {
+            syn::Expr::Assign(assign) => {
+                let syn::Expr::Path(path) = &*assign.left else {
                     return None;
                 };
-                built.push_str(&text.value());
+                let name = path.path.segments.last()?.ident.to_string();
+                named.push((name, &assign.right));
             }
-            argument if names_content_length_field(argument) => {
-                built.push_str(CONTENT_LENGTH_FIELD);
-            }
-            _ => return None,
+            argument => positional.push(argument),
         }
-        built.push_str(piece);
     }
-    if !rest.is_empty() {
+    let mut filled = vec![false; positional.len()];
+    let mut built = String::new();
+    let mut characters = format.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            // A doubled brace is a brace the site wrote out.
+            '{' if characters.peek() == Some(&'{') => {
+                characters.next();
+                built.push('{');
+            }
+            '}' if characters.peek() == Some(&'}') => {
+                characters.next();
+                built.push('}');
+            }
+            // A placeholder takes the text of the argument that fills
+            // it.
+            '{' => {
+                let mut placeholder = String::new();
+                for character in characters.by_ref() {
+                    if character == '}' {
+                        break;
+                    }
+                    placeholder.push(character);
+                }
+                let placeholder = placeholder
+                    .split(':')
+                    .next()
+                    .unwrap_or_default()
+                    .trim()
+                    .to_string();
+                let text = if placeholder.is_empty() {
+                    let index = filled.iter().position(|filled| !*filled)?;
+                    filled[index] = true;
+                    argument_text(positional[index], names)?
+                } else if let Ok(index) = placeholder.parse::<usize>() {
+                    let argument = positional.get(index)?;
+                    filled[index] = true;
+                    argument_text(argument, names)?
+                } else {
+                    match named.iter().find(|(name, _)| *name == placeholder) {
+                        Some((_, argument)) => argument_text(argument, names)?,
+                        None => name_text(&placeholder, names)?,
+                    }
+                };
+                built.push_str(&text);
+            }
+            character => built.push(character),
+        }
+    }
+    // Every argument the site wrote out has to fill a placeholder, or
+    // the built text is not the text the site writes out.
+    if filled.iter().any(|filled| !*filled) {
         return None;
     }
     Some(built)
+}
+
+/// The text an argument of a format string holds.
+///
+/// An argument the site wrote out holds the text it was written out
+/// as. An argument that is not written out holds the field's name when
+/// it names the field, because then the built text is the field's name.
+fn argument_text(argument: &syn::Expr, names: &FieldNames) -> Option<String> {
+    if let Some(text) = built_text_of(argument, names) {
+        return Some(text);
+    }
+    if names_content_length_field_or_alias(argument, names) {
+        return Some(CONTENT_LENGTH_FIELD.to_string());
+    }
+    None
+}
+
+/// The text a name holds, when the name stands for a piece of text the
+/// site wrote out or for the field's name.
+fn name_text(name: &str, names: &FieldNames) -> Option<String> {
+    if let Some(text) = names.text_of(name) {
+        return Some(text.to_string());
+    }
+    names
+        .aliases
+        .iter()
+        .any(|alias| alias == name)
+        .then(|| CONTENT_LENGTH_FIELD.to_string())
+}
+
+/// The text an expression builds, when the site wrote that text out.
+///
+/// A piece of text the site wrote out stands under a name of its own
+/// when the site binds it, so the gate reads a binding's text as well
+/// as a literal's, and a name built from those pieces is a name the
+/// gate can read.
+fn built_text_of(expr: &syn::Expr, names: &FieldNames) -> Option<String> {
+    match expr {
+        syn::Expr::Lit(literal) => match &literal.lit {
+            syn::Lit::Str(text) => Some(text.value()),
+            syn::Lit::ByteStr(text) => Some(String::from_utf8_lossy(&text.value()).into_owned()),
+            _ => None,
+        },
+        // A reference to the text is the text.
+        syn::Expr::Reference(reference) => built_text_of(&reference.expr, names),
+        // A binding of the text holds it.
+        syn::Expr::Path(path) => {
+            let name = path.path.segments.last()?.ident.to_string();
+            names.text_of(&name).map(str::to_string)
+        }
+        // A copy of the text is the text, and a copy that changes the
+        // case holds the same letters.
+        syn::Expr::MethodCall(call) => {
+            let text = built_text_of(&call.receiver, names)?;
+            match call.method.to_string().as_str() {
+                "to_ascii_lowercase" => Some(text.to_ascii_lowercase()),
+                "to_ascii_uppercase" => Some(text.to_ascii_uppercase()),
+                "to_lowercase" => Some(text.to_lowercase()),
+                "to_uppercase" => Some(text.to_uppercase()),
+                method if CONTENT_LENGTH_NAME_COPY_METHODS.contains(&method) => Some(text),
+                _ => None,
+            }
+        }
+        // A name built by a constructor holds the text it was built
+        // from.
+        syn::Expr::Call(call) => {
+            if !builds_a_name_at_runtime(call) {
+                return None;
+            }
+            built_text_of(call.args.first()?, names)
+        }
+        // A name built by a macro holds the text the macro built.
+        syn::Expr::Macro(mac) => macro_built_text(&mac.mac, names),
+        // Two texts added together are one text.
+        syn::Expr::Binary(binary) if matches!(binary.op, syn::BinOp::Add(_)) => {
+            let left = built_text_of(&binary.left, names)?;
+            let right = built_text_of(&binary.right, names)?;
+            Some(left + &right)
+        }
+        _ => None,
+    }
 }
 
 /// Whether an expression names the field, directly or through a binding
@@ -2854,8 +3033,11 @@ fn format_built_text(arguments: &[syn::Expr]) -> Option<String> {
 /// A site that binds the field's name to a name of its own and reads the
 /// field through that name reads the declaration, so the binding names
 /// the field as well.
-fn names_content_length_field_or_alias(expr: &syn::Expr, aliases: &[String]) -> bool {
-    names_content_length_field(expr) || alias_base_name(expr, aliases).is_some()
+fn names_content_length_field_or_alias(expr: &syn::Expr, names: &FieldNames) -> bool {
+    names_content_length_field(expr)
+        || alias_base_name(expr, names).is_some()
+        || built_text_of(expr, names)
+            .is_some_and(|text| text.eq_ignore_ascii_case(CONTENT_LENGTH_FIELD))
 }
 
 /// The name a binding of the field's name is used under.
@@ -2865,13 +3047,13 @@ fn names_content_length_field_or_alias(expr: &syn::Expr, aliases: &[String]) -> 
 /// for the rest of the function, and a binding made in a block of its own
 /// is followed outside that block as well, so the gate errs towards
 /// seeing a read of the field.
-fn alias_base_name(expr: &syn::Expr, aliases: &[String]) -> Option<String> {
+fn alias_base_name(expr: &syn::Expr, names: &FieldNames) -> Option<String> {
     match expr {
         syn::Expr::Path(path) if path.qself.is_none() => {
             let name = path.path.segments.last()?.ident.to_string();
-            aliases.contains(&name).then_some(name)
+            names.aliases.contains(&name).then_some(name)
         }
-        syn::Expr::Reference(reference) => alias_base_name(&reference.expr, aliases),
+        syn::Expr::Reference(reference) => alias_base_name(&reference.expr, names),
         _ => None,
     }
 }
@@ -9951,6 +10133,219 @@ fn strips(headers: &mut HeaderMap) {
                 .unwrap()
                 .is_empty(),
             "a site that removes the field does not read the declaration"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_name_the_site_builds_from_bound_text() {
+        // A site that writes a piece of the field's name out, binds that
+        // piece to a name of its own and builds the name from it reads
+        // the declaration.
+        let bound_piece = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<u64> {
+    let prefix = "content-";
+    let name = format!("{prefix}length");
+    headers.get(&name).and_then(|value| value.to_str().ok()?.parse().ok())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&bound_piece.0, &bound_piece.1).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length inline; it must call the owner"
+            ]
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&bound_piece.0, &bound_piece.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site finds the field's own entry with
+        // the name it built from the bound piece.
+        let found = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let prefix = "content-";
+    let name = format!("{prefix}length");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&found.0, &found.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site hands the piece to the macro under
+        // the name the macro names it by.
+        let named_argument = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let name = format!("{prefix}length", prefix = "content-");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &named_argument.0,
+                &named_argument.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site adds the two pieces it wrote out.
+        let added = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let name = String::from("content-") + "length";
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&added.0, &added.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site fills a placeholder with the
+        // piece it bound.
+        let filled = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let prefix = "content-";
+    let name = format!("{}{}", prefix, "length");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&filled.0, &filled.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The same read when the site adds the piece it bound to another
+        // piece it wrote out.
+        let bound_added = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let prefix = "content-";
+    let name = prefix + "length";
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&bound_added.0, &bound_added.1, &[])
+                .unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A site that builds the name from a piece it did not write out
+        // does not read the declaration: the gate cannot read the text
+        // of a value that arrives at runtime.
+        let runtime_piece = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)], suffix: &str) -> Option<String> {
+    let name = format!("content-{suffix}");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(
+                &runtime_piece.0,
+                &runtime_piece.1,
+                &[]
+            )
+            .unwrap()
+            .is_empty(),
+            "a name built from text the site did not write out is not a reader"
+        );
+
+        // A site that builds another field's name from a bound piece
+        // does not read the declaration either.
+        let other_field = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[(String, String)]) -> Option<String> {
+    let prefix = "content-";
+    let name = format!("{prefix}type");
+    for (header_name, value) in headers {
+        if header_name == name {
+            return Some(value.clone());
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other_field.0, &other_field.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a name built from a bound piece of another field is not a reader"
         );
     }
 }

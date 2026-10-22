@@ -275,8 +275,13 @@ pub enum ContentLengthError {
 /// that builds the field's name with a constructor or with a macro and
 /// finds the field's own entry with the built name reads the
 /// declaration, so the gate reads the text the site writes out and
-/// follows it back to the field. A name the site builds at runtime whose
-/// text the gate cannot read is a name the gate cannot follow.
+/// follows it back to the field. The text the site writes out may stand
+/// under a name of its own, so the gate reads the text a binding holds
+/// as well and follows a name the site builds from that piece, whether
+/// the site builds it with a macro that takes the piece by its name or
+/// by adding the piece to another piece. A name the site builds at
+/// runtime from text the site did not write out is a name the gate
+/// cannot follow.
 /// Test code is not
 /// part of that question, because a test observes the value to assert on
 /// what the proxy put on the wire rather than to decide what the proxy
