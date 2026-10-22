@@ -1280,6 +1280,13 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// a pair and uses its second element, by the second element of the
 /// pair, and by the `value` member of the entry whose name the
 /// comparison found.
+/// The gate follows the entry itself as well, so the value is seen
+/// however the entry travels: a binding of the entry holds it under a
+/// name of its own, a closure that receives it from the search that
+/// found it holds it under the name the closure binds, a pattern that
+/// binds the search's result holds it as well, and a helper of the
+/// same file that found it hands it to its caller, which binds the
+/// result.
 ///
 /// The gate follows a binding of the field's name as well: a site that
 /// binds the field's name to a name of its own and reads the field
@@ -1296,9 +1303,9 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// comparison finds that entry and the value the site takes is that
 /// entry's value.
 /// What the gate cannot see is a site that finds the field's entry by a
-/// name it builds at runtime, a site whose name comparison and whose
-/// taken value stand in two different functions, and a site that takes
-/// the value under a member of another name.
+/// name it builds at runtime, a site whose helper that found the entry
+/// stands in another file, and a site that takes the value under a
+/// member of another name.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1479,9 +1486,16 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// a comparison of a header's name with the field's name is what selects
 /// it. The value has to come from the entry the comparison found: the
 /// rule reads the `value` member only when the site takes it under the
-/// name it compared, so a site that compares the field's name and takes
-/// another entry's value is not a reader either. A comparison that
-/// decides about the field instead does not select it: a comparison that
+/// name it compared or under a name the entry travels to, so a site
+/// that compares the field's name and takes another entry's value is
+/// not a reader either. The entry travels: a binding of the entry
+/// holds it under a name of its own, a closure that receives it from
+/// the search that found it holds it under the name the closure binds,
+/// a pattern that binds the search's result holds it as well, and a
+/// helper of the same file that found it hands it to its caller, which
+/// binds the result, so the value the site takes under any of those
+/// names is the field's value. A comparison that decides about the
+/// field instead does not select it: a comparison that
 /// is not equal, and a comparison whose branch skips the entry, decide
 /// about the field, so a site that skips the field and takes another
 /// header's value is not a reader.
@@ -1499,12 +1513,12 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// behind a binding or a constant of its own.
 ///
 /// What the rule cannot see is a site that finds the field's entry by a
-/// name it builds at runtime, a site whose name comparison and whose
-/// taken value stand in two different functions, a site that takes the
-/// value under a member of another name, a site that copies a header
-/// entry's name through an expression of its own that the rule does not
-/// follow, and a comparison inside a condition that holds more than the
-/// comparison, whose branch the rule cannot read as skipping the entry.
+/// name it builds at runtime, a site whose helper that found the entry
+/// stands in another file, a site that takes the value under a member
+/// of another name, a site that copies a header entry's name through an
+/// expression of its own that the rule does not follow, and a
+/// comparison inside a condition that holds more than the comparison,
+/// whose branch the rule cannot read as skipping the entry.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -1553,7 +1567,40 @@ fn content_length_reader_facts(
         ..ContentLengthFunctionCollector::default()
     };
     collector.visit_file(syntax);
+    // The entry the comparison found travels: a helper that found it
+    // hands it to its caller, which binds the result.
+    content_length_follow_the_entry_across_functions(&mut collector.facts);
+    for (_, facts) in collector.facts.iter_mut() {
+        facts.finish();
+    }
     collector.facts
+}
+
+/// The names that hold the entry a helper of the same file found.
+///
+/// A helper that finds the field's own entry hands that entry to its
+/// caller, so a binding of the helper's result holds the entry the
+/// comparison found, and the value the caller takes under that name is
+/// the field's value. A helper of another file is not seen here: the
+/// rule reads one file at a time.
+fn content_length_follow_the_entry_across_functions(
+    facts: &mut [(String, ContentLengthReaderFacts)],
+) {
+    let finders: Vec<String> = facts
+        .iter()
+        .filter(|(_, facts)| facts.selects_field)
+        .map(|(name, _)| name.clone())
+        .collect();
+    if finders.is_empty() {
+        return;
+    }
+    for (_, facts) in facts.iter_mut() {
+        for (binding, callee) in facts.finder_calls.clone() {
+            if finders.contains(&callee) && !facts.field_entry_names.contains(&binding) {
+                facts.field_entry_names.push(binding);
+            }
+        }
+    }
 }
 
 /// The names a file holds the field's name under in a constant or a static.
@@ -1637,6 +1684,35 @@ struct ContentLengthReaderFacts {
     /// A header entry that is a struct holds its value under `value`, so
     /// a site that takes that member takes the entry's value.
     value_bases: Vec<String>,
+    /// The names the field's own entry is held under.
+    ///
+    /// The entry the comparison found travels: a binding of it holds it
+    /// under a name of its own, a closure that receives it from the
+    /// search that found it holds it under the name the closure binds,
+    /// and a helper that found it hands it to its caller, which binds
+    /// the result. The value the site takes under one of these names is
+    /// the field's value, so the rule follows the entry rather than the
+    /// name the site happened to give it.
+    field_entry_names: Vec<String>,
+    /// The names a binding holds an entry under, and the entry it holds.
+    ///
+    /// A binding of the entry the comparison found holds that entry
+    /// under a name of its own, so the names tell whether the value the
+    /// site takes is the field's value.
+    entry_copies: Vec<(String, String)>,
+    /// The names a call's result is bound under, and the helper the call
+    /// names.
+    ///
+    /// A helper that finds the field's own entry hands that entry to its
+    /// caller, so the names tell whether a binding holds the entry the
+    /// comparison found.
+    finder_calls: Vec<(String, String)>,
+    /// The names a pair's second element is taken under.
+    ///
+    /// A header entry that is a pair holds its value as the pair's
+    /// second element, so the names tell whether the element that is
+    /// taken is the field's own.
+    pair_element_bases: Vec<String>,
     /// The function takes the value of an entry it bound by a pattern.
     ///
     /// A header entry is a pair of a name and a value, so a pattern that
@@ -1750,27 +1826,18 @@ impl ContentLengthFunctionCollector {
             ..ContentLengthReaderFacts::default()
         };
         facts.visit_block(block);
-        // A site that finds the field's own entry by comparing a header's
-        // name with the field's name and then takes that entry's value
-        // reads the declaration's value: the owner is the only reader.
-        // The value is taken by a closure that receives the entry as a
-        // pair, by the second element of the pair, by the `value`
-        // member of the entry the comparison found, or by a pattern that
-        // binds the entry's pair. A comparison that decides about the
-        // field rather than finding its entry does not find the value
-        // either, so a site that skips the field and takes another
-        // header's value is not a reader.
-        let same_entry = facts
-            .selected_bases
-            .iter()
-            .any(|base| facts.value_bases.iter().any(|value| value == base));
-        if facts.selects_field
-            && (facts.takes_entry_value
-                || facts.takes_pair_element
-                || same_entry
-                || facts.takes_pattern_entry_value)
-        {
-            facts.reads_value = true;
+        // A closure that receives the entry a search found holds that
+        // entry, so the value the site takes under the name the closure
+        // binds is the field's value.
+        let mut chains = ContentLengthEntryChainCollector {
+            field_aliases: facts.field_aliases.clone(),
+            ..ContentLengthEntryChainCollector::default()
+        };
+        chains.visit_block(block);
+        for entry_name in chains.names {
+            if !facts.field_entry_names.contains(&entry_name) {
+                facts.field_entry_names.push(entry_name);
+            }
         }
         self.facts.push((name, facts));
     }
@@ -1787,6 +1854,44 @@ impl Visit<'_> for ContentLengthReaderFacts {
             && binding.subpat.is_none()
         {
             self.field_aliases.push(binding.ident.to_string());
+        }
+        // A binding of the entry the comparison found holds that entry
+        // under a name of its own, so the value the site takes under
+        // that name is the field's value.
+        if let Some(initializer) = &node.init
+            && let syn::Pat::Ident(binding) = &node.pat
+            && binding.subpat.is_none()
+            && let Some(base) = expression_base_name(&initializer.expr)
+        {
+            self.entry_copies.push((binding.ident.to_string(), base));
+        }
+        // A binding of the entry a search found holds that entry under a
+        // name of its own as well, so the value the site takes under
+        // that name is the field's value.
+        if let Some(initializer) = &node.init
+            && search_entry_name(&initializer.expr, &self.field_aliases).is_some()
+        {
+            let names = pattern_binding_names(&node.pat);
+            if names.len() == 1 {
+                self.field_entry_names.push(names[0].clone());
+            }
+        }
+        // A call that names a helper hands the helper's result to the
+        // binding, so a helper that finds the field's own entry hands
+        // that entry over.
+        if let Some(initializer) = &node.init
+            && let syn::Pat::Ident(binding) = &node.pat
+            && binding.subpat.is_none()
+            && let syn::Expr::Call(call) = unwrapped_expr(&initializer.expr)
+            && let syn::Expr::Path(path) = &*call.func
+            && path.qself.is_none()
+            && let Some(callee) = path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+        {
+            self.finder_calls.push((binding.ident.to_string(), callee));
         }
         // A binding of a header entry's name stands for the entry the
         // name came from, so a comparison under the binding compares
@@ -1981,7 +2086,12 @@ impl Visit<'_> for ContentLengthReaderFacts {
                     self.value_bases.push(base);
                 }
             }
-            syn::Member::Unnamed(index) if index.index == 1 => self.takes_pair_element = true,
+            syn::Member::Unnamed(index) if index.index == 1 => {
+                self.takes_pair_element = true;
+                if let Some(base) = expression_base_name(&node.base) {
+                    self.pair_element_bases.push(base);
+                }
+            }
             _ => {}
         }
         syn::visit::visit_expr_field(self, node);
@@ -1999,6 +2109,66 @@ impl Visit<'_> for ContentLengthReaderFacts {
 
 /// The facts of a function, and what they add up to.
 impl ContentLengthReaderFacts {
+    /// The read of the field's value the facts add up to.
+    ///
+    /// A site that finds the field's own entry by comparing a header's
+    /// name with the field's name and then takes that entry's value
+    /// reads the declaration's value: the owner is the only reader.
+    /// The value is taken by a closure that receives the entry as a
+    /// pair, by the second element of the pair, by the `value` member
+    /// of the entry the comparison found, or by a pattern that binds the
+    /// entry's pair. A comparison that decides about the field rather
+    /// than finding its entry does not find the value either, so a site
+    /// that skips the field and takes another header's value is not a
+    /// reader.
+    ///
+    /// The entry travels, so the value may be taken under another name
+    /// than the one the comparison used: a binding of the entry, a
+    /// closure that receives it from the search that found it, and a
+    /// helper that found it and hands it to its caller all hold the
+    /// field's own entry. The value the site takes under one of those
+    /// names is the field's value, so the rule follows the entry rather
+    /// than the name the site happened to give it.
+    fn finish(&mut self) {
+        self.follow_the_entry();
+        let same_entry = self
+            .selected_bases
+            .iter()
+            .any(|base| self.value_bases.iter().any(|value| value == base));
+        let from_the_entry = self.field_entry_names.iter().any(|name| {
+            self.value_bases.iter().any(|value| value == name)
+                || self.pair_element_bases.iter().any(|value| value == name)
+        });
+        if (self.selects_field
+            && (self.takes_entry_value
+                || self.takes_pair_element
+                || same_entry
+                || self.takes_pattern_entry_value))
+            || from_the_entry
+        {
+            self.reads_value = true;
+        }
+    }
+
+    /// The names the entry the comparison found travels under.
+    ///
+    /// A binding of the entry holds it under a name of its own, so the
+    /// value the site takes under that name is the field's value.
+    fn follow_the_entry(&mut self) {
+        let mut changed = true;
+        while changed {
+            changed = false;
+            for (alias, base) in self.entry_copies.clone() {
+                let known =
+                    self.selected_bases.contains(&base) || self.field_entry_names.contains(&base);
+                if known && !self.field_entry_names.contains(&alias) {
+                    self.field_entry_names.push(alias);
+                    changed = true;
+                }
+            }
+        }
+    }
+
     /// Records a comparison of a header's name with the field's name.
     ///
     /// A comparison finds the field's own entry, so it selects it. A
@@ -2063,6 +2233,123 @@ impl ContentLengthReaderFacts {
             .used_names
             .iter()
             .any(|name| self.bound_value_names.contains(name))
+    }
+}
+
+/// The collector of the closures that receive the field's own entry.
+///
+/// A search compares a header's name with the field's name, so the
+/// entry it finds is the field's own entry, and a closure that receives
+/// the entry from that search receives the field's own entry. The value
+/// such a closure takes is the field's value.
+#[derive(Default)]
+struct ContentLengthEntryChainCollector {
+    /// The names the file holds the field's name under.
+    field_aliases: Vec<String>,
+    /// The names the entry is held under.
+    names: Vec<String>,
+}
+
+impl Visit<'_> for ContentLengthEntryChainCollector {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        // A closure that receives the entry a search found holds that
+        // entry, so the value it takes is the field's value.
+        if let Some(param) = closure_param_name(node.args.first())
+            && search_entry_name(&node.receiver, &self.field_aliases).is_some()
+        {
+            self.names.push(param);
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+/// The expression a `?` or a parenthesis stands for.
+///
+/// A call that a site writes with a `?` is the call itself, so the rule
+/// sees the helper it names.
+fn unwrapped_expr(expr: &syn::Expr) -> &syn::Expr {
+    match expr {
+        syn::Expr::Try(try_expr) => unwrapped_expr(&try_expr.expr),
+        syn::Expr::Paren(paren) => unwrapped_expr(&paren.expr),
+        syn::Expr::Group(group) => unwrapped_expr(&group.expr),
+        _ => expr,
+    }
+}
+
+/// The name a closure binds, when the closure takes one thing.
+fn closure_param_name(argument: Option<&syn::Expr>) -> Option<String> {
+    let Some(syn::Expr::Closure(closure)) = argument else {
+        return None;
+    };
+    if closure.inputs.len() != 1 {
+        return None;
+    }
+    let syn::Pat::Ident(binding) = &closure.inputs[0] else {
+        return None;
+    };
+    if binding.subpat.is_some() {
+        return None;
+    }
+    Some(binding.ident.to_string())
+}
+
+/// The name a search binds the entry it finds to.
+///
+/// A search compares a header's name with the field's name, so the
+/// entry it finds is the field's own entry, and the closure the search
+/// takes binds that entry under a name of its own.
+fn search_entry_name(expr: &syn::Expr, field_aliases: &[String]) -> Option<String> {
+    let syn::Expr::MethodCall(call) = unwrapped_expr(expr) else {
+        return None;
+    };
+    if !matches!(call.method.to_string().as_str(), "find" | "find_map") {
+        return None;
+    }
+    let argument = call.args.first()?;
+    let syn::Expr::Closure(closure) = argument else {
+        return None;
+    };
+    let name = closure_param_name(Some(argument))?;
+    let mut scope = ContentLengthReaderFacts {
+        field_aliases: field_aliases.to_vec(),
+        ..ContentLengthReaderFacts::default()
+    };
+    scope.visit_expr(&closure.body);
+    scope.selects_field.then_some(name)
+}
+
+/// The names a pattern binds.
+fn pattern_binding_names(pat: &syn::Pat) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_pattern_binding_names(pat, &mut names);
+    names
+}
+
+/// The names a pattern binds, collected.
+fn collect_pattern_binding_names(pat: &syn::Pat, names: &mut Vec<String>) {
+    match pat {
+        syn::Pat::Ident(binding) => {
+            if binding.subpat.is_none() {
+                names.push(binding.ident.to_string());
+            }
+        }
+        syn::Pat::Tuple(tuple) => {
+            for element in &tuple.elems {
+                collect_pattern_binding_names(element, names);
+            }
+        }
+        syn::Pat::TupleStruct(tuple) => {
+            for element in &tuple.elems {
+                collect_pattern_binding_names(element, names);
+            }
+        }
+        syn::Pat::Struct(structure) => {
+            for field in &structure.fields {
+                collect_pattern_binding_names(&field.pat, names);
+            }
+        }
+        syn::Pat::Reference(reference) => collect_pattern_binding_names(&reference.pat, names),
+        _ => {}
     }
 }
 
@@ -8408,5 +8695,141 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
             "#,
         );
         assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_value_through_a_binding_of_the_entry() {
+        // A binding of the entry the comparison found holds that entry
+        // under a name of its own, so the value the site takes under
+        // that name is the field's value.
+        let bound = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    for header in headers {
+        if header.name.eq_ignore_ascii_case("content-length") {
+            let entry = header;
+            return Some(entry.value);
+        }
+    }
+    None
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&bound.0, &bound.1, &[]).unwrap(),
+            [
+                "qpxd/src/upstream/raw_http1/raw_head.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_value_through_a_closure_that_receives_the_entry() {
+        // A closure that receives the entry a search found holds that
+        // entry, so the value it takes is the field's value.
+        let chain = (
+            "qpxd/src/reverse/transport/raw_http1.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("content-length"))
+        .map(|entry| entry.value)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&chain.0, &chain.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/raw_http1.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_value_through_a_pattern_that_binds_the_entry() {
+        // A search's result bound by a pattern holds the entry the
+        // search found.
+        let pattern = (
+            "qpxd/src/reverse/transport/raw_http1.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    let Some(entry) = headers
+        .iter()
+        .find(|h| h.name.eq_ignore_ascii_case("content-length"))
+    else {
+        return None;
+    };
+    Some(entry.value)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&pattern.0, &pattern.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/raw_http1.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_value_through_a_helper_that_found_the_entry() {
+        // A helper that found the entry hands it to its caller, so the
+        // value the caller takes is the field's value.
+        let helper = (
+            "qpxd/src/reverse/transport/raw_http1.rs".to_string(),
+            r#"
+fn find_content_length(headers: &[Header<'_>]) -> Option<&Header<'_>> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+}
+
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    let entry = find_content_length(headers)?;
+    Some(entry.value)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&helper.0, &helper.1, &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/raw_http1.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_allows_a_helper_that_found_another_entry() {
+        // A helper that finds another header's entry does not hand the
+        // field's entry over, so the value its caller takes is another
+        // header's value.
+        let other = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn find_content_type(headers: &[Header<'_>]) -> Option<&Header<'_>> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-type"))
+}
+
+fn other_value(headers: &[Header<'_>]) -> Option<&[u8]> {
+    let entry = find_content_type(headers)?;
+    Some(entry.value)
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other.0, &other.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a helper that finds another header's entry does not hand the field's entry over"
+        );
     }
 }

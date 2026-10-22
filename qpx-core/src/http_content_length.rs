@@ -236,13 +236,21 @@ pub enum ContentLengthError {
 /// entry, decide about the field, so a site that skips the field and
 /// takes another header's value is not a reader. The value has to come
 /// from the entry the comparison found: the gate reads the `value`
-/// member only when the site takes it under the name it compared, so a
-/// site that compares the field's name and takes another entry's value
-/// is not a reader either. The gate follows a binding of a header
-/// entry's name as well: a site that binds the entry's name to a name of
-/// its own and compares that name with the field's name compares the
-/// entry's name, so the binding stands for the entry the name came from
-/// and the value the site takes is that entry's value. Test code is not
+/// member only when the site takes it under the name it compared or
+/// under a name the entry travels to, so a site that compares the
+/// field's name and takes another entry's value is not a reader
+/// either. The gate follows the entry as it travels: a binding of the
+/// entry holds it under a name of its own, a closure that receives it
+/// from the search that found it holds it under the name the closure
+/// binds, a pattern that binds the search's result holds it as well,
+/// and a helper of the same file that found it hands it to its caller,
+/// which binds the result, so the value the site takes under any of
+/// those names is the field's value. The gate follows a binding of a
+/// header entry's name as well: a site that binds the entry's name to a
+/// name of its own and compares that name with the field's name
+/// compares the entry's name, so the binding stands for the entry the
+/// name came from and the value the site takes is that entry's value.
+/// Test code is not
 /// part of that question, because a test observes the value to assert on
 /// what the proxy put on the wire rather than to decide what the proxy
 /// does; a test that reads the value and turns it into a number is still
