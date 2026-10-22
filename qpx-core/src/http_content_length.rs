@@ -211,7 +211,13 @@ pub enum ContentLengthError {
 /// never used. The gate sees the field named through a reference to the
 /// constant, through the constant's text and through a name built from
 /// the field's text, so a reader cannot hide behind another spelling of
-/// the field's name. Test code is not part of that question, because a test
+/// the field's name. The gate sees a value taken out of the field's own
+/// entry as well: a site that compares a header's name with the field's
+/// name and takes the value of a header entry in the same body finds that
+/// entry itself, which is the second reading of the field this owner
+/// removes, so the cache hands the owner the stored response's named
+/// values rather than selecting the field's values on its own. Test code
+/// is not part of that question, because a test
 /// observes the value to assert on what the proxy put on the wire rather
 /// than to decide what the proxy does; a test that reads the value and
 /// turns it into a number is still inside the gate.

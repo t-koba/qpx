@@ -1268,6 +1268,20 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// never used. Test code is not part of that rule: a test observes the
 /// value to assert on what the proxy put on the wire, and it does not
 /// decide what the proxy does.
+///
+/// A read of the value has two shapes. The first is a read of the field
+/// through a header map, which the gate sees by the name the site reads
+/// the field with. The second is a value taken out of the field's own
+/// entry in a list of header entries: a site that compares a header's
+/// name with the field's name and, in the same body, takes the value of
+/// a header entry finds that entry itself, and a second reading of the
+/// field is what this owner removes. The second shape is seen when the
+/// entry is taken apart in a closure that receives it as a pair and uses
+/// its second element, so a site that takes the value another way is
+/// beyond it. What the gate cannot see is a site that finds the field's
+/// entry by a name it holds in a variable of its own, and a site whose
+/// name comparison and whose taken value stand in two different
+/// functions.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1434,9 +1448,11 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// value itself interprets the declaration on its own, whether it turns the
 /// value into a number in the same body or hands the value to another
 /// function that does, so the rule sees the read and not the parse that may
-/// follow it. A read of the value is therefore a violation on its own, and
-/// a site that reads the value and calls the owner as well is a violation
-/// too, because the owner is the only reader.
+/// follow it. The value is read either through a header map or out of the
+/// entry the site found by the field's name, and both are reads of the
+/// declaration's value. A read of the value is therefore a violation on
+/// its own, and a site that reads the value and calls the owner as well
+/// is a violation too, because the owner is the only reader.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -1498,6 +1514,17 @@ struct ContentLengthReaderFacts {
     /// site that reads the value and hands it to another function reads
     /// the declaration on its own just as a site that parses it does.
     reads_value: bool,
+    /// The function compares a header's name with the field's name.
+    ///
+    /// The comparison is what finds the field's own entry in a list of
+    /// header entries, so it is the first half of a read of the value.
+    compares_field: bool,
+    /// The function takes the value of a header entry.
+    ///
+    /// A header entry is a pair of a name and a value, so a closure that
+    /// receives such a pair and uses its second element takes that
+    /// entry's value.
+    takes_entry_value: bool,
     /// The function turns text into a number.
     parses_integer: bool,
     /// The function calls the owner.
@@ -1561,6 +1588,12 @@ impl ContentLengthFunctionCollector {
             ..ContentLengthReaderFacts::default()
         };
         facts.visit_block(block);
+        // A site that finds the field's own entry by comparing a header's
+        // name with the field's name and then takes that entry's value
+        // reads the declaration's value: the owner is the only reader.
+        if facts.compares_field && facts.takes_entry_value {
+            facts.reads_value = true;
+        }
         self.facts.push((name, facts));
     }
 }
@@ -1573,6 +1606,12 @@ impl Visit<'_> for ContentLengthReaderFacts {
             && names_field
         {
             self.reads_field = true;
+        }
+        // A comparison of a header's name with the field's name finds the
+        // field's own entry, whether the field is named by the argument or
+        // by the receiver.
+        if method.starts_with("eq") && (names_field || names_content_length_field(&node.receiver)) {
+            self.compares_field = true;
         }
         // A read of the field's value through the header map is the read
         // itself: whether the value is turned into a number here or
@@ -1636,6 +1675,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
             && (names_content_length_field(&node.left) || names_content_length_field(&node.right))
         {
             self.reads_field = true;
+            self.compares_field = true;
         }
         syn::visit::visit_expr_binary(self, node);
     }
@@ -1645,6 +1685,13 @@ impl Visit<'_> for ContentLengthReaderFacts {
             self.calls_owner = true;
         }
         syn::visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_closure(&mut self, node: &syn::ExprClosure) {
+        if closure_takes_entry_value(node) {
+            self.takes_entry_value = true;
+        }
+        syn::visit::visit_expr_closure(self, node);
     }
 
     fn visit_item_fn(&mut self, _node: &syn::ItemFn) {
@@ -1698,6 +1745,55 @@ fn names_content_length_field(expr: &syn::Expr) -> bool {
             builds_a_name && call.args.first().is_some_and(names_content_length_field)
         }
         _ => false,
+    }
+}
+
+/// Whether a closure takes the value of a header entry.
+///
+/// A header entry is a pair of a name and a value, so a closure that
+/// receives such a pair and uses its second element takes that entry's
+/// value. A closure that receives the pair but leaves the value unused
+/// looks at the name alone, and a closure that receives one thing is not
+/// looking at an entry at all.
+fn closure_takes_entry_value(closure: &syn::ExprClosure) -> bool {
+    if closure.inputs.len() != 1 {
+        return false;
+    }
+    let syn::Pat::Tuple(tuple) = &closure.inputs[0] else {
+        return false;
+    };
+    if tuple.elems.len() != 2 {
+        return false;
+    }
+    let syn::Pat::Ident(binding) = &tuple.elems[1] else {
+        return false;
+    };
+    if binding.subpat.is_some() {
+        return false;
+    }
+    let name = binding.ident.to_string();
+    let mut uses = BindingUse {
+        name: &name,
+        used: false,
+    };
+    uses.visit_expr(&closure.body);
+    uses.used
+}
+
+/// Whether a body uses a name.
+struct BindingUse<'a> {
+    /// The name the closure binds.
+    name: &'a str,
+    /// Whether the body uses it.
+    used: bool,
+}
+
+impl Visit<'_> for BindingUse<'_> {
+    fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+        if node.path.is_ident(self.name) {
+            self.used = true;
+        }
+        syn::visit::visit_expr_path(self, node);
     }
 }
 
@@ -5970,6 +6066,99 @@ fn declared_length(headers: &HeaderMap) -> Option<&HeaderValue> {
             r#"
 fn declared_type(headers: &HeaderMap) -> Option<&HeaderValue> {
     headers.get(&CONTENT_TYPE)
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other_field.0, &other_field.1, &[])
+                .unwrap()
+                .is_empty(),
+            "another field's name is not the field"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_site_that_takes_the_field_value_by_name() {
+        // A site that finds the field's own entry by comparing a header's
+        // name with the field's name and then takes that entry's value
+        // reads the declaration's value: the owner is the only reader.
+        let selected = (
+            "qpxd-cache/src/entry.rs".to_string(),
+            r#"
+fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
+    let values = envelope
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(CONTENT_LENGTH.as_str()))
+        .map(|(_, value)| value.as_str());
+    qpx_core::http_content_length::declared_content_length_in_values(values)
+        .ok()
+        .flatten()
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&selected.0, &selected.1, &[])
+                .unwrap(),
+            [
+                "qpxd-cache/src/entry.rs: the function stored_content_length reads the declared Content-Length's value as well as calling the owner; it must read the declaration through the owner alone"
+            ]
+        );
+
+        // A site that hands the named values to the owner does not select
+        // the field's values itself, so it is not a reader.
+        let folded = (
+            "qpxd-cache/src/entry.rs".to_string(),
+            r#"
+fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
+    let named = envelope.headers.iter().map(|(name, value)| (name, value));
+    qpx_core::http_content_length::declared_content_length_in_named_values(named)
+        .ok()
+        .flatten()
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&folded.0, &folded.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a site that hands the named values to the owner is not a reader"
+        );
+
+        // A site that compares the field's name and leaves the value alone
+        // decides about the field rather than reading its value.
+        let name_only = (
+            "qpxd/src/upstream/raw_http1/raw_head.rs".to_string(),
+            r#"
+fn strips_the_field(headers: &[Header<'_>]) -> bool {
+    headers
+        .iter()
+        .any(|header| header.name.eq_ignore_ascii_case(b"content-length"))
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&name_only.0, &name_only.1, &[])
+                .unwrap()
+                .is_empty(),
+            "a site that compares the field's name and leaves the value alone is not a reader"
+        );
+
+        // Another field's name is not the field.
+        let other_field = (
+            "qpxd-cache/src/entry.rs".to_string(),
+            r#"
+fn stored_type(envelope: &CachedResponseEnvelope) -> Option<&str> {
+    let mut values = envelope
+        .headers
+        .iter()
+        .filter(|(name, _)| name.eq_ignore_ascii_case(CONTENT_TYPE.as_str()))
+        .map(|(_, value)| value.as_str());
+    values.next()
 }
 "#
             .to_string(),
