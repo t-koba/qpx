@@ -1,9 +1,14 @@
 //! The declared Content-Length.
 //!
-//! RFC 9110 section 8.6 gives the field one grammar: every value is a
-//! comma-separated list of `1*DIGIT` members, and every member of every
-//! value declares the same length, so a value that names two different
-//! lengths is a conflict rather than a choice.
+//! RFC 9110 section 8.6 gives the field one grammar, `Content-Length =
+//! 1*DIGIT`, so the value a sender writes is one decimal. The section
+//! also names the one exception a recipient has: a value that is the same
+//! decimal repeated as a comma-separated list may be rejected or
+//! replaced with a single instance of the decimal, because it likely
+//! means an upstream processor combined a duplicate. qpx takes the
+//! replacement, so its reader treats an equal-member comma list as one
+//! length, and a value that names two different lengths is a conflict
+//! rather than a choice.
 //!
 //! The member grammar, the conflict rule and the entry points have one
 //! owner, and it sits in qpx-core, below every crate that reads the
@@ -16,17 +21,24 @@
 //! the field's values itself.
 //!
 //! The field has a sending half as well, and the owner holds it too.
-//! RFC 9110 section 8.6 gives the field the grammar `1*DIGIT`, so the
-//! value a sender writes is one decimal; the receiving half above reads
-//! a comma list of equal members as one length, and such a list is a
-//! value that does not match the grammar a sender writes. The section's
-//! sender rule forbids forwarding a value that does not match that
-//! grammar, and the section's one exception lets a recipient of an
-//! equal-member comma list either reject the message or replace that
-//! value with a single instance of the decimal value. qpx replaces it,
-//! so every writer emits one field line whose value is the resolved
-//! decimal, and the owner holds the value that is written as well as the
-//! reading of the value that was received.
+//! The section's sender rule forbids forwarding a value that does not
+//! match the grammar, and the section's one exception lets a recipient
+//! of an equal-member comma list either reject the message or replace
+//! that value with a single instance of the decimal value. qpx
+//! replaces it: the owner holds the value a writer emits for a resolved
+//! length, and the writers that forward a declaration write that value,
+//! so the field leaves as one field line whose value is the resolved
+//! decimal.
+//!
+//! The writers that write it are the ones this tree owns: the HTTP/1
+//! request writer, the HTTP/1 raw response relay, the reverse raw
+//! HTTP/1 fast path, the HTTP/1 response writers to the client, the
+//! HTTP/2 response writer, the HTTP/3 response head preparation and the
+//! HTTP/3 library's response head sanitizer. A path that hands a header
+//! map to another library's writer - the HTTP/1 client library, and the
+//! HTTP/2 and HTTP/3 client libraries - leaves that library to write
+//! the values the map holds, so a declaration those paths carry is not
+//! written by qpx in the canonical form.
 
 use http::HeaderMap;
 use http::HeaderValue;
@@ -68,9 +80,11 @@ pub enum ContentLengthError {
 
 /// The Content-Length that a header set declares.
 ///
-/// RFC 9110 section 8.6: every value is a comma-separated list of `1*DIGIT`
-/// members, and every member of every value declares the same length, so a
-/// value that names two different lengths is a conflict rather than a choice.
+/// The field's grammar is one decimal (RFC 9110 section 8.6), and the
+/// section's one exception lets a recipient treat a value that is the
+/// same decimal repeated as a comma-separated list as that decimal, so a
+/// value here may hold such a list and still name one length. Two
+/// different lengths are a conflict rather than a choice.
 ///
 /// The field's sending half belongs to the owner as well: the grammar a
 /// sender writes is one decimal, so the value the owner writes for a
@@ -394,9 +408,12 @@ fn merge_value(value: &str, declared: &mut Option<u64>) -> Result<(), ContentLen
 
 /// The Content-Length that a sequence of field values declares.
 ///
-/// The values are the field's values in the order they appear, and each one
-/// is a comma-separated list of `1*DIGIT` members (RFC 9110 section 8.6),
-/// so two different lengths are a conflict rather than a choice.
+/// The values are the field's values in the order they appear. The
+/// field's grammar is one decimal (RFC 9110 section 8.6), and the
+/// section's one exception lets a recipient treat a value that is the
+/// same decimal repeated as a comma-separated list as that decimal, so a
+/// value here may hold such a list and still name one length. Two
+/// different lengths are a conflict rather than a choice.
 ///
 /// The field's sending half belongs to the owner as well: the grammar a
 /// sender writes is one decimal, so the value the owner writes for a
