@@ -118,6 +118,7 @@ async fn proxy_wss(
             warn!(error = ?err, upstream = %authority, "reverse_edges websocket TLS upstream closed");
         }
     });
+    qpx_core::http_content_length::canonicalize_content_length(req.headers_mut());
     let mut response = timeout(timeout_dur, sender.send_request(req))
         .await??
         .map(Body::from);

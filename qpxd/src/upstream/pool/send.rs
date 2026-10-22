@@ -21,6 +21,7 @@ pub(crate) async fn send_via_upstream_proxy(
 ) -> Result<Response<Body>> {
     let endpoint = upstream.endpoint().clone();
     set_proxy_authorization_header(req.headers_mut(), endpoint.proxy_authorization.as_ref());
+    qpx_core::http_content_length::canonicalize_content_length(req.headers_mut());
     let pool_key = upstream_proxy_pool_key(&endpoint, upstream.trust());
 
     let slot = pool.slot_for(&pool_key).await;

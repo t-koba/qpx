@@ -66,8 +66,9 @@ pub(crate) fn shared_http_client() -> &'static Client<HttpConnector, Body> {
 }
 
 pub(crate) async fn request_with_shared_client(
-    req: http::Request<Body>,
+    mut req: http::Request<Body>,
 ) -> Result<Response<Body>, hyper_util::client::legacy::Error> {
+    qpx_core::http_content_length::canonicalize_content_length(req.headers_mut());
     Ok(shared_http_client().request(req).await?.map(Body::from))
 }
 
@@ -209,6 +210,59 @@ mod tests {
             resolved.as_ref().map(|upstream| upstream.label()),
             Some("127.0.0.1:3128")
         );
+    }
+
+    #[tokio::test]
+    async fn shared_client_emits_one_canonical_content_length() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::time::{Duration, timeout};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let authority = listener.local_addr().expect("address");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            let mut captured = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 1024];
+                let count = timeout(Duration::from_secs(5), stream.read(&mut chunk))
+                    .await
+                    .expect("request head timeout")
+                    .expect("read request");
+                assert_ne!(count, 0, "client closed before completing the request head");
+                captured.extend_from_slice(&chunk[..count]);
+                assert!(captured.len() <= 8192, "request head exceeded its bound");
+                if captured.windows(4).any(|window| window == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                .await
+                .expect("write response");
+            captured
+        });
+
+        let request = http::Request::builder()
+            .method(http::Method::POST)
+            .uri(format!("http://{authority}/canonical-length"))
+            .header(http::header::CONTENT_LENGTH, "0, 0")
+            .body(qpx_http::body::Body::empty())
+            .expect("request");
+        let response = request_with_shared_client(request)
+            .await
+            .expect("shared-client request");
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let captured = timeout(Duration::from_secs(5), server)
+            .await
+            .expect("capture timeout")
+            .expect("capture task");
+        let captured = String::from_utf8(captured).expect("request is text");
+        let content_length_lines: Vec<_> = captured
+            .lines()
+            .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
+            .collect();
+        assert_eq!(content_length_lines, ["content-length: 0"]);
     }
 
     #[test]

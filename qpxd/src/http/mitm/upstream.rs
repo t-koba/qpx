@@ -152,6 +152,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             crate::http::protocol::websocket::websocket_response_expectation(input.req.headers())
         })
         .transpose()?;
+    qpx_core::http_content_length::canonicalize_content_length(input.req.headers_mut());
     let mut guard = input.sender.lock().await;
     let upstream_result = timeout(upstream_timeout, guard.send_request(input.req)).await;
     record_upstream_request_duration(input.audit.kind, upstream_started.elapsed());

@@ -380,6 +380,7 @@ pub(crate) async fn proxy_websocket_http1(
         sender
     };
 
+    qpx_core::http_content_length::canonicalize_content_length(req.headers_mut());
     let mut response = timeout(timeout_dur, sender.send_request(req))
         .await??
         .map(Body::from);

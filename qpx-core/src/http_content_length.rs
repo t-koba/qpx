@@ -45,11 +45,11 @@
 //! request writer, the HTTP/1 raw response relay, the reverse raw
 //! HTTP/1 fast path, the HTTP/1 response writers to the client, the
 //! HTTP/2 request and response writers, the HTTP/3 request and response
-//! writers, and the HTTP/3 library's response head sanitizer. A path
-//! that hands a header map to another library's writer - the HTTP/1
-//! client library - leaves that library to write the values the map
-//! holds, so a declaration those paths carry is not written by qpx in
-//! the canonical form.
+//! writers, and the HTTP/3 library's response head sanitizer. The paths
+//! that hand a header map to Hyper's HTTP/1 client writer first replace a
+//! resolved declaration with this owner's canonical value, so the library
+//! writes one decimal rather than the text that arrived. A declaration
+//! this owner refuses is left for the writer's own rules to handle.
 
 use http::HeaderMap;
 use http::HeaderValue;
@@ -515,6 +515,24 @@ where
     }
 }
 
+/// Replaces the field's values with the canonical value for the length
+/// they declare.
+///
+/// The field's grammar is one decimal, so a sender writes one field line
+/// whose value is the resolved decimal. A path that hands a header map to
+/// another library's writer calls this first, so the library writes the
+/// value the section allows rather than the text that arrived.
+///
+/// A declaration the owner refuses names no length, so the field is left
+/// as it is: the writer's own rules decide what a declaration it cannot
+/// read means.
+pub fn canonicalize_content_length(headers: &mut HeaderMap) {
+    let Ok(Some(length)) = declared_content_length(headers) else {
+        return;
+    };
+    headers.insert(CONTENT_LENGTH, canonical_content_length_value(length));
+}
+
 /// The canonical field value for a resolved length.
 ///
 /// RFC 9110 section 8.6 gives the field the grammar `1*DIGIT`, so the
@@ -555,6 +573,31 @@ mod tests {
                 .expect("text"),
             "18446744073709551615"
         );
+    }
+
+    #[test]
+    fn canonicalize_content_length_replaces_equal_members_with_one_decimal() {
+        let mut headers = HeaderMap::new();
+        headers.append(CONTENT_LENGTH, HeaderValue::from_static("42, 42"));
+        headers.append(CONTENT_LENGTH, HeaderValue::from_static("42"));
+
+        canonicalize_content_length(&mut headers);
+
+        let values: Vec<_> = headers.get_all(CONTENT_LENGTH).iter().collect();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], "42");
+    }
+
+    #[test]
+    fn canonicalize_content_length_leaves_a_refused_declaration_unchanged() {
+        let mut headers = HeaderMap::new();
+        headers.append(CONTENT_LENGTH, HeaderValue::from_static("42"));
+        headers.append(CONTENT_LENGTH, HeaderValue::from_static("43"));
+
+        canonicalize_content_length(&mut headers);
+
+        let values: Vec<_> = headers.get_all(CONTENT_LENGTH).iter().collect();
+        assert_eq!(values, ["42", "43"]);
     }
 
     #[test]
