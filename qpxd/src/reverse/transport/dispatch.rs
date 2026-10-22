@@ -20,6 +20,7 @@ mod browser_reports;
 mod dispatch_cache;
 mod dispatch_http;
 mod dispatch_ipc;
+mod finalize;
 mod modules;
 mod outcome;
 mod plain;

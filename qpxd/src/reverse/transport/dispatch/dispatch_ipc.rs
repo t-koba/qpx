@@ -1,11 +1,11 @@
 use super::super::mirrors::{
-    dispatch_mirrors, record_reverse_upstream_error, record_reverse_upstream_status,
-    record_reverse_upstream_timeout,
+    record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
 };
 use super::super::response_rules::{
     DispatchResponseRuleInput, ResponseRuleInput, apply_dispatch_response_rules,
 };
 use super::super::{InterimList, empty_interim_response};
+use super::finalize::{ReverseFinalizeResponseInput, finalize_reverse_dispatch_response};
 use super::record_reverse_success_metrics;
 use super::{
     ReverseAttemptOutcome, ReverseIpcDispatchInput, ReverseIpcSuccessInput,
@@ -14,9 +14,8 @@ use super::{
     record_reverse_loop_error, reverse_continue_response_rule, reverse_retry_backoff,
 };
 use crate::http::dispatch::{
-    DispatchCacheWriteInput, DispatchOutcome, annotate_dispatch_response,
+    DispatchOutcome, annotate_dispatch_response,
     concurrency_limited_response_for_parts_with_limits, finalize_dispatch_stale_if_error_response,
-    write_dispatch_cache_result,
 };
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::ipc_client::{ClientConnInfo, IpcUpstreamRequestContext, proxy_ipc_upstream};
@@ -305,7 +304,7 @@ async fn handle_reverse_ipc_success(
         proxy_name,
     })
     .await?;
-    let (mut resp, route_headers_for_response, response_cache_bypass, policy_tags, mirror) =
+    let (resp, route_headers_for_response, response_cache_bypass, policy_tags, mirror) =
         match reverse_continue_response_rule(ReverseResponseRuleInput {
             response_rule,
             http_modules,
@@ -343,71 +342,32 @@ async fn handle_reverse_ipc_success(
         .await);
     }
     record_reverse_success_metrics(state, started);
-    resp = write_dispatch_cache_result(DispatchCacheWriteInput {
+    let resp = finalize_reverse_dispatch_response(ReverseFinalizeResponseInput {
         response: resp,
+        state,
+        route,
+        request_method,
         cache_policy,
         response_cache_bypass,
         request_headers_snapshot,
         cache_target_key,
         cache_lookup_key,
-        revalidation_state: revalidation_state.take(),
-        request_collapse_guard: cache_collapse_guard.take(),
-        request_method,
-        response_delay_secs: cache_policy
-            .and_then(|_| started.map(|started| started.elapsed().as_secs()))
-            .unwrap_or(0),
-        state,
+        revalidation_state,
+        cache_collapse_guard,
+        started,
+        route_headers_for_response,
+        export_session,
+        template,
+        replay_recorder: replay_recorder.as_ref(),
+        mirror_upstreams,
+        mirror,
+        route_timeout,
+        proxy_name,
+        http_modules,
+        audit_ctx,
+        policy_tags: policy_tags.as_slice(),
     })
     .await?;
-    resp = http_modules.prepare_downstream_response(resp).await?;
-    finalize_response_with_headers_in_place(
-        request_method,
-        resp.version(),
-        proxy_name,
-        &mut resp,
-        route_headers_for_response.as_deref(),
-        false,
-    );
-    resp = crate::http::capture::stream::emit_optional_response_for_export(
-        resp,
-        &route.plan,
-        export_session,
-    )
-    .await;
-    if mirror.unwrap_or(true) && !mirror_upstreams.is_empty() {
-        if let Some(template) = template {
-            dispatch_mirrors(
-                state.pools.clone(),
-                template,
-                std::mem::take(mirror_upstreams),
-                route_timeout,
-                route.policy.health.clone(),
-                route.policy.lifecycle.clone(),
-                route.upstream_trust.clone(),
-                proxy_name,
-            );
-        } else if let Some(recorder) = replay_recorder.as_ref()
-            && let Some(template) = recorder.template().await
-        {
-            dispatch_mirrors(
-                state.pools.clone(),
-                template.as_ref(),
-                std::mem::take(mirror_upstreams),
-                route_timeout,
-                route.policy.health.clone(),
-                route.policy.lifecycle.clone(),
-                route.upstream_trust.clone(),
-                proxy_name,
-            );
-        }
-    }
-    http_modules.on_logging(Some(resp.status()), None).await;
-    annotate_dispatch_response(
-        &mut resp,
-        audit_ctx,
-        DispatchOutcome::Allow,
-        policy_tags.as_ref(),
-    );
     Ok(ReverseAttemptOutcome::Response(Box::new(
         empty_interim_response(resp),
     )))
