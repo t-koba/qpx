@@ -1400,11 +1400,13 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// The rule is what it says and no more. It sees a read of the field
 /// through `get`, `get_all` and `contains_key`, a read of the field
 /// through an index, and it sees a comparison of a header name with the
-/// field's name. It sees a parse whose type is written and a parse whose
-/// type is inferred, because the field's value is a length either way. It
-/// does not see a reader that lives outside a function body, and it reads
-/// a function's body as one whole rather than tying a parse to the read
-/// it belongs to.
+/// field's name. It sees the field named through a reference, through the
+/// constant's text and through a name built from the text. It sees a
+/// parse whose type is written and a parse whose type is inferred,
+/// because the field's value is a length either way. It does not see a
+/// reader that lives outside a function body, it does not see a name the
+/// site holds in a variable of its own, and it reads a function's body as
+/// one whole rather than tying a parse to the read it belongs to.
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
@@ -1656,6 +1658,15 @@ impl Visit<'_> for ContentLengthReaderFacts {
 }
 
 /// Whether an expression names the Content-Length field.
+///
+/// The field is named by the constant the http crate spells it with and
+/// by the field's name as text. A site may reach either of those through
+/// a reference, through the constant's text or through a name built from
+/// the text, so the question asks about the expression the site reads the
+/// field with and not only about the two spellings themselves: a read of
+/// the field through `&CONTENT_LENGTH`, through `CONTENT_LENGTH.as_str()`
+/// or through a name built from `"content-length"` names the field as
+/// well.
 fn names_content_length_field(expr: &syn::Expr) -> bool {
     match expr {
         syn::Expr::Path(path) => path
@@ -1670,6 +1681,22 @@ fn names_content_length_field(expr: &syn::Expr) -> bool {
                 .eq_ignore_ascii_case(CONTENT_LENGTH_FIELD.as_bytes()),
             _ => false,
         },
+        // A reference to the field's name names the field.
+        syn::Expr::Reference(reference) => names_content_length_field(&reference.expr),
+        // The constant's text names the field.
+        syn::Expr::MethodCall(call) => {
+            call.method == "as_str" && names_content_length_field(&call.receiver)
+        }
+        // A name built from the field's text names the field.
+        syn::Expr::Call(call) => {
+            let builds_a_name = matches!(&*call.func, syn::Expr::Path(path)
+                if path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == "from_static"));
+            builds_a_name && call.args.first().is_some_and(names_content_length_field)
+        }
         _ => false,
     }
 }
@@ -5870,6 +5897,88 @@ mod tests {
                 .unwrap()
                 .is_empty(),
             "a site the owner names may read the declaration"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_the_field_named_in_another_spelling() {
+        // A read of the field through a reference to the constant names
+        // the field.
+        let by_reference = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<&HeaderValue> {
+    headers.get(&CONTENT_LENGTH)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &by_reference.0,
+                &by_reference.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // The constant's text names the field.
+        let by_text = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<&HeaderValue> {
+    headers.get(CONTENT_LENGTH.as_str())
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(&by_text.0, &by_text.1, &[]).unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // A name built from the field's text names the field.
+        let by_built_name = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_length(headers: &HeaderMap) -> Option<&HeaderValue> {
+    headers.get(&HeaderName::from_static("content-length"))
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_production_value_reader_violations(
+                &by_built_name.0,
+                &by_built_name.1,
+                &[]
+            )
+            .unwrap(),
+            [
+                "qpxd/src/http/body/size/io.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+
+        // Another field's name is not the field.
+        let other_field = (
+            "qpxd/src/http/body/size/io.rs".to_string(),
+            r#"
+fn declared_type(headers: &HeaderMap) -> Option<&HeaderValue> {
+    headers.get(&CONTENT_TYPE)
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_production_value_reader_violations(&other_field.0, &other_field.1, &[])
+                .unwrap()
+                .is_empty(),
+            "another field's name is not the field"
         );
     }
 

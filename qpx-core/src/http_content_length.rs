@@ -207,7 +207,10 @@ pub enum ContentLengthError {
 /// is a violation on its own. That is what catches the readers the naming
 /// rule cannot see: a site that reads the value and hands it to another
 /// function, and a site whose helper carries a name the workspace has
-/// never used. Test code is not part of that question, because a test
+/// never used. The gate sees the field named through a reference to the
+/// constant, through the constant's text and through a name built from
+/// the field's text, so a reader cannot hide behind another spelling of
+/// the field's name. Test code is not part of that question, because a test
 /// observes the value to assert on what the proxy put on the wire rather
 /// than to decide what the proxy does; a test that reads the value and
 /// turns it into a number is still inside the gate.
