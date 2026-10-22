@@ -328,9 +328,13 @@ pub fn declared_content_length_in_values<'a>(
 /// are raw bytes and a site whose lines are text reach the owner without
 /// copying them.
 ///
-/// A value that is not text is refused before a conflict is reported, the
-/// order the value-level entry point reports them in: the values are read
-/// first and the members are merged afterwards.
+/// A value that is not text is refused before a conflict is reported, even
+/// when the conflict is in an earlier value: the values are read as text
+/// first and the members are merged afterwards, so the first value that
+/// cannot be read is the error. The value-level entry point merges as it
+/// goes and stops at the first member it cannot read, and it cannot be
+/// given a value that is not text at all, so the two entry points report
+/// the same error wherever both of them can report one.
 pub fn declared_content_length_in_named_values<'a, N, V>(
     headers: impl IntoIterator<Item = (&'a N, &'a V)>,
 ) -> Result<Option<u64>, ContentLengthError>
@@ -461,6 +465,31 @@ mod tests {
                 (&b"content-length"[..], &[0xff][..]),
             ]),
             Err(ContentLengthError::InvalidHeader)
+        );
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_reports_a_non_text_value_before_a_conflict() {
+        // The values are read as text before the members are merged, so a
+        // value that cannot be read is the error even when an earlier
+        // value names two different lengths.
+        assert_eq!(
+            declared_content_length_in_named_values([
+                (&b"Content-Length"[..], &b"5, 6"[..]),
+                (&b"content-length"[..], &[0xff][..]),
+            ]),
+            Err(ContentLengthError::InvalidHeader)
+        );
+    }
+
+    #[test]
+    fn declared_content_length_in_values_reports_a_conflict_before_a_later_invalid_member() {
+        // The value-level entry point merges as it goes, so it stops at
+        // the first member it cannot read: a conflict in an earlier value
+        // is reported before a later value's invalid member.
+        assert_eq!(
+            declared_content_length_in_values(["5, 6", "+5"]),
+            Err(ContentLengthError::Conflicting)
         );
     }
 
