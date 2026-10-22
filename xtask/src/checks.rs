@@ -1236,9 +1236,10 @@ const CONTENT_LENGTH_READER_NAMES: [&str; 15] = [
 
 /// The qualified call a site that folds the declaration into the owner uses.
 ///
-/// The owner has two entry points, one for a header map and one for the
-/// field's values, so the call is matched by its name: a site that reads
-/// the declaration through either of them has folded it.
+/// The owner has three entry points, one for a header map, one for the
+/// field's values and one for a sequence of named header values, so the
+/// call is matched by its name: a site that reads the declaration through
+/// any of them has folded it.
 const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 
 /// The declared Content-Length has one owner, and the owner names the sites
@@ -1367,9 +1368,10 @@ const CONTENT_LENGTH_FIELD: &str = "content-length";
 const CONTENT_LENGTH_OWNER_MODULE: &str = "http_content_length";
 
 /// The entry points the owner has.
-const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 2] = [
+const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
     "declared_content_length",
     "declared_content_length_in_values",
+    "declared_content_length_in_named_values",
 ];
 
 /// The violations of a site that reads the declared Content-Length inline.
@@ -5434,6 +5436,52 @@ fn observed_size(headers: &HeaderMap) -> Option<u64> {
                 .unwrap()
                 .is_empty(),
             "a reader that calls the owner is not a violation"
+        );
+
+        // A reader that calls the owner's named-value entry point is not a
+        // violation either.
+        let folded_lines = (
+            "qpxd/src/reverse/transport/raw_http1.rs".to_string(),
+            r#"
+fn raw_declared_content_length(lines: &[(&str, &str)]) -> Option<u64> {
+    qpx_core::http_content_length::declared_content_length_in_named_values(lines)
+        .ok()
+        .flatten()
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_inline_reader_violations(&folded_lines.0, &folded_lines.1)
+                .unwrap()
+                .is_empty(),
+            "a reader that calls the owner's named-value entry point is not a violation"
+        );
+
+        // A reader that calls the owner's named-value entry point and still
+        // reads the field on its own is a violation as well.
+        let half_folded_lines = (
+            "qpxd/src/reverse/transport/raw_http1.rs".to_string(),
+            r#"
+fn raw_declared_content_length(headers: &HeaderMap, lines: &[(&str, &str)]) -> Option<u64> {
+    let own = headers
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    let owner = qpx_core::http_content_length::declared_content_length_in_named_values(lines)
+        .ok()
+        .flatten();
+    own.or(owner)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_inline_reader_violations(&half_folded_lines.0, &half_folded_lines.1)
+                .unwrap(),
+            [
+                "qpxd/src/reverse/transport/raw_http1.rs: the function raw_declared_content_length reads the declared Content-Length as well as calling the owner; it must read the declaration through the owner alone"
+            ]
         );
 
         // A function that turns text into a number without naming the

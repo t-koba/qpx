@@ -5,14 +5,26 @@
 //! value declares the same length, so a value that names two different
 //! lengths is a conflict rather than a choice.
 //!
-//! The member grammar, the conflict rule and the two entry points have
-//! one owner, and it sits in qpx-core, below every crate that reads the
+//! The member grammar, the conflict rule and the entry points have one
+//! owner, and it sits in qpx-core, below every crate that reads the
 //! declaration, so the HTTP stack and the IPC gateway read the field the
 //! same way instead of each keeping its own interpretation.
+//!
+//! The owner has an entry point for a header map, one for the field's
+//! values, and one for a sequence of named header values, so a site that
+//! reads raw header lines reaches the owner as well and does not select
+//! the field's values itself.
 
 use http::HeaderMap;
 use http::header::CONTENT_LENGTH;
 use thiserror::Error;
+
+/// The field's name, as a header spells it.
+///
+/// The name is compared case-insensitively, as HTTP requires, so a site
+/// that reads raw header lines reaches the owner without selecting the
+/// field's values itself.
+const CONTENT_LENGTH_NAME: &[u8] = b"content-length";
 
 /// Parses one Content-Length comma-list member per RFC 9110 §8.6
 /// (`1*DIGIT`): the trimmed member must be a nonempty ASCII digit sequence,
@@ -63,20 +75,21 @@ pub enum ContentLengthError {
 /// The upstream raw HTTP/1 path reads the declaration through the owner as
 /// well: `qpxd/src/upstream/raw_http1/mod.rs` calls it with the header map
 /// it holds, and `qpxd/src/upstream/raw_http1/raw_head.rs`, which reads raw
-/// header lines rather than a header map, hands the field's values to the
-/// owner's value-level entry point. A leading plus sign is refused there
-/// too, so an upstream response that frames its body with one is rejected
-/// instead of read.
+/// header lines rather than a header map, hands the lines to the owner's
+/// named-value entry point, which finds the field's own values. A leading
+/// plus sign is refused there too, so an upstream response that frames its
+/// body with one is rejected instead of read.
 ///
 /// The reverse raw HTTP/1 path reads the declaration through the owner as
 /// well: `qpxd/src/reverse/transport/raw_http1.rs` reads raw header lines
-/// rather than a header map, so it hands the field's values to the owner's
-/// value-level entry point, and the length it reads says whether the
-/// request may carry a body. A leading plus sign is refused there, so a
-/// request that declares its length as "+0" is treated as one that may
-/// carry a body instead of one without a body, and the fast path is
-/// declined for it. A comma list of equal members is still one length and
-/// two members that disagree are still a conflict.
+/// rather than a header map, so it hands the lines to the owner's
+/// named-value entry point, which finds the field's own values, and the
+/// length it reads says whether the request may carry a body. A leading
+/// plus sign is refused there, so a request that declares its length as
+/// "+0" is treated as one that may carry a body instead of one without a
+/// body, and the fast path is declined for it. A comma list of equal
+/// members is still one length and two members that disagree are still a
+/// conflict.
 ///
 /// The reverse mirror path reads the declaration through the owner as well:
 /// `qpxd/src/reverse/transport/mirrors.rs` calls it for the length that
@@ -171,12 +184,12 @@ pub enum ContentLengthError {
 /// body it reads.
 ///
 /// The IPC gateway reads the declaration through the owner as well:
-/// `qpxf/src/ipc_request.rs` hands the header list's Content-Length values
-/// to the owner's value-level entry point, so the length that says how many
-/// stdin bytes the script may read is the length the field declares. A
-/// leading plus sign is refused there too, so a request that declares its
-/// length that way is refused instead of read, and a comma list of equal
-/// members is one length there as well.
+/// `qpxf/src/ipc_request.rs` hands the header list's named values to the
+/// owner's named-value entry point, which finds the field's own values, so
+/// the length that says how many stdin bytes the script may read is the
+/// length the field declares. A leading plus sign is refused there too, so
+/// a request that declares its length that way is refused instead of read,
+/// and a comma list of equal members is one length there as well.
 ///
 /// The gate finds those helpers by the names the workspace has used for
 /// them, and it looks inside a function's body as well, so a site that
@@ -188,11 +201,11 @@ pub enum ContentLengthError {
 ///
 /// The test helpers read the declaration through the owner as well:
 /// `qpxd/src/test_util.rs` and `qpxd/tests/http_rfc/mod.rs` read a raw
-/// head rather than a header map, so they hand the head's Content-Length
-/// values to the owner's value-level entry point. A comma list of equal
-/// members is one length there now, so such a head declares the length of
-/// the body it carries, and a declaration the owner refuses names no
-/// length, so the helper reads no body.
+/// head rather than a header map, so they hand the head's lines to the
+/// owner's named-value entry point, which finds the field's own values. A
+/// comma list of equal members is one length there now, so such a head
+/// declares the length of the body it carries, and a declaration the owner
+/// refuses names no length, so the helper reads no body.
 ///
 /// The access log reads the declaration through the owner as well:
 /// `qpxd/src/reverse/listener/raw_http1.rs` and
@@ -270,6 +283,51 @@ pub fn declared_content_length_in_values<'a>(
     Ok(declared)
 }
 
+/// The Content-Length that a sequence of named header values declares.
+///
+/// A site that reads raw header lines has no header map to hand the
+/// owner, so it hands the lines themselves: the owner finds the field's
+/// own values by their name, matched case-insensitively as HTTP requires,
+/// and reads them with the same member grammar and the same conflict rule
+/// as every other reader. A site that selected the field's values itself
+/// kept a second reading of the field, which is the shape this owner
+/// removes.
+///
+/// The names and the values are borrowed as bytes, so a site whose lines
+/// are raw bytes and a site whose lines are text reach the owner without
+/// copying them.
+///
+/// A value that is not text is refused before a conflict is reported, the
+/// order the value-level entry point reports them in: the values are read
+/// first and the members are merged afterwards.
+pub fn declared_content_length_in_named_values<'a, N, V>(
+    headers: impl IntoIterator<Item = (&'a N, &'a V)>,
+) -> Result<Option<u64>, ContentLengthError>
+where
+    N: AsRef<[u8]> + ?Sized + 'a,
+    V: AsRef<[u8]> + ?Sized + 'a,
+{
+    let mut declared = None::<u64>;
+    let mut merge_error = None;
+    for (name, value) in headers {
+        let name: &[u8] = name.as_ref();
+        if !name.eq_ignore_ascii_case(CONTENT_LENGTH_NAME) {
+            continue;
+        }
+        let value: &[u8] = value.as_ref();
+        let value = std::str::from_utf8(value).map_err(|_| ContentLengthError::InvalidHeader)?;
+        if merge_error.is_none()
+            && let Err(error) = merge_value(value, &mut declared)
+        {
+            merge_error = Some(error);
+        }
+    }
+    match merge_error {
+        Some(error) => Err(error),
+        None => Ok(declared),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +367,70 @@ mod tests {
                 Err(ContentLengthError::InvalidValue)
             );
         }
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_reads_the_field_by_its_name() {
+        assert_eq!(
+            declared_content_length_in_named_values([
+                ("Content-Type", "text/plain"),
+                ("Content-Length", "42"),
+                ("content-length", "42, 42"),
+            ]),
+            Ok(Some(42))
+        );
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_ignores_the_other_fields() {
+        assert_eq!(
+            declared_content_length_in_named_values([("Content-Type", "text/plain")]),
+            Ok(None)
+        );
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_reads_raw_bytes() {
+        assert_eq!(
+            declared_content_length_in_named_values([
+                (&b"Content-Length"[..], &b"42"[..]),
+                (&b"content-length"[..], &b"42"[..]),
+            ]),
+            Ok(Some(42))
+        );
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_rejects_a_value_that_is_not_text() {
+        assert_eq!(
+            declared_content_length_in_named_values([(&b"Content-Length"[..], &[0xff][..])]),
+            Err(ContentLengthError::InvalidHeader)
+        );
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_rejects_conflicting_members() {
+        assert_eq!(
+            declared_content_length_in_named_values([
+                ("Content-Length", "5"),
+                ("content-length", "6"),
+            ]),
+            Err(ContentLengthError::Conflicting)
+        );
+    }
+
+    #[test]
+    fn declared_content_length_in_named_values_reports_a_value_that_is_not_text_first() {
+        // The values are read before the members are merged, so a value
+        // that is not text is reported before a conflict among the values
+        // that are text.
+        assert_eq!(
+            declared_content_length_in_named_values([
+                (&b"Content-Length"[..], &b"5, 6"[..]),
+                (&b"content-length"[..], &[0xff][..]),
+            ]),
+            Err(ContentLengthError::InvalidHeader)
+        );
     }
 
     #[test]

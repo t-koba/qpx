@@ -915,22 +915,16 @@ fn request_has_body_or_expect(headers: &[httparse::Header<'_>]) -> bool {
 /// The Content-Length that the raw header lines declare.
 ///
 /// The raw request has no header map to hand the owner, so it hands the
-/// field's values to the owner's value-level entry point: the member
-/// grammar and the conflict rule stay with the owner, and a member that is
-/// not a digit sequence is refused here as it is everywhere else.
+/// raw header lines to the owner's named-value entry point, which finds
+/// the field's own values: the member grammar and the conflict rule stay
+/// with the owner, and a member that is not a digit sequence is refused
+/// here as it is everywhere else.
 fn raw_declared_content_length(
     headers: &[httparse::Header<'_>],
 ) -> Result<Option<u64>, qpx_core::http_content_length::ContentLengthError> {
-    let mut values = Vec::new();
-    for header in headers {
-        if !header.name.eq_ignore_ascii_case("content-length") {
-            continue;
-        }
-        let raw = std::str::from_utf8(header.value)
-            .map_err(|_| qpx_core::http_content_length::ContentLengthError::InvalidHeader)?;
-        values.push(raw);
-    }
-    qpx_core::http_content_length::declared_content_length_in_values(values)
+    qpx_core::http_content_length::declared_content_length_in_named_values(
+        headers.iter().map(|header| (header.name, header.value)),
+    )
 }
 
 fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {

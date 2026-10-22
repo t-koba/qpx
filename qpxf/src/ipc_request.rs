@@ -37,11 +37,10 @@ pub(crate) fn plaintext_meta(status: u16) -> IpcResponseMeta {
 }
 
 pub(crate) fn declared_content_length(headers: &[(String, String)]) -> Result<Option<usize>> {
-    let values = headers
+    let named = headers
         .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .map(|(_, value)| value.as_str());
-    let declared = qpx_core::http_content_length::declared_content_length_in_values(values)
+        .map(|(name, value)| (name.as_str(), value.as_str()));
+    let declared = qpx_core::http_content_length::declared_content_length_in_named_values(named)
         .map_err(|err| match err {
             ContentLengthError::Conflicting => anyhow!("conflicting Content-Length values"),
             ContentLengthError::InvalidValue | ContentLengthError::InvalidHeader => {

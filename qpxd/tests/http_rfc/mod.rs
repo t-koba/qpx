@@ -196,15 +196,14 @@ type Http1Head = (u16, Vec<(String, String)>, Vec<u8>);
 /// The body length a response head declares.
 ///
 /// The head is a list of raw header lines rather than a header map, so its
-/// Content-Length values are handed to the owner, which owns the member
-/// grammar and the conflict rule. A head that declares no length, or one
-/// the owner refuses, declares no length here.
+/// named values are handed to the owner, which finds the field's own values
+/// and owns the member grammar and the conflict rule. A head that declares
+/// no length, or one the owner refuses, declares no length here.
 fn declared_content_length(headers: &[(String, String)]) -> usize {
-    let values = headers
+    let named = headers
         .iter()
-        .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-        .map(|(_, value)| value.as_str());
-    qpx_core::http_content_length::declared_content_length_in_values(values)
+        .map(|(name, value)| (name.as_str(), value.as_str()));
+    qpx_core::http_content_length::declared_content_length_in_named_values(named)
         .ok()
         .flatten()
         .and_then(|length| usize::try_from(length).ok())

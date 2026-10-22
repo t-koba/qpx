@@ -94,17 +94,13 @@ pub(crate) async fn spawn_http1_send_request(
 
 /// The body length a raw request head declares.
 ///
-/// The head is raw text rather than a header map, so its Content-Length
-/// values are handed to the owner, which owns the member grammar and the
-/// conflict rule. A head that declares no length, or one the owner
-/// refuses, declares no length here.
+/// The head is raw text rather than a header map, so its header lines are
+/// handed to the owner, which finds the field's own values and owns the
+/// member grammar and the conflict rule. A head that declares no length,
+/// or one the owner refuses, declares no length here.
 fn declared_content_length(head: &str) -> usize {
-    let values = head.lines().filter_map(|line| {
-        line.split_once(':')
-            .filter(|(name, _)| name.eq_ignore_ascii_case("content-length"))
-            .map(|(_, value)| value.trim())
-    });
-    qpx_core::http_content_length::declared_content_length_in_values(values)
+    let lines = head.lines().filter_map(|line| line.split_once(':'));
+    qpx_core::http_content_length::declared_content_length_in_named_values(lines)
         .ok()
         .flatten()
         .and_then(|length| usize::try_from(length).ok())
