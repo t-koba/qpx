@@ -30,6 +30,17 @@
 //! so the field leaves as one field line whose value is the resolved
 //! decimal.
 //!
+//! A declaration the owner refuses names no length, so the message it
+//! came in has ambiguous framing, and the tree answers each side of
+//! that. A request that carries one is answered with a bad request, and
+//! the HTTP/1 edge closes the connection, because a request whose length
+//! cannot be determined cannot be framed. A response from an origin
+//! that carries one is refused as well: the proxy answers the client
+//! with a bad gateway, and the connection to the origin is closed rather
+//! than reused, because the origin's framing is unknown. The reverse
+//! path may try another origin first, which is a new request rather
+//! than a forwarding of the response that could not be framed.
+//!
 //! The writers that write it are the ones this tree owns: the HTTP/1
 //! request writer, the HTTP/1 raw response relay, the reverse raw
 //! HTTP/1 fast path, the HTTP/1 response writers to the client, the
