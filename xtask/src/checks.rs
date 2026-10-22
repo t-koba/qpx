@@ -1284,9 +1284,11 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// however the entry travels: a binding of the entry holds it under a
 /// name of its own, a closure that receives it from the search that
 /// found it holds it under the name the closure binds, a pattern that
-/// binds the search's result holds it as well, and a helper of the
-/// same file that found it hands it to its caller, which binds the
-/// result.
+/// binds the search's result holds it as well, and a helper that
+/// found it hands it to its caller, which binds the result. The
+/// helper may stand in another file: the gate reads the files of the
+/// workspace together, so the helpers that found the field's own entry
+/// are known before the files that call them are read.
 ///
 /// The gate follows a binding of the field's name as well: a site that
 /// binds the field's name to a name of its own and reads the field
@@ -1313,9 +1315,10 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// so a comparison inside such a condition still finds the field's own
 /// entry: the code after the branch may hold it.
 /// What the gate cannot see is a site that finds the field's entry by a
-/// name it builds at runtime, a site whose helper that found the entry
-/// stands in another file, and a site that takes the value under a
-/// member of another name.
+/// name it builds at runtime, and a site that takes the value under a
+/// member of another name. A helper of another file that found the
+/// entry is seen when the caller calls it by the name it is defined
+/// with; a call through another name is not seen.
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1345,12 +1348,7 @@ fn check_content_length_single_owner(root: &Path) -> Result<()> {
     }
     let listed = content_length_listed_sites(&owner);
     let mut violations = content_length_single_owner_violations(&owner, &files);
-    for (path, content) in &files {
-        violations.extend(content_length_inline_reader_violations(path, content)?);
-        violations.extend(content_length_production_value_reader_violations(
-            path, content, &listed,
-        )?);
-    }
+    violations.extend(content_length_workspace_violations(&files, &listed)?);
     if !violations.is_empty() {
         bail!(
             "the declared Content-Length must have one owner ({CONTENT_LENGTH_OWNER}):\n{}",
@@ -1471,11 +1469,24 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 3] = [
 /// body, it does not see a name the site builds at runtime, and it reads
 /// a function's body as one whole rather than tying a parse to the read it
 /// belongs to.
+#[cfg(test)]
 fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<Vec<String>> {
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
+    Ok(content_length_inline_reader_facts_violations(
+        path,
+        &content_length_reader_facts(path, &syntax),
+    ))
+}
+
+/// The violations of a site that reads the declared Content-Length inline,
+/// from the facts of its functions.
+fn content_length_inline_reader_facts_violations(
+    path: &str,
+    facts: &ContentLengthFileFacts,
+) -> Vec<String> {
     let mut violations = Vec::new();
-    for (name, facts) in content_length_reader_facts(path, &syntax) {
+    for (name, facts) in facts {
         if !facts.reads_field || !facts.parses_integer {
             continue;
         }
@@ -1488,7 +1499,7 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
             "{path}: the function {name} reads the declared Content-Length {detail}"
         ));
     }
-    Ok(violations)
+    violations
 }
 
 /// The violations of a shipped site that reads the declared Content-Length's
@@ -1518,10 +1529,11 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// holds it under a name of its own, a closure that receives it from
 /// the search that found it holds it under the name the closure binds,
 /// a pattern that binds the search's result holds it as well, and a
-/// helper of the same file that found it hands it to its caller, which
-/// binds the result, so the value the site takes under any of those
-/// names is the field's value. A comparison that decides about the
-/// field instead does not select it: a comparison whose branch skips
+/// helper that found it hands it to its caller, which binds the result,
+/// so the value the site takes under any of those names is the field's
+/// value. The helper may stand in another file, because the rule reads
+/// the files of the workspace together. A comparison that decides about
+/// the field instead does not select it: a comparison whose branch skips
 /// the entry decides about the field, so a site that skips the field
 /// and takes another header's value is not a reader. A comparison that
 /// is not equal reads the other way round when the branch skips the
@@ -1548,9 +1560,10 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 /// behind a binding or a constant of its own.
 ///
 /// What the rule cannot see is a site that finds the field's entry by a
-/// name it builds at runtime, a site whose helper that found the entry
-/// stands in another file, and a site that takes the value under a
-/// member of another name.
+/// name it builds at runtime, and a site that takes the value under a
+/// member of another name. A helper of another file that found the entry
+/// is seen when the caller calls it by the name it is defined with; a
+/// call through another name is not seen.
 ///
 /// The rule covers the shipped code. Test code observes the field's value to
 /// assert on what the proxy put on the wire, and it does not decide what the
@@ -1560,6 +1573,7 @@ fn content_length_inline_reader_violations(path: &str, content: &str) -> Result<
 ///
 /// The owner names the sites that read the declaration themselves, so a site
 /// the owner names is not a violation.
+#[cfg(test)]
 fn content_length_production_value_reader_violations(
     path: &str,
     content: &str,
@@ -1570,8 +1584,25 @@ fn content_length_production_value_reader_violations(
     }
     let syntax = syn::parse_file(content)
         .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
+    Ok(content_length_production_value_reader_facts_violations(
+        path,
+        &content_length_reader_facts(path, &syntax),
+        listed,
+    ))
+}
+
+/// The violations of a shipped site that reads the declared Content-Length's
+/// value, from the facts of its functions.
+fn content_length_production_value_reader_facts_violations(
+    path: &str,
+    facts: &ContentLengthFileFacts,
+    listed: &[String],
+) -> Vec<String> {
+    if listed.iter().any(|site| site == path) {
+        return Vec::new();
+    }
     let mut violations = Vec::new();
-    for (name, facts) in content_length_reader_facts(path, &syntax) {
+    for (name, facts) in facts {
         if !facts.reads_value || facts.test_code {
             continue;
         }
@@ -1584,15 +1615,21 @@ fn content_length_production_value_reader_violations(
             "{path}: the function {name} reads the declared Content-Length's value {detail}"
         ));
     }
-    Ok(violations)
+    violations
 }
+
+/// The facts of the functions of a file.
+///
+/// Every function of the file is recorded on its own, so a reader in a
+/// function is named by that function rather than by the one it sits in.
+type ContentLengthFileFacts = Vec<(String, ContentLengthReaderFacts)>;
+
+/// The facts of every file of the workspace.
+type ContentLengthWorkspaceFacts = Vec<(String, ContentLengthFileFacts)>;
 
 /// The functions of a file and what each of them says about the declared
 /// Content-Length.
-fn content_length_reader_facts(
-    path: &str,
-    syntax: &syn::File,
-) -> Vec<(String, ContentLengthReaderFacts)> {
+fn content_length_reader_facts(path: &str, syntax: &syn::File) -> ContentLengthFileFacts {
     let mut collector = ContentLengthFunctionCollector {
         test_file: is_test_file(Path::new(path)),
         field_name_constants: content_length_field_name_constants(syntax),
@@ -1613,8 +1650,8 @@ fn content_length_reader_facts(
 /// A helper that finds the field's own entry hands that entry to its
 /// caller, so a binding of the helper's result holds the entry the
 /// comparison found, and the value the caller takes under that name is
-/// the field's value. A helper of another file is not seen here: the
-/// rule reads one file at a time.
+/// the field's value. A helper of another file is found by the
+/// workspace pass, which reads the files of the workspace together.
 fn content_length_follow_the_entry_across_functions(
     facts: &mut [(String, ContentLengthReaderFacts)],
 ) {
@@ -1633,6 +1670,81 @@ fn content_length_follow_the_entry_across_functions(
             }
         }
     }
+}
+
+/// The facts of every file of the workspace.
+///
+/// The rule reads one file at a time, but the entry the comparison found
+/// travels between files: a helper of another file that found the field's
+/// own entry hands it to its caller, so the caller binds the entry under
+/// a name of its own and the value it takes under that name is the
+/// field's value. The facts of the workspace are therefore taken
+/// together, so the helpers that found the field's own entry are known
+/// before the files that call them are read.
+///
+/// A helper in test code is not one of them: test code observes the
+/// field's value to assert on what the proxy put on the wire, and it
+/// does not decide what the proxy does, so a helper of test code does
+/// not hand the field's entry to the shipped code.
+fn content_length_workspace_facts(
+    files: &[(String, String)],
+) -> Result<ContentLengthWorkspaceFacts> {
+    let mut parsed = Vec::new();
+    for (path, content) in files {
+        let syntax = syn::parse_file(content)
+            .with_context(|| format!("failed to parse {path} for the Content-Length gate"))?;
+        parsed.push((path.clone(), content_length_reader_facts(path, &syntax)));
+    }
+    // The helpers that found the field's own entry in the shipped code.
+    // A helper that compares a header's name with the field's name found
+    // that entry, so a call to the helper hands the entry to the caller.
+    // The helper is followed by the name it is defined with, so a call
+    // through another name does not hand the entry over.
+    let mut finders: Vec<String> = Vec::new();
+    for (_, facts) in &parsed {
+        for (name, facts) in facts {
+            if facts.selects_field && !facts.test_code && !finders.contains(name) {
+                finders.push(name.clone());
+            }
+        }
+    }
+    if finders.is_empty() {
+        return Ok(parsed);
+    }
+    // A helper that found the field's own entry hands it to its caller,
+    // wherever the helper stands, so the caller's binding of the result
+    // holds the entry.
+    for (_, facts) in parsed.iter_mut() {
+        for (_, facts) in facts.iter_mut() {
+            for (binding, callee) in facts.finder_calls.clone() {
+                if finders.contains(&callee) && !facts.field_entry_names.contains(&binding) {
+                    facts.field_entry_names.push(binding);
+                }
+            }
+            facts.finish();
+        }
+    }
+    Ok(parsed)
+}
+
+/// The violations of the whole workspace.
+///
+/// The files are read together, because the entry the comparison found
+/// travels from the file that found it to the file that calls the
+/// helper that found it.
+fn content_length_workspace_violations(
+    files: &[(String, String)],
+    listed: &[String],
+) -> Result<Vec<String>> {
+    let workspace = content_length_workspace_facts(files)?;
+    let mut violations = Vec::new();
+    for (path, facts) in &workspace {
+        violations.extend(content_length_inline_reader_facts_violations(path, facts));
+        violations.extend(content_length_production_value_reader_facts_violations(
+            path, facts, listed,
+        ));
+    }
+    Ok(violations)
 }
 
 /// The names a file holds the field's name under in a constant or a static.
@@ -8924,6 +9036,94 @@ fn other_value(headers: &[Header<'_>]) -> Option<&[u8]> {
                 .unwrap()
                 .is_empty(),
             "a helper that finds another header's entry does not hand the field's entry over"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_sees_a_helper_that_found_the_entry_in_another_file() {
+        // A helper that found the entry hands it to its caller, and the
+        // file the helper stands in does not matter.
+        let finder = (
+            "qpxd/src/upstream/raw_http1/entries.rs".to_string(),
+            r#"
+fn find_content_length(headers: &[Header<'_>]) -> Option<&Header<'_>> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+}
+"#
+            .to_string(),
+        );
+        let caller = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn declared_length(headers: &[Header<'_>]) -> Option<&[u8]> {
+    let entry = find_content_length(headers)?;
+    Some(entry.value)
+}
+"#
+            .to_string(),
+        );
+        assert_eq!(
+            content_length_workspace_violations(&[finder.clone(), caller.clone()], &[]).unwrap(),
+            [
+                "qpxd/src/reverse/transport/request_template.rs: the function declared_length reads the declared Content-Length's value itself; it must call the owner"
+            ]
+        );
+        // The helper on its own finds the entry and takes no value, so it
+        // does not read the declaration.
+        assert!(
+            content_length_workspace_violations(std::slice::from_ref(&finder), &[])
+                .unwrap()
+                .is_empty(),
+            "a helper that found the entry and took no value does not read the declaration"
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_allows_a_helper_that_found_another_entry_in_another_file() {
+        // A helper of another file that finds another header's entry does
+        // not hand the field's entry over, so the value its caller takes
+        // is another header's value. The workspace holds a helper that
+        // found the field's own entry as well, so the rule has a helper
+        // to follow and still does not follow this one.
+        let finder = (
+            "qpxd/src/upstream/raw_http1/entries.rs".to_string(),
+            r#"
+fn find_content_length(headers: &[Header<'_>]) -> Option<&Header<'_>> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-length"))
+}
+"#
+            .to_string(),
+        );
+        let other = (
+            "qpxd/src/upstream/raw_http1/other_entries.rs".to_string(),
+            r#"
+fn find_content_type(headers: &[Header<'_>]) -> Option<&Header<'_>> {
+    headers
+        .iter()
+        .find(|header| header.name.eq_ignore_ascii_case("content-type"))
+}
+"#
+            .to_string(),
+        );
+        let caller = (
+            "qpxd/src/reverse/transport/request_template.rs".to_string(),
+            r#"
+fn other_value(headers: &[Header<'_>]) -> Option<&[u8]> {
+    let entry = find_content_type(headers)?;
+    Some(entry.value)
+}
+"#
+            .to_string(),
+        );
+        assert!(
+            content_length_workspace_violations(&[finder, other, caller], &[])
+                .unwrap()
+                .is_empty(),
+            "a helper of another file that finds another header's entry does not hand the field's entry over"
         );
     }
 

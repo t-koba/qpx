@@ -249,13 +249,15 @@ pub enum ContentLengthError {
 /// entry holds it under a name of its own, a closure that receives it
 /// from the search that found it holds it under the name the closure
 /// binds, a pattern that binds the search's result holds it as well,
-/// and a helper of the same file that found it hands it to its caller,
-/// which binds the result, so the value the site takes under any of
-/// those names is the field's value. The gate follows a binding of a
-/// header entry's name as well: a site that binds the entry's name to a
-/// name of its own and compares that name with the field's name
-/// compares the entry's name, so the binding stands for the entry the
-/// name came from and the value the site takes is that entry's value.
+/// and a helper that found it hands it to its caller, which binds the
+/// result, so the value the site takes under any of those names is the
+/// field's value. The helper may stand in another file, because the
+/// gate reads the files of the workspace together. The gate follows a
+/// binding of a header entry's name as well: a site that binds the
+/// entry's name to a name of its own and compares that name with the
+/// field's name compares the entry's name, so the binding stands for
+/// the entry the name came from and the value the site takes is that
+/// entry's value.
 /// The gate follows a copy of a name as well: a site that copies the
 /// name of the entry it holds holds that entry's name, so the
 /// comparison under the copy finds that entry and the value the site
