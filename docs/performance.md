@@ -101,11 +101,16 @@ giving either implementation a fixed first position.
   be an equivalent workload. redb remains the durable metadata source of truth;
   committed properties, content types, and bindings are published through
   immutable read snapshots. File data is shared only while its size and
-  modification timestamp still match the filesystem, so the optimization does
-  not turn external file changes into stale responses. Canonical resource IDs
-  are Arc-backed, while every path component is still checked for symlink
-  traversal on each filesystem access. The comparison mounts the same physical
-  data directory at `/dav/` in both products: qpx uses its normal
+  modification timestamp still match the opened file; Unix device/inode identity
+  also detects same-size, same-timestamp replacements. Canonical resource IDs
+  are Arc-backed. A pinned root and component-by-component no-follow directory
+  acquisition provide filesystem authority, not cached absolute pathname checks.
+  Each read performs a no-follow open and checks the opened object's metadata
+  before cache reuse; large file-backed reads retain their Arc-backed file region
+  without materializing the body. Cache budgets and mutation invalidation are
+  unchanged. The extra handle operations are part of confinement; previous
+  benchmark figures do not measure this repair. The comparison mounts the same
+  physical data directory at `/dav/` in both products: qpx uses its normal
   `path_rewrite.strip_prefix` route feature and Apache uses `Alias`. A compiled
   single-route WebDAV dispatch avoids constructing unused generic proxy policy
   state only when the execution plan proves that authorization, HTTP modules,

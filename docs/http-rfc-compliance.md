@@ -198,8 +198,30 @@ IdP or PDP product name. Verified identity metadata and authorization-decision
 metadata are separate QPX-IPC values and are forwarded to a handler only by
 explicit opt-in.
 
-The filesystem store rejects traversal and symlink escape. Metadata mutations
-use redb transactions. OPTIONS/DAV advertises only implemented capabilities.
+The filesystem store pins the configured root directory at open and resolves
+resources through acquired parent-directory capabilities, one component at a
+time. Reads and directory traversal reject symlinks (including links whose
+target is inside the root); metadata, listing, PUT, MKCOL, COPY, MOVE and DELETE
+use those capabilities rather than reconstructing absolute resource paths.
+PUT installs a uniquely created temporary file by same-parent atomic rename.
+Recursive COPY rejects nested links; recursive DELETE unlinks nested links
+without traversing them, while explicitly addressed links are rejected.
+Configured ancestor symlinks are allowed during startup, but a linked root leaf
+is not. The `root()` path is advisory, not filesystem authority.
+
+Replacing the root, a root ancestor, or an acquired parent after open cannot
+redirect operations to a substituted directory or link. An already acquired
+directory object remains authorized if a local actor renames it; on Windows,
+retained directory handles may instead prevent replacement with a sharing
+violation. This boundary does not prevent hard-link aliases, privileged mount
+changes, or direct modification of file bytes by local writers. The repaired
+replacement scenario requires local filesystem replacement access, not merely
+remote HTTP access. Deterministic Linux regressions cover root/ancestor/parent
+replacement and outside sentinels; native Windows build/test remains necessary
+to validate platform-specific handle behavior.
+
+Metadata mutations use redb transactions. OPTIONS/DAV advertises only
+implemented capabilities.
 
 ## Web-platform behavior
 

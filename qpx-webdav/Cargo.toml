@@ -9,8 +9,9 @@ rust-version.workspace = true
 anyhow.workspace = true
 arc-swap.workspace = true
 bytes.workspace = true
+cap-primitives = "4.0.3"
+cap-fs-ext = { version = "4.0.3", default-features = false }
 http.workspace = true
-libc.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
 quick-xml.workspace = true
@@ -18,6 +19,9 @@ redb.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
