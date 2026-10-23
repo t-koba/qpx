@@ -698,19 +698,7 @@ fn serialize_status_and_headers(
 ) {
     head.clear();
     head.reserve(512);
-    let version = match version {
-        Version::HTTP_10 => "HTTP/1.0",
-        _ => "HTTP/1.1",
-    };
-    let reason = status.canonical_reason().unwrap_or("");
-    head.extend_from_slice(version.as_bytes());
-    head.extend_from_slice(b" ");
-    head.extend_from_slice(status.as_str().as_bytes());
-    if !reason.is_empty() {
-        head.extend_from_slice(b" ");
-        head.extend_from_slice(reason.as_bytes());
-    }
-    head.extend_from_slice(b"\r\n");
+    serialize_status_line(head, version, status);
 
     for (name, value) in headers {
         if name == CONNECTION || name.as_str().eq_ignore_ascii_case("proxy-connection") {
@@ -736,19 +724,7 @@ fn serialize_status_and_raw_headers(
 ) {
     head.clear();
     head.reserve(raw_header_lines.len().saturating_add(128));
-    let version = match version {
-        Version::HTTP_10 => "HTTP/1.0",
-        _ => "HTTP/1.1",
-    };
-    let reason = status.canonical_reason().unwrap_or("");
-    head.extend_from_slice(version.as_bytes());
-    head.extend_from_slice(b" ");
-    head.extend_from_slice(status.as_str().as_bytes());
-    if !reason.is_empty() {
-        head.extend_from_slice(b" ");
-        head.extend_from_slice(reason.as_bytes());
-    }
-    head.extend_from_slice(b"\r\n");
+    serialize_status_line(head, version, status);
     head.extend_from_slice(raw_header_lines);
     for (name, value) in additional_headers {
         if name == CONNECTION || name.as_str().eq_ignore_ascii_case("proxy-connection") {
@@ -763,6 +739,22 @@ fn serialize_status_and_raw_headers(
         head.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
     }
     serialize_connection_headers(head, additional_headers, connection_mode);
+    head.extend_from_slice(b"\r\n");
+}
+
+fn serialize_status_line(head: &mut BytesMut, version: Version, status: StatusCode) {
+    let version = match version {
+        Version::HTTP_10 => "HTTP/1.0",
+        _ => "HTTP/1.1",
+    };
+    let reason = status.canonical_reason().unwrap_or("");
+    head.extend_from_slice(version.as_bytes());
+    head.extend_from_slice(b" ");
+    head.extend_from_slice(status.as_str().as_bytes());
+    if !reason.is_empty() {
+        head.extend_from_slice(b" ");
+        head.extend_from_slice(reason.as_bytes());
+    }
     head.extend_from_slice(b"\r\n");
 }
 
@@ -1102,7 +1094,7 @@ fn serialize_trailer_field_names(trailers: &HeaderMap) -> Option<HeaderValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionHeaderMode, serialize_connection_headers};
+    use super::{ConnectionHeaderMode, serialize_connection_headers, serialize_status_line};
     use bytes::BytesMut;
     use http::header::{CONNECTION, HeaderMap, HeaderValue};
 
@@ -1131,5 +1123,17 @@ mod tests {
             serialize_connection_headers(&mut head, &headers, mode);
             assert_eq!(head.as_ref(), expected, "{mode:?}");
         }
+    }
+
+    #[test]
+    fn status_line_preserves_version_reason_and_missing_reason_behavior() {
+        let mut head = BytesMut::new();
+        serialize_status_line(&mut head, http::Version::HTTP_10, http::StatusCode::OK);
+        assert_eq!(head.as_ref(), b"HTTP/1.0 200 OK\r\n");
+
+        head.clear();
+        let unknown_status = http::StatusCode::from_u16(299).expect("valid status");
+        serialize_status_line(&mut head, http::Version::HTTP_11, unknown_status);
+        assert_eq!(head.as_ref(), b"HTTP/1.1 299\r\n");
     }
 }
