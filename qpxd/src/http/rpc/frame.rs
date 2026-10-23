@@ -1,5 +1,8 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
-use super::protocol::{detect_rpc_protocol, parse_grpc_web_trailer_block, response_content_type};
+use super::protocol::{
+    detect_rpc_protocol, parse_grpc_web_trailer_block, response_content_type,
+    rpc_protocol_from_content_type,
+};
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use super::streaming::ConnectFrameObserver;
 use anyhow::{Result, anyhow};
@@ -65,15 +68,13 @@ fn body_summary_observer(
     protocol_or_content_type: Option<&str>,
     headers: &HeaderMap,
 ) -> Option<RpcBodySummaryObserver> {
-    let protocol = match protocol_or_content_type {
-        Some(value) if value.starts_with("application/grpc-web") => Some("grpc_web"),
-        Some(value) if value.starts_with("application/grpc") => Some("grpc"),
-        Some(value) if value.starts_with("application/connect+") => Some("connect"),
-        Some("grpc_web") => Some("grpc_web"),
-        Some("grpc") => Some("grpc"),
-        Some("connect") => Some("connect"),
+    let value = protocol_or_content_type?;
+    let protocol = rpc_protocol_from_content_type(value).or(match value {
+        "grpc_web" => Some("grpc_web"),
+        "grpc" => Some("grpc"),
+        "connect" => Some("connect"),
         _ => None,
-    }?;
+    })?;
     if protocol == "connect" {
         return connect_summary_observer(headers);
     }

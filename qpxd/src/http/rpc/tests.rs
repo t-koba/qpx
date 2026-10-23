@@ -1200,3 +1200,50 @@ async fn recognized_connect_get_keeps_unary_label_on_response() {
     let inspected = inspect_response(&ctx, &response).await;
     assert_eq!(inspected.streaming.as_deref(), Some("unary"));
 }
+
+#[test]
+fn rpc_protocol_from_content_type_matches_ordered_prefixes() {
+    use super::protocol::rpc_protocol_from_content_type;
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web"),
+        Some("grpc_web")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web-text"),
+        Some("grpc_web")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web+proto"),
+        Some("grpc_web")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc"),
+        Some("grpc")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc+proto"),
+        Some("grpc")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/connect+json"),
+        Some("connect")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/connect+proto"),
+        Some("connect")
+    );
+}
+
+#[test]
+fn rpc_protocol_from_content_type_rejects_unknown_inputs_without_normalizing() {
+    use super::protocol::rpc_protocol_from_content_type;
+    assert_eq!(rpc_protocol_from_content_type("application/json"), None);
+    assert_eq!(rpc_protocol_from_content_type(""), None);
+    assert_eq!(rpc_protocol_from_content_type("grpc"), None);
+    assert_eq!(rpc_protocol_from_content_type("grpc_web"), None);
+    assert_eq!(rpc_protocol_from_content_type("connect"), None);
+    // No trimming or case folding: inputs are already lowercased upstream.
+    assert_eq!(rpc_protocol_from_content_type(" application/grpc"), None);
+    assert_eq!(rpc_protocol_from_content_type("Application/grpc"), None);
+    assert_eq!(rpc_protocol_from_content_type("APPLICATION/GRPC-WEB"), None);
+}

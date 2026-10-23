@@ -10,16 +10,30 @@ pub(super) fn response_content_type(headers: &HeaderMap) -> Option<String> {
     raw_media_type(headers).map(|media| media.to_ascii_lowercase())
 }
 
+pub(super) fn rpc_protocol_from_content_type(raw: &str) -> Option<&'static str> {
+    if raw.starts_with("application/grpc-web") {
+        Some("grpc_web")
+    } else if raw.starts_with("application/grpc") {
+        Some("grpc")
+    } else if raw.starts_with("application/connect+") {
+        Some("connect")
+    } else {
+        None
+    }
+}
+
 pub(super) fn detect_rpc_protocol(headers: &HeaderMap, fallback: Option<&str>) -> Option<String> {
     let content_type = response_content_type(headers);
-    let protocol = match content_type.as_deref() {
-        Some(value) if value.starts_with("application/grpc-web") => Some("grpc_web"),
-        Some(value) if value.starts_with("application/grpc") => Some("grpc"),
-        Some(value) if value.starts_with("application/connect+") => Some("connect"),
-        _ if headers.contains_key("connect-protocol-version") => Some("connect"),
-        _ => fallback,
-    };
-    protocol.map(str::to_string)
+    if let Some(protocol) = content_type
+        .as_deref()
+        .and_then(rpc_protocol_from_content_type)
+    {
+        return Some(protocol.to_string());
+    }
+    if headers.contains_key("connect-protocol-version") {
+        return Some("connect".to_string());
+    }
+    fallback.map(str::to_string)
 }
 
 pub(super) fn extract_service_and_method(path: &str) -> Option<(&str, &str)> {
