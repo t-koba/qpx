@@ -234,9 +234,23 @@ fn guard_allows_single_chunked_on_http11_and_trailers_on_h2() {
     );
     assert!(profile.evaluate_request(&req).expect("guard").is_none());
     let mut h2 = head_request(http::Version::HTTP_2);
-    h2.headers_mut()
-        .insert(http::header::TE, http::HeaderValue::from_static("trailers"));
+    h2.headers_mut().insert(
+        http::header::TE,
+        http::HeaderValue::from_static(" \ttrailers\t "),
+    );
     assert!(profile.evaluate_request(&h2).expect("guard").is_none());
+
+    let mut invalid_h2 = head_request(http::Version::HTTP_2);
+    invalid_h2.headers_mut().insert(
+        http::header::TE,
+        http::HeaderValue::from_static("trailers, gzip"),
+    );
+    assert!(
+        profile
+            .evaluate_request(&invalid_h2)
+            .expect("guard")
+            .is_some()
+    );
 }
 
 #[tokio::test]

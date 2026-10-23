@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 /// Trims only HTTP optional whitespace (SP and HTAB).
-pub(super) fn trim_http_ows(value: &str) -> &str {
+pub(crate) fn trim_http_ows(value: &str) -> &str {
     let (start, end) = http_ows_bounds(value.as_bytes());
     &value[start..end]
 }

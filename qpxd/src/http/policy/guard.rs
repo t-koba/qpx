@@ -1,7 +1,7 @@
 use crate::http::codec::h1_common::{
     TransferEncodingClassificationError, has_only_chunked_transfer_encoding_values,
 };
-use crate::http::protocol::common::trim_http_ows_len;
+use crate::http::protocol::common::{trim_http_ows, trim_http_ows_len};
 use anyhow::{Result, anyhow};
 use hyper::{Request, StatusCode};
 use qpx_core::config::HttpGuardProfileConfig;
@@ -366,7 +366,7 @@ fn validate_invalid_framing(req: &Request<Body>) -> Option<HttpGuardReject> {
             };
             if value
                 .split(',')
-                .map(str::trim)
+                .map(trim_http_ows)
                 .any(|token| !token.eq_ignore_ascii_case("trailers"))
             {
                 return Some(bad_request("HTTP/2 and HTTP/3 TE must be trailers"));
