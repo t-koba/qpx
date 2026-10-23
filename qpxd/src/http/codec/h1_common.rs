@@ -143,6 +143,13 @@ pub(crate) fn find_crlf(buf: &BytesMut) -> Option<usize> {
     None
 }
 
+pub(crate) fn take_crlf_line(buf: &mut BytesMut) -> Option<BytesMut> {
+    let index = find_crlf(buf)?;
+    let mut line = buf.split_to(index + 2);
+    line.truncate(index);
+    Some(line)
+}
+
 pub(crate) fn parse_header_map(headers: &[httparse::Header<'_>]) -> Result<HeaderMap> {
     let mut out = HeaderMap::with_capacity(headers.len());
     parse_header_map_into(headers, &mut out, false)?;
@@ -270,6 +277,22 @@ pub(crate) fn parse_version(version: Option<u8>, missing_message: &'static str) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn take_crlf_line_preserves_bytes_after_the_terminator() {
+        let mut buf = BytesMut::from(&b"line\r\nnext"[..]);
+
+        assert_eq!(take_crlf_line(&mut buf).as_deref(), Some(&b"line"[..]));
+        assert_eq!(&buf[..], b"next");
+    }
+
+    #[test]
+    fn take_crlf_line_leaves_incomplete_buffer_unchanged() {
+        let mut buf = BytesMut::from(&b"line\r"[..]);
+
+        assert!(take_crlf_line(&mut buf).is_none());
+        assert_eq!(&buf[..], b"line\r");
+    }
 
     #[test]
     fn raw_connection_token_matching_trims_and_ignores_ascii_case() {

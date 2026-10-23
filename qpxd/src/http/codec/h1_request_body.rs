@@ -1,4 +1,4 @@
-use crate::http::codec::h1_common::{MAX_HEADER_BYTES, find_crlf, parse_header_map};
+use crate::http::codec::h1_common::{MAX_HEADER_BYTES, parse_header_map, take_crlf_line};
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
@@ -163,9 +163,7 @@ where
     R: AsyncRead + Unpin,
 {
     loop {
-        if let Some(idx) = find_crlf(buf) {
-            let mut line = buf.split_to(idx + 2);
-            line.truncate(idx);
+        if let Some(line) = take_crlf_line(buf) {
             return Ok(line.to_vec());
         }
         // Require one more byte than already buffered so an incomplete line

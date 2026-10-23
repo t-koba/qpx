@@ -3,7 +3,7 @@ use super::{
     Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_CHUNKED_BODY_BYTES,
     MAX_EMITTED_BODY_FRAME_SIZE, MAX_HEADER_BYTES, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
 };
-use crate::http::codec::h1_common::{find_crlf, parse_header_map};
+use crate::http::codec::h1_common::{parse_header_map, take_crlf_line};
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use http_body::Frame;
 use qpx_http::body::BodyError;
@@ -213,9 +213,7 @@ where
                     total_body_bytes,
                 } => match state {
                     ChunkState::Size => {
-                        if let Some(idx) = find_crlf(&this.buf) {
-                            let mut line = this.buf.split_to(idx + 2);
-                            line.truncate(idx);
+                        if let Some(line) = take_crlf_line(&mut this.buf) {
                             let size = parse_chunk_size(&line)?;
                             *total_body_bytes =
                                 total_body_bytes.checked_add(size as u64).ok_or_else(|| {

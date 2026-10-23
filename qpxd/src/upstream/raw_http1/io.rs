@@ -3,7 +3,7 @@ use super::MAX_HEADER_BYTES;
 use super::{UpstreamConnectionClosed, parse_declared_content_length, response::ResponseBodyKind};
 use crate::http::codec::h1_common::has_only_chunked_transfer_encoding;
 #[cfg(test)]
-use crate::http::codec::h1_common::{find_crlf, parse_header_map};
+use crate::http::codec::h1_common::{parse_header_map, take_crlf_line};
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use anyhow::{Result, anyhow};
 #[cfg(test)]
@@ -26,9 +26,7 @@ where
     S: AsyncRead + Unpin,
 {
     loop {
-        if let Some(idx) = find_crlf(buf) {
-            let mut line = buf.split_to(idx + 2);
-            line.truncate(idx);
+        if let Some(line) = take_crlf_line(buf) {
             return Ok(line.to_vec());
         }
         let next_min_len = buf.len().saturating_add(1);
