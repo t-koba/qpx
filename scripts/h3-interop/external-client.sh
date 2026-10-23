@@ -16,6 +16,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
+summarize_chromium_netlog() {
+  # Diagnostics must never replace the client status or payload assertion.
+  python3 "$ROOT_DIR/scripts/h3-interop/chromium-netlog-summary.py" \
+    "$TMP_DIR/chromium-netlog.json" >&2 || true
+}
+
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
   -keyout "$TMP_DIR/key.pem" -out "$TMP_DIR/cert.pem" \
   -subj /CN=localhost -addext 'subjectAltName=DNS:localhost,IP:127.0.0.1' >/dev/null 2>&1
@@ -64,6 +70,7 @@ case "$CLIENT" in
     chromium_status=0
     timeout 45 "$CHROMIUM_BIN" --headless --disable-gpu --no-sandbox \
       --enable-quic --origin-to-force-quic-on=localhost:18443 \
+      --log-net-log="$TMP_DIR/chromium-netlog.json" \
       --ignore-certificate-errors-spki-list="$SPKI_HASH" --dump-dom "$URL" >"$TMP_DIR/client.out" || chromium_status=$?
     if [ "$chromium_status" -ne 0 ]; then
       echo "chromium HTTP/3 client failed with status $chromium_status" >&2
@@ -71,6 +78,7 @@ case "$CLIENT" in
         cat "$TMP_DIR/client.out" >&2
       fi
       cat "$TMP_DIR/qpxd.log" >&2
+      summarize_chromium_netlog
       exit "$chromium_status"
     fi
     ;;
@@ -83,6 +91,9 @@ esac
 if ! grep -q "$EXPECTED" "$TMP_DIR/client.out"; then
   cat "$TMP_DIR/client.out" >&2
   cat "$TMP_DIR/qpxd.log" >&2
+  if [[ "$CLIENT" == chromium ]]; then
+    summarize_chromium_netlog
+  fi
   echo "$CLIENT did not receive the expected HTTP/3 response" >&2
   exit 1
 fi

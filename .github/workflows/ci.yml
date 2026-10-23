@@ -29,6 +29,10 @@ jobs:
         with:
           components: rustfmt
       - run: cargo fmt --all -- --check
+      - name: Chromium NetLog diagnostic fixtures
+        run: |
+          bash -n ./scripts/h3-interop/external-client.sh
+          python3 ./scripts/h3-interop/test-chromium-netlog.py
 
   msrv:
     name: msrv
