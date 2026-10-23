@@ -5,6 +5,7 @@ pub(crate) use super::terminate_tls::build_reverse_tls_config;
 use crate::http::body::size::set_observed_request_size;
 use crate::http3::qpx_listener::serve_qpx_h3_endpoint;
 use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
+use crate::http3::response_options::H3ResponseSendOptions;
 use crate::reverse::transport::{self, ReverseConnInfo};
 use crate::runtime::ResolvedStreamingLimits;
 use crate::server::control::SidecarControl;
@@ -319,7 +320,7 @@ impl ReverseQpxHandler {
             &mut response_stream,
             response,
             &request_method,
-            crate::http3::qpx_stream::QpxResponseSendOptions {
+            H3ResponseSendOptions {
                 max_body_bytes: response_streaming.max_response_body_bytes,
                 body_read_timeout: Duration::from_millis(response_streaming.body_read_timeout_ms),
                 body_send_timeout: Duration::from_millis(response_streaming.body_send_timeout_ms),

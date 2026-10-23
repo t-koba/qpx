@@ -32,6 +32,8 @@ pub(crate) mod quinn_socket;
 #[cfg(feature = "http3")]
 pub(crate) mod response_error;
 #[cfg(feature = "http3")]
+pub(crate) mod response_options;
+#[cfg(feature = "http3")]
 pub(crate) mod response_rpc;
 #[cfg(feature = "http3")]
 pub(crate) mod response_sse;

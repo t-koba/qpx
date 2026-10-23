@@ -1,5 +1,6 @@
 use crate::http3::codec::{prepare_h3_response_head, sanitize_interim_response_for_h3};
 use crate::http3::response_error::H3ResponseSendError;
+use crate::http3::response_options::H3ResponseSendOptions;
 use crate::http3::stream_limits::{response_stream_timeouts, timeout_or_deadline};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
@@ -14,36 +15,6 @@ mod request_body;
 pub(crate) use self::request_body::{
     QpxRequestBodyRelayOptions, relay_qpx_request_body_observed_from_recv,
 };
-
-pub(crate) struct QpxResponseSendOptions<'a> {
-    pub(crate) max_body_bytes: usize,
-    pub(crate) body_read_timeout: Duration,
-    pub(crate) body_send_timeout: Duration,
-    pub(crate) listener_name: Option<&'a str>,
-    pub(crate) fallback_grpc_protocol: Option<&'a str>,
-    pub(crate) max_grpc_message_bytes: Option<u64>,
-    pub(crate) max_grpc_web_trailer_bytes: Option<u64>,
-    pub(crate) grpc_stream_deadline: Option<Instant>,
-    pub(crate) sse_policy: Option<qpx_core::config::SseStreamingPolicy>,
-    pub(crate) observe_grpc_messages: bool,
-}
-
-impl QpxResponseSendOptions<'_> {
-    fn unobserved(max_body_bytes: usize, body_read_timeout: Duration) -> Self {
-        Self {
-            max_body_bytes,
-            body_read_timeout,
-            body_send_timeout: body_read_timeout,
-            listener_name: None,
-            fallback_grpc_protocol: None,
-            max_grpc_message_bytes: None,
-            max_grpc_web_trailer_bytes: None,
-            grpc_stream_deadline: None,
-            sse_policy: None,
-            observe_grpc_messages: false,
-        }
-    }
-}
 
 pub(crate) async fn send_qpx_interim_response_to_send(
     req_stream: &mut qpx_h3::RequestSendStream,
@@ -130,7 +101,7 @@ pub(crate) async fn send_qpx_response_stream(
         req_stream,
         response,
         request_method,
-        QpxResponseSendOptions::unobserved(max_body_bytes, body_read_timeout),
+        H3ResponseSendOptions::unobserved(max_body_bytes, body_read_timeout),
     )
     .await
     .map(|_summary| ())
@@ -144,7 +115,7 @@ pub(crate) async fn send_qpx_response_stream_observed(
     req_stream: &mut qpx_h3::RequestStream,
     response: Response<Body>,
     request_method: &http::Method,
-    options: QpxResponseSendOptions<'_>,
+    options: H3ResponseSendOptions<'_>,
 ) -> std::result::Result<Option<crate::http::rpc::FramedBodySummary>, H3ResponseSendError> {
     send_qpx_response_stream_observed_inner(
         QpxResponseWriter::Full(req_stream),
@@ -159,7 +130,7 @@ pub(crate) async fn send_qpx_response_stream_observed_to_send(
     req_stream: &mut qpx_h3::RequestSendStream,
     response: Response<Body>,
     request_method: &http::Method,
-    options: QpxResponseSendOptions<'_>,
+    options: H3ResponseSendOptions<'_>,
 ) -> std::result::Result<Option<crate::http::rpc::FramedBodySummary>, H3ResponseSendError> {
     send_qpx_response_stream_observed_inner(
         QpxResponseWriter::Send(req_stream),
@@ -174,7 +145,7 @@ async fn send_qpx_response_stream_observed_inner(
     mut req_stream: QpxResponseWriter<'_>,
     response: Response<Body>,
     request_method: &http::Method,
-    options: QpxResponseSendOptions<'_>,
+    options: H3ResponseSendOptions<'_>,
 ) -> std::result::Result<Option<crate::http::rpc::FramedBodySummary>, H3ResponseSendError> {
     let (parts, mut body) = response.into_parts();
     let mut grpc_observer = crate::http3::response_rpc::H3ResponseRpcObserver::new(

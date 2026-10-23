@@ -1,10 +1,11 @@
 use crate::http::body::size::set_observed_request_size;
 use crate::http3::codec::{h3_request_to_hyper, sanitize_interim_response_for_h3};
 use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamDatagrams};
+use crate::http3::response_options::H3ResponseSendOptions;
 use crate::http3::server::{
     H3IncomingBodyCompletion, H3IncomingBodyOptions, H3RequestBodyDrainControl,
-    H3ResponseSendOptions, H3ServerRequestStream, H3ServerSendStream, h3_incoming_body,
-    send_h3_response, send_h3_response_observed, send_h3_static_response,
+    H3ServerRequestStream, H3ServerSendStream, h3_incoming_body, send_h3_response,
+    send_h3_response_observed, send_h3_static_response,
 };
 use crate::runtime::ResolvedStreamingLimits;
 use anyhow::Result;

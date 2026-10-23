@@ -1,42 +1,13 @@
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http3::codec::prepare_h3_response_head;
 use crate::http3::response_error::{H3ResponseSendError, emit_h3_response_send_error};
+use crate::http3::response_options::H3ResponseSendOptions;
 use crate::http3::stream_limits::{response_stream_timeouts, timeout_or_deadline};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::Response;
 use qpx_http::body::Body;
 use tokio::time::{Duration, Instant};
-
-pub struct H3ResponseSendOptions<'a> {
-    pub max_body_bytes: usize,
-    pub body_read_timeout: Duration,
-    pub body_send_timeout: Duration,
-    pub listener_name: Option<&'a str>,
-    pub fallback_grpc_protocol: Option<&'a str>,
-    pub max_grpc_message_bytes: Option<u64>,
-    pub max_grpc_web_trailer_bytes: Option<u64>,
-    pub grpc_stream_deadline: Option<Instant>,
-    pub sse_policy: Option<qpx_core::config::SseStreamingPolicy>,
-    pub observe_grpc_messages: bool,
-}
-
-impl H3ResponseSendOptions<'_> {
-    fn unobserved(max_body_bytes: usize, body_read_timeout: Duration) -> Self {
-        Self {
-            max_body_bytes,
-            body_read_timeout,
-            body_send_timeout: body_read_timeout,
-            listener_name: None,
-            fallback_grpc_protocol: None,
-            max_grpc_message_bytes: None,
-            max_grpc_web_trailer_bytes: None,
-            grpc_stream_deadline: None,
-            sse_policy: None,
-            observe_grpc_messages: false,
-        }
-    }
-}
 
 pub(crate) async fn send_h3_response<S>(
     response: Response<Body>,

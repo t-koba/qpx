@@ -4,6 +4,7 @@ use super::response::{send_qpx_response_stream, send_qpx_static_response};
 use super::webtransport_dispatch::handle_qpx_webtransport_connect as dispatch_qpx_webtransport_connect;
 use crate::http::body::size::set_observed_request_size;
 use crate::http3::codec::h3_request_to_hyper;
+use crate::http3::response_options::H3ResponseSendOptions;
 use crate::runtime::{ResolvedStreamingLimits, Runtime};
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
@@ -270,7 +271,7 @@ impl ForwardQpxHandler {
             &mut response_stream,
             response,
             &request_method,
-            crate::http3::qpx_stream::QpxResponseSendOptions {
+            H3ResponseSendOptions {
                 max_body_bytes: response_streaming.max_response_body_bytes,
                 body_read_timeout: Duration::from_millis(response_streaming.body_read_timeout_ms),
                 body_send_timeout: Duration::from_millis(response_streaming.body_send_timeout_ms),
