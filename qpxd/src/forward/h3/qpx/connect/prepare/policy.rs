@@ -7,11 +7,9 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::http::local_response::finalized_local_response;
+use crate::http::protocol::common::blocked_response as blocked;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::common::forbidden_response as forbidden;
-use crate::http::protocol::common::{
-    blocked_response as blocked, too_many_requests_response as too_many_requests,
-};
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use anyhow::{Result, anyhow};
@@ -188,25 +186,6 @@ pub(super) async fn apply_connect_rate_limits(
             .await?
         };
     }
-    macro_rules! send_rate_limited {
-        ($retry_after:expr, $limits:expr, $decision_service_policy_id:expr, $log_context:expr) => {{
-            let retry_after = $retry_after;
-            let mut response = finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name,
-                too_many_requests(Some(retry_after)),
-                false,
-            );
-            $limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
-            send_policy_response!(
-                response,
-                crate::http::dispatch::DispatchOutcome::RateLimited,
-                $decision_service_policy_id,
-                $log_context
-            )
-        }};
-    }
 
     let (request_limit_ctx, mut request_limits, retry_after) =
         crate::forward::connect::acquire_initial_connect_rate_limit(
@@ -218,7 +197,18 @@ pub(super) async fn apply_connect_rate_limits(
         )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule_name, None, None);
-        send_rate_limited!(retry_after, &request_limits, None, &log_context);
+        let response = crate::forward::h3::connect::h3_connect_rate_limited_response(
+            proxy_name,
+            None,
+            &request_limits,
+            Some(retry_after),
+        );
+        send_policy_response!(
+            response,
+            crate::http::dispatch::DispatchOutcome::RateLimited,
+            None,
+            &log_context
+        );
         return Ok(None);
     }
 

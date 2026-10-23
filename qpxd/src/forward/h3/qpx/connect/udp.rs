@@ -118,7 +118,7 @@ pub(super) async fn run_connect_udp_relay(
     let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            let response = crate::forward::h3::connect::h3_connect_concurrency_limited_response(
+            let response = crate::forward::h3::connect::h3_connect_rate_limited_response(
                 proxy_name.as_str(),
                 response_headers.as_deref(),
                 &request_limits,

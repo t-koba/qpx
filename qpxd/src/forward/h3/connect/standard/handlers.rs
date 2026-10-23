@@ -161,7 +161,7 @@ pub(crate) async fn handle_h3_connect(
     let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            let response = super::super::h3_connect_concurrency_limited_response(
+            let response = super::super::h3_connect_rate_limited_response(
                 proxy_name.as_str(),
                 response_headers.as_deref(),
                 &request_limits,

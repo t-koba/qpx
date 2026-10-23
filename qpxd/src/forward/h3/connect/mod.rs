@@ -116,7 +116,7 @@ pub(super) async fn apply_connect_udp_bandwidth_controls(
 }
 
 #[cfg(feature = "http3")]
-pub(super) fn h3_connect_concurrency_limited_response(
+pub(super) fn h3_connect_rate_limited_response(
     proxy_name: &str,
     response_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     request_limits: &crate::rate_limit::AppliedRateLimits,
@@ -158,16 +158,12 @@ mod h3_connect_bad_gateway_base_response_tests {
 }
 
 #[cfg(all(test, feature = "http3"))]
-mod h3_connect_concurrency_limited_response_tests {
+mod h3_connect_rate_limited_response_tests {
     #[test]
-    fn concurrency_limited_response_uses_429_retry_after_and_plain_text() {
+    fn rate_limited_response_uses_429_retry_after_and_plain_text() {
         let request_limits = crate::rate_limit::AppliedRateLimits::default();
-        let response = super::h3_connect_concurrency_limited_response(
-            "test-proxy",
-            None,
-            &request_limits,
-            None,
-        );
+        let response =
+            super::h3_connect_rate_limited_response("test-proxy", None, &request_limits, None);
         assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
         assert!(response.headers().get(http::header::RETRY_AFTER).is_none());
         assert_eq!(
@@ -177,7 +173,7 @@ mod h3_connect_concurrency_limited_response_tests {
                 .and_then(|value| value.to_str().ok()),
             Some("text/plain; charset=utf-8"),
         );
-        let response = super::h3_connect_concurrency_limited_response(
+        let response = super::h3_connect_rate_limited_response(
             "test-proxy",
             None,
             &request_limits,

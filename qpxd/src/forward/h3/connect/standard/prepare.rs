@@ -9,11 +9,9 @@ use crate::forward::connect::apply_connect_decision_service;
 use crate::forward::request::proxy_auth_required;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::local_response::finalized_local_response;
+use crate::http::protocol::common::blocked_response as blocked;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::common::forbidden_response as forbidden;
-use crate::http::protocol::common::{
-    blocked_response as blocked, too_many_requests_response as too_many_requests,
-};
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http3::codec::h1_headers_to_http;
 use crate::http3::listener::H3ConnInfo;
@@ -217,20 +215,6 @@ pub(crate) async fn prepare_h3_connect_request(
     macro_rules! respond_with_unmatched_policy {
         ($response:expr, $outcome:expr, $log_context:expr) => {{ respond_with_policy!($response, $outcome, None, None, $log_context) }};
     }
-    macro_rules! rate_limited_response {
-        ($retry_after:expr, $limits:expr) => {{
-            let retry_after = $retry_after;
-            let mut response = finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name,
-                too_many_requests(Some(retry_after)),
-                false,
-            );
-            $limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
-            response
-        }};
-    }
     let ctx = build_h3_connect_rule_context(H3ConnectRuleContextInput {
         remote_ip: conn.remote_addr.ip(),
         port,
@@ -320,7 +304,12 @@ pub(crate) async fn prepare_h3_connect_request(
         )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule_name, None, None);
-        let response = rate_limited_response!(retry_after, &request_limits);
+        let response = super::super::h3_connect_rate_limited_response(
+            proxy_name,
+            None,
+            &request_limits,
+            Some(retry_after),
+        );
         respond_with_policy!(
             response,
             DispatchOutcome::RateLimited,

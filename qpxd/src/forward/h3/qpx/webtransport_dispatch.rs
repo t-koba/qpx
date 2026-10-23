@@ -12,10 +12,7 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::forward::request::proxy_auth_required;
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
-use crate::http::protocol::common::{
-    blocked_response as blocked, forbidden_response as forbidden,
-    too_many_requests_response as too_many_requests,
-};
+use crate::http::protocol::common::{blocked_response as blocked, forbidden_response as forbidden};
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
     DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
@@ -164,26 +161,6 @@ pub(super) async fn handle_qpx_webtransport_connect(
     macro_rules! return_with_unmatched_policy {
         ($response:expr, $outcome:expr, $log_context:expr) => {{ return_with_policy!($response, $outcome, None, None, $log_context) }};
     }
-    macro_rules! return_rate_limited {
-        ($retry_after:expr, $limits:expr, $matched_rule:expr, $decision_service_policy_id:expr, $log_context:expr) => {{
-            let retry_after = $retry_after;
-            let mut response = finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                too_many_requests(retry_after),
-                false,
-            );
-            $limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
-            return_with_policy!(
-                response,
-                DispatchOutcome::RateLimited,
-                $matched_rule,
-                $decision_service_policy_id,
-                $log_context
-            );
-        }};
-    }
     let ctx = build_h3_connect_rule_context(H3ConnectRuleContextInput {
         remote_ip: conn.remote_addr.ip(),
         port,
@@ -269,9 +246,15 @@ pub(super) async fn handle_qpx_webtransport_connect(
     )?;
     if let Some(retry_after) = retry_after {
         let log_context = identity.to_log_context(matched_rule_name, None, None);
-        return_rate_limited!(
-            Some(retry_after),
+        let response = crate::forward::h3::connect::h3_connect_rate_limited_response(
+            proxy_name.as_str(),
+            None,
             &request_limits,
+            Some(retry_after),
+        );
+        return_with_policy!(
+            response,
+            DispatchOutcome::RateLimited,
             matched_rule_name,
             None,
             &log_context
@@ -315,9 +298,15 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 &request_limit_ctx,
                 1,
             )? {
-                return_rate_limited!(
-                    Some(retry_after),
+                let response = crate::forward::h3::connect::h3_connect_rate_limited_response(
+                    proxy_name.as_str(),
+                    None,
                     &request_limits,
+                    Some(retry_after),
+                );
+                return_with_policy!(
+                    response,
+                    DispatchOutcome::RateLimited,
                     matched_rule_name,
                     decision_service_policy_id.as_deref(),
                     &log_context
@@ -407,9 +396,15 @@ pub(super) async fn handle_qpx_webtransport_connect(
     let _concurrency_permits = match concurrency.permits {
         Some(permits) => Some(permits),
         None => {
-            return_rate_limited!(
-                concurrency.retry_after,
+            let response = crate::forward::h3::connect::h3_connect_rate_limited_response(
+                proxy_name.as_str(),
+                None,
                 &request_limits,
+                concurrency.retry_after,
+            );
+            return_with_policy!(
+                response,
+                DispatchOutcome::RateLimited,
                 matched_rule_name,
                 decision_service_policy_id.as_deref(),
                 &log_context
