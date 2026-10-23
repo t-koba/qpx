@@ -175,6 +175,7 @@ fn response_status_body_suppression_preserves_upgrade_exception() {
         StatusCode::SWITCHING_PROTOCOLS,
         false
     ));
+    assert!(response_status_has_no_body(StatusCode::CONTINUE, true));
     assert!(!response_status_has_no_body(
         StatusCode::SWITCHING_PROTOCOLS,
         true
