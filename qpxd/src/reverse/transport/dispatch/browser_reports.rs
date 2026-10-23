@@ -161,7 +161,7 @@ fn single_media_type(headers: &http::HeaderMap) -> Result<String> {
     let value = value
         .to_str()
         .map_err(|_| anyhow!("browser report Content-Type is not ASCII"))?;
-    let media_type = value.split(';').next().unwrap_or_default().trim();
+    let media_type = crate::http::media_type::media_type_without_parameters(value);
     if media_type.is_empty() {
         return Err(anyhow!("browser report Content-Type is empty"));
     }

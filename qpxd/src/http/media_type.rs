@@ -9,6 +9,12 @@
 use http::HeaderMap;
 use http::header::CONTENT_TYPE;
 
+/// Strips any `;` parameters from a raw `Content-Type` value and trims
+/// surrounding whitespace. No case folding is applied.
+pub(crate) fn media_type_without_parameters(raw: &str) -> &str {
+    raw.split(';').next().unwrap_or(raw).trim()
+}
+
 /// Returns the raw media type of the first `Content-Type` field when readable.
 ///
 /// `None` when no field is present or the first field value is not valid header text.
@@ -17,7 +23,7 @@ pub(crate) fn raw_media_type(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-        .map(|raw| raw.split(';').next().unwrap_or(raw).trim())
+        .map(media_type_without_parameters)
 }
 
 #[cfg(test)]
@@ -55,6 +61,19 @@ mod tests {
         );
         headers.append(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
         assert_eq!(raw_media_type(&headers), None);
+    }
+
+    #[test]
+    fn helper_strips_parameters_without_headers() {
+        assert_eq!(
+            media_type_without_parameters("  text/html; charset=utf-8 "),
+            "text/html"
+        );
+        assert_eq!(
+            media_type_without_parameters("application/json"),
+            "application/json"
+        );
+        assert_eq!(media_type_without_parameters(""), "");
     }
 
     #[test]
