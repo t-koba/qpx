@@ -307,6 +307,19 @@ impl LatencyWindow {
         }
     }
 
+    /// Observe one sample and determine whether it meets the shared passive
+    /// latency-ejection threshold against the trailing p95 window.
+    pub(crate) fn observe_and_meets_p95_threshold(
+        &self,
+        elapsed: Duration,
+        threshold: Duration,
+        min_samples: u64,
+    ) -> bool {
+        self.observe(elapsed);
+        let threshold_ms = threshold.as_millis().min(u128::from(u64::MAX)) as u64;
+        elapsed >= threshold && self.total() >= min_samples && self.p95_ms() >= threshold_ms
+    }
+
     pub(crate) fn total(&self) -> u64 {
         self.total.load(Ordering::Relaxed)
     }
@@ -442,6 +455,28 @@ mod tests {
         }
         assert_eq!(window.total(), (2 * LATENCY_P95_WINDOW) as u64);
         assert_eq!(window.p95_ms(), 50);
+    }
+
+    #[test]
+    fn p95_ejection_predicate_requires_slow_sample_minimum_and_window_tail() {
+        let threshold = Duration::from_millis(10);
+        let window = LatencyWindow::new();
+        assert!(!window.observe_and_meets_p95_threshold(threshold, threshold, 2));
+        assert!(window.observe_and_meets_p95_threshold(threshold, threshold, 2));
+        assert!(!window.observe_and_meets_p95_threshold(Duration::from_millis(9), threshold, 2));
+
+        let window = LatencyWindow::new();
+        let min_samples = LATENCY_P95_WINDOW as u64;
+        for _ in 0..LATENCY_P95_WINDOW - 1 {
+            window.observe(Duration::from_millis(1));
+        }
+        assert!(!window.observe_and_meets_p95_threshold(threshold, threshold, min_samples));
+        // With a 100-sample window, five slow samples still leave p95 below
+        // the threshold; the sixth makes the rank meet it.
+        for _ in 0..4 {
+            assert!(!window.observe_and_meets_p95_threshold(threshold, threshold, min_samples));
+        }
+        assert!(window.observe_and_meets_p95_threshold(threshold, threshold, min_samples));
     }
 
     #[test]

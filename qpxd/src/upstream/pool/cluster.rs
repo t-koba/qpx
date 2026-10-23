@@ -165,12 +165,11 @@ impl ManagedUpstreamEndpoint {
             return;
         };
         self.note_adaptive_latency(policy.max_ejection, threshold, elapsed);
-        self.latency_window.observe(elapsed);
-        let threshold_ms = threshold.as_millis().min(u128::from(u64::MAX)) as u64;
-        if elapsed >= threshold
-            && self.latency_window.total() >= policy.latency_min_samples
-            && self.latency_window.p95_ms() >= threshold_ms
-        {
+        if self.latency_window.observe_and_meets_p95_threshold(
+            elapsed,
+            threshold,
+            policy.latency_min_samples,
+        ) {
             self.eject(policy.max_ejection, EjectionReason::Latency);
         }
     }
