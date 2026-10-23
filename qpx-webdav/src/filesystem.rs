@@ -726,6 +726,11 @@ mod tests {
             if changed {
                 assert_eq!(fs::read_dir(replaced).unwrap().count(), 1);
             }
+            let redirected_root = if replace_ancestor {
+                replaced.join("root")
+            } else {
+                replaced.to_path_buf()
+            };
             let pinned_root = if changed {
                 if replace_ancestor {
                     saved.join("root")
@@ -735,6 +740,20 @@ mod tests {
             } else {
                 root
             };
+            let marker = id("/replacement-marker");
+            store.put(&marker, b"pinned", None).unwrap();
+            assert_eq!(
+                fs::read(pinned_root.join("replacement-marker")).unwrap(),
+                b"pinned",
+                "{scenario}: operation did not use the opened root"
+            );
+            if changed {
+                assert!(
+                    !redirected_root.join("replacement-marker").exists(),
+                    "{scenario}: operation was redirected to the replacement root"
+                );
+            }
+            store.delete(&marker).unwrap();
             assert_eq!(fs::read_dir(pinned_root).unwrap().count(), 0);
         }
     }
