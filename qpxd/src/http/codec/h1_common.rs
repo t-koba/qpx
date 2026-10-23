@@ -36,6 +36,25 @@ pub(crate) fn raw_has_connection_token(headers: &[httparse::Header<'_>], expecte
     })
 }
 
+/// Whether a raw HTTP/1 field is removed when crossing a proxy hop.
+///
+/// When `preserve_proxy_auth` is set for a 407 response, this retains
+/// `Proxy-Authenticate` and `Proxy-Authentication-Info`; it always removes
+/// `Proxy-Authorization`.
+pub(crate) fn is_sanitized_hop_header(name: &[u8], preserve_proxy_auth: bool) -> bool {
+    name.eq_ignore_ascii_case(b"connection")
+        || name.eq_ignore_ascii_case(b"keep-alive")
+        || name.eq_ignore_ascii_case(b"proxy-authorization")
+        || name.eq_ignore_ascii_case(b"proxy-connection")
+        || name.eq_ignore_ascii_case(b"te")
+        || name.eq_ignore_ascii_case(b"trailer")
+        || name.eq_ignore_ascii_case(b"transfer-encoding")
+        || name.eq_ignore_ascii_case(b"upgrade")
+        || (!preserve_proxy_auth
+            && (name.eq_ignore_ascii_case(b"proxy-authenticate")
+                || name.eq_ignore_ascii_case(b"proxy-authentication-info")))
+}
+
 fn trim_ascii(mut value: &[u8]) -> &[u8] {
     while value.first().is_some_and(u8::is_ascii_whitespace) {
         value = &value[1..];
@@ -249,6 +268,34 @@ mod tests {
         assert!(raw_has_connection_token(&headers, b"close"));
         assert!(!raw_has_connection_token(&headers, b"keep"));
         assert!(!raw_has_connection_token(&headers, b"upgrade-extra"));
+    }
+
+    #[test]
+    fn hop_header_filter_preserves_proxy_auth_only_when_requested() {
+        let common_hop_headers: [&[u8]; 8] = [
+            b"connection",
+            b"keep-alive",
+            b"proxy-authorization",
+            b"proxy-connection",
+            b"te",
+            b"trailer",
+            b"transfer-encoding",
+            b"upgrade",
+        ];
+        for name in common_hop_headers {
+            assert!(is_sanitized_hop_header(name, false), "{name:?}");
+            assert!(is_sanitized_hop_header(name, true), "{name:?}");
+        }
+
+        for name in [
+            b"proxy-authenticate".as_slice(),
+            b"proxy-authentication-info",
+        ] {
+            assert!(is_sanitized_hop_header(name, false), "{name:?}");
+            assert!(!is_sanitized_hop_header(name, true), "{name:?}");
+        }
+        assert!(!is_sanitized_hop_header(b"X-End-To-End", false));
+        assert!(!is_sanitized_hop_header(b"x-end-to-end", true));
     }
 
     #[test]

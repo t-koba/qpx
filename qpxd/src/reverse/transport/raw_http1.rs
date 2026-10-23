@@ -2,7 +2,7 @@ use super::mirrors::{
     record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
 };
 use super::{InterimList, ReverseConnInfo};
-use crate::http::codec::h1_common::raw_has_connection_token;
+use crate::http::codec::h1_common::{is_sanitized_hop_header, raw_has_connection_token};
 use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
 use crate::reverse::{CompiledReverse, ReloadableReverse};
 use crate::upstream::origin::{
@@ -886,7 +886,7 @@ fn serialize_upstream_request_head(
     for header in headers {
         let name = header.name.as_bytes();
         if name.eq_ignore_ascii_case(b"host")
-            || is_hop_by_hop_header(name)
+            || is_sanitized_hop_header(name, false)
             || raw_has_connection_token(headers, name)
         {
             continue;
@@ -959,19 +959,6 @@ fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {
         .iter()
         .any(|header| header.name.eq_ignore_ascii_case("upgrade"))
         || raw_has_connection_token(headers, b"upgrade")
-}
-
-fn is_hop_by_hop_header(name: &[u8]) -> bool {
-    name.eq_ignore_ascii_case(b"connection")
-        || name.eq_ignore_ascii_case(b"keep-alive")
-        || name.eq_ignore_ascii_case(b"proxy-authenticate")
-        || name.eq_ignore_ascii_case(b"proxy-authentication-info")
-        || name.eq_ignore_ascii_case(b"proxy-authorization")
-        || name.eq_ignore_ascii_case(b"proxy-connection")
-        || name.eq_ignore_ascii_case(b"te")
-        || name.eq_ignore_ascii_case(b"trailer")
-        || name.eq_ignore_ascii_case(b"transfer-encoding")
-        || name.eq_ignore_ascii_case(b"upgrade")
 }
 
 fn append_header_line(out: &mut BytesMut, name: &[u8], value: &[u8]) {
@@ -1128,6 +1115,18 @@ mod tests {
                 value: b"secret",
             },
             httparse::Header {
+                name: "Proxy-Authenticate",
+                value: b"Basic realm=upstream",
+            },
+            httparse::Header {
+                name: "Proxy-Authentication-Info",
+                value: b"nextnonce=nonce",
+            },
+            httparse::Header {
+                name: "Proxy-Authorization",
+                value: b"Basic dXNlcjpwYXNz",
+            },
+            httparse::Header {
                 name: "X-End-To-End",
                 value: b"kept",
             },
@@ -1143,6 +1142,9 @@ mod tests {
         assert!(text.contains("Via: 1.1 qpx\r\n"));
         assert!(!text.contains("X-Private"));
         assert!(!text.contains("Connection"));
+        assert!(!text.contains("Proxy-Authenticate"));
+        assert!(!text.contains("Proxy-Authentication-Info"));
+        assert!(!text.contains("Proxy-Authorization"));
     }
 
     /// The content-length field lines of a serialized request head.

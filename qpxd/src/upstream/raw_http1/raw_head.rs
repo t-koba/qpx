@@ -1,4 +1,4 @@
-use crate::http::codec::h1_common::raw_has_connection_token;
+use crate::http::codec::h1_common::{is_sanitized_hop_header, raw_has_connection_token};
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::header::{HeaderMap, HeaderName, HeaderValue};
@@ -369,20 +369,6 @@ fn has_only_chunked_transfer_encoding(headers: &[httparse::Header<'_>]) -> Resul
     }
 }
 
-fn is_sanitized_hop_header(name: &[u8], preserve_proxy_auth: bool) -> bool {
-    name.eq_ignore_ascii_case(b"connection")
-        || name.eq_ignore_ascii_case(b"keep-alive")
-        || name.eq_ignore_ascii_case(b"proxy-authorization")
-        || name.eq_ignore_ascii_case(b"proxy-connection")
-        || name.eq_ignore_ascii_case(b"te")
-        || name.eq_ignore_ascii_case(b"trailer")
-        || name.eq_ignore_ascii_case(b"transfer-encoding")
-        || name.eq_ignore_ascii_case(b"upgrade")
-        || (!preserve_proxy_auth
-            && (name.eq_ignore_ascii_case(b"proxy-authenticate")
-                || name.eq_ignore_ascii_case(b"proxy-authentication-info")))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +430,38 @@ mod tests {
             .filter(|line| line.to_ascii_lowercase().starts_with("content-length:"))
             .map(str::to_string)
             .collect()
+    }
+
+    #[test]
+    fn raw_head_preserves_proxy_authentication_only_for_407() {
+        let headers = [
+            httparse::Header {
+                name: "Proxy-Authenticate",
+                value: b"Basic realm=\"upstream\"",
+            },
+            httparse::Header {
+                name: "Proxy-Authentication-Info",
+                value: b"nextnonce=\"nonce\"",
+            },
+            httparse::Header {
+                name: "Proxy-Authorization",
+                value: b"Basic dXNlcjpwYXNz",
+            },
+        ];
+
+        for (status, preserve) in [
+            (StatusCode::OK, false),
+            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, true),
+        ] {
+            let mut raw =
+                RawHttp1ResponseHead::from_parsed(&headers, &Method::GET, status, Version::HTTP_11)
+                    .expect("raw head");
+            raw.finalize("qpx");
+            let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+            assert_eq!(encoded.contains("Proxy-Authenticate:"), preserve);
+            assert_eq!(encoded.contains("Proxy-Authentication-Info:"), preserve);
+            assert!(!encoded.contains("Proxy-Authorization:"));
+        }
     }
 
     #[test]
