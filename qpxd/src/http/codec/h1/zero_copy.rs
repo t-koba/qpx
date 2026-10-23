@@ -135,7 +135,11 @@ impl ZeroCopySocket {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        AsyncFd::new(OwnedSocketFd(fd))
+        // SAFETY: dup returned a valid, open descriptor exclusively owned by
+        // OwnedSocketFd. Its AsRawFd always returns that same descriptor, and
+        // only its Drop closes it, after AsyncFd has deregistered it. Nothing
+        // replaces or closes the descriptor while the registration is alive.
+        unsafe { AsyncFd::register(OwnedSocketFd(fd)) }.map_err(io::Error::from)
     }
 
     pub(super) async fn send_file(&self, region: &FileRegion) -> io::Result<()> {

@@ -103,7 +103,7 @@ h3-quinn = { version = "0.0.10", features = ["datagram"] }
 h3-datagram = "0.0.2"
 
 # Async runtime
-tokio = { version = "1", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "process", "signal", "fs"] }
+tokio = { version = "1.53.3", default-features = false, features = ["macros", "rt", "rt-multi-thread", "net", "io-util", "time", "sync", "process", "signal", "fs"] }
 tokio-util = "0.7"
 socket2 = { version = "0.6", features = ["all"] }
 memmap2 = "0.9.10"
