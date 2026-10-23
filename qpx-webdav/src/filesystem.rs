@@ -666,7 +666,7 @@ mod tests {
         true
     }
 
-    fn exercise_store(store: &FileSystemDataStore) {
+    fn exercise_store(store: &FileSystemDataStore, scenario: &str) {
         assert!(store.metadata(&id("/")).unwrap().unwrap().is_collection);
         store.create_collection(&id("/docs")).unwrap();
         assert!(store.put(&id("/docs/a"), b"first", None).unwrap());
@@ -681,7 +681,9 @@ mod tests {
         assert_eq!(store.read(&id("/copied/a")).unwrap(), b"second".as_slice());
         store
             .move_resource(&id("/copied"), &id("/moved"), false)
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!("{scenario}: directory MOVE /copied -> /moved failed: {error:#}")
+            });
         assert!(store.metadata(&id("/copied")).unwrap().is_none());
         assert_eq!(store.read(&id("/moved/a")).unwrap(), b"second".as_slice());
         store.put(&id("/target"), b"old", None).unwrap();
@@ -691,7 +693,9 @@ mod tests {
         store.put(&id("/moved/a"), b"third", None).unwrap();
         store
             .move_resource(&id("/moved/a"), &id("/target"), true)
-            .unwrap();
+            .unwrap_or_else(|error| {
+                panic!("{scenario}: overwrite MOVE /moved/a -> /target failed: {error:#}")
+            });
         assert!(store.metadata(&id("/moved/a")).unwrap().is_none());
         assert_eq!(store.read(&id("/target")).unwrap(), b"third".as_slice());
         store.delete(&id("/docs")).unwrap();
@@ -712,7 +716,9 @@ mod tests {
             let replaced = if replace_ancestor { &ancestor } else { &root };
             let saved = directory.path().join("saved");
             let changed = replace_directory(replaced, &saved, outside.path());
-            exercise_store(&store);
+            let scenario =
+                format!("replace_ancestor={replace_ancestor}, replacement_changed={changed}");
+            exercise_store(&store, &scenario);
             assert_eq!(
                 fs::read(outside.path().join("sentinel")).unwrap(),
                 b"outside"
