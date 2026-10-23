@@ -383,15 +383,19 @@ impl Parent {
             let metadata = cap::stat(directory, &child.name, FollowSymlinks::No)?;
             if metadata.file_type().is_symlink() {
                 // Nested links are unlinked, unlike explicitly addressed links.
+                // Stable Windows Rust cannot distinguish directory links via
+                // FileTypeExt, so retry the directory unlink form if removing
+                // the link as a file fails. Both operations are relative to
+                // the pinned parent and unlink, rather than traverse, the link.
+                let remove_file = cap::remove_file(directory, &child.name);
                 #[cfg(windows)]
-                {
-                    use cap_primitives::fs::FileTypeExt as _;
-                    if metadata.file_type().is_symlink_dir() {
-                        cap::remove_dir(directory, &child.name)?;
-                        continue;
+                if let Err(file_error) = remove_file {
+                    if cap::remove_dir(directory, &child.name).is_err() {
+                        return Err(file_error.into());
                     }
                 }
-                cap::remove_file(directory, &child.name)?;
+                #[cfg(not(windows))]
+                remove_file?;
             } else {
                 child.remove()?;
             }
@@ -781,6 +785,32 @@ mod tests {
             fs::read(outside.path().join("sentinel")).unwrap(),
             b"outside"
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn recursive_delete_unlinks_nested_directory_symlinks() {
+        let directory = tempdir().unwrap();
+        let outside = tempdir().unwrap();
+        fs::write(outside.path().join("sentinel"), b"outside").unwrap();
+        let store = FileSystemDataStore::open(directory.path().join("root")).unwrap();
+        let link = store.root().join("link");
+        if let Err(error) = std::os::windows::fs::symlink_dir(outside.path(), &link) {
+            // Some Windows environments do not grant symbolic-link creation.
+            // Exercise the regression wherever the host policy permits it.
+            if error.kind() == std::io::ErrorKind::PermissionDenied {
+                return;
+            }
+            panic!("create directory symlink: {error}");
+        }
+
+        Parent::remove_children(&store.directory).unwrap();
+        assert!(fs::symlink_metadata(&link).is_err());
+        assert_eq!(
+            fs::read(outside.path().join("sentinel")).unwrap(),
+            b"outside"
+        );
+        assert_eq!(fs::read_dir(outside.path()).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
