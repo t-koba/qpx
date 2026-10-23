@@ -42,7 +42,7 @@ pub(super) fn validate_multipart_limits(
             {
                 continue;
             }
-            if let Some(name) = disposition_param(line, "name")
+            if let Some(name) = semicolon_parameter(line, "name")
                 && let Some(limit) = profile.multipart.max_name_bytes
                 && name.len() > limit
             {
@@ -50,7 +50,7 @@ pub(super) fn validate_multipart_limits(
                     "multipart field name exceeds http_guard limit",
                 ));
             }
-            if let Some(filename) = disposition_param(line, "filename")
+            if let Some(filename) = semicolon_parameter(line, "filename")
                 && let Some(limit) = profile.multipart.max_filename_bytes
                 && filename.len() > limit
             {
@@ -108,7 +108,7 @@ pub(super) async fn validate_multipart_limits_reader(
             {
                 continue;
             }
-            if let Some(name) = disposition_param(&line, "name")
+            if let Some(name) = semicolon_parameter(&line, "name")
                 && let Some(limit) = profile.multipart.max_name_bytes
                 && name.len() > limit
             {
@@ -116,7 +116,7 @@ pub(super) async fn validate_multipart_limits_reader(
                     "multipart field name exceeds http_guard limit",
                 )));
             }
-            if let Some(filename) = disposition_param(&line, "filename")
+            if let Some(filename) = semicolon_parameter(&line, "filename")
                 && let Some(limit) = profile.multipart.max_filename_bytes
                 && filename.len() > limit
             {
@@ -137,24 +137,38 @@ pub(super) fn multipart_boundary_from_headers(headers: &http::HeaderMap) -> Opti
     {
         return None;
     }
-    value
-        .split(';')
-        .skip(1)
-        .find_map(|part| {
-            let mut split = part.trim().splitn(2, '=');
-            let key = split.next()?.trim();
-            let value = split.next()?.trim().trim_matches('"');
-            key.eq_ignore_ascii_case("boundary")
-                .then(|| value.to_string())
-        })
-        .filter(|boundary| !boundary.is_empty())
+    semicolon_parameter(value, "boundary").filter(|boundary| !boundary.is_empty())
 }
 
-fn disposition_param(line: &str, name: &str) -> Option<String> {
-    line.split(';').skip(1).find_map(|part| {
+fn semicolon_parameter(value: &str, name: &str) -> Option<String> {
+    value.split(';').skip(1).find_map(|part| {
         let mut split = part.trim().splitn(2, '=');
         let key = split.next()?.trim();
         let value = split.next()?.trim().trim_matches('"');
         key.eq_ignore_ascii_case(name).then(|| value.to_string())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::semicolon_parameter;
+
+    #[test]
+    fn semicolon_parameter_preserves_first_match_and_value_text() {
+        let value = r#"form-data; NAME = "first=value"; name=second"#;
+        assert_eq!(
+            semicolon_parameter(value, "name"),
+            Some("first=value".to_owned())
+        );
+        assert_eq!(semicolon_parameter(value, "missing"), None);
+    }
+
+    #[test]
+    fn semicolon_parameter_ignores_the_initial_token_and_unassigned_parts() {
+        assert_eq!(
+            semicolon_parameter("boundary=initial; name=actual", "boundary"),
+            None
+        );
+        assert_eq!(semicolon_parameter("form-data; name", "name"), None);
+    }
 }
