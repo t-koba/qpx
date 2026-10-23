@@ -98,7 +98,7 @@ pub(crate) async fn spawn_http1_send_request(
 /// handed to the owner, which finds the field's own values and owns the
 /// member grammar and the conflict rule. A head that declares no length,
 /// or one the owner refuses, declares no length here.
-fn declared_content_length(head: &str) -> usize {
+pub(crate) fn declared_content_length(head: &str) -> usize {
     let lines = head.lines().filter_map(|line| line.split_once(':'));
     qpx_core::http_content_length::declared_content_length_in_named_values(lines)
         .ok()

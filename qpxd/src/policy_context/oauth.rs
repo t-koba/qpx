@@ -58,7 +58,7 @@ mod tests {
             oauth_form_encode_component("a:b/c?d@e f+g%h"),
             "a%3Ab%2Fc%3Fd%40e+f%2Bg%25h"
         );
-        assert_eq!(oauth_form_encode_component("caf\u{e9}"), "caf%C3%A9");
+        assert_eq!(oauth_form_encode_component("value\u{e9}"), "value%C3%A9");
     }
 
     #[test]

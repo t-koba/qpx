@@ -559,13 +559,7 @@ async fn oauth_token_request_sends_form_encoded_client_secret_basic() {
             .map(|index| index + 4)
             .unwrap_or(raw.len());
         let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
-        let content_length = head
-            .lines()
-            .skip(1)
-            .filter_map(|line| line.split_once(':'))
-            .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
-            .and_then(|(_, value)| value.trim().parse::<usize>().ok())
-            .unwrap_or(0);
+        let content_length = crate::test_util::declared_content_length(&head);
         while raw.len() < head_end + content_length {
             let read = stream.read(&mut buf).await.expect("read mock token body");
             if read == 0 {
