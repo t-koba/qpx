@@ -721,22 +721,7 @@ fn serialize_status_and_headers(
         head.extend_from_slice(value.as_bytes());
         head.extend_from_slice(b"\r\n");
     }
-    match connection_mode {
-        ConnectionHeaderMode::Omit => {}
-        ConnectionHeaderMode::Close => {
-            head.extend_from_slice(b"Connection: close\r\n");
-        }
-        ConnectionHeaderMode::KeepAlive => {
-            head.extend_from_slice(b"Connection: keep-alive\r\n");
-        }
-        ConnectionHeaderMode::Preserve => {
-            for value in headers.get_all(CONNECTION) {
-                head.extend_from_slice(b"Connection: ");
-                head.extend_from_slice(value.as_bytes());
-                head.extend_from_slice(b"\r\n");
-            }
-        }
-    }
+    serialize_connection_headers(head, headers, connection_mode);
     head.extend_from_slice(b"\r\n");
 }
 
@@ -777,6 +762,15 @@ fn serialize_status_and_raw_headers(
     if chunked {
         head.extend_from_slice(b"Transfer-Encoding: chunked\r\n");
     }
+    serialize_connection_headers(head, additional_headers, connection_mode);
+    head.extend_from_slice(b"\r\n");
+}
+
+fn serialize_connection_headers(
+    head: &mut BytesMut,
+    headers: &HeaderMap,
+    connection_mode: ConnectionHeaderMode,
+) {
     match connection_mode {
         ConnectionHeaderMode::Omit => {}
         ConnectionHeaderMode::Close => head.extend_from_slice(b"Connection: close\r\n"),
@@ -784,14 +778,13 @@ fn serialize_status_and_raw_headers(
             head.extend_from_slice(b"Connection: keep-alive\r\n");
         }
         ConnectionHeaderMode::Preserve => {
-            for value in additional_headers.get_all(CONNECTION) {
+            for value in headers.get_all(CONNECTION) {
                 head.extend_from_slice(b"Connection: ");
                 head.extend_from_slice(value.as_bytes());
                 head.extend_from_slice(b"\r\n");
             }
         }
     }
-    head.extend_from_slice(b"\r\n");
 }
 
 async fn write_content_length_response_body<W>(
@@ -1105,4 +1098,38 @@ fn serialize_trailer_field_names(trailers: &HeaderMap) -> Option<HeaderValue> {
         return None;
     }
     HeaderValue::from_str(names.join(", ").as_str()).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ConnectionHeaderMode, serialize_connection_headers};
+    use bytes::BytesMut;
+    use http::header::{CONNECTION, HeaderMap, HeaderValue};
+
+    #[test]
+    fn connection_header_modes_preserve_their_exact_serialization() {
+        let mut headers = HeaderMap::new();
+        headers.append(CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.append(CONNECTION, HeaderValue::from_static("upgrade"));
+
+        for (mode, expected) in [
+            (ConnectionHeaderMode::Omit, b"".as_slice()),
+            (
+                ConnectionHeaderMode::Close,
+                b"Connection: close\r\n".as_slice(),
+            ),
+            (
+                ConnectionHeaderMode::KeepAlive,
+                b"Connection: keep-alive\r\n".as_slice(),
+            ),
+            (
+                ConnectionHeaderMode::Preserve,
+                b"Connection: keep-alive\r\nConnection: upgrade\r\n".as_slice(),
+            ),
+        ] {
+            let mut head = BytesMut::new();
+            serialize_connection_headers(&mut head, &headers, mode);
+            assert_eq!(head.as_ref(), expected, "{mode:?}");
+        }
+    }
 }
