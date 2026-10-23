@@ -117,6 +117,31 @@ fn event_stream_is_not_a_regular_compressible_text_type() {
 }
 
 #[test]
+fn missing_or_unreadable_content_type_is_neither_event_stream_nor_allowed() {
+    let headers = HeaderMap::new();
+    assert!(!is_event_stream_headers(&headers));
+    assert!(!content_type_allowed(&headers, &[]));
+    assert!(!content_type_allowed(&headers, &["text/plain".to_string()]));
+
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_bytes(b"\xff").expect("opaque content-type value"),
+    );
+    assert!(!is_event_stream_headers(&headers));
+    assert!(!content_type_allowed(&headers, &[]));
+}
+
+#[test]
+fn repeated_content_type_fields_keep_first_value() {
+    let mut headers = HeaderMap::new();
+    headers.append(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"));
+    headers.append(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    assert!(is_event_stream_headers(&headers));
+    assert!(!content_type_allowed(&headers, &["text/plain".to_string()]));
+}
+
+#[test]
 fn event_stream_compression_requires_explicit_force() {
     let request = hyper::Request::builder()
         .method(Method::GET)

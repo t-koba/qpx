@@ -472,21 +472,21 @@ fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn is_event_stream_headers(headers: &HeaderMap) -> bool {
+fn response_media_type(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.split(';').next().unwrap_or(value).trim())
+}
+
+pub(crate) fn is_event_stream_headers(headers: &HeaderMap) -> bool {
+    response_media_type(headers)
         .map(|value| value.eq_ignore_ascii_case("text/event-stream"))
         .unwrap_or(false)
 }
 
 fn content_type_allowed(headers: &HeaderMap, configured: &[String]) -> bool {
-    let Some(content_type) = headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(';').next().unwrap_or(value).trim())
-    else {
+    let Some(content_type) = response_media_type(headers) else {
         return false;
     };
     let mut iter: Box<dyn Iterator<Item = &str>> = if configured.is_empty() {
