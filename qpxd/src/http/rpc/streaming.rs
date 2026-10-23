@@ -2,7 +2,8 @@
 use super::frame::{FrameParseState, FramedBodySummary, GrpcFrameError, GrpcFrameObserver};
 use super::protocol::{
     detect_rpc_protocol, infer_request_streaming, infer_response_streaming,
-    parse_connect_end_stream_metadata, response_content_type, rpc_protocol_from_content_type,
+    is_grpc_web_text_content_type, parse_connect_end_stream_metadata, response_content_type,
+    rpc_protocol_from_content_type,
 };
 use anyhow::{Result, anyhow};
 use http::HeaderMap;
@@ -185,7 +186,7 @@ pub(crate) fn streaming_rpc_observer(
         "grpc_web" => StreamingRpcInner::Grpc(GrpcFrameObserver::grpc_web(
             response_content_type(headers)
                 .as_deref()
-                .map(|value| value.starts_with("application/grpc-web-text"))
+                .map(is_grpc_web_text_content_type)
                 .unwrap_or(false),
             max_message_bytes,
             max_trailer_bytes,

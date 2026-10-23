@@ -1,7 +1,7 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use super::protocol::{
-    detect_rpc_protocol, parse_grpc_web_trailer_block, response_content_type,
-    rpc_protocol_from_content_type,
+    detect_rpc_protocol, is_grpc_web_text_content_type, parse_grpc_web_trailer_block,
+    response_content_type, rpc_protocol_from_content_type,
 };
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use super::streaming::ConnectFrameObserver;
@@ -84,7 +84,7 @@ fn body_summary_observer(
         "grpc_web" => RpcSummaryInner::Grpc(GrpcFrameObserver::grpc_web(
             content_type
                 .as_deref()
-                .map(|value| value.starts_with("application/grpc-web-text"))
+                .map(is_grpc_web_text_content_type)
                 .unwrap_or(false),
             None,
             None,

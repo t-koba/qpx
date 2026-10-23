@@ -22,6 +22,10 @@ pub(super) fn rpc_protocol_from_content_type(raw: &str) -> Option<&'static str> 
     }
 }
 
+pub(super) fn is_grpc_web_text_content_type(raw: &str) -> bool {
+    raw.starts_with("application/grpc-web-text")
+}
+
 pub(super) fn detect_rpc_protocol(headers: &HeaderMap, fallback: Option<&str>) -> Option<String> {
     let content_type = response_content_type(headers);
     if let Some(protocol) = content_type
@@ -262,5 +266,21 @@ pub(super) fn infer_response_streaming(
         }
         Some("connect") => None,
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_grpc_web_text_content_type;
+
+    #[test]
+    fn grpc_web_text_content_type_preserves_prefix_and_case_sensitive_semantics() {
+        assert!(is_grpc_web_text_content_type("application/grpc-web-text"));
+        assert!(is_grpc_web_text_content_type(
+            "application/grpc-web-text+proto"
+        ));
+        assert!(!is_grpc_web_text_content_type("application/grpc-web"));
+        assert!(!is_grpc_web_text_content_type("Application/grpc-web-text"));
+        assert!(!is_grpc_web_text_content_type(" application/grpc-web-text"));
     }
 }

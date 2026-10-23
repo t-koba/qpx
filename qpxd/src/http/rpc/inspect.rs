@@ -5,7 +5,8 @@ use super::frame::{FramedBodySummary, GrpcFrameObserver, PrecomputedRpcBodySumma
 use super::protocol::rpc_protocol_from_content_type;
 use super::protocol::{
     detect_rpc_protocol, extract_rpc_status_and_message, extract_service_and_method,
-    infer_request_streaming, infer_response_streaming, response_content_type,
+    infer_request_streaming, infer_response_streaming, is_grpc_web_text_content_type,
+    response_content_type,
 };
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use super::streaming::ConnectFrameObserver;
@@ -193,7 +194,7 @@ async fn summarize_observed_request_body(
                 GrpcFrameObserver::grpc_web(
                     response_content_type(headers)
                         .as_deref()
-                        .map(|value| value.starts_with("application/grpc-web-text"))
+                        .map(is_grpc_web_text_content_type)
                         .unwrap_or(false),
                     None,
                     None,
@@ -228,7 +229,7 @@ async fn summarize_observed_response_body(
                 body,
                 GrpcFrameObserver::grpc_web(
                     content_type
-                        .map(|value| value.starts_with("application/grpc-web-text"))
+                        .map(is_grpc_web_text_content_type)
                         .unwrap_or(false),
                     None,
                     None,
