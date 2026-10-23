@@ -6,8 +6,10 @@ use super::{
 use crate::http::media_type::raw_media_type;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+#[cfg(test)]
+use http::StatusCode;
 use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, VARY};
-use http::{HeaderMap, HeaderValue, Method, StatusCode};
+use http::{HeaderMap, HeaderValue, Method};
 use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
 use qpx_core::http_content_length::declared_content_length;
@@ -16,6 +18,7 @@ use qpx_http::compression_dictionary::{
     encode_dcb, encode_dcz, parse_available_dictionary, parse_dictionary_id,
 };
 use qpx_http::digest_fields::{CONTENT_DIGEST, REPR_DIGEST};
+use qpx_http::protocol::semantics::response_status_has_no_body;
 use qpxd_cache::parse_cache_control_response_directives;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
@@ -386,10 +389,7 @@ fn response_body_is_compressible(
     config: &ResponseCompressionModuleConfig,
     response: &Response<Body>,
 ) -> Result<bool> {
-    if response.status().is_informational()
-        || response.status() == StatusCode::NO_CONTENT
-        || response.status() == StatusCode::RESET_CONTENT
-        || response.status() == StatusCode::NOT_MODIFIED
+    if response_status_has_no_body(response.status(), false)
         || response.headers().contains_key(CONTENT_ENCODING)
         || response.headers().contains_key(CONTENT_RANGE)
     {

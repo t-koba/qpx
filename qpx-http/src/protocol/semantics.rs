@@ -541,6 +541,19 @@ pub fn validate_h2_h3_request_headers(
     Ok(())
 }
 
+/// Whether the response status prevents an HTTP message body.
+///
+/// `allow_switching_protocols` preserves the existing upgrade behavior for a
+/// `101 Switching Protocols` response. Request-method and CONNECT rules are
+/// intentionally left to the caller.
+pub fn response_status_has_no_body(status: StatusCode, allow_switching_protocols: bool) -> bool {
+    (status.is_informational()
+        && !(allow_switching_protocols && status == StatusCode::SWITCHING_PROTOCOLS))
+        || status == StatusCode::NO_CONTENT
+        || status == StatusCode::RESET_CONTENT
+        || status == StatusCode::NOT_MODIFIED
+}
+
 pub fn normalize_response_for_request<B>(
     request_method: &Method,
     response: &mut http::Response<B>,
@@ -560,18 +573,14 @@ where
     B: Default,
 {
     let status = response.status();
-    if status.is_informational()
-        && !(allow_switching_protocols && status == StatusCode::SWITCHING_PROTOCOLS)
-    {
+    if status.is_informational() && response_status_has_no_body(status, allow_switching_protocols) {
         *response.status_mut() = StatusCode::BAD_GATEWAY;
         *response.body_mut() = B::default();
         strip_message_body_headers(response.headers_mut());
         return true;
     }
     let no_body = request_method == Method::HEAD
-        || status == StatusCode::NO_CONTENT
-        || status == StatusCode::RESET_CONTENT
-        || status == StatusCode::NOT_MODIFIED
+        || response_status_has_no_body(status, allow_switching_protocols)
         || (request_method == Method::CONNECT && status.is_success());
     if no_body {
         *response.body_mut() = B::default();

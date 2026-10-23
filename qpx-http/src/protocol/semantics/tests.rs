@@ -169,6 +169,23 @@ fn validation_metadata_prefers_the_absolute_target_authority() {
 }
 
 #[test]
+fn response_status_body_suppression_preserves_upgrade_exception() {
+    assert!(response_status_has_no_body(StatusCode::CONTINUE, false));
+    assert!(response_status_has_no_body(
+        StatusCode::SWITCHING_PROTOCOLS,
+        false
+    ));
+    assert!(!response_status_has_no_body(
+        StatusCode::SWITCHING_PROTOCOLS,
+        true
+    ));
+    assert!(response_status_has_no_body(StatusCode::NO_CONTENT, true));
+    assert!(response_status_has_no_body(StatusCode::RESET_CONTENT, true));
+    assert!(response_status_has_no_body(StatusCode::NOT_MODIFIED, true));
+    assert!(!response_status_has_no_body(StatusCode::OK, false));
+}
+
+#[test]
 fn normalize_response_keeps_content_length_for_head() {
     let mut resp = http::Response::builder()
         .status(StatusCode::OK)

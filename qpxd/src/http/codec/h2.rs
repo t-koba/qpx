@@ -10,6 +10,7 @@ use http_body::Frame;
 use hyper::header::COOKIE;
 use hyper::{Request, Response};
 use qpx_http::body::{Body, BodyError};
+use qpx_http::protocol::semantics::response_status_has_no_body;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -159,10 +160,7 @@ pub(crate) async fn send_h2_response_with_interim(
     let status =
         qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
     let no_body = request_method == hyper::Method::HEAD
-        || parts.status.is_informational()
-        || parts.status == http::StatusCode::NO_CONTENT
-        || parts.status == http::StatusCode::RESET_CONTENT
-        || parts.status == http::StatusCode::NOT_MODIFIED
+        || response_status_has_no_body(parts.status, false)
         || (request_method == hyper::Method::CONNECT
             && parts.status.is_success()
             && !allow_successful_connect_body);

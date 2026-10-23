@@ -15,6 +15,7 @@ use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::response_status_has_no_body;
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::task::Poll;
@@ -83,10 +84,7 @@ pub(crate) async fn send_static_http1_response(
     request_keep_alive: bool,
     head_buf: &mut BytesMut,
 ) -> Result<bool> {
-    let status_has_no_body = response_status.is_informational()
-        || response_status == StatusCode::NO_CONTENT
-        || response_status == StatusCode::RESET_CONTENT
-        || response_status == StatusCode::NOT_MODIFIED
+    let status_has_no_body = response_status_has_no_body(response_status, false)
         || (request_method == Method::CONNECT && response_status.is_success());
     let no_body = request_method == Method::HEAD || status_has_no_body;
     let body_len = body.len() as u64;
@@ -214,10 +212,7 @@ where
     let raw_head = parts.extensions.remove::<Arc<RawHttp1ResponseHead>>();
     let mut headers = parts.headers;
     let no_body = request_method == Method::HEAD
-        || parts.status.is_informational()
-        || parts.status == StatusCode::NO_CONTENT
-        || parts.status == StatusCode::RESET_CONTENT
-        || parts.status == StatusCode::NOT_MODIFIED
+        || response_status_has_no_body(parts.status, false)
         || (request_method == Method::CONNECT && parts.status.is_success());
     let body_kind = if let Some(raw) = raw_head.as_ref() {
         if !raw.is_finalized() {

@@ -3,6 +3,7 @@ use anyhow::{Result, anyhow};
 use http::header::COOKIE;
 use hyper::{Request, Uri};
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::response_status_has_no_body;
 
 pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
     let mut headers = http::HeaderMap::new();
@@ -100,11 +101,8 @@ pub(crate) fn prepare_h3_response_head(
     let status =
         qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/3 response")?;
     let mut headers = parts.headers.clone();
-    let no_body = *request_method == http::Method::HEAD
-        || parts.status.is_informational()
-        || parts.status == http::StatusCode::NO_CONTENT
-        || parts.status == http::StatusCode::NOT_MODIFIED
-        || parts.status == http::StatusCode::RESET_CONTENT;
+    let no_body =
+        *request_method == http::Method::HEAD || response_status_has_no_body(parts.status, false);
     // RFC 9110 section 8.6 gives the field the grammar `1*DIGIT`, so the
     // value a sender writes is one decimal, and the declaration the
     // response carried is replaced with a single instance of the resolved
