@@ -1,10 +1,8 @@
 use super::PreparedReverseRequest;
 use super::prepare_early::{EarlyReversePrepare, check_early_reverse_prepare};
 use super::prepare_finalize::finalize_reverse_route_selection;
-use super::prepare_initial::{
-    InitialReverseScan, initial_scan_reverse_routes, reverse_prefilter_context,
-};
-use super::prepare_scan::observe_body_and_rescan_reverse_routes;
+use super::prepare_initial::{InitialReverseScan, initial_scan_reverse_routes};
+use super::prepare_scan::{observe_body_and_rescan_reverse_routes, reverse_prefilter_context};
 use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::{InterimList, ReverseConnInfo};

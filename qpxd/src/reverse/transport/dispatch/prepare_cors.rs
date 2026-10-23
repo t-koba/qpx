@@ -1,12 +1,9 @@
-use super::prepare_scan::{ReverseRouteSelection, scan_reverse_routes};
-use super::{InlineCache, empty_interim_response};
-use crate::http::body::observation::RequestObservationPlan;
+use super::empty_interim_response;
+use super::prepare_scan::{ReverseRouteSelection, reverse_prefilter_context, scan_reverse_routes};
 use crate::http::protocol::base_fields::BaseRequestFields;
-use crate::policy_context::EffectivePolicyContext;
 use crate::reverse::transport::{InterimList, ReverseConnInfo, ReverseRouter};
 use anyhow::{Result, anyhow};
 use hyper::{Method, Response, StatusCode};
-use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -25,26 +22,9 @@ pub(super) async fn prepare_cors_preflight(
     let mut route_base = base.clone();
     route_base.method = preflight.method().clone();
     let host = route_base.host().unwrap_or_default();
-    let prefilter_ctx = MatchPrefilterContext {
-        method: Some(route_base.method.as_str()),
-        dst_port: Some(conn.dst_port),
-        src_ip: Some(conn.remote_addr.ip()),
-        host: (!host.is_empty()).then_some(host),
-        sni: conn.tls_sni.as_deref(),
-        path: route_base.path(),
-    };
-    let mut selection = ReverseRouteSelection {
-        route_idx: None,
-        selected_policy: EffectivePolicyContext::default(),
-        selected_identity: None,
-        request_destination_cache: InlineCache::new(),
-        identity_cache: InlineCache::new(),
-        observation_plan: RequestObservationPlan::default(),
-        max_observed_request_body_bytes: state.plan.limits.body.max_observed_request_body_bytes,
-        collect_observation_from_remaining: false,
-        first_match_idx: None,
-        preflight_owner_ambiguous: false,
-    };
+    let prefilter_ctx = reverse_prefilter_context(&route_base, conn, host);
+    let mut selection =
+        ReverseRouteSelection::new(state.plan.limits.body.max_observed_request_body_bytes);
     scan_reverse_routes(
         router,
         &request_headers,

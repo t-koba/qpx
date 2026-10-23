@@ -45,6 +45,38 @@ pub(super) struct ReverseRouteSelection {
     pub(super) preflight_owner_ambiguous: bool,
 }
 
+impl ReverseRouteSelection {
+    pub(super) fn new(max_observed_request_body_bytes: usize) -> Self {
+        Self {
+            route_idx: None,
+            selected_policy: EffectivePolicyContext::default(),
+            selected_identity: None,
+            request_destination_cache: InlineCache::new(),
+            identity_cache: InlineCache::new(),
+            observation_plan: RequestObservationPlan::default(),
+            max_observed_request_body_bytes,
+            collect_observation_from_remaining: false,
+            first_match_idx: None,
+            preflight_owner_ambiguous: false,
+        }
+    }
+}
+
+pub(super) fn reverse_prefilter_context<'a>(
+    base: &'a BaseRequestFields,
+    conn: &'a ReverseConnInfo,
+    host: &'a str,
+) -> MatchPrefilterContext<'a> {
+    MatchPrefilterContext {
+        method: Some(base.method.as_str()),
+        dst_port: Some(conn.dst_port),
+        src_ip: Some(conn.remote_addr.ip()),
+        host: (!host.is_empty()).then_some(host),
+        sni: conn.tls_sni.as_deref(),
+        path: base.path(),
+    }
+}
+
 #[expect(
     clippy::too_many_arguments,
     reason = "route scan receives explicit immutable match facts instead of a broad mutable context"
@@ -326,4 +358,80 @@ pub(super) async fn observe_body_and_rescan_reverse_routes(
         return Err(error);
     }
     Ok(Ok((req, request_rpc)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
+
+    #[test]
+    fn reverse_route_selection_starts_empty_with_explicit_observation_limit() {
+        for limit in [0, 8192] {
+            let ReverseRouteSelection {
+                route_idx,
+                selected_policy,
+                selected_identity,
+                request_destination_cache,
+                identity_cache,
+                observation_plan,
+                max_observed_request_body_bytes,
+                collect_observation_from_remaining,
+                first_match_idx,
+                preflight_owner_ambiguous,
+            } = ReverseRouteSelection::new(limit);
+            assert!(route_idx.is_none());
+            assert!(selected_policy.identity_sources.is_empty());
+            assert!(selected_policy.decision_service.is_none());
+            assert!(selected_identity.is_none());
+            assert_eq!(request_destination_cache.into_iter().count(), 0);
+            assert_eq!(identity_cache.into_iter().count(), 0);
+            assert!(observation_plan.is_empty());
+            assert!(!observation_plan.needs_size);
+            assert!(!observation_plan.needs_body);
+            assert!(!observation_plan.needs_rpc);
+            assert_eq!(max_observed_request_body_bytes, limit);
+            assert!(!collect_observation_from_remaining);
+            assert!(first_match_idx.is_none());
+            assert!(!preflight_owner_ambiguous);
+        }
+    }
+
+    #[test]
+    fn reverse_prefilter_context_uses_caller_method_host_and_connection_facts() {
+        let request = Request::builder()
+            .method(http::Method::OPTIONS)
+            .uri("https://base.example/items/42?view=full")
+            .body(())
+            .unwrap();
+        let base = extract_base_request_fields(
+            &request,
+            BaseRequestContext {
+                peer_ip: Some("192.0.2.10".parse().unwrap()),
+                dst_port: Some(443),
+                sni: Some("base.example"),
+                ..Default::default()
+            },
+        );
+        // Like a preflight scan, use the requested method, not wire OPTIONS.
+        let mut route_base = base.clone();
+        route_base.method = http::Method::DELETE;
+        let mut conn = ReverseConnInfo::plain("198.51.100.7:54321".parse().unwrap(), 8443);
+        for sni in [None, Some(Arc::<str>::from("tls.example"))] {
+            conn.tls_sni = sni;
+            for host in ["", "route.example"] {
+                let ctx = reverse_prefilter_context(&route_base, &conn, host);
+                assert_eq!(ctx.method, Some("DELETE"));
+                assert_eq!(ctx.dst_port, Some(8443));
+                assert_eq!(ctx.src_ip, Some("198.51.100.7".parse().unwrap()));
+                assert_eq!(ctx.path, Some("/items/42"));
+                assert_eq!(ctx.host, (!host.is_empty()).then_some(host));
+                assert_eq!(ctx.sni, conn.tls_sni.as_deref());
+            }
+        }
+        assert_eq!(
+            reverse_prefilter_context(&base, &conn, "").method,
+            Some("OPTIONS")
+        );
+    }
 }
