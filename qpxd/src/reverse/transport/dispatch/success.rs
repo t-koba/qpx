@@ -172,6 +172,7 @@ mod tests {
 
             for case in ["http", "ipc", "retry", "stop", "stale", "local"] {
                 let dir = tempfile::tempdir()?;
+                let cache_path = dir.path().canonicalize()?.join("cache");
                 let config = qpx_core::config::load_config_value(
                     serde_yaml::from_str(&format!(
                         r#"upstreams:
@@ -193,7 +194,7 @@ edges:
     health_check: {{fail_threshold: 1, cooldown_ms: 60000}}
     target: {{type: upstream, upstreams: [origin]}}
 "#,
-                        serde_json::to_string(&dir.path().join("cache"))?
+                        serde_json::to_string(&cache_path)?
                     ))?,
                     "success tail test",
                 )?;
