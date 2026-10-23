@@ -155,7 +155,13 @@ async fn prepare_transparent_request(
     .await?
     {
         Ok(prepared) => prepared,
-        Err(response) => return Ok(TransparentPrepareOutcome::Response(Box::new(response))),
+        Err(response) => {
+            let response = crate::http::capture::stream::limit_response_body_for_plan(
+                response,
+                &compiled_edge.default_plan,
+            );
+            return Ok(TransparentPrepareOutcome::Response(Box::new(response)));
+        }
     };
     req = prepared_req;
     let mut request_body_observed = initial_observation_plan.needs_body;
@@ -182,6 +188,10 @@ async fn prepare_transparent_request(
     ))
     .await?
     {
+        let response = crate::http::capture::stream::limit_response_body_for_plan(
+            response,
+            &compiled_edge.default_plan,
+        );
         return Ok(TransparentPrepareOutcome::Response(Box::new(response)));
     }
     macro_rules! transparent_policy_input {
@@ -209,14 +219,17 @@ async fn prepare_transparent_request(
         {
             Ok(req) => req,
             Err(err) if crate::http::body::size::is_observed_body_limit_exceeded(&err) => {
-                return Ok(TransparentPrepareOutcome::Response(Box::new(
-                    request_body_too_large_response(
-                        &base.method,
-                        request_version_for_observation,
-                        proxy_name,
-                        None,
-                    )?,
-                )));
+                let response = request_body_too_large_response(
+                    &base.method,
+                    request_version_for_observation,
+                    proxy_name,
+                    None,
+                )?;
+                let response = crate::http::capture::stream::limit_response_body_for_plan(
+                    response,
+                    &compiled_edge.default_plan,
+                );
+                return Ok(TransparentPrepareOutcome::Response(Box::new(response)));
             }
             Err(err) => return Err(err),
         };
