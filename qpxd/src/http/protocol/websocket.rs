@@ -1,5 +1,5 @@
 use hyper_util::rt::TokioIo;
-use qpx_core::http_token::{header_values_contain_token, is_http_token};
+use qpx_core::http_token::{header_value_members, header_values_contain_token, is_http_token};
 use qpx_http::body::Body;
 use std::collections::HashSet;
 use std::future::Future;
@@ -92,14 +92,10 @@ pub(crate) fn websocket_response_expectation(
     let digest = ring::digest::digest(&ring::digest::SHA1_FOR_LEGACY_USE_ONLY, &material);
     use base64::Engine as _;
     let accept = base64::engine::general_purpose::STANDARD.encode(digest.as_ref());
-    let protocols = headers
-        .get_all("sec-websocket-protocol")
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(trim_http_ows)
+    let protocol_header = http::header::HeaderName::from_static("sec-websocket-protocol");
+    let protocols = header_value_members(headers, &protocol_header)
         .filter(|value| !value.is_empty())
-        .map(str::to_string)
+        .map(str::to_owned)
         .collect();
     Ok((accept, protocols))
 }
@@ -256,7 +252,7 @@ pub(crate) fn spawn_upgrade_tunnel<F, I, E>(
 mod tests {
     use super::{
         is_websocket_upgrade, validate_extended_connect_websocket_request,
-        validate_extended_connect_websocket_response,
+        validate_extended_connect_websocket_response, websocket_response_expectation,
     };
     use http::HeaderMap;
 
@@ -285,6 +281,25 @@ mod tests {
             "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap(),
         );
         assert!(is_websocket_upgrade(&http::Method::GET, &headers).unwrap());
+    }
+
+    #[test]
+    fn websocket_response_expectation_preserves_readable_members_and_omits_empty_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert("sec-websocket-key", "key".parse().unwrap());
+        headers.append(
+            "sec-websocket-protocol",
+            " chat, superchat ".parse().unwrap(),
+        );
+        headers.append("sec-websocket-protocol", ", ,".parse().unwrap());
+        headers.append("sec-websocket-protocol", "Chat".parse().unwrap());
+        headers.append(
+            "sec-websocket-protocol",
+            http::HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+
+        let (_, protocols) = websocket_response_expectation(&headers).unwrap();
+        assert_eq!(protocols, ["chat", "superchat", "Chat"]);
     }
 
     #[test]
