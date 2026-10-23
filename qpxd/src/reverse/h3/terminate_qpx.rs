@@ -338,12 +338,11 @@ impl ReverseQpxHandler {
                 observe_grpc_messages: response_streaming.observe_grpc_messages,
             },
         );
-        let response_summary = if relay_done {
-            reverse_qpx_response_summary(response_fut.await)?
-        } else if is_deadline_reply {
-            // The synthetic reply is self-contained: a still-pending relay
-            // can only fail on the expired budget, so send the reply alone
-            // instead of letting the relay reset the stream.
+        let response_summary = if relay_done || is_deadline_reply {
+            // A completed relay must never be polled again. The synthetic
+            // deadline reply is self-contained: a still-pending relay can only
+            // fail on the expired budget, so send the reply alone instead of
+            // letting the relay reset the stream.
             reverse_qpx_response_summary(response_fut.await)?
         } else {
             let (response_result, relay_result) = tokio::join!(response_fut, relay_fut);
