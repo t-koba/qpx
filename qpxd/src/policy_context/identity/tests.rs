@@ -224,7 +224,9 @@ async fn resolve_identity_extracts_trusted_headers() {
     };
     let mut headers = HeaderMap::new();
     headers.insert("x-user", "alice".parse().unwrap());
-    headers.insert("x-groups", "eng, ops, eng".parse().unwrap());
+    headers.append("x-groups", "eng, ops, eng".parse().unwrap());
+    headers.append("x-groups", ", ops, ".parse().unwrap());
+    headers.append("x-groups", http::HeaderValue::from_bytes(b"\xff").unwrap());
     let identity = resolve_identity(
         &state,
         &policy,

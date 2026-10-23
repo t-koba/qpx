@@ -44,15 +44,9 @@ pub(super) fn extract_list_header(headers: &HeaderMap, name: Option<&HeaderName>
         return Vec::new();
     };
     let mut out = Vec::new();
-    for value in headers.get_all(name).iter() {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for item in value.split(',') {
-            let item = item.trim();
-            if !item.is_empty() && !out.iter().any(|existing| existing == item) {
-                out.push(item.to_string());
-            }
+    for item in qpx_core::http_token::header_value_members(headers, name) {
+        if !item.is_empty() && !out.iter().any(|existing| existing == item) {
+            out.push(item.to_string());
         }
     }
     out
