@@ -826,13 +826,10 @@ async fn fetch_introspection(
     let body = url::form_urlencoded::Serializer::new(String::new())
         .append_pair("token", token)
         .finish();
-    let credentials = base64::engine::general_purpose::STANDARD.encode(format!(
-        "{}:{}",
-        source.client_id,
-        source.client_secret.as_str()
-    ));
-    let mut authorization = http::HeaderValue::from_str(&format!("Basic {credentials}"))?;
-    authorization.set_sensitive(true);
+    let authorization = super::oauth::oauth_client_secret_basic_header(
+        &source.client_id,
+        source.client_secret.as_str(),
+    )?;
     let request = Request::builder()
         .method(http::Method::POST)
         .uri(source.endpoint.as_str())
@@ -1805,5 +1802,111 @@ mod tests {
             http::HeaderValue::from_static("Max-Age=77"),
         );
         assert_eq!(cache_max_age(&headers), 300);
+    }
+
+    #[tokio::test]
+    async fn introspection_request_sends_form_encoded_client_secret_basic() {
+        use base64::Engine as _;
+        use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+        let client_id = "in:tro+spec tion%id";
+        let client_secret = "sec:ret+with/special?@chars";
+        let token = "tok+en/with%special chars";
+        let expected_userinfo = format!(
+            "{}:{}",
+            url::form_urlencoded::byte_serialize(client_id.as_bytes()).collect::<String>(),
+            url::form_urlencoded::byte_serialize(client_secret.as_bytes()).collect::<String>(),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock introspection endpoint");
+        let addr = listener.local_addr().expect("mock introspection addr");
+        let (captured_tx, captured_rx) =
+            tokio::sync::oneshot::channel::<(Option<String>, String)>();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept mock introspection");
+            let mut raw = Vec::new();
+            let mut buf = [0u8; 1024];
+            crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
+            let head_end = raw
+                .windows(4)
+                .position(|window| window == b"\r\n\r\n")
+                .map(|index| index + 4)
+                .unwrap_or(raw.len());
+            let head = String::from_utf8_lossy(&raw[..head_end]).into_owned();
+            let content_length = head
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, value)| value.trim().parse::<usize>().ok())
+                .unwrap_or(0);
+            while raw.len() < head_end + content_length {
+                let read = stream
+                    .read(&mut buf)
+                    .await
+                    .expect("read mock introspection body");
+                if read == 0 {
+                    break;
+                }
+                raw.extend_from_slice(&buf[..read]);
+            }
+            let authorization = head
+                .lines()
+                .skip(1)
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.trim().eq_ignore_ascii_case("authorization"))
+                .map(|(_, value)| value.trim().to_string());
+            let body =
+                String::from_utf8_lossy(&raw[head_end..head_end + content_length]).into_owned();
+            let _ = captured_tx.send((authorization, body));
+            let response_body = r#"{"active":true,"sub":"alice"}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len()
+            );
+            stream
+                .write_all(response.as_bytes())
+                .await
+                .expect("write mock introspection response");
+        });
+
+        let state = bearer_test_runtime();
+        let source = IntrospectionSource {
+            endpoint: Url::parse(&format!("http://{addr}/introspect"))
+                .expect("mock introspection url"),
+            client_id: client_id.to_string(),
+            client_secret: Zeroizing::new(client_secret.to_string()),
+            positive_cache_seconds: 0,
+            negative_cache_seconds: 0,
+            cache: Mutex::new(HashMap::new()),
+        };
+        let payload = fetch_introspection(&state, &source, token)
+            .await
+            .expect("mock introspection succeeds")
+            .expect("mock token is active");
+        assert_eq!(payload.get("sub").and_then(Value::as_str), Some("alice"));
+
+        let (authorization, body) = tokio::time::timeout(Duration::from_secs(5), captured_rx)
+            .await
+            .expect("mock introspection capture arrives")
+            .expect("mock introspection sender");
+        let encoded = authorization
+            .as_deref()
+            .and_then(|value| value.strip_prefix("Basic "))
+            .expect("introspection request uses Basic auth");
+        let decoded = String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("Basic body is base64"),
+        )
+        .expect("Basic body is UTF-8");
+        assert_eq!(decoded, expected_userinfo);
+        assert_ne!(decoded, format!("{client_id}:{client_secret}"));
+        let pairs: HashMap<String, String> = url::form_urlencoded::parse(body.as_bytes())
+            .into_owned()
+            .collect();
+        assert_eq!(pairs.get("token").map(String::as_str), Some(token));
     }
 }

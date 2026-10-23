@@ -4,6 +4,7 @@ mod crypto;
 mod decision_service;
 mod identity;
 mod metrics;
+mod oauth;
 mod signed_assertion;
 mod util;
 

@@ -545,10 +545,8 @@ async fn fetch_oauth2_client_credentials_token(
             .client_secret
             .as_deref()
             .ok_or_else(|| anyhow!("OAuth client secret is unavailable"))?;
-        let credentials = base64::engine::general_purpose::STANDARD
-            .encode(format!("{}:{}", provider.client_id, secret));
-        let mut authorization = http::HeaderValue::from_str(&format!("Basic {credentials}"))?;
-        authorization.set_sensitive(true);
+        let authorization =
+            super::oauth::oauth_client_secret_basic_header(&provider.client_id, secret)?;
         request = request.header(http::header::AUTHORIZATION, authorization);
     }
     let request = request.body(Body::from(body))?;
