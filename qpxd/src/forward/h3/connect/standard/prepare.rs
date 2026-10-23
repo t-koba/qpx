@@ -12,7 +12,9 @@ use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::blocked_response as blocked;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::common::forbidden_response as forbidden;
-use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
+#[cfg(feature = "auth-basic")]
+use crate::http::protocol::l7::finalize_response_for_request;
+use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::codec::h1_headers_to_http;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};

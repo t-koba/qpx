@@ -13,7 +13,9 @@ use crate::forward::request::proxy_auth_required;
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{blocked_response as blocked, forbidden_response as forbidden};
-use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
+#[cfg(feature = "auth-basic")]
+use crate::http::protocol::l7::finalize_response_for_request;
+use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::policy_context::{
     DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
     authentication_response_for_error, enforce_decision_service, prepare_decision_service_allow,
