@@ -1,4 +1,6 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use crate::http::media_type::media_type_without_parameters;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::{HeaderMap, Response, StatusCode};
@@ -55,11 +57,7 @@ fn build_grpc_web_local_response(
 pub(crate) fn connect_streaming_response_codec(
     request_content_type: Option<&str>,
 ) -> Option<&'static str> {
-    let base = request_content_type?
-        .split(';')
-        .next()?
-        .trim()
-        .to_ascii_lowercase();
+    let base = media_type_without_parameters(request_content_type?).to_ascii_lowercase();
     match base.as_str() {
         "application/connect+proto" => Some("application/connect+proto"),
         "application/connect+json" => Some("application/connect+json"),
@@ -196,4 +194,43 @@ pub(super) fn frame_grpc_web_trailers(trailers: &[u8]) -> Vec<u8> {
     out.extend_from_slice(&(trailers.len() as u32).to_be_bytes());
     out.extend_from_slice(trailers);
     out
+}
+
+#[cfg(all(test, any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
+mod tests {
+    use super::connect_streaming_response_codec;
+
+    #[test]
+    fn connect_streaming_codec_strips_parameters_and_folds_case() {
+        assert_eq!(
+            connect_streaming_response_codec(Some("application/connect+proto")),
+            Some("application/connect+proto")
+        );
+        assert_eq!(
+            connect_streaming_response_codec(Some("application/connect+proto; charset=utf-8")),
+            Some("application/connect+proto")
+        );
+        assert_eq!(
+            connect_streaming_response_codec(Some("  application/connect+json ; charset=utf-8 ")),
+            Some("application/connect+json")
+        );
+        assert_eq!(
+            connect_streaming_response_codec(Some("Application/Connect+JSON; charset=utf-8")),
+            Some("application/connect+json")
+        );
+    }
+
+    #[test]
+    fn connect_streaming_codec_rejects_missing_or_nonmatching() {
+        assert_eq!(connect_streaming_response_codec(None), None);
+        assert_eq!(
+            connect_streaming_response_codec(Some("application/json")),
+            None
+        );
+        assert_eq!(
+            connect_streaming_response_codec(Some("text/plain; charset=utf-8")),
+            None
+        );
+        assert_eq!(connect_streaming_response_codec(Some("")), None);
+    }
 }
