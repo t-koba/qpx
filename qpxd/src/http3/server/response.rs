@@ -94,13 +94,13 @@ where
     macro_rules! stop_body_error {
         ($code:expr, $err:expr) => {{
             req_stream.stop_stream($code);
-            return Err(h3_response_send_error_for_body(body_started, $err));
+            return Err(H3ResponseSendError::for_body(body_started, $err));
         }};
     }
     macro_rules! stop_body_map_err {
         ($err:expr) => {{
             req_stream.stop_stream(::h3::error::Code::H3_INTERNAL_ERROR);
-            h3_response_send_error_for_body(body_started, $err)
+            H3ResponseSendError::for_body(body_started, $err)
         }};
     }
     loop {
@@ -259,17 +259,6 @@ where
     )
     .await?
     .map_err(Into::into)
-}
-
-fn h3_response_send_error_for_body(
-    body_started: bool,
-    source: anyhow::Error,
-) -> H3ResponseSendError {
-    if body_started {
-        H3ResponseSendError::after_body_started(source)
-    } else {
-        H3ResponseSendError::after_response_head(source)
-    }
 }
 
 pub(crate) async fn send_h3_static_response<S>(

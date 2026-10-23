@@ -204,7 +204,7 @@ async fn send_qpx_response_stream_observed_inner(
     macro_rules! abort_body_error {
         ($err:expr) => {{
             req_stream.abort_message_stream();
-            return Err(qpx_response_send_error_for_body(body_started, $err));
+            return Err(H3ResponseSendError::for_body(body_started, $err));
         }};
     }
     loop {
@@ -340,17 +340,6 @@ async fn send_qpx_response_stream_observed_inner(
         abort_body_error!(err);
     }
     Ok(summary)
-}
-
-fn qpx_response_send_error_for_body(
-    body_started: bool,
-    source: anyhow::Error,
-) -> H3ResponseSendError {
-    if body_started {
-        H3ResponseSendError::after_body_started(source)
-    } else {
-        H3ResponseSendError::after_response_head(source)
-    }
 }
 
 async fn qpx_timeout_result<F, T, E>(
