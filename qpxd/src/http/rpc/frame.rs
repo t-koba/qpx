@@ -101,7 +101,7 @@ fn body_summary_observer(
 fn connect_summary_observer(headers: &HeaderMap) -> Option<RpcBodySummaryObserver> {
     response_content_type(headers)
         .as_deref()
-        .is_some_and(|value| value.starts_with("application/connect+"))
+        .is_some_and(|value| rpc_protocol_from_content_type(value) == Some("connect"))
         .then(|| RpcBodySummaryObserver {
             inner: RpcSummaryInner::Connect(ConnectFrameObserver::new(None, None)),
         })

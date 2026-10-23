@@ -2,7 +2,7 @@
 use super::frame::{FrameParseState, FramedBodySummary, GrpcFrameError, GrpcFrameObserver};
 use super::protocol::{
     detect_rpc_protocol, infer_request_streaming, infer_response_streaming,
-    parse_connect_end_stream_metadata, response_content_type,
+    parse_connect_end_stream_metadata, response_content_type, rpc_protocol_from_content_type,
 };
 use anyhow::{Result, anyhow};
 use http::HeaderMap;
@@ -203,7 +203,7 @@ pub(crate) fn streaming_rpc_observer(
 fn is_connect_streaming_response(headers: &HeaderMap) -> bool {
     response_content_type(headers)
         .as_deref()
-        .is_some_and(|value| value.starts_with("application/connect+"))
+        .is_some_and(|value| rpc_protocol_from_content_type(value) == Some("connect"))
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]

@@ -1,6 +1,8 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use super::context::RpcMatchContext;
 use super::frame::{FramedBodySummary, GrpcFrameObserver, PrecomputedRpcBodySummary};
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use super::protocol::rpc_protocol_from_content_type;
 use super::protocol::{
     detect_rpc_protocol, extract_rpc_status_and_message, extract_service_and_method,
     infer_request_streaming, infer_response_streaming, response_content_type,
@@ -246,7 +248,7 @@ async fn summarize_observed_response_body(
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 fn connect_observed_body_is_enveloped(content_type: Option<&str>) -> bool {
-    content_type.is_some_and(|value| value.starts_with("application/connect+"))
+    content_type.is_some_and(|value| rpc_protocol_from_content_type(value) == Some("connect"))
 }
 
 /// Summarizes a buffered Connect request or response body with the same envelope rule
