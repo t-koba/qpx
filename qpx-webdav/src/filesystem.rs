@@ -403,9 +403,7 @@ impl Parent {
                 let remove_file = cap::remove_file(directory, &child.name);
                 #[cfg(windows)]
                 if let Err(file_error) = remove_file {
-                    if cap::remove_dir(directory, &child.name).is_err() {
-                        return Err(file_error.into());
-                    }
+                    cap::remove_dir(directory, &child.name).map_err(|_| file_error)?;
                 }
                 #[cfg(not(windows))]
                 remove_file?;
