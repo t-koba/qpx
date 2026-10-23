@@ -12,6 +12,7 @@ use bytes::BytesMut;
 use hyper::header::HeaderMap;
 use hyper::{Method, StatusCode, Version};
 use qpx_core::http_token::header_values_contain_token;
+use qpx_http::protocol::semantics::response_status_has_no_body;
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::time::Duration;
 
@@ -181,12 +182,7 @@ pub(super) fn determine_response_body_kind(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Result<ResponseBodyKind> {
-    if *request_method == Method::HEAD
-        || status.is_informational()
-        || status == StatusCode::NO_CONTENT
-        || status == StatusCode::RESET_CONTENT
-        || status == StatusCode::NOT_MODIFIED
-    {
+    if *request_method == Method::HEAD || response_status_has_no_body(status, false) {
         return Ok(ResponseBodyKind::Empty);
     }
 

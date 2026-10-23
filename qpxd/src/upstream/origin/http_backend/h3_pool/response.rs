@@ -7,6 +7,7 @@ use bytes::Bytes;
 use http_body::Frame;
 use hyper::{Method, Response, StatusCode};
 use qpx_http::body::{Body, BodyError};
+use qpx_http::protocol::semantics::response_status_has_no_body;
 use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -69,10 +70,7 @@ pub(super) fn declared_h3_response_body_length(
 ) -> Result<Option<u64>> {
     let declared = parse_declared_content_length(headers)?;
     if *request_method == Method::HEAD
-        || status.is_informational()
-        || status == StatusCode::NO_CONTENT
-        || status == StatusCode::RESET_CONTENT
-        || status == StatusCode::NOT_MODIFIED
+        || response_status_has_no_body(status, false)
         || (*request_method == Method::CONNECT && status.is_success())
     {
         Ok(Some(0))

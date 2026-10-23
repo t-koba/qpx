@@ -6,6 +6,7 @@ use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use http::{Method, StatusCode, Version};
+use qpx_http::protocol::semantics::response_status_has_no_body;
 use std::cell::RefCell;
 use std::sync::OnceLock;
 use tracing::warn;
@@ -91,11 +92,7 @@ impl RawHttp1ResponseHead {
     ) -> Result<Self> {
         validate_field_values(headers)?;
         let content_length = parse_content_length(headers)?;
-        let no_body = request_method == Method::HEAD
-            || status.is_informational()
-            || status == StatusCode::NO_CONTENT
-            || status == StatusCode::RESET_CONTENT
-            || status == StatusCode::NOT_MODIFIED;
+        let no_body = request_method == Method::HEAD || response_status_has_no_body(status, false);
         let chunked = if no_body {
             false
         } else {
