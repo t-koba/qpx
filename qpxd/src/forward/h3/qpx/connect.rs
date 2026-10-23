@@ -217,7 +217,7 @@ async fn run_qpx_traditional_connect_tunnel(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                crate::forward::h3::connect::h3_connect_bad_gateway_base_response(
+                crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),
@@ -243,7 +243,7 @@ async fn run_qpx_traditional_connect_tunnel(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                crate::forward::h3::connect::h3_connect_bad_gateway_base_response(
+                crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),
@@ -509,7 +509,7 @@ async fn handle_qpx_extended_connect_stream(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                crate::forward::h3::connect::h3_connect_bad_gateway_base_response(
+                crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),

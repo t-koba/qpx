@@ -52,11 +52,7 @@ pub(crate) fn prepare_http3_listener_socket(
 }
 
 /// Builds the raw HTTP/3 502 status/body; callers retain their own fallback and finalization.
-#[cfg(all(
-    feature = "http3",
-    feature = "http3-backend-h3",
-    not(feature = "http3-backend-qpx")
-))]
+#[cfg(feature = "http3")]
 pub(in crate::forward::h3) fn h3_bad_gateway_base_response(
     proxy_error: String,
 ) -> http::Result<http::Response<qpx_http::body::Body>> {
@@ -65,12 +61,7 @@ pub(in crate::forward::h3) fn h3_bad_gateway_base_response(
         .body(qpx_http::body::Body::from(proxy_error))
 }
 
-#[cfg(all(
-    test,
-    feature = "http3",
-    feature = "http3-backend-h3",
-    not(feature = "http3-backend-qpx")
-))]
+#[cfg(all(test, feature = "http3"))]
 mod h3_bad_gateway_base_response_tests {
     #[tokio::test]
     async fn bad_gateway_base_response_preserves_body_bytes() {
