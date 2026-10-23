@@ -5,21 +5,8 @@ use qpx_http::body::Body;
 use std::collections::{HashMap, HashSet};
 
 fn is_hop_by_hop_header(name: &str) -> bool {
-    matches!(
-        name,
-        "connection"
-            | "keep-alive"
-            | "proxy"
-            | "proxy-connection"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "proxy-authentication-info"
-            | "te"
-            | "trailer"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
+    qpx_http::protocol::semantics::is_hop_by_hop_header_name(name)
+        || matches!(name, "proxy" | "trailers")
 }
 
 fn parse_connection_tokens(headers: &hyper::HeaderMap) -> HashSet<String> {
@@ -88,5 +75,34 @@ pub(super) fn build_ipc_meta(
         res_body_shm_path: None,
         res_body_shm_size_bytes: None,
         shm_reusable: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_hop_by_hop_header;
+
+    #[test]
+    fn hop_header_filter_uses_shared_names_and_keeps_ipc_extras() {
+        for name in [
+            "connection",
+            "proxy-connection",
+            "proxy-authorization",
+            "proxy-authenticate",
+            "proxy-authentication-info",
+            "keep-alive",
+            "te",
+            "trailer",
+            "transfer-encoding",
+            "upgrade",
+            "proxy",
+            "trailers",
+        ] {
+            assert!(is_hop_by_hop_header(name), "{name} should be filtered");
+        }
+
+        for name in ["host", "content-type", "x-forwarded-for"] {
+            assert!(!is_hop_by_hop_header(name), "{name} should be retained");
+        }
     }
 }
