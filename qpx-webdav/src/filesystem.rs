@@ -174,12 +174,19 @@ impl FileSystemDataStore {
         {
             return;
         }
+        let mut cached_read = read.clone();
+        if file_identity.is_none() {
+            // Without identity checks only the materialized body is reusable.
+            // In particular, retaining an idle file handle on Windows prevents
+            // renaming its ancestor directory, even with delete sharing.
+            cached_read.file = None;
+        }
         let new_entry = ReadCacheEntry {
             resource: resource.clone(),
             content_length: metadata.len(),
             modified,
             file_identity,
-            read: read.clone(),
+            read: cached_read,
         };
         self.read_cache.rcu(|current| {
             let mut entries =
@@ -235,7 +242,13 @@ impl FileSystemDataStore {
                 && (entry.read.body.len() as u64 == metadata.len()
                     || (file_backed && entry.read.file.is_some() && identity.is_some()))
         }) {
-            return Ok(Some(entry.read.clone()));
+            let mut read = entry.read.clone();
+            if read.file.is_none() {
+                // The cache may retain bytes without a handle. Preserve file-
+                // backed responses using this read's verified no-follow open.
+                read.file = Some(Arc::new(file));
+            }
+            return Ok(Some(read));
         }
         let mut body = Bytes::new();
         if !file_backed || metadata.len() <= READ_CACHE_MAX_OBJECT_BYTES as u64 {
@@ -1145,6 +1158,42 @@ mod tests {
         assert_eq!(backed.body, Bytes::from_static(b"payload"));
         assert!(backed.file.is_some());
         assert_eq!(store.read(&file).unwrap(), b"payload".as_slice());
+    }
+
+    #[test]
+    fn cached_reads_preserve_file_responses_without_blocking_collection_move() {
+        for file_backed in [false, true] {
+            let directory = tempdir().unwrap();
+            let store = FileSystemDataStore::open(directory.path()).unwrap();
+            store.create_collection(&id("/source")).unwrap();
+            let file = id("/source/file");
+            store.put(&file, b"payload", None).unwrap();
+            let first = store.read_resource(&file, file_backed).unwrap().unwrap();
+            let cached = store.read_resource(&file, file_backed).unwrap().unwrap();
+            assert_eq!(first.body.as_ptr(), cached.body.as_ptr());
+            assert_eq!(cached.body, b"payload".as_slice());
+            let mut response_file = cached.file.as_ref().unwrap().try_clone().unwrap();
+            std::io::Seek::rewind(&mut response_file).unwrap();
+            let mut response_body = Vec::new();
+            response_file.read_to_end(&mut response_body).unwrap();
+            assert_eq!(response_body, b"payload");
+            if file_identity(&Metadata::from_file(&response_file).unwrap()).is_none() {
+                assert!(store.read_cache.load().entries[0].read.file.is_none());
+            }
+            // No response is active, but its reusable body stays cached.
+            drop(response_file);
+            drop(cached);
+            drop(first);
+            store
+                .move_resource(&id("/source"), &id("/moved"), false)
+                .unwrap();
+            assert!(store.metadata(&file).unwrap().is_none());
+            assert_eq!(
+                store.read(&id("/moved/file")).unwrap(),
+                b"payload".as_slice()
+            );
+            store.delete(&id("/moved")).unwrap();
+        }
     }
 
     #[test]
