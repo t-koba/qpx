@@ -16,9 +16,7 @@ use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
 use crate::rate_limit::TransportScope;
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
 use qpx_core::config::ActionKind;
-use qpx_http::body::Body;
 use tokio::time::Duration;
 use tracing::warn;
 
@@ -180,9 +178,9 @@ pub(crate) async fn handle_h3_extended_connect(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                super::super::h3_connect_bad_gateway_base_response(
+                    state.messages.proxy_error.clone(),
+                )?,
                 response_headers.as_deref(),
                 false,
             );

@@ -24,9 +24,8 @@ use crate::policy_context::{
 };
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
+use hyper::StatusCode;
 use qpx_core::config::ActionKind;
-use qpx_http::body::Body;
 use tokio::time::Duration;
 use tracing::warn;
 
@@ -446,9 +445,9 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                crate::forward::h3::connect::h3_connect_bad_gateway_base_response(
+                    state.messages.proxy_error.clone(),
+                )?,
                 response_headers.as_deref(),
                 false,
             );

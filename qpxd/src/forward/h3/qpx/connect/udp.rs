@@ -325,9 +325,7 @@ fn connect_udp_bad_gateway_response(
         &http::Method::CONNECT,
         http::Version::HTTP_3,
         proxy_name,
-        Response::builder()
-            .status(StatusCode::BAD_GATEWAY)
-            .body(Body::from(body))?,
+        crate::forward::h3::connect::h3_connect_bad_gateway_base_response(body)?,
         response_headers,
         false,
     ))

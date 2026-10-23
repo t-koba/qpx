@@ -23,9 +23,8 @@ use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
-use hyper::{Response, StatusCode};
+use hyper::StatusCode;
 use qpx_core::config::ConnectUdpConfig;
-use qpx_http::body::Body;
 use std::net::SocketAddr;
 use tokio::net::{UdpSocket, lookup_host};
 use tokio::time::{Duration, timeout};
@@ -109,9 +108,9 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,
                     proxy_name.as_str(),
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(state.messages.proxy_error.clone()))?,
+                    super::super::h3_connect_bad_gateway_base_response(
+                        state.messages.proxy_error.clone(),
+                    )?,
                     response_headers.as_deref(),
                     false,
                 ),
@@ -126,11 +125,9 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,
                     proxy_name.as_str(),
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(
-                            state.messages.upstream_connect_udp_failed.clone(),
-                        ))?,
+                    super::super::h3_connect_bad_gateway_base_response(
+                        state.messages.upstream_connect_udp_failed.clone(),
+                    )?,
                     response_headers.as_deref(),
                     false,
                 ),

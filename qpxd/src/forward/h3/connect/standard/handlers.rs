@@ -10,9 +10,7 @@ use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::H3ServerRequestStream;
 use crate::upstream::connect::connect_tunnel_target;
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
 use qpx_core::config::ActionKind;
-use qpx_http::body::Body;
 use tokio::time::Duration;
 use tracing::warn;
 
@@ -149,9 +147,9 @@ pub(crate) async fn handle_h3_connect(
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 CONNECT upstream resolution failed");
             send_finalized!(
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                super::super::h3_connect_bad_gateway_base_response(
+                    state.messages.proxy_error.clone(),
+                )?,
                 DispatchOutcome::Error
             )
             .await?;
@@ -190,9 +188,9 @@ pub(crate) async fn handle_h3_connect(
                 "forward HTTP/3 CONNECT tunnel establish failed"
             );
             send_finalized!(
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                super::super::h3_connect_bad_gateway_base_response(
+                    state.messages.proxy_error.clone(),
+                )?,
                 DispatchOutcome::Error
             )
             .await?;

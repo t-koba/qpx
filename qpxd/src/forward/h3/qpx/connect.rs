@@ -217,9 +217,9 @@ async fn run_qpx_traditional_connect_tunnel(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                crate::forward::h3::connect::h3_connect_bad_gateway_base_response(
+                    state.messages.proxy_error.clone(),
+                )?,
                 response_headers.as_deref(),
                 false,
             );
@@ -243,9 +243,9 @@ async fn run_qpx_traditional_connect_tunnel(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                crate::forward::h3::connect::h3_connect_bad_gateway_base_response(
+                    state.messages.proxy_error.clone(),
+                )?,
                 response_headers.as_deref(),
                 false,
             );
@@ -509,9 +509,9 @@ async fn handle_qpx_extended_connect_stream(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                crate::forward::h3::connect::h3_connect_bad_gateway_base_response(
+                    state.messages.proxy_error.clone(),
+                )?,
                 response_headers.as_deref(),
                 false,
             );
