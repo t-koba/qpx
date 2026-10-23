@@ -1,7 +1,7 @@
 use super::write::{chunk_size_header, write_vectored_all};
 use super::zero_copy::ZeroCopySocket;
-use super::{RESPONSE_WRITE_TIMEOUT, has_chunked_transfer_encoding, parse_declared_content_length};
-use crate::http::codec::h1_common::serialize_headers;
+use super::{RESPONSE_WRITE_TIMEOUT, parse_declared_content_length};
+use crate::http::codec::h1_common::{has_only_chunked_transfer_encoding, serialize_headers};
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::{
     InterimResponseHead, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1BodyFraming,
@@ -234,7 +234,7 @@ where
         }
     } else {
         let declared_length = parse_declared_content_length(&headers)?;
-        let has_chunked = has_chunked_transfer_encoding(&headers)?;
+        let has_chunked = has_only_chunked_transfer_encoding(&headers)?;
         if no_body {
             if request_method != Method::HEAD {
                 headers.remove(CONTENT_LENGTH);

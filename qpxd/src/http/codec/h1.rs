@@ -581,7 +581,7 @@ fn determine_request_body_kind(headers: &HeaderMap, version: Version) -> Result<
             "transfer-encoding is not defined for HTTP/1.0 requests"
         ));
     }
-    let has_chunked = has_chunked_transfer_encoding(headers)?;
+    let has_chunked = has_only_chunked_transfer_encoding(headers)?;
     let declared_length = parse_declared_content_length(headers)?;
     if has_chunked && declared_length.is_some() {
         return Err(anyhow!(
@@ -599,10 +599,6 @@ fn determine_request_body_kind(headers: &HeaderMap, version: Version) -> Result<
         });
     }
     Ok(RequestBodyKind::Empty)
-}
-
-fn has_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
-    has_only_chunked_transfer_encoding(headers)
 }
 
 fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {

@@ -190,7 +190,7 @@ pub(super) fn determine_response_body_kind(
         return Ok(ResponseBodyKind::Empty);
     }
 
-    if has_chunked_transfer_encoding(headers)? {
+    if has_only_chunked_transfer_encoding(headers)? {
         return Ok(ResponseBodyKind::Chunked);
     }
     if let Some(length) = parse_declared_content_length(headers)? {
@@ -201,10 +201,6 @@ pub(super) fn determine_response_body_kind(
         });
     }
     Ok(ResponseBodyKind::CloseDelimited)
-}
-
-fn has_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
-    has_only_chunked_transfer_encoding(headers)
 }
 
 pub(super) fn response_body_allows_reuse(kind: ResponseBodyKind) -> bool {
