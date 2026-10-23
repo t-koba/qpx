@@ -1,31 +1,25 @@
 use http::HeaderMap;
-use http::header::VARY;
+use http::header::{ACCEPT_ENCODING, VARY};
 
 pub(super) fn parse_accept_encoding(headers: &HeaderMap) -> Vec<(String, i32)> {
     let mut out = Vec::new();
-    for value in headers.get_all("accept-encoding") {
-        let Ok(value) = value.to_str() else {
+    for part in qpx_core::http_token::header_value_members(headers, &ACCEPT_ENCODING) {
+        if part.is_empty() {
             continue;
-        };
-        for part in value.split(',') {
-            let part = part.trim();
-            if part.is_empty() {
-                continue;
-            }
-            let mut segments = part.split(';');
-            let name = segments
-                .next()
-                .unwrap_or_default()
-                .trim()
-                .to_ascii_lowercase();
-            let mut q = 1000i32;
-            for segment in segments {
-                if let Some(raw) = segment.trim().strip_prefix("q=") {
-                    q = parse_quality(raw);
-                }
-            }
-            out.push((name, q));
         }
+        let mut segments = part.split(';');
+        let name = segments
+            .next()
+            .unwrap_or_default()
+            .trim()
+            .to_ascii_lowercase();
+        let mut q = 1000i32;
+        for segment in segments {
+            if let Some(raw) = segment.trim().strip_prefix("q=") {
+                q = parse_quality(raw);
+            }
+        }
+        out.push((name, q));
     }
     out
 }

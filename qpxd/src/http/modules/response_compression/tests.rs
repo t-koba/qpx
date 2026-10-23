@@ -1,6 +1,32 @@
 use super::*;
 
 #[test]
+fn accept_encoding_parses_shared_members_across_repeated_fields() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static(" GZip ;q=0.5, br "),
+    );
+    headers.append(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static(", identity;q=1, "),
+    );
+    headers.append(
+        ACCEPT_ENCODING,
+        HeaderValue::from_bytes(b"\xff").expect("opaque encoding value"),
+    );
+
+    assert_eq!(
+        parse_accept_encoding(&headers),
+        vec![
+            ("gzip".to_string(), 500),
+            ("br".to_string(), 1000),
+            ("identity".to_string(), 1000),
+        ]
+    );
+}
+
+#[test]
 fn append_vary_accept_encoding_preserves_repeated_mixed_case_fields() {
     let mut headers = HeaderMap::new();
     headers.append(VARY, HeaderValue::from_static("Origin"));
