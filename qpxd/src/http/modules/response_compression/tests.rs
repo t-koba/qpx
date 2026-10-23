@@ -1,6 +1,43 @@
 use super::*;
 
 #[test]
+fn append_vary_accept_encoding_preserves_repeated_mixed_case_fields() {
+    let mut headers = HeaderMap::new();
+    headers.append(VARY, HeaderValue::from_static("Origin"));
+    headers.append(VARY, HeaderValue::from_static("aCcEpT-EnCoDiNg"));
+
+    append_vary_accept_encoding(&mut headers);
+
+    let values: Vec<_> = headers
+        .get_all(VARY)
+        .iter()
+        .map(|value| value.to_str().expect("text Vary value"))
+        .collect();
+    assert_eq!(values, ["Origin", "aCcEpT-EnCoDiNg"]);
+}
+
+#[test]
+fn append_vary_accept_encoding_appends_when_no_readable_member_matches() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        VARY,
+        HeaderValue::from_bytes(b"\xff").expect("opaque Vary value"),
+    );
+    headers.append(VARY, HeaderValue::from_static("Origin"));
+
+    append_vary_accept_encoding(&mut headers);
+
+    let values: Vec<_> = headers.get_all(VARY).iter().collect();
+    assert_eq!(values.len(), 3);
+    assert_eq!(values[0].as_bytes(), b"\xff");
+    assert_eq!(values[1].to_str().expect("text Vary value"), "Origin");
+    assert_eq!(
+        values[2].to_str().expect("text Vary value"),
+        "Accept-Encoding"
+    );
+}
+
+#[test]
 fn request_snapshot_is_absent_without_accept_encoding() {
     let request = hyper::Request::builder()
         .method(Method::GET)

@@ -42,14 +42,7 @@ pub(super) fn accept_encoding_q(name: &str, values: &[(String, i32)]) -> i32 {
 }
 
 pub(super) fn append_vary_accept_encoding(headers: &mut HeaderMap) {
-    let existing = headers
-        .get_all(VARY)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
-        .map(|token| token.trim().to_ascii_lowercase())
-        .collect::<Vec<_>>();
-    if existing.iter().any(|token| token == "accept-encoding") {
+    if qpx_core::http_token::header_values_contain_token(headers, &VARY, "accept-encoding") {
         return;
     }
     headers.append(VARY, http::HeaderValue::from_static("Accept-Encoding"));
