@@ -861,12 +861,12 @@ fn request_transfer_encoding_allows_only_chunked_singleton() {
     let mut headers = HeaderMap::new();
     headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
     assert_eq!(
-        determine_request_body_kind(&headers).expect("chunked"),
+        determine_request_body_kind(&headers, Version::HTTP_11).expect("chunked"),
         RequestBodyKind::Chunked
     );
 
     headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("gzip, chunked"));
-    assert!(determine_request_body_kind(&headers).is_err());
+    assert!(determine_request_body_kind(&headers, Version::HTTP_11).is_err());
 }
 
 #[tokio::test]
@@ -988,4 +988,170 @@ fn invalid_content_length_diagnostic_does_not_echo_userinfo() {
     let error = parse_declared_content_length(&headers).unwrap_err();
     assert_eq!(error.to_string(), "invalid content-length value");
     assert!(!format!("{error:?}").contains("synthetic-"));
+}
+
+#[test]
+fn http10_with_any_transfer_encoding_is_faulty_framing() {
+    for raw in [
+        "POST / HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "POST / HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n",
+        "POST / HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: gzip\r\n\r\n",
+    ] {
+        let error =
+            try_parse_http1_request_head(raw.as_bytes()).expect_err("HTTP/1.0 + TE must fail");
+        assert!(
+            error.to_string().contains("transfer-encoding"),
+            "unexpected error for {raw:?}: {error}"
+        );
+    }
+
+    // Controls: valid HTTP/1.0 without TE and valid HTTP/1.1 chunked still parse.
+    let parsed = try_parse_http1_request_head(b"GET / HTTP/1.0\r\nHost: example.test\r\n\r\n")
+        .expect("valid HTTP/1.0")
+        .expect("complete");
+    assert_eq!(parsed.body_kind, RequestBodyKind::Empty);
+
+    let parsed = try_parse_http1_request_head(
+        b"POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n",
+    )
+    .expect("valid HTTP/1.1 chunked")
+    .expect("complete");
+    assert_eq!(parsed.body_kind, RequestBodyKind::Chunked);
+}
+
+#[derive(Clone)]
+struct CountingService {
+    calls: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl RequestHandler<Request<Body>> for CountingService {
+    type Response = Response<Body>;
+    type Error = Infallible;
+
+    async fn call(&self, _req: Request<Body>) -> Result<Response<Body>, Infallible> {
+        self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, "2")
+            .body(Body::from("OK"))
+            .expect("response"))
+    }
+}
+
+async fn read_http1_response_head(stream: &mut TcpStream) -> Vec<u8> {
+    let mut raw = Vec::new();
+    let mut chunk = [0; 1024];
+    loop {
+        let read = stream.read(&mut chunk).await.expect("read response head");
+        assert_ne!(read, 0, "connection ended before response head");
+        raw.extend_from_slice(&chunk[..read]);
+        if raw.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+    raw
+}
+
+#[tokio::test]
+async fn http10_transfer_encoding_is_rejected_and_closes_without_reaching_service() {
+    for head in [
+        // Lone chunked framing.
+        "POST /first HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
+        // Chunked framing that also carries Content-Length.
+        "POST /first HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello",
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = CountingService {
+            calls: Arc::clone(&calls),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let _ = serve_http1_with_interim(socket, service, Duration::from_secs(5)).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        // Pipeline a valid second request: it must never reach the service
+        // because the faulty first head closes the connection.
+        let pipelined = format!(
+            "{head}GET /second HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(pipelined.as_bytes())
+            .await
+            .expect("write pipelined requests");
+
+        let head_bytes = read_http1_response_head(&mut stream).await;
+        let text = String::from_utf8(head_bytes).expect("utf8");
+        assert!(
+            text.starts_with("HTTP/1.1 400"),
+            "expected 400 for {head:?}, got {text:?}"
+        );
+        assert!(text.contains("Connection: close"));
+
+        // The server closes after the faulty head; no second response follows.
+        let mut rest = Vec::new();
+        match tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut rest)).await {
+            Ok(Ok(_)) => assert!(
+                !rest.windows(12).any(|w| w == b"HTTP/1.1 200"),
+                "pipelined request must not receive a second response for {head:?}"
+            ),
+            Ok(Err(error)) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            Ok(Err(error)) => panic!("read after 400 response: {error}"),
+            Err(_) => panic!("connection remained open after 400 for {head:?}"),
+        }
+        server.await.expect("server task");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "faulty HTTP/1.0 head {head:?} must not reach the service"
+        );
+    }
+}
+
+#[tokio::test]
+async fn http11_chunked_and_http10_plain_controls_reach_service() {
+    for request in [
+        // Valid chunked control: empty chunked body.
+        "POST /chunked HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
+        // Valid HTTP/1.0 without Transfer-Encoding.
+        "GET /plain HTTP/1.0\r\nHost: example.test\r\n\r\n",
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = CountingService {
+            calls: Arc::clone(&calls),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            serve_http1_with_interim(socket, service, Duration::from_secs(5))
+                .await
+                .expect("serve control");
+        });
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write control request");
+        let mut raw = Vec::new();
+        stream.read_to_end(&mut raw).await.expect("read response");
+        let text = String::from_utf8(raw).expect("utf8");
+        assert!(
+            text.contains("HTTP/1.1 200") || text.contains("HTTP/1.0 200"),
+            "expected 200 for {request:?}, got {text:?}"
+        );
+        assert!(
+            text.ends_with("OK"),
+            "control body for {request:?}: {text:?}"
+        );
+        server.await.expect("server task");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "control {request:?} must reach the service"
+        );
+    }
 }

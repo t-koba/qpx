@@ -10,7 +10,7 @@ use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
-use hyper::header::{EXPECT, HeaderMap};
+use hyper::header::{EXPECT, HeaderMap, TRANSFER_ENCODING};
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
@@ -498,7 +498,7 @@ fn finish_parsed_http1_request(
     let empty_path_absolute_options = is_empty_path_absolute_options_target(&method, target, &uri);
     let version = parse_version(request.version, "missing HTTP version")?;
     let headers = parse_header_map_recycled(request.headers)?;
-    let body_kind = determine_request_body_kind(&headers)?;
+    let body_kind = determine_request_body_kind(&headers, version)?;
     let keep_alive = request_keep_alive(version, &headers);
     let upgrade = request_has_upgrade(&headers);
     let send_continue = version == Version::HTTP_11
@@ -552,7 +552,7 @@ pub(crate) fn fuzz_parse_http1_request_head(bytes: &[u8]) {
         });
         let _ = parse_version(request.version, "missing HTTP version");
         if let Ok(headers) = parse_header_map(request.headers) {
-            let _ = determine_request_body_kind(&headers);
+            let _ = determine_request_body_kind(&headers, Version::HTTP_11);
             let _ = request_keep_alive(Version::HTTP_11, &headers);
             let _ = request_has_upgrade(&headers);
         }
@@ -572,7 +572,15 @@ fn expect_continue(headers: &HeaderMap) -> bool {
     qpx_core::http_token::header_values_contain_token(headers, &EXPECT, "100-continue")
 }
 
-fn determine_request_body_kind(headers: &HeaderMap) -> Result<RequestBodyKind> {
+fn determine_request_body_kind(headers: &HeaderMap, version: Version) -> Result<RequestBodyKind> {
+    // RFC 9112 section 6.1: Transfer-Encoding has no defined meaning for
+    // HTTP/1.0 senders. Treat any present framing as faulty and fail closed
+    // through the existing bad-request/close path.
+    if version == Version::HTTP_10 && headers.contains_key(TRANSFER_ENCODING) {
+        return Err(anyhow!(
+            "transfer-encoding is not defined for HTTP/1.0 requests"
+        ));
+    }
     let has_chunked = has_chunked_transfer_encoding(headers)?;
     let declared_length = parse_declared_content_length(headers)?;
     if has_chunked && declared_length.is_some() {
