@@ -3789,6 +3789,7 @@ fn check_http_response_body_hard_cap(root: &Path) -> Result<()> {
         "qpxd/src/forward/request/dispatch.rs",
         "qpxd/src/forward/request/dispatch/prepare.rs",
         "qpxd/src/reverse/transport/dispatch/outcome.rs",
+        "qpxd/src/reverse/transport/dispatch/success.rs",
         "qpxd/src/reverse/transport/dispatch/dispatch_http.rs",
         "qpxd/src/reverse/transport/dispatch/dispatch_ipc.rs",
         "qpxd/src/transparent/http/dispatch/complete.rs",
@@ -5874,27 +5875,20 @@ fn response_capture_order_rules() -> Vec<(&'static str, Vec<ResponseCaptureOrder
             }],
         ),
         (
-            "qpxd/src/reverse/transport/dispatch/dispatch_http.rs",
+            "qpxd/src/reverse/transport/dispatch/success.rs",
             vec![ResponseCaptureOrderRule {
-                name: "reverse HTTP shared finalizer call",
+                name: "reverse normal-success shared finalizer call",
                 finalize: "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput",
                 capture: "Box::new((interim, resp))",
             }],
         ),
         (
             "qpxd/src/reverse/transport/dispatch/dispatch_ipc.rs",
-            vec![
-                ResponseCaptureOrderRule {
-                    name: "reverse IPC shared finalizer call",
-                    finalize: "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput",
-                    capture: "empty_interim_response(resp)",
-                },
-                ResponseCaptureOrderRule {
-                    name: "reverse IPC upgrade response",
-                    finalize: "finalize_response_with_headers_in_place(\n                request_method",
-                    capture: "resp = crate::http::capture::stream::emit_optional_response_for_export(\n                resp",
-                },
-            ],
+            vec![ResponseCaptureOrderRule {
+                name: "reverse IPC upgrade response",
+                finalize: "finalize_response_with_headers_in_place(\n                request_method",
+                capture: "resp = crate::http::capture::stream::emit_optional_response_for_export(\n                resp",
+            }],
         ),
         (
             "qpxd/src/http/mitm/upstream.rs",
@@ -9286,65 +9280,35 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
 
     #[test]
     fn phase3_reverse_shared_finalizer_call_order() {
-        let http_rule = ResponseCaptureOrderRule {
-            name: "reverse HTTP shared finalizer call",
+        let success_rule = ResponseCaptureOrderRule {
+            name: "reverse normal-success shared finalizer call",
             finalize: "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput",
             capture: "Box::new((interim, resp))",
         };
         assert!(
             response_capture_order_violations(
                 "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput { }); Box::new((interim, resp))",
-                &http_rule,
+                &success_rule,
             )
             .is_empty()
         );
         assert_eq!(
-            response_capture_order_violations("Box::new((interim, resp))", &http_rule),
-            ["reverse HTTP shared finalizer call missing finalization marker"]
+            response_capture_order_violations("Box::new((interim, resp))", &success_rule),
+            ["reverse normal-success shared finalizer call missing finalization marker"]
         );
         assert_eq!(
             response_capture_order_violations(
                 "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput { });",
-                &http_rule
+                &success_rule
             ),
-            ["reverse HTTP shared finalizer call missing response capture marker"]
+            ["reverse normal-success shared finalizer call missing response capture marker"]
         );
         assert_eq!(
             response_capture_order_violations(
                 "Box::new((interim, resp)); finalize_reverse_dispatch_response(ReverseFinalizeResponseInput { });",
-                &http_rule,
+                &success_rule,
             ),
-            ["reverse HTTP shared finalizer call captures before finalization"]
-        );
-        let ipc_rule = ResponseCaptureOrderRule {
-            name: "reverse IPC shared finalizer call",
-            finalize: "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput",
-            capture: "empty_interim_response(resp)",
-        };
-        assert!(
-            response_capture_order_violations(
-                "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput { }); empty_interim_response(resp)",
-                &ipc_rule,
-            )
-            .is_empty()
-        );
-        assert_eq!(
-            response_capture_order_violations("empty_interim_response(resp)", &ipc_rule),
-            ["reverse IPC shared finalizer call missing finalization marker"]
-        );
-        assert_eq!(
-            response_capture_order_violations(
-                "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput { });",
-                &ipc_rule
-            ),
-            ["reverse IPC shared finalizer call missing response capture marker"]
-        );
-        assert_eq!(
-            response_capture_order_violations(
-                "empty_interim_response(resp); finalize_reverse_dispatch_response(ReverseFinalizeResponseInput { });",
-                &ipc_rule,
-            ),
-            ["reverse IPC shared finalizer call captures before finalization"]
+            ["reverse normal-success shared finalizer call captures before finalization"]
         );
     }
 

@@ -1,17 +1,12 @@
 use super::super::mirrors::{
     record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
 };
-use super::super::response_rules::{
-    DispatchResponseRuleInput, ResponseRuleInput, apply_dispatch_response_rules,
-};
 use super::super::{InterimList, empty_interim_response};
-use super::finalize::{ReverseFinalizeResponseInput, finalize_reverse_dispatch_response};
-use super::record_reverse_success_metrics;
+use super::success::handle_reverse_success;
 use super::{
-    ReverseAttemptOutcome, ReverseIpcDispatchInput, ReverseIpcSuccessInput,
-    ReverseResponseRuleInput, ReverseWebsocketDispatch, acquire_reverse_upstream_concurrency,
-    build_reverse_attempt_request, capture_reverse_response_outcome, consume_reverse_retry_budget,
-    record_reverse_loop_error, reverse_continue_response_rule, reverse_retry_backoff,
+    ReverseAttemptOutcome, ReverseIpcDispatchInput, ReverseSuccessInput, ReverseWebsocketDispatch,
+    acquire_reverse_upstream_concurrency, build_reverse_attempt_request,
+    consume_reverse_retry_budget, record_reverse_loop_error, reverse_retry_backoff,
 };
 use crate::http::dispatch::{
     DispatchOutcome, annotate_dispatch_response,
@@ -145,12 +140,13 @@ pub(super) async fn dispatch_reverse_ipc_route(
         .await;
         match response {
             Ok(Ok(resp)) => {
-                match handle_reverse_ipc_success(ReverseIpcSuccessInput {
+                let resp = http_modules.on_upstream_response(resp).await?;
+                match handle_reverse_success(ReverseSuccessInput {
                     base,
                     state,
                     conn,
                     route,
-                    request_destination,
+                    response_destination: request_destination,
                     request_method,
                     request_version,
                     request_rpc,
@@ -171,6 +167,9 @@ pub(super) async fn dispatch_reverse_ipc_route(
                     http_modules,
                     audit_ctx,
                     attempt_idx,
+                    selected_upstream: None,
+                    upstream_cert: None,
+                    interim: InterimList::new(),
                     started,
                     response: resp,
                     export_session: export_session.as_ref(),
@@ -242,135 +241,6 @@ pub(super) async fn dispatch_reverse_ipc_route(
         http_modules.on_error(err).await;
     }
     Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")))
-}
-
-async fn handle_reverse_ipc_success(
-    input: ReverseIpcSuccessInput<'_>,
-) -> Result<ReverseAttemptOutcome> {
-    let ReverseIpcSuccessInput {
-        base,
-        state,
-        conn,
-        route,
-        request_destination,
-        request_method,
-        request_version,
-        request_rpc,
-        identity,
-        route_headers,
-        cache_policy,
-        request_headers_snapshot,
-        cache_lookup_key,
-        cache_target_key,
-        revalidation_state,
-        cache_collapse_guard,
-        template,
-        replay_recorder,
-        mirror_upstreams,
-        attempts,
-        route_timeout,
-        proxy_name,
-        http_modules,
-        audit_ctx,
-        attempt_idx,
-        started,
-        response,
-        export_session,
-    } = input;
-    let resp = http_modules.on_upstream_response(response).await?;
-    let response_rule = apply_dispatch_response_rules(DispatchResponseRuleInput {
-        rule: ResponseRuleInput {
-            route,
-            base,
-            conn,
-            destination: request_destination,
-            upstream_cert: None,
-            identity,
-            request_rpc,
-            route_headers: route_headers.clone(),
-            response: resp,
-            max_observed_response_body_bytes: route.plan.response_body_observation_limit(
-                state.plan.limits.body.max_observed_response_body_bytes,
-            ),
-            response_body_read_timeout: Duration::from_millis(
-                state.plan.limits.timeouts.upstream_http_timeout_ms.max(1),
-            ),
-            force_response_body_observation: false,
-        },
-        http_modules,
-        audit: audit_ctx,
-        request_method,
-        request_version,
-        proxy_name,
-    })
-    .await?;
-    let (resp, route_headers_for_response, response_cache_bypass, policy_tags, mirror) =
-        match reverse_continue_response_rule(ReverseResponseRuleInput {
-            response_rule,
-            http_modules,
-            state,
-            route,
-            selected_upstream: None,
-            attempt_idx,
-            attempts,
-            started,
-        })
-        .await?
-        {
-            Ok(values) => values,
-            Err(outcome) => {
-                return Ok(capture_reverse_response_outcome(outcome, route, export_session).await);
-            }
-        };
-    if resp.status().is_server_error()
-        && let Some(stale) = finalize_dispatch_stale_if_error_response(
-            revalidation_state.as_ref(),
-            &route.plan,
-            request_method,
-            proxy_name,
-            route_headers.as_deref(),
-            http_modules,
-            audit_ctx,
-        )
-        .await?
-    {
-        return Ok(capture_reverse_response_outcome(
-            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(stale))),
-            route,
-            export_session,
-        )
-        .await);
-    }
-    record_reverse_success_metrics(state, started);
-    let resp = finalize_reverse_dispatch_response(ReverseFinalizeResponseInput {
-        response: resp,
-        state,
-        route,
-        request_method,
-        cache_policy,
-        response_cache_bypass,
-        request_headers_snapshot,
-        cache_target_key,
-        cache_lookup_key,
-        revalidation_state,
-        cache_collapse_guard,
-        started,
-        route_headers_for_response,
-        export_session,
-        template,
-        replay_recorder: replay_recorder.as_ref(),
-        mirror_upstreams,
-        mirror,
-        route_timeout,
-        proxy_name,
-        http_modules,
-        audit_ctx,
-        policy_tags: policy_tags.as_slice(),
-    })
-    .await?;
-    Ok(ReverseAttemptOutcome::Response(Box::new(
-        empty_interim_response(resp),
-    )))
 }
 
 pub(super) async fn handle_reverse_websocket_upgrade(
