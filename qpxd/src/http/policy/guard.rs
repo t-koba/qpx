@@ -1,3 +1,6 @@
+use crate::http::codec::h1_common::{
+    TransferEncodingClassificationError, has_only_chunked_transfer_encoding_values,
+};
 use anyhow::{Result, anyhow};
 use hyper::{Request, StatusCode};
 use qpx_core::config::HttpGuardProfileConfig;
@@ -329,28 +332,25 @@ fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
         && req.version() != http::Version::HTTP_3
         && req.headers().contains_key(http::header::TRANSFER_ENCODING)
     {
-        let mut tokens: Vec<&str> = Vec::new();
-        for value in req
-            .headers()
-            .get_all(http::header::TRANSFER_ENCODING)
-            .iter()
-        {
-            let Ok(raw) = value.to_str() else {
-                return Some(bad_request("invalid Transfer-Encoding header"));
-            };
-            for token in raw.split(',') {
-                let token = token.trim();
-                if !token.is_empty() {
-                    tokens.push(token);
-                }
-            }
-        }
-        match tokens.as_slice() {
-            [token] if token.eq_ignore_ascii_case("chunked") => {}
-            _ => {
+        let classification = has_only_chunked_transfer_encoding_values(
+            req.headers()
+                .get_all(http::header::TRANSFER_ENCODING)
+                .iter()
+                .map(|value| {
+                    value
+                        .to_str()
+                        .map_err(|_| TransferEncodingClassificationError::InvalidHeader)
+                }),
+        );
+        match classification {
+            Ok(true) => {}
+            Ok(false) | Err(TransferEncodingClassificationError::UnsupportedCoding) => {
                 return Some(bad_request(
                     "unsupported Transfer-Encoding: only a single chunked coding is supported",
                 ));
+            }
+            Err(TransferEncodingClassificationError::InvalidHeader) => {
+                return Some(bad_request("invalid Transfer-Encoding header"));
             }
         }
         // Transfer-Encoding is an HTTP/1.1 framing feature; reject it on

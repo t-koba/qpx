@@ -178,9 +178,29 @@ fn guard_rejects_ambiguous_transfer_encoding_values() {
         if te.trim().eq_ignore_ascii_case("chunked") {
             assert!(reject.is_none(), "valid TE {te:?} must pass");
         } else {
-            assert!(reject.is_some(), "ambiguous TE {te:?} must reject");
+            assert_eq!(
+                reject.expect("ambiguous TE rejected").body,
+                "unsupported Transfer-Encoding: only a single chunked coding is supported",
+                "ambiguous TE {te:?}"
+            );
         }
     }
+}
+
+#[test]
+fn guard_preserves_invalid_transfer_encoding_error_message() {
+    let profile = strict_profile();
+
+    let mut invalid = head_request(http::Version::HTTP_11);
+    invalid.headers_mut().insert(
+        http::header::TRANSFER_ENCODING,
+        http::HeaderValue::from_bytes(b"\xff").expect("obs-text header value"),
+    );
+    let reject = profile
+        .evaluate_request(&invalid)
+        .expect("guard")
+        .expect("invalid TE rejected");
+    assert_eq!(reject.body, "invalid Transfer-Encoding header");
 }
 
 #[test]

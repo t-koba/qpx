@@ -65,14 +65,34 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
     value
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TransferEncodingClassificationError {
+    InvalidHeader,
+    UnsupportedCoding,
+}
+
+impl std::fmt::Display for TransferEncodingClassificationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::InvalidHeader => "invalid transfer-encoding header",
+            Self::UnsupportedCoding => {
+                "unsupported transfer-encoding: only a single chunked coding is supported"
+            }
+        })
+    }
+}
+
+impl std::error::Error for TransferEncodingClassificationError {}
+
 pub(crate) fn has_only_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
     has_only_chunked_transfer_encoding_values(headers.get_all(TRANSFER_ENCODING).iter().map(
         |value| {
             value
                 .to_str()
-                .map_err(|_| anyhow!("invalid transfer-encoding header"))
+                .map_err(|_| TransferEncodingClassificationError::InvalidHeader)
         },
     ))
+    .map_err(anyhow::Error::new)
 }
 
 /// Whether decoded Transfer-Encoding field values contain exactly one `chunked` coding.
@@ -80,8 +100,8 @@ pub(crate) fn has_only_chunked_transfer_encoding(headers: &HeaderMap) -> Result<
 /// Callers select and decode their own header representation so raw and parsed inputs keep
 /// their existing validation and error mapping.
 pub(crate) fn has_only_chunked_transfer_encoding_values<'a>(
-    values: impl IntoIterator<Item = Result<&'a str>>,
-) -> Result<bool> {
+    values: impl IntoIterator<Item = std::result::Result<&'a str, TransferEncodingClassificationError>>,
+) -> std::result::Result<bool, TransferEncodingClassificationError> {
     let mut count = 0;
     let mut chunked = false;
     for value in values {
@@ -97,9 +117,7 @@ pub(crate) fn has_only_chunked_transfer_encoding_values<'a>(
     match (count, chunked) {
         (0, _) => Ok(false),
         (1, true) => Ok(true),
-        _ => Err(anyhow!(
-            "unsupported transfer-encoding: only a single chunked coding is supported"
-        )),
+        _ => Err(TransferEncodingClassificationError::UnsupportedCoding),
     }
 }
 
@@ -327,9 +345,9 @@ mod tests {
         );
         assert!(has_only_chunked_transfer_encoding_values([Ok("chunked"), Ok("chunked")]).is_err());
         assert_eq!(
-            has_only_chunked_transfer_encoding_values([Err(anyhow!(
-                "invalid transfer-encoding header"
-            ))])
+            has_only_chunked_transfer_encoding_values([Err(
+                TransferEncodingClassificationError::InvalidHeader,
+            )])
             .unwrap_err()
             .to_string(),
             "invalid transfer-encoding header"

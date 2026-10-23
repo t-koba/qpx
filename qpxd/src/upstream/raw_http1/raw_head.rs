@@ -1,5 +1,6 @@
 use crate::http::codec::h1_common::{
-    has_only_chunked_transfer_encoding_values, is_sanitized_hop_header, raw_has_connection_token,
+    TransferEncodingClassificationError, has_only_chunked_transfer_encoding_values,
+    is_sanitized_hop_header, raw_has_connection_token,
 };
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
@@ -351,9 +352,10 @@ fn has_only_chunked_transfer_encoding(headers: &[httparse::Header<'_>]) -> Resul
             .filter(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
             .map(|header| {
                 std::str::from_utf8(header.value)
-                    .map_err(|_| anyhow!("invalid transfer-encoding header"))
+                    .map_err(|_| TransferEncodingClassificationError::InvalidHeader)
             }),
     )
+    .map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]
