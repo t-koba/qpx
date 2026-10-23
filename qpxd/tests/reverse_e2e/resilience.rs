@@ -10,9 +10,10 @@ async fn reverse_route_retries_and_mirrors() -> Result<()> {
     // connection-refused without a picked-then-released port reuse race.
     let (mirror_addr, mirror_hits) = start_text_backend("MIRROR", vec![]).await?;
 
-    let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("reverse-route.log"), |port| {
-        format!(
-            r#"upstreams:
+    let (port, mut qpxd) =
+        spawn_qpxd_on_random_port(&cfg, dir.join("reverse-route.log"), |port| {
+            format!(
+                r#"upstreams:
 - name: dead
   url: http://127.0.0.1:0
 - name: live
@@ -48,8 +49,8 @@ edges:
       upstreams:
       - dead
       - live"#
-        )
-    })?;
+            )
+        })?;
 
     let client = test_client();
     let uri: hyper::Uri = format!("http://127.0.0.1:{port}/app/test").parse()?;
@@ -61,7 +62,14 @@ edges:
                 .header("host", "reverse.local")
                 .body(empty_body())?,
         )
-        .await?;
+        .await
+        .with_context(|| {
+            format!(
+                "reverse request to 127.0.0.1:{port}; child status: {:?}{}",
+                qpxd.child.try_wait(),
+                qpxd.log_tail(),
+            )
+        })?;
     assert_eq!(response.status(), StatusCode::OK);
     let body = collect_body(response.into_body()).await?;
     assert_eq!(&body[..], b"LIVE");

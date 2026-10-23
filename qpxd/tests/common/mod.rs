@@ -5,6 +5,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
+mod readiness;
+use readiness::Readiness;
+
 pub struct QpxdHandle {
     pub(crate) child: Child,
     #[allow(
@@ -106,9 +109,10 @@ pub fn spawn_qpxd(config_path: &Path, ready_port: u16, log_path: PathBuf) -> Res
         .env("RUST_LOG", "warn")
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    let mut child = cmd.spawn().context("spawn qpxd")?;
-    wait_for_qpxd(&mut child, ready_port, &log_path)?;
-    Ok(QpxdHandle::with_log_path(child, log_path))
+    let (child, mut readiness) = Readiness::spawn(cmd).context("spawn qpxd")?;
+    let mut handle = QpxdHandle::with_log_path(child, log_path);
+    wait_for_qpxd(&mut handle, || readiness.is_ready(), ready_port)?;
+    Ok(handle)
 }
 
 pub fn spawn_qpxd_on_random_port(
@@ -179,31 +183,51 @@ pub fn spawn_qpxd_on_random_tcp_udp_port(
     )
 }
 
-fn wait_for_qpxd(child: &mut Child, ready_port: u16, log_path: &Path) -> Result<()> {
+fn wait_for_qpxd(
+    handle: &mut QpxdHandle,
+    mut is_ready: impl FnMut() -> std::io::Result<bool>,
+    ready_port: u16,
+) -> Result<()> {
     let started = Instant::now();
     let addr = SocketAddr::from(([127, 0, 0, 1], ready_port));
-    while started.elapsed() < Duration::from_secs(15) {
-        if std::net::TcpStream::connect_timeout(&addr, Duration::from_millis(50)).is_ok() {
-            return Ok(());
+    let result = (|| {
+        while started.elapsed() < Duration::from_secs(15) {
+            if let Some(status) = handle.child.try_wait().context("qpxd wait")? {
+                return Err(anyhow!("qpxd exited early: {status}"));
+            }
+            match is_ready() {
+                Ok(true) => {
+                    if let Some(status) = handle.child.try_wait().context("qpxd wait")? {
+                        return Err(anyhow!("qpxd exited after notifying readiness: {status}"));
+                    }
+                    return Ok(());
+                }
+                // Startup unwind drops the Unix notifier before main prints
+                // its error. Let the child finish within this same deadline so
+                // the final log can still drive the existing bind retry.
+                Err(error) if error.kind() == std::io::ErrorKind::UnexpectedEof => {}
+                Ok(false) => {}
+                Err(error) => return Err(error).context("qpxd readiness notification"),
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        if let Some(status) = child.try_wait().context("qpxd wait")? {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Err(anyhow!(
-                "qpxd exited early: {status} (log: {}){}",
-                log_path.display(),
-                log_excerpt(log_path)
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
+        Err(anyhow!("timed out waiting for qpxd readiness"))
+    })();
+    if let Err(error) = result {
+        // Reap before reading the log, including on notification/protocol errors.
+        let _ = handle.child.kill();
+        let status = handle.child.wait();
+        return Err(anyhow!(
+            "{error:#}; address {addr}; child status {status:?} (log: {}){}",
+            handle
+                .log_path
+                .as_deref()
+                .unwrap_or(Path::new("<uncaptured>"))
+                .display(),
+            handle.log_tail(),
+        ));
     }
-    let _ = child.kill();
-    let _ = child.wait();
-    Err(anyhow!(
-        "timed out waiting for qpxd to listen on {addr} (log: {}){}",
-        log_path.display(),
-        log_excerpt(log_path)
-    ))
+    Ok(())
 }
 
 fn log_excerpt(log_path: &Path) -> String {
