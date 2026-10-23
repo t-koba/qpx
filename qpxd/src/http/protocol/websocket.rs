@@ -1,3 +1,4 @@
+use crate::http::protocol::common::trim_http_ows;
 use hyper_util::rt::TokioIo;
 use qpx_core::http_token::{header_value_members, header_values_contain_token, is_http_token};
 use qpx_http::body::Body;
@@ -51,10 +52,6 @@ pub(crate) fn is_websocket_upgrade(
     }
     let _ = parse_websocket_subprotocol_offers(headers)?;
     Ok(true)
-}
-
-fn trim_http_ows(value: &str) -> &str {
-    value.trim_matches(|character| matches!(character, ' ' | '\t'))
 }
 
 /// Validate the combined, case-sensitive list of client subprotocol offers.

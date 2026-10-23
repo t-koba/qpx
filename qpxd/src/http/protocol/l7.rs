@@ -1,3 +1,4 @@
+use crate::http::protocol::common::trim_http_ows;
 use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
 use crate::http::protocol::trailer_body;
 use hyper::{Method, Request, Response, StatusCode};
@@ -350,7 +351,7 @@ pub(crate) fn apply_request_header_control_in_place(
 }
 
 fn parse_max_forwards_value(raw: &str) -> Option<u64> {
-    let raw = raw.trim_matches(|character| character == ' ' || character == '\t');
+    let raw = trim_http_ows(raw);
     if raw.is_empty() {
         return None;
     }

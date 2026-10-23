@@ -8,6 +8,11 @@ use qpx_http::body::Body;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+/// Trims only HTTP optional whitespace (SP and HTAB).
+pub(super) fn trim_http_ows(value: &str) -> &str {
+    value.trim_matches(|character| matches!(character, ' ' | '\t'))
+}
+
 pub(crate) fn blocked_response(message: &str) -> Response<Body> {
     text_response(StatusCode::FORBIDDEN, message.to_owned())
 }
@@ -126,6 +131,16 @@ pub(crate) fn resolve_named_upstream(
 #[cfg(test)]
 mod tests {
     use crate::http::protocol::common::*;
+
+    #[test]
+    fn trim_http_ows_removes_only_ascii_space_and_tab() {
+        assert_eq!(trim_http_ows(" \tvalue\t "), "value");
+        assert_eq!(trim_http_ows("\t "), "");
+        assert_eq!(
+            trim_http_ows("\u{00a0}value\u{00a0}"),
+            "\u{00a0}value\u{00a0}"
+        );
+    }
     use crate::runtime::Runtime;
     use qpx_core::config::{
         AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, Config,
