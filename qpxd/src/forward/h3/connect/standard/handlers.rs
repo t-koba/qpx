@@ -147,7 +147,7 @@ pub(crate) async fn handle_h3_connect(
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 CONNECT upstream resolution failed");
             send_finalized!(
-                super::super::h3_connect_bad_gateway_base_response(
+                super::super::super::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 DispatchOutcome::Error
@@ -188,7 +188,7 @@ pub(crate) async fn handle_h3_connect(
                 "forward HTTP/3 CONNECT tunnel establish failed"
             );
             send_finalized!(
-                super::super::h3_connect_bad_gateway_base_response(
+                super::super::super::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 DispatchOutcome::Error

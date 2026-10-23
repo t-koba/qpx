@@ -8,7 +8,7 @@ use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::Result;
 use async_trait::async_trait;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, Response};
 use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
 use qpx_http::body::Body;
 use std::net::SocketAddr;
@@ -144,9 +144,7 @@ impl H3RequestHandler for ForwardH3Handler {
                     &request_method,
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(state.messages.proxy_error.clone()))
+                    super::h3_bad_gateway_base_response(state.messages.proxy_error.clone())
                         .unwrap_or_else(|_| Response::new(Body::empty())),
                     false,
                 )
@@ -196,9 +194,7 @@ impl H3RequestHandler for ForwardH3Handler {
                         &request_method,
                         request_version,
                         state.plan.identity.proxy_name.as_ref(),
-                        Response::builder()
-                            .status(StatusCode::BAD_GATEWAY)
-                            .body(Body::from(state.messages.proxy_error.clone()))
+                        super::h3_bad_gateway_base_response(state.messages.proxy_error.clone())
                             .unwrap_or_else(|_| Response::new(Body::empty())),
                         false,
                     ),

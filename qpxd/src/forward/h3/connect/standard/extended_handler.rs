@@ -178,7 +178,7 @@ pub(crate) async fn handle_h3_extended_connect(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name.as_str(),
-                super::super::h3_connect_bad_gateway_base_response(
+                super::super::super::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),

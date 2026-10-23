@@ -108,7 +108,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,
                     proxy_name.as_str(),
-                    super::super::h3_connect_bad_gateway_base_response(
+                    super::super::super::h3_bad_gateway_base_response(
                         state.messages.proxy_error.clone(),
                     )?,
                     response_headers.as_deref(),
@@ -125,7 +125,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,
                     proxy_name.as_str(),
-                    super::super::h3_connect_bad_gateway_base_response(
+                    super::super::super::h3_bad_gateway_base_response(
                         state.messages.upstream_connect_udp_failed.clone(),
                     )?,
                     response_headers.as_deref(),

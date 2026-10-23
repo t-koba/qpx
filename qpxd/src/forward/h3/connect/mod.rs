@@ -134,29 +134,6 @@ pub(super) fn h3_connect_rate_limited_response(
     response
 }
 
-#[cfg(feature = "http3")]
-pub(super) fn h3_connect_bad_gateway_base_response(
-    proxy_error: String,
-) -> http::Result<http::Response<qpx_http::body::Body>> {
-    http::Response::builder()
-        .status(http::StatusCode::BAD_GATEWAY)
-        .body(qpx_http::body::Body::from(proxy_error))
-}
-
-#[cfg(all(test, feature = "http3"))]
-mod h3_connect_bad_gateway_base_response_tests {
-    #[tokio::test]
-    async fn bad_gateway_base_response_preserves_body_bytes() {
-        let response = super::h3_connect_bad_gateway_base_response("proxy error".to_owned())
-            .expect("base response builds");
-        assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
-        let bytes = qpx_http::body::to_bytes(response.into_body())
-            .await
-            .expect("body bytes");
-        assert_eq!(bytes.as_ref(), b"proxy error");
-    }
-}
-
 #[cfg(all(test, feature = "http3"))]
 mod h3_connect_rate_limited_response_tests {
     #[test]
