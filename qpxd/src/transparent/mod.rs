@@ -1,5 +1,6 @@
 use crate::http::metrics as http_metrics;
 use crate::runtime::Runtime;
+use crate::server::acceptors::join_acceptor_tasks;
 use crate::server::connection_permit::accept_tcp_with_connection_permit;
 #[cfg(feature = "http3")]
 use crate::server::control::SidecarControl;
@@ -13,7 +14,7 @@ use crate::{
         ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
     },
 };
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use qpx_core::config::IngressEdgeConfig;
 use qpx_core::rules::RuleMatchContext;
@@ -85,14 +86,7 @@ pub(crate) async fn run_tcp(
         }));
     }
 
-    for task in accept_tasks {
-        match task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(anyhow!("transparent acceptor task failed: {}", err)),
-        }
-    }
-    Ok(())
+    join_acceptor_tasks(accept_tasks, "transparent").await
 }
 
 #[cfg(feature = "http3")]

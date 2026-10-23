@@ -5,6 +5,7 @@ use crate::http::codec::interim::{
 use crate::http::metrics as http_metrics;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
+use crate::server::acceptors::join_acceptor_tasks;
 use crate::server::connection_permit::accept_tcp_with_connection_permit;
 #[cfg(feature = "http3")]
 use crate::server::control::SidecarControl;
@@ -75,14 +76,7 @@ pub(crate) async fn run_tcp(
             .await
         }));
     }
-    for task in accept_tasks {
-        match task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(anyhow!("forward acceptor task failed: {}", err)),
-        }
-    }
-    Ok(())
+    join_acceptor_tasks(accept_tasks, "forward").await
 }
 
 #[cfg(feature = "http3")]

@@ -12,6 +12,7 @@ use crate::runtime::CompiledReverseEdge;
 #[cfg(any(feature = "http3", feature = "tls-rustls", feature = "tls-native"))]
 use crate::runtime::PlanFlags;
 use crate::runtime::Runtime;
+use crate::server::acceptors::join_acceptor_tasks;
 use crate::tcp_bindings::filter::{
     ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
 };
@@ -393,14 +394,7 @@ pub(crate) async fn run_tcp(
                     .await
                 }));
             }
-            for task in accept_tasks {
-                match task.await {
-                    Ok(Ok(())) => {}
-                    Ok(Err(err)) => return Err(err),
-                    Err(err) => return Err(anyhow!("reverse TLS acceptor task failed: {}", err)),
-                }
-            }
-            return Ok(());
+            return join_acceptor_tasks(accept_tasks, "reverse TLS").await;
         }
         #[cfg(not(any(feature = "tls-rustls", feature = "tls-native")))]
         {
@@ -433,14 +427,7 @@ pub(crate) async fn run_tcp(
             .await
         }));
     }
-    for task in accept_tasks {
-        match task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => return Err(err),
-            Err(err) => return Err(anyhow!("reverse acceptor task failed: {}", err)),
-        }
-    }
-    Ok(())
+    join_acceptor_tasks(accept_tasks, "reverse").await
 }
 
 pub(crate) fn build_reloadable_reverse(
