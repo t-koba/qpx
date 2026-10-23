@@ -9,6 +9,10 @@ use std::fmt;
 use super::bad_request;
 use super::{HttpGuardReject, payload_too_large};
 
+fn is_json_content_type(content_type: &str) -> bool {
+    content_type.starts_with("application/json") || content_type.contains("+json")
+}
+
 #[cfg(test)]
 pub(super) fn validate_json_limits(
     bytes: &Bytes,
@@ -19,7 +23,7 @@ pub(super) fn validate_json_limits(
         return None;
     }
     let content_type = content_type?;
-    if !(content_type.starts_with("application/json") || content_type.contains("+json")) {
+    if !is_json_content_type(content_type) {
         return None;
     }
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes.as_ref()) else {
@@ -52,7 +56,7 @@ pub(super) async fn validate_json_limits_reader(
     let Some(content_type) = content_type else {
         return Ok(None);
     };
-    if !(content_type.starts_with("application/json") || content_type.contains("+json")) {
+    if !is_json_content_type(content_type) {
         return Ok(None);
     }
     body.with_blocking_reader(move |reader| {
@@ -224,5 +228,21 @@ fn json_stats(value: &serde_json::Value, depth: usize) -> (usize, usize) {
             (acc.0.max(child_depth), acc.1 + child_fields)
         }),
         _ => (depth, 0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_json_content_type;
+
+    #[test]
+    fn json_content_type_preserves_existing_prefix_and_substring_semantics() {
+        assert!(is_json_content_type("application/json"));
+        assert!(is_json_content_type("application/json; charset=utf-8"));
+        assert!(is_json_content_type("application/json-extra"));
+        assert!(is_json_content_type("application/problem+json"));
+        assert!(!is_json_content_type("text/plain"));
+        assert!(!is_json_content_type("Application/json"));
+        assert!(!is_json_content_type(" application/json"));
     }
 }
