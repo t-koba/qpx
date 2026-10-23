@@ -109,3 +109,7 @@ qpx-http/src/protocol/semantics/tests.rs	797	r
 qpxd/src/http/protocol/forwarded.rs	173	r
 qpxd/src/http/protocol/websocket.rs	244	r
 qpxd/src/upstream/raw_http1/io.rs	205	r
+qpxd/src/http3/qpx_stream.rs	344	r
+qpxd/src/http3/server/response.rs	284	r
+qpxd/src/reverse/transport/dispatch/prepare_cors.rs	131	r
+qpxd/src/reverse/transport/dispatch/prepare_initial.rs	76	r
