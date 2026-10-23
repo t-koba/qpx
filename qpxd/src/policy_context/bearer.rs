@@ -926,14 +926,9 @@ fn is_active(payload: &Value) -> bool {
 }
 
 fn cache_max_age(headers: &HeaderMap) -> u64 {
-    headers
-        .get_all(http::header::CACHE_CONTROL)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|value| value.split(','))
+    qpx_core::http_token::header_value_members(headers, &http::header::CACHE_CONTROL)
         .find_map(|directive| {
             directive
-                .trim()
                 .strip_prefix("max-age=")
                 .and_then(|value| value.parse().ok())
         })
@@ -1725,5 +1720,90 @@ mod tests {
             Some(r#"Bearer error="invalid_token""#)
         );
         assert!(!response.headers().contains_key("DPoP-Nonce"));
+    }
+
+    #[test]
+    fn cache_max_age_reads_max_age_across_repeated_fields() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("no-cache"),
+        );
+        headers.append(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("max-age=60"),
+        );
+        assert_eq!(cache_max_age(&headers), 60);
+    }
+
+    #[test]
+    fn cache_max_age_reads_first_directive_among_many() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("no-store, max-age=120, must-revalidate"),
+        );
+        assert_eq!(cache_max_age(&headers), 120);
+    }
+
+    #[test]
+    fn cache_max_age_trims_whitespace_around_directives() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("  max-age=45  "),
+        );
+        assert_eq!(cache_max_age(&headers), 45);
+    }
+
+    #[test]
+    fn cache_max_age_keeps_first_match_and_falls_back_on_invalid() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("max-age=10, max-age=20"),
+        );
+        assert_eq!(cache_max_age(&headers), 10);
+
+        let mut invalid = HeaderMap::new();
+        invalid.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("max-age=nonsense"),
+        );
+        assert_eq!(cache_max_age(&invalid), 300);
+
+        let empty = HeaderMap::new();
+        assert_eq!(cache_max_age(&empty), 300);
+    }
+
+    #[test]
+    fn cache_max_age_skips_values_that_are_not_readable_text() {
+        let mut headers = HeaderMap::new();
+        headers.append(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_bytes(b"\xff").expect("opaque value"),
+        );
+        headers.append(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("max-age=90"),
+        );
+        assert_eq!(cache_max_age(&headers), 90);
+
+        let mut unreadable_only = HeaderMap::new();
+        unreadable_only.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_bytes(b"\xff").expect("opaque value"),
+        );
+        assert_eq!(cache_max_age(&unreadable_only), 300);
+    }
+
+    #[test]
+    fn cache_max_age_matches_directive_case_sensitively() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::CACHE_CONTROL,
+            http::HeaderValue::from_static("Max-Age=77"),
+        );
+        assert_eq!(cache_max_age(&headers), 300);
     }
 }
