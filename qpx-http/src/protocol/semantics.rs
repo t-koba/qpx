@@ -40,6 +40,15 @@ pub fn capsule_protocol_enabled(headers: &HeaderMap) -> bool {
     parse_item(value.as_bytes()).is_ok_and(|item| matches!(item.bare_item, BareItem::Boolean(true)))
 }
 
+/// Iterate valid header names nominated by all parseable `Connection` field values.
+pub fn connection_nominated_header_names(
+    headers: &HeaderMap,
+) -> impl Iterator<Item = HeaderName> + '_ {
+    qpx_core::http_token::header_value_members(headers, &CONNECTION)
+        .filter(|token| !token.is_empty())
+        .filter_map(|token| HeaderName::from_bytes(token.as_bytes()).ok())
+}
+
 pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
     let mut connection_present = false;
     let mut upgrade_present = false;
@@ -66,21 +75,12 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bo
     let mut extension_headers = Vec::new();
 
     if connection_present {
-        for value in headers.get_all(CONNECTION) {
-            if let Ok(value) = value.to_str() {
-                for token in value
-                    .split(',')
-                    .map(str::trim)
-                    .filter(|token| !token.is_empty())
-                {
-                    if token.eq_ignore_ascii_case("upgrade") {
-                        keep_upgrade |= preserve_upgrade;
-                    } else if !is_well_known_hop_token(token)
-                        && let Ok(name) = HeaderName::from_bytes(token.as_bytes())
-                    {
-                        extension_headers.push(name);
-                    }
-                }
+        for name in connection_nominated_header_names(headers) {
+            let token = name.as_str();
+            if token.eq_ignore_ascii_case("upgrade") {
+                keep_upgrade |= preserve_upgrade;
+            } else if !is_well_known_hop_token(token) {
+                extension_headers.push(name);
             }
         }
     }

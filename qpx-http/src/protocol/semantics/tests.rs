@@ -1,6 +1,29 @@
 use crate::protocol::semantics::*;
 
 #[test]
+fn connection_nominated_header_names_normalizes_valid_tokens() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        CONNECTION,
+        HeaderValue::from_static(" X-Remove, UPGRADE,, "),
+    );
+    headers.append(CONNECTION, HeaderValue::from_static("x-remove, x-second"));
+    headers.append(CONNECTION, HeaderValue::from_static("not a name, x-final"));
+    headers.append(
+        CONNECTION,
+        HeaderValue::from_bytes(b"\xff").expect("opaque value"),
+    );
+
+    let names: Vec<_> = connection_nominated_header_names(&headers)
+        .map(|name| name.as_str().to_owned())
+        .collect();
+    assert_eq!(
+        names,
+        ["x-remove", "upgrade", "x-remove", "x-second", "x-final"]
+    );
+}
+
+#[test]
 fn sanitize_removes_connection_tokens_and_hop_headers() {
     let mut headers = HeaderMap::new();
     headers.insert(CONNECTION, HeaderValue::from_static("keep-alive, x-remove"));

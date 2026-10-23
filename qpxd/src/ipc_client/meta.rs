@@ -2,27 +2,12 @@ use super::ClientConnInfo;
 use hyper::Request;
 use qpx_core::ipc::meta::IpcRequestMeta;
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::connection_nominated_header_names;
 use std::collections::{HashMap, HashSet};
 
 fn is_hop_by_hop_header(name: &str) -> bool {
     qpx_http::protocol::semantics::is_hop_by_hop_header_name(name)
         || matches!(name, "proxy" | "trailers")
-}
-
-fn parse_connection_tokens(headers: &hyper::HeaderMap) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for value in headers.get_all("connection") {
-        let Ok(s) = value.to_str() else {
-            continue;
-        };
-        for token in s.split(',') {
-            let token = token.trim();
-            if !token.is_empty() {
-                out.insert(token.to_ascii_lowercase());
-            }
-        }
-    }
-    out
 }
 
 pub(super) fn build_ipc_meta(
@@ -32,14 +17,14 @@ pub(super) fn build_ipc_meta(
     authorization_decision: Option<qpx_core::ipc::meta::AuthorizationDecisionContext>,
 ) -> IpcRequestMeta {
     let mut headers = Vec::new();
-    let connection_tokens = parse_connection_tokens(req.headers());
+    let connection_tokens: HashSet<_> = connection_nominated_header_names(req.headers()).collect();
     let mut has_host = false;
     for (name, value) in req.headers() {
         let name_str = name.as_str();
         if is_hop_by_hop_header(name_str) {
             continue;
         }
-        if connection_tokens.contains(name_str) {
+        if connection_tokens.contains(name) {
             continue;
         }
         if let Ok(val_str) = value.to_str() {
@@ -80,7 +65,47 @@ pub(super) fn build_ipc_meta(
 
 #[cfg(test)]
 mod tests {
-    use super::is_hop_by_hop_header;
+    use super::{build_ipc_meta, is_hop_by_hop_header};
+    use crate::ipc_client::ClientConnInfo;
+    use hyper::header::{CONNECTION, HeaderValue};
+    use qpx_http::body::Body;
+
+    #[test]
+    fn ipc_metadata_filters_connection_nominated_headers() {
+        let mut req = hyper::Request::builder()
+            .uri("https://example.test/path")
+            .body(Body::empty())
+            .expect("request");
+        req.headers_mut()
+            .append(CONNECTION, HeaderValue::from_static(" X-Private, UPGRADE "));
+        req.headers_mut()
+            .append(CONNECTION, HeaderValue::from_static("x-private, x-second"));
+        req.headers_mut().append(
+            CONNECTION,
+            HeaderValue::from_bytes(b"\xff").expect("opaque value"),
+        );
+        req.headers_mut()
+            .insert("x-private", HeaderValue::from_static("secret"));
+        req.headers_mut()
+            .insert("x-second", HeaderValue::from_static("secret"));
+        req.headers_mut()
+            .insert("x-kept", HeaderValue::from_static("value"));
+
+        let meta = build_ipc_meta(&req, ClientConnInfo::default(), None, None);
+        assert!(!meta.headers.iter().any(|(name, _)| name == "x-private"));
+        assert!(!meta.headers.iter().any(|(name, _)| name == "x-second"));
+        assert!(!meta.headers.iter().any(|(name, _)| name == "upgrade"));
+        assert!(
+            meta.headers
+                .iter()
+                .any(|(name, value)| name == "x-kept" && value == "value")
+        );
+        assert!(
+            meta.headers
+                .iter()
+                .any(|(name, value)| name == "host" && value == "example.test")
+        );
+    }
 
     #[test]
     fn hop_header_filter_uses_shared_names_and_keeps_ipc_extras() {
