@@ -87,13 +87,6 @@ pub(super) fn evaluate_tls_policy_decision(
         ja3: client_hello.and_then(|hello| hello.ja3.as_deref()),
         ja4: client_hello.and_then(|hello| hello.ja4.as_deref()),
         headers: None,
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
         upstream_cert_present: upstream_cert.map(|cert| cert.present),
         upstream_cert_subject: upstream_cert.and_then(|cert| cert.subject.as_deref()),
         upstream_cert_issuer: upstream_cert.and_then(|cert| cert.issuer.as_deref()),
@@ -107,6 +100,7 @@ pub(super) fn evaluate_tls_policy_decision(
             .and_then(|cert| cert.fingerprint_sha256.as_deref()),
         ..Default::default()
     };
+    crate::http::policy::rule_context::apply_identity(&mut ctx, identity);
     destination.apply_to_rule_context(&mut ctx);
     let outcome = engine.evaluate_ref(&ctx);
     Ok(TransparentTlsDecision {

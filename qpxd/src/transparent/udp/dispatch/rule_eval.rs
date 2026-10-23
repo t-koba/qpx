@@ -117,15 +117,9 @@ pub(super) fn prepare_udp_rule_evaluation<'a>(
         ja3: client_hello.as_ref().and_then(|hello| hello.ja3.as_deref()),
         ja4: client_hello.as_ref().and_then(|hello| hello.ja4.as_deref()),
         request_size: Some(packet.len() as u64),
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
         ..Default::default()
     };
+    crate::http::policy::rule_context::apply_identity(&mut ctx, &identity);
     destination.apply_to_rule_context(&mut ctx);
     let outcome = engine.evaluate_ref(&ctx);
     let request_limit_ctx =

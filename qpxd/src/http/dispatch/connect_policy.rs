@@ -40,15 +40,9 @@ pub(crate) fn build_dispatch_connect_rule_context<'a>(
         http_version: Some(http_version),
         alpn,
         headers: Some(headers),
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
         ..Default::default()
     };
+    crate::http::policy::rule_context::apply_identity(&mut ctx, identity);
     destination.apply_to_rule_context(&mut ctx);
     ctx
 }

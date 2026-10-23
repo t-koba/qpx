@@ -91,7 +91,7 @@ pub(crate) fn attach_destination_trace(
     log_context.destination_trace = destination.decision_trace();
 }
 
-fn apply_identity<'a>(ctx: &mut RuleMatchContext<'a>, identity: &'a ResolvedIdentity) {
+pub(crate) fn apply_identity<'a>(ctx: &mut RuleMatchContext<'a>, identity: &'a ResolvedIdentity) {
     ctx.user = identity.user.as_deref();
     ctx.user_groups = &identity.groups;
     ctx.device_id = identity.device_id.as_deref();
@@ -144,4 +144,32 @@ fn apply_rpc<'a>(ctx: &mut RuleMatchContext<'a>, rpc: &'a RpcMatchContext) {
     ctx.rpc_message_size = rpc.message_size;
     ctx.rpc_message = rpc.message.as_deref();
     ctx.rpc_trailers = rpc.trailers.as_ref();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn apply_identity_maps_all_seven_fields() {
+        let identity = ResolvedIdentity {
+            user: Some("alice".to_string()),
+            groups: vec!["eng".to_string(), "ops".to_string()],
+            device_id: Some("device-1".to_string()),
+            posture: vec!["healthy".to_string()],
+            tenant: Some("tenant-a".to_string()),
+            auth_strength: Some("mfa".to_string()),
+            idp: Some("example-idp".to_string()),
+            ..ResolvedIdentity::default()
+        };
+        let mut ctx = RuleMatchContext::default();
+        apply_identity(&mut ctx, &identity);
+        assert_eq!(ctx.user, Some("alice"));
+        assert_eq!(ctx.user_groups, &["eng".to_string(), "ops".to_string()]);
+        assert_eq!(ctx.device_id, Some("device-1"));
+        assert_eq!(ctx.posture, &["healthy".to_string()]);
+        assert_eq!(ctx.tenant, Some("tenant-a"));
+        assert_eq!(ctx.auth_strength, Some("mfa"));
+        assert_eq!(ctx.idp, Some("example-idp"));
+    }
 }

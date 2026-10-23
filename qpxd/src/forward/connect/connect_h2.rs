@@ -151,15 +151,9 @@ pub(super) async fn handle_h2_extended_connect(
         http_version: Some(http_version_label(req_version)),
         alpn: Some("h2"),
         headers: Some(&sanitized_headers),
-        user: identity.user.as_deref(),
-        user_groups: &identity.groups,
-        device_id: identity.device_id.as_deref(),
-        posture: &identity.posture,
-        tenant: identity.tenant.as_deref(),
-        auth_strength: identity.auth_strength.as_deref(),
-        idp: identity.idp.as_deref(),
         ..Default::default()
     };
+    crate::http::policy::rule_context::apply_identity(&mut ctx, &identity);
     destination.apply_to_rule_context(&mut ctx);
     #[cfg(feature = "auth-basic")]
     macro_rules! pre_access_response {

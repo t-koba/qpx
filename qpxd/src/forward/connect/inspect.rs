@@ -79,13 +79,6 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
         ja3: input.client_hello.ja3.as_deref(),
         ja4: input.client_hello.ja4.as_deref(),
         headers: Some(input.sanitized_headers),
-        user: input.identity.user.as_deref(),
-        user_groups: &input.identity.groups,
-        device_id: input.identity.device_id.as_deref(),
-        posture: &input.identity.posture,
-        tenant: input.identity.tenant.as_deref(),
-        auth_strength: input.identity.auth_strength.as_deref(),
-        idp: input.identity.idp.as_deref(),
         upstream_cert_present: input.upstream_cert.map(|cert| cert.present),
         upstream_cert_subject: input.upstream_cert.and_then(|cert| cert.subject.as_deref()),
         upstream_cert_issuer: input.upstream_cert.and_then(|cert| cert.issuer.as_deref()),
@@ -102,6 +95,7 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
             .and_then(|cert| cert.fingerprint_sha256.as_deref()),
         ..Default::default()
     };
+    crate::http::policy::rule_context::apply_identity(&mut ctx, input.identity);
     destination.apply_to_rule_context(&mut ctx);
     match evaluate_forward_policy(
         input.runtime,
