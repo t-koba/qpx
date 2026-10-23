@@ -114,3 +114,66 @@ pub(super) async fn apply_connect_udp_bandwidth_controls(
     }
     Ok(())
 }
+
+#[cfg(feature = "http3")]
+pub(super) fn h3_connect_concurrency_limited_response(
+    proxy_name: &str,
+    response_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
+    request_limits: &crate::rate_limit::AppliedRateLimits,
+    retry_after: Option<std::time::Duration>,
+) -> http::Response<qpx_http::body::Body> {
+    let mut response = crate::http::protocol::l7::finalize_response_with_headers(
+        &http::Method::CONNECT,
+        http::Version::HTTP_3,
+        proxy_name,
+        crate::http::protocol::common::too_many_requests_response(retry_after),
+        response_headers,
+        false,
+    );
+    request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
+    response
+}
+
+#[cfg(all(test, feature = "http3"))]
+mod h3_connect_concurrency_limited_response_tests {
+    #[test]
+    fn concurrency_limited_response_uses_429_retry_after_and_plain_text() {
+        let request_limits = crate::rate_limit::AppliedRateLimits::default();
+        let response = super::h3_connect_concurrency_limited_response(
+            "test-proxy",
+            None,
+            &request_limits,
+            None,
+        );
+        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        assert!(response.headers().get(http::header::RETRY_AFTER).is_none());
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+        let response = super::h3_connect_concurrency_limited_response(
+            "test-proxy",
+            None,
+            &request_limits,
+            Some(std::time::Duration::ZERO),
+        );
+        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::RETRY_AFTER)
+                .and_then(|value| value.to_str().ok()),
+            Some("1"),
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_TYPE)
+                .and_then(|value| value.to_str().ok()),
+            Some("text/plain; charset=utf-8"),
+        );
+    }
+}

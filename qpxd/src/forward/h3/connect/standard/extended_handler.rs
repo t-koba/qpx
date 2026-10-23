@@ -9,9 +9,7 @@ use super::{
 };
 use crate::forward::connect::listener_upstream_trust;
 use crate::http::dispatch::DispatchOutcome;
-use crate::http::protocol::common::{
-    blocked_response as blocked, too_many_requests_response as too_many_requests,
-};
+use crate::http::protocol::common::blocked_response as blocked;
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::listener::H3ConnInfo;
@@ -130,16 +128,12 @@ pub(crate) async fn handle_h3_extended_connect(
     let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            let retry_after = concurrency.retry_after;
-            let mut response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = super::super::h3_connect_concurrency_limited_response(
                 proxy_name.as_str(),
-                too_many_requests(retry_after),
                 response_headers.as_deref(),
-                false,
+                &request_limits,
+                concurrency.retry_after,
             );
-            request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
             send_policy!(
                 &mut req_stream,
                 response,

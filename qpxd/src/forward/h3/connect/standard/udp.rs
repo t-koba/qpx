@@ -11,7 +11,6 @@ use self::chained::relay_h3_connect_udp_stream_chained;
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
 use super::super::{apply_connect_udp_bandwidth_controls, forward_udp_capsules};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
-use crate::http::protocol::common::too_many_requests_response as too_many_requests;
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::capsule::{
     CapsuleBuffer, decode_connect_udp_payload, encode_datagram_capsule_context_header,
@@ -139,21 +138,6 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             )
         };
     }
-    macro_rules! send_concurrency_limited {
-        ($retry_after:expr) => {{
-            let retry_after = $retry_after;
-            let mut response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
-                proxy_name.as_str(),
-                too_many_requests(retry_after),
-                response_headers.as_deref(),
-                false,
-            );
-            request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
-            send_policy!(response, DispatchOutcome::ConcurrencyLimited)
-        }};
-    }
     let upstream = match crate::forward::request::resolve_upstream_url(
         &action,
         &state,
@@ -176,7 +160,13 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            send_concurrency_limited!(concurrency.retry_after).await?;
+            let response = super::super::h3_connect_concurrency_limited_response(
+                proxy_name.as_str(),
+                response_headers.as_deref(),
+                &request_limits,
+                concurrency.retry_after,
+            );
+            send_policy!(response, DispatchOutcome::ConcurrencyLimited).await?;
             return Ok(());
         }
     };
