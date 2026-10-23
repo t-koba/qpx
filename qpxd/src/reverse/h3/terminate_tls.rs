@@ -59,24 +59,17 @@ impl QuicSniResolver {
         let mut certs = HashMap::new();
         let mut acme_snis = std::collections::HashSet::new();
         for cert in &tls.certificates {
-            let cert_path = cert.cert.as_deref().unwrap_or("").trim();
-            let key_path = cert.key.as_deref().unwrap_or("").trim();
-            if cert_path.is_empty() && key_path.is_empty() {
-                acme_snis.insert(cert.sni.to_ascii_lowercase());
-            } else {
-                if cert_path.is_empty() {
-                    return Err(anyhow!("reverse.tls.certificates[].cert must not be empty"));
-                }
-                if key_path.is_empty() {
-                    return Err(anyhow!("reverse.tls.certificates[].key must not be empty"));
-                }
-                let chain = load_cert_chain(Path::new(cert_path))?;
-                let key = load_private_key(Path::new(key_path))?;
+            if let Some((cert_path, key_path)) = crate::reverse::tls::certificate_file_paths(cert)?
+            {
+                let chain = load_cert_chain(cert_path)?;
+                let key = load_private_key(key_path)?;
                 let signing_key = quinn::rustls::crypto::aws_lc_rs::sign::any_supported_type(&key)
                     .map_err(|_| anyhow!("unsupported key"))?;
                 let certified =
                     Arc::new(quinn::rustls::sign::CertifiedKey::new(chain, signing_key));
                 certs.insert(cert.sni.to_ascii_lowercase(), certified);
+            } else {
+                acme_snis.insert(cert.sni.to_ascii_lowercase());
             }
         }
         Ok(Self { certs, acme_snis })
