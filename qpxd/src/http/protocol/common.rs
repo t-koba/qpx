@@ -10,7 +10,26 @@ use std::time::Duration;
 
 /// Trims only HTTP optional whitespace (SP and HTAB).
 pub(super) fn trim_http_ows(value: &str) -> &str {
-    value.trim_matches(|character| matches!(character, ' ' | '\t'))
+    let (start, end) = http_ows_bounds(value.as_bytes());
+    &value[start..end]
+}
+
+/// Counts the bytes left after trimming HTTP optional whitespace.
+pub(crate) fn trim_http_ows_len(value: &[u8]) -> usize {
+    let (start, end) = http_ows_bounds(value);
+    end - start
+}
+
+fn http_ows_bounds(value: &[u8]) -> (usize, usize) {
+    let start = value
+        .iter()
+        .position(|byte| !matches!(byte, b' ' | b'\t'))
+        .unwrap_or(value.len());
+    let end = value
+        .iter()
+        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
+        .map_or(start, |index| index + 1);
+    (start, end)
 }
 
 pub(crate) fn blocked_response(message: &str) -> Response<Body> {
@@ -140,6 +159,13 @@ mod tests {
             trim_http_ows("\u{00a0}value\u{00a0}"),
             "\u{00a0}value\u{00a0}"
         );
+    }
+
+    #[test]
+    fn trim_http_ows_len_counts_the_same_bytes_without_requiring_utf8() {
+        assert_eq!(trim_http_ows_len(b" \tvalue\t "), 5);
+        assert_eq!(trim_http_ows_len(b" \t "), 0);
+        assert_eq!(trim_http_ows_len(b"\x80value\x80"), 7);
     }
     use crate::runtime::Runtime;
     use qpx_core::config::{

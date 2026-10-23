@@ -1,6 +1,7 @@
 use crate::http::codec::h1_common::{
     TransferEncodingClassificationError, has_only_chunked_transfer_encoding_values,
 };
+use crate::http::protocol::common::trim_http_ows_len;
 use anyhow::{Result, anyhow};
 use hyper::{Request, StatusCode};
 use qpx_core::config::HttpGuardProfileConfig;
@@ -245,7 +246,7 @@ fn validate_header_limits(
         let mut total = 0usize;
         for (name, value) in req.headers() {
             let value_len = if profile.normalize.headers {
-                trimmed_http_ows_len(value.as_bytes())
+                trim_http_ows_len(value.as_bytes())
             } else {
                 value.as_bytes().len()
             };
@@ -256,18 +257,6 @@ fn validate_header_limits(
         }
     }
     None
-}
-
-fn trimmed_http_ows_len(value: &[u8]) -> usize {
-    let start = value
-        .iter()
-        .position(|byte| !matches!(byte, b' ' | b'\t'))
-        .unwrap_or(value.len());
-    let end = value
-        .iter()
-        .rposition(|byte| !matches!(byte, b' ' | b'\t'))
-        .map_or(start, |index| index + 1);
-    end.saturating_sub(start)
 }
 
 fn validate_query_limits(
