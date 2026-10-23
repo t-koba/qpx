@@ -12,11 +12,15 @@ pub(crate) use security::ReverseTlsHostPolicy;
 #[cfg(feature = "tls-rustls")]
 pub(in crate::reverse) use write_coalescer::AdaptiveWriteCoalescer;
 
+#[cfg(feature = "tls-rustls")]
 use anyhow::{Result, anyhow};
+#[cfg(feature = "tls-rustls")]
 use qpx_core::config::TlsCertConfig;
+#[cfg(feature = "tls-rustls")]
 use std::path::Path;
 
 /// Returns the trimmed certificate and key paths, or `None` for an ACME-managed pair.
+#[cfg(feature = "tls-rustls")]
 pub(in crate::reverse) fn certificate_file_paths(
     cert: &TlsCertConfig,
 ) -> Result<Option<(&Path, &Path)>> {
@@ -34,7 +38,7 @@ pub(in crate::reverse) fn certificate_file_paths(
     Ok(Some((Path::new(cert_path), Path::new(key_path))))
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "tls-rustls"))]
 mod tests {
     use super::*;
 
