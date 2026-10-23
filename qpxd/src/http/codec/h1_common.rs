@@ -155,14 +155,6 @@ pub(crate) fn parse_header_map_recycled(headers: &[httparse::Header<'_>]) -> Res
     Ok(out)
 }
 
-pub(crate) fn parse_response_header_map_recycled(
-    headers: &[httparse::Header<'_>],
-) -> Result<HeaderMap> {
-    let mut out = super::header_pool::take(headers.len().saturating_add(4));
-    parse_header_map_into(headers, &mut out, true)?;
-    Ok(out)
-}
-
 fn parse_header_map_into(
     headers: &[httparse::Header<'_>],
     out: &mut HeaderMap,
@@ -361,8 +353,8 @@ mod tests {
             value: b"application/qpx-intern-test",
         }];
 
-        let first = parse_response_header_map_recycled(&parsed).expect("first parse");
-        let second = parse_response_header_map_recycled(&parsed).expect("second parse");
+        let first = parse_header_map_recycled(&parsed).expect("first parse");
+        let second = parse_header_map_recycled(&parsed).expect("second parse");
 
         assert_eq!(
             first[http::header::CONTENT_TYPE].as_bytes().as_ptr(),
@@ -377,8 +369,8 @@ mod tests {
             value: b"session=qpx-sensitive-test; Secure; HttpOnly",
         }];
 
-        let first = parse_response_header_map_recycled(&parsed).expect("first parse");
-        let second = parse_response_header_map_recycled(&parsed).expect("second parse");
+        let first = parse_header_map_recycled(&parsed).expect("first parse");
+        let second = parse_header_map_recycled(&parsed).expect("second parse");
 
         assert_ne!(
             first[http::header::SET_COOKIE].as_bytes().as_ptr(),

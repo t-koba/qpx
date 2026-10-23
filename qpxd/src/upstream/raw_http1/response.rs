@@ -13,7 +13,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{MAX_CHUNKED_BODY_BYTES, READ_BUF_SIZE};
-use crate::http::codec::h1_common::{parse_response_header_map_recycled, parse_version};
+use crate::http::codec::h1_common::{parse_header_map_recycled, parse_version};
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use hyper::header::CONTENT_LENGTH;
@@ -408,7 +408,7 @@ fn finish_raw_response_head(
             consumed,
             version,
             status,
-            Some(parse_response_header_map_recycled(response.headers)?),
+            Some(parse_header_map_recycled(response.headers)?),
             None,
         ));
     }
@@ -442,7 +442,7 @@ fn finish_parsed_response_head(
         return Err(anyhow!("upstream response status is out of range: {code}"));
     }
     let status = StatusCode::from_u16(code)?;
-    let headers = parse_response_header_map_recycled(response.headers)?;
+    let headers = parse_header_map_recycled(response.headers)?;
     let body_kind = determine_response_body_kind(request_method, status, &headers)?;
     Ok((consumed, version, status, headers, body_kind))
 }
