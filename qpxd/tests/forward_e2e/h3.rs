@@ -638,6 +638,7 @@ runtime:
         .method(http::Method::OPTIONS)
         .uri(uri)
         .header(http::header::HOST, target_authority)
+        .header(http::header::CONTENT_LENGTH, "0")
         .body(())?;
     let mut stream = sender.send_request(request).await?;
     stream.finish().await?;
