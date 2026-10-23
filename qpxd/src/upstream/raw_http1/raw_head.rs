@@ -1,4 +1,6 @@
-use crate::http::codec::h1_common::{is_sanitized_hop_header, raw_has_connection_token};
+use crate::http::codec::h1_common::{
+    has_only_chunked_transfer_encoding_values, is_sanitized_hop_header, raw_has_connection_token,
+};
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::header::{HeaderMap, HeaderName, HeaderValue};
@@ -343,30 +345,15 @@ fn parse_content_length(headers: &[httparse::Header<'_>]) -> Result<Option<u64>>
 }
 
 fn has_only_chunked_transfer_encoding(headers: &[httparse::Header<'_>]) -> Result<bool> {
-    let mut count = 0usize;
-    let mut chunked = false;
-    for header in headers {
-        if !header.name.eq_ignore_ascii_case("transfer-encoding") {
-            continue;
-        }
-        let raw = std::str::from_utf8(header.value)
-            .map_err(|_| anyhow!("invalid transfer-encoding header"))?;
-        for token in raw
-            .split(',')
-            .map(str::trim)
-            .filter(|token| !token.is_empty())
-        {
-            count += 1;
-            chunked = token.eq_ignore_ascii_case("chunked");
-        }
-    }
-    match (count, chunked) {
-        (0, _) => Ok(false),
-        (1, true) => Ok(true),
-        _ => Err(anyhow!(
-            "unsupported transfer-encoding: only a single chunked coding is supported"
-        )),
-    }
+    has_only_chunked_transfer_encoding_values(
+        headers
+            .iter()
+            .filter(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
+            .map(|header| {
+                std::str::from_utf8(header.value)
+                    .map_err(|_| anyhow!("invalid transfer-encoding header"))
+            }),
+    )
 }
 
 #[cfg(test)]
@@ -417,6 +404,42 @@ mod tests {
         assert!(!materialized.contains_key("x-hop"));
         assert_eq!(raw.framing(), RawHttp1BodyFraming::ContentLength(4));
         assert!(raw.upstream_keep_alive());
+    }
+
+    #[test]
+    fn raw_head_uses_shared_transfer_encoding_classification() {
+        let valid = [httparse::Header {
+            name: "Transfer-Encoding",
+            value: b"Chunked",
+        }];
+        let raw = RawHttp1ResponseHead::from_parsed(
+            &valid,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("single chunked coding");
+        assert_eq!(raw.framing(), RawHttp1BodyFraming::Chunked);
+
+        for value in [
+            b"gzip".as_slice(),
+            b"gzip, chunked",
+            b"chunked, chunked",
+            b"chunked, \xff",
+        ] {
+            let headers = [httparse::Header {
+                name: "Transfer-Encoding",
+                value,
+            }];
+            let error = RawHttp1ResponseHead::from_parsed(
+                &headers,
+                &Method::GET,
+                StatusCode::OK,
+                Version::HTTP_11,
+            )
+            .expect_err("unsupported transfer coding");
+            assert!(error.to_string().contains("transfer-encoding"));
+        }
     }
 
     /// The content-length field lines of a head.

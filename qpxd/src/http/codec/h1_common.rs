@@ -66,21 +66,37 @@ fn trim_ascii(mut value: &[u8]) -> &[u8] {
 }
 
 pub(crate) fn has_only_chunked_transfer_encoding(headers: &HeaderMap) -> Result<bool> {
-    let mut tokens = Vec::new();
-    for value in headers.get_all(TRANSFER_ENCODING).iter() {
-        let raw = value
-            .to_str()
-            .map_err(|_| anyhow!("invalid transfer-encoding header"))?;
-        for token in raw.split(',') {
-            let token = token.trim();
-            if !token.is_empty() {
-                tokens.push(token);
-            }
+    has_only_chunked_transfer_encoding_values(headers.get_all(TRANSFER_ENCODING).iter().map(
+        |value| {
+            value
+                .to_str()
+                .map_err(|_| anyhow!("invalid transfer-encoding header"))
+        },
+    ))
+}
+
+/// Whether decoded Transfer-Encoding field values contain exactly one `chunked` coding.
+///
+/// Callers select and decode their own header representation so raw and parsed inputs keep
+/// their existing validation and error mapping.
+pub(crate) fn has_only_chunked_transfer_encoding_values<'a>(
+    values: impl IntoIterator<Item = Result<&'a str>>,
+) -> Result<bool> {
+    let mut count = 0;
+    let mut chunked = false;
+    for value in values {
+        for token in value?
+            .split(',')
+            .map(str::trim)
+            .filter(|token| !token.is_empty())
+        {
+            count += 1;
+            chunked = token.eq_ignore_ascii_case("chunked");
         }
     }
-    match tokens.as_slice() {
-        [] => Ok(false),
-        [token] if token.eq_ignore_ascii_case("chunked") => Ok(true),
+    match (count, chunked) {
+        (0, _) => Ok(false),
+        (1, true) => Ok(true),
         _ => Err(anyhow!(
             "unsupported transfer-encoding: only a single chunked coding is supported"
         )),
@@ -296,6 +312,28 @@ mod tests {
         }
         assert!(!is_sanitized_hop_header(b"X-End-To-End", false));
         assert!(!is_sanitized_hop_header(b"x-end-to-end", true));
+    }
+
+    #[test]
+    fn transfer_encoding_classifier_requires_one_chunked_coding() {
+        assert!(!has_only_chunked_transfer_encoding_values(std::iter::empty()).unwrap());
+        assert!(has_only_chunked_transfer_encoding_values([Ok("Chunked")]).unwrap());
+        assert!(has_only_chunked_transfer_encoding_values([Ok("chunked,"), Ok(" 	")]).unwrap());
+        assert_eq!(
+            has_only_chunked_transfer_encoding_values([Ok("gzip, chunked")])
+                .unwrap_err()
+                .to_string(),
+            "unsupported transfer-encoding: only a single chunked coding is supported"
+        );
+        assert!(has_only_chunked_transfer_encoding_values([Ok("chunked"), Ok("chunked")]).is_err());
+        assert_eq!(
+            has_only_chunked_transfer_encoding_values([Err(anyhow!(
+                "invalid transfer-encoding header"
+            ))])
+            .unwrap_err()
+            .to_string(),
+            "invalid transfer-encoding header"
+        );
     }
 
     #[test]
