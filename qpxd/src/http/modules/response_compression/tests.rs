@@ -1,4 +1,5 @@
 use super::*;
+use http::header::CONTENT_TYPE;
 
 #[test]
 fn accept_encoding_parses_shared_members_across_repeated_fields() {

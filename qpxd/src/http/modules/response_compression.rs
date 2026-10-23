@@ -3,11 +3,10 @@ use super::{
     BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
     HttpModuleFactory, HttpModuleStage, ModuleStages,
 };
+use crate::http::media_type::raw_media_type;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
-use http::header::{
-    ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, CONTENT_TYPE, ETAG, VARY,
-};
+use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, VARY};
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
@@ -472,21 +471,14 @@ fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
     Ok(())
 }
 
-fn response_media_type(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(';').next().unwrap_or(value).trim())
-}
-
 pub(crate) fn is_event_stream_headers(headers: &HeaderMap) -> bool {
-    response_media_type(headers)
+    raw_media_type(headers)
         .map(|value| value.eq_ignore_ascii_case("text/event-stream"))
         .unwrap_or(false)
 }
 
 fn content_type_allowed(headers: &HeaderMap, configured: &[String]) -> bool {
-    let Some(content_type) = response_media_type(headers) else {
+    let Some(content_type) = raw_media_type(headers) else {
         return false;
     };
     let mut iter: Box<dyn Iterator<Item = &str>> = if configured.is_empty() {

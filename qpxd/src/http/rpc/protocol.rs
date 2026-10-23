@@ -4,11 +4,10 @@ use bytes::Bytes;
 use http::HeaderMap;
 use percent_encoding::percent_decode_str;
 
+use crate::http::media_type::raw_media_type;
+
 pub(super) fn response_content_type(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get(http::header::CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .map(normalize_content_type)
+    raw_media_type(headers).map(|media| media.to_ascii_lowercase())
 }
 
 pub(super) fn detect_rpc_protocol(headers: &HeaderMap, fallback: Option<&str>) -> Option<String> {
@@ -21,14 +20,6 @@ pub(super) fn detect_rpc_protocol(headers: &HeaderMap, fallback: Option<&str>) -
         _ => fallback,
     };
     protocol.map(str::to_string)
-}
-
-fn normalize_content_type(raw: &str) -> String {
-    raw.split(';')
-        .next()
-        .unwrap_or(raw)
-        .trim()
-        .to_ascii_lowercase()
 }
 
 pub(super) fn extract_service_and_method(path: &str) -> Option<(&str, &str)> {
