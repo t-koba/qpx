@@ -1,7 +1,7 @@
 use crate::destination::{CompiledDestinationResolutionPolicy, DestinationClassifier};
 use crate::rate_limit::RateLimiters;
 use crate::tcp_bindings::filter::compile_connection_filter;
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use qpx_core::rules::RuleEngine;
 use std::collections::HashMap;
 
@@ -18,6 +18,12 @@ pub struct PolicyRuntime {
 }
 
 impl PolicyRuntime {
+    pub(crate) fn rule_engine_for_listener(&self, listener_name: &str) -> Result<&RuleEngine> {
+        self.rules_by_listener
+            .get(listener_name)
+            .ok_or_else(|| anyhow!("rule engine not found"))
+    }
+
     pub(super) fn build(config: &RuntimeResources) -> Result<Self> {
         let mut rules_by_listener = HashMap::new();
         let mut connection_filters_by_listener = HashMap::new();

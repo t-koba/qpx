@@ -186,11 +186,7 @@ async fn prepare_forward_request(
             return Ok(ForwardPrepareOutcome::Response(Box::new(response)));
         }
     };
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let engine = state.policy.rule_engine_for_listener(listener_name)?;
     let prefilter_ctx = forward_prefilter_context(&base, &host);
     let response_engine = compiled_edge.default_plan.response_rules.clone();
     let response_candidates_for_request = response_engine

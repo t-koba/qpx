@@ -3,7 +3,7 @@ use crate::runtime::Runtime;
 #[cfg(feature = "auth-basic")]
 use crate::runtime::auth::AuthChallenge;
 use crate::runtime::auth::{AuthOutcome, AuthenticatedUser};
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use hyper::HeaderMap;
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::CompiledHeaderControl;
@@ -35,11 +35,7 @@ pub(crate) async fn evaluate_forward_policy_staged(
     auth_uri: &str,
 ) -> Result<PolicyStage<ForwardPolicyDecision>> {
     let state = runtime.state();
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let engine = state.policy.rule_engine_for_listener(listener_name)?;
     if let Some(requirements) = staged_request_observation_requirements(engine, &ctx) {
         return Ok(PolicyStage::Observe(requirements));
     }
@@ -65,11 +61,7 @@ pub(crate) async fn evaluate_forward_policy(
     auth_uri: &str,
 ) -> Result<ForwardPolicyDecision> {
     let state = runtime.state();
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let engine = state.policy.rule_engine_for_listener(listener_name)?;
 
     let candidates = engine.matcher_candidate_indices(&ctx);
     if candidates.is_empty() {

@@ -74,11 +74,7 @@ pub(super) async fn handle_new_udp_session(ctx: NewUdpSessionContext<'_>) -> Res
         .ingress_edge_execution_plan(listener_name, None)
         .ok_or_else(|| anyhow!("listener plan not found"))?;
     let effective_policy = base_plan.policy_context.clone();
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let engine = state.policy.rule_engine_for_listener(listener_name)?;
 
     let UdpRuleEvaluation {
         connect_target,

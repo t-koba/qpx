@@ -43,11 +43,7 @@ pub(super) fn evaluate_tls_policy_decision(
         upstream_cert,
     } = input;
     let state = runtime.state();
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let engine = state.policy.rule_engine_for_listener(listener_name)?;
     let base_plan = state
         .plan
         .ingress_edge_execution_plan(listener_name, None)

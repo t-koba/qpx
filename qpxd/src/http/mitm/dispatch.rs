@@ -87,11 +87,7 @@ async fn execute_mitm_request(
     let websocket = is_websocket_upgrade(req.method(), req.headers())?;
     let client_upgrade = websocket.then(|| crate::http::protocol::upgrade::on(&mut req));
     let path = base.path().unwrap_or("/");
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(route.listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let engine = state.policy.rule_engine_for_listener(route.listener_name)?;
     let prefilter_ctx = MatchPrefilterContext {
         method: Some(base.method.as_str()),
         dst_port: Some(route.dst_port),

@@ -90,11 +90,7 @@ async fn prepare_transparent_request(
         Ok(validated) => validated,
         Err(response) => return Ok(TransparentPrepareOutcome::Response(response)),
     };
-    let engine = state
-        .policy
-        .rules_by_listener
-        .get(listener_name)
-        .ok_or_else(|| anyhow!("rule engine not found"))?;
+    let engine = state.policy.rule_engine_for_listener(listener_name)?;
     let listener_cfg = state
         .ingress_edge_settings(listener_name)
         .ok_or_else(|| anyhow!("listener not found"))?
