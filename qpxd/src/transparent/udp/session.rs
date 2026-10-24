@@ -1,3 +1,5 @@
+#[cfg(test)]
+use crate::http3::quic_packet::parse_quic_short_dcid;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 #[cfg(test)]
 use std::collections::HashMap;
@@ -16,9 +18,9 @@ pub(super) use self::index::SharedSessionIndex;
 const MAX_CIDS_PER_SESSION: usize = 32;
 
 pub(super) use crate::http3::quic_packet::{
-    QuicConnectionId, connection_id_len_bit, find_by_known_connection_id_len,
-    observe_client_quic_packet, observe_upstream_quic_packet, parse_quic_long_header,
-    parse_quic_short_dcid,
+    QuicConnectionId, client_packet_needs_cid_index_update, connection_id_len_bit,
+    find_by_known_connection_id_len, observe_client_quic_packet, observe_upstream_quic_packet,
+    parse_quic_long_header,
 };
 
 pub(super) struct TransparentUdpSession {

@@ -155,6 +155,33 @@ pub(crate) fn upstream_packet_needs_cid_index_update(
         .is_some_and(|cid| cid_owner(cid) != Some(session_id))
 }
 
+/// Checks whether a client packet requires this session's CID index to update.
+/// Lazy length reads preserve the index's existing order; CID ownership stays caller-owned.
+pub(crate) fn client_packet_needs_cid_index_update(
+    packet: &[u8],
+    session_id: u64,
+    mut client_cid_len: impl FnMut() -> Option<u8>,
+    mut server_cid_len: impl FnMut() -> Option<u8>,
+    mut cid_owner: impl FnMut(QuicConnectionId) -> Option<u64>,
+) -> bool {
+    if let Some(long) = parse_quic_long_header(packet) {
+        if long.scid_len > 0 && client_cid_len() != Some(long.scid_len) {
+            return true;
+        }
+        return [long.dcid, long.scid]
+            .into_iter()
+            .flatten()
+            .any(|cid| cid_owner(cid) != Some(session_id));
+    }
+    let Some(server_cid_len) = server_cid_len() else {
+        return false;
+    };
+    let Some(cid) = parse_quic_short_dcid(packet, server_cid_len) else {
+        return false;
+    };
+    cid_owner(cid) != Some(session_id)
+}
+
 pub(crate) fn is_quic_long_header(packet: &[u8]) -> bool {
     packet.first().is_some_and(|first| (first & 0x80) != 0)
 }
@@ -335,6 +362,82 @@ mod tests {
             || panic!("server CID length is not read for short headers"),
             || None,
             |_| Some(8),
+        ));
+    }
+
+    #[test]
+    fn client_index_update_preserves_lazy_directional_reads_and_owner_checks() {
+        use std::cell::{Cell, RefCell};
+
+        let packet = long_packet(0xc0, 1, 3, 2);
+        let reads = RefCell::new(Vec::new());
+        let owners = RefCell::new(Vec::new());
+        assert!(!client_packet_needs_cid_index_update(
+            &packet,
+            7,
+            || {
+                reads.borrow_mut().push("client");
+                Some(2)
+            },
+            || panic!("server CID length is not read for long headers"),
+            |cid| {
+                owners.borrow_mut().push(cid);
+                Some(7)
+            },
+        ));
+        assert_eq!(*reads.borrow(), ["client"]);
+        assert_eq!(owners.borrow().len(), 2);
+
+        assert!(client_packet_needs_cid_index_update(
+            &packet,
+            7,
+            || Some(1),
+            || panic!("server CID length is not read for long headers"),
+            |_| panic!("CID ownership is not read after client length mismatch"),
+        ));
+
+        let zero_scid_packet = long_packet(0xc0, 1, 3, 0);
+        let owner_calls = Cell::new(0);
+        assert!(!client_packet_needs_cid_index_update(
+            &zero_scid_packet,
+            7,
+            || panic!("client CID length is not read for a zero-length SCID"),
+            || panic!("server CID length is not read for long headers"),
+            |_| {
+                owner_calls.set(owner_calls.get() + 1);
+                Some(7)
+            },
+        ));
+        assert_eq!(owner_calls.get(), 1);
+
+        let short_packet = [0x40, 0x42, 0x24];
+        assert!(!client_packet_needs_cid_index_update(
+            &short_packet,
+            7,
+            || panic!("client CID length is not read for short headers"),
+            || Some(2),
+            |_| Some(7),
+        ));
+        assert!(client_packet_needs_cid_index_update(
+            &short_packet,
+            7,
+            || panic!("client CID length is not read for short headers"),
+            || Some(2),
+            |_| Some(8),
+        ));
+        assert!(!client_packet_needs_cid_index_update(
+            &short_packet,
+            7,
+            || panic!("client CID length is not read for short headers"),
+            || None,
+            |_| panic!("CID ownership is not read without a server CID length"),
+        ));
+        assert!(!client_packet_needs_cid_index_update(
+            &short_packet[..2],
+            7,
+            || panic!("client CID length is not read for short headers"),
+            || Some(2),
+            |_| panic!("CID ownership is not read for a malformed short header"),
         ));
     }
 

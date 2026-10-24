@@ -8,9 +8,9 @@ use tokio::sync::mpsc;
 
 use super::session::{PassthroughSession, SessionTouch};
 use crate::http3::quic_packet::{
-    QuicConnectionId, connection_id_len_bit, find_by_known_connection_id_len,
-    observe_client_quic_packet, observe_upstream_quic_packet, parse_quic_long_header,
-    parse_quic_short_dcid,
+    QuicConnectionId, client_packet_needs_cid_index_update, connection_id_len_bit,
+    find_by_known_connection_id_len, observe_client_quic_packet, observe_upstream_quic_packet,
+    parse_quic_long_header,
 };
 
 const MAX_CIDS_PER_SESSION: usize = 32;
@@ -303,22 +303,13 @@ impl SharedSessionIndex {
         session: &PassthroughSession,
         packet: &[u8],
     ) -> bool {
-        if let Some(long) = parse_quic_long_header(packet) {
-            if long.scid_len > 0 && session.client_cid_len() != Some(long.scid_len) {
-                return true;
-            }
-            return [long.dcid, long.scid]
-                .into_iter()
-                .flatten()
-                .any(|cid| self.cid_owner(cid) != Some(session_id));
-        }
-        let Some(server_cid_len) = session.server_cid_len() else {
-            return false;
-        };
-        let Some(cid) = parse_quic_short_dcid(packet, server_cid_len) else {
-            return false;
-        };
-        self.cid_owner(cid) != Some(session_id)
+        client_packet_needs_cid_index_update(
+            packet,
+            session_id,
+            || session.client_cid_len(),
+            || session.server_cid_len(),
+            |cid| self.cid_owner(cid),
+        )
     }
 
     pub(in crate::reverse::h3::passthrough) fn upstream_packet_needs_index_update(
