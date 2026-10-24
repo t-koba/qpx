@@ -1,5 +1,5 @@
 use super::super::super::super::connect::{
-    ConnectPolicyInput, decide_connect_action_from_tls_metadata,
+    ConnectPolicyInput, decide_connect_action_from_tls_metadata, forward_connect_verify_upstream,
     listener_requires_upstream_cert_preview, listener_upstream_trust,
 };
 use super::super::super::backend_h3::ForwardH3Handler;
@@ -104,15 +104,12 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
             ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
         )
     {
-        let preview_verify = listener_cfg
-            .tls_inspection
-            .as_ref()
-            .map(|cfg| {
-                cfg.verify_upstream
-                    && !state
-                        .tls_verify_exception_matches(handler.listener_name.as_ref(), host.as_str())
-            })
-            .unwrap_or(true);
+        let preview_verify = forward_connect_verify_upstream(
+            &state,
+            Some(listener_cfg),
+            handler.listener_name.as_ref(),
+            host.as_str(),
+        );
         let preview_server = server
             .take()
             .ok_or_else(|| anyhow!("HTTP/3 CONNECT upstream tunnel missing before cert preview"))?;
@@ -259,18 +256,17 @@ async fn finish_h3_connect_mitm(input: H3ConnectMitmFinish) -> Result<()> {
         listener_trust,
     } = input;
     let state = handler.runtime.state();
-    let tls_inspection = state
-        .ingress_edge_settings(handler.listener_name.as_ref())
-        .and_then(|l| l.tls_inspection.as_ref());
+    let listener_cfg = state.ingress_edge_settings(handler.listener_name.as_ref());
+    let tls_inspection = listener_cfg.and_then(|l| l.tls_inspection.as_ref());
     if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
         return Ok(());
     }
-    let verify_upstream = tls_inspection
-        .map(|t| {
-            t.verify_upstream
-                && !state.tls_verify_exception_matches(handler.listener_name.as_ref(), &host)
-        })
-        .unwrap_or(true);
+    let verify_upstream = forward_connect_verify_upstream(
+        &state,
+        listener_cfg,
+        handler.listener_name.as_ref(),
+        host.as_str(),
+    );
     let Some(mitm) = state.security.destination.tls.mitm.clone() else {
         return Ok(());
     };

@@ -1,7 +1,7 @@
 use super::{
     ConnectPolicyInput, decide_connect_action_from_client_hello,
-    decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
-    listener_upstream_trust, resolve_upstream,
+    decide_connect_action_from_tls_metadata, forward_connect_verify_upstream,
+    listener_requires_upstream_cert_preview, listener_upstream_trust, resolve_upstream,
 };
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
@@ -252,15 +252,12 @@ async fn prepare_connect_upstream_after_preview(
         && listener_requires_upstream_cert_preview(listener_cfg)
         && connect_action_uses_upstream(&action)
     {
-        let preview_verify = listener_cfg
-            .tls_inspection
-            .as_ref()
-            .map(|cfg| {
-                cfg.verify_upstream
-                    && !state
-                        .tls_verify_exception_matches(ctx.listener_name.as_str(), ctx.host.as_str())
-            })
-            .unwrap_or(true);
+        let preview_verify = forward_connect_verify_upstream(
+            &state,
+            Some(listener_cfg),
+            ctx.listener_name.as_str(),
+            ctx.host.as_str(),
+        );
         let preview_server = server
             .take()
             .ok_or_else(|| anyhow!("CONNECT upstream tunnel missing before cert preview"))?;

@@ -135,6 +135,18 @@ pub(in crate::forward) fn listener_upstream_trust(
         .and_then(|cfg| cfg.upstream_trust.clone()))
 }
 
+pub(in crate::forward) fn forward_connect_verify_upstream(
+    state: &crate::runtime::RuntimeState,
+    listener_cfg: Option<&crate::runtime::CompiledListenerSettings>,
+    listener_name: &str,
+    host: &str,
+) -> bool {
+    listener_cfg
+        .and_then(|l| l.tls_inspection.as_ref())
+        .map(|cfg| cfg.verify_upstream && !state.tls_verify_exception_matches(listener_name, host))
+        .unwrap_or(true)
+}
+
 #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 pub(in crate::forward) fn listener_upstream_tls_settings(
     state: &crate::runtime::RuntimeState,
@@ -145,11 +157,8 @@ pub(in crate::forward) fn listener_upstream_tls_settings(
         .ingress_edge_settings(listener_name)
         .ok_or_else(|| anyhow!("listener not found"))?;
     let trust = listener_upstream_trust(listener_cfg)?;
-    let verify_upstream = listener_cfg
-        .tls_inspection
-        .as_ref()
-        .map(|cfg| cfg.verify_upstream && !state.tls_verify_exception_matches(listener_name, host))
-        .unwrap_or(true);
+    let verify_upstream =
+        forward_connect_verify_upstream(state, Some(listener_cfg), listener_name, host);
     Ok((verify_upstream, trust))
 }
 

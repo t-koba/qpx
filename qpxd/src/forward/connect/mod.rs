@@ -51,8 +51,8 @@ pub(super) use self::decision_service::apply_connect_decision_service;
 pub(super) use self::inspect::listener_upstream_tls_settings;
 pub(super) use self::inspect::{
     ConnectPolicyInput, decide_connect_action_from_client_hello,
-    decide_connect_action_from_tls_metadata, listener_requires_upstream_cert_preview,
-    listener_upstream_trust,
+    decide_connect_action_from_tls_metadata, forward_connect_verify_upstream,
+    listener_requires_upstream_cert_preview, listener_upstream_trust,
 };
 #[cfg(all(
     feature = "http3",
@@ -380,12 +380,12 @@ pub(super) async fn handle_connect(
                 if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
                     return Ok(blocked_connect_response!());
                 }
-                let verify = tls_inspection
-                    .map(|t| {
-                        t.verify_upstream
-                            && !state.tls_verify_exception_matches(listener_name, &host)
-                    })
-                    .unwrap_or(true);
+                let verify = self::inspect::forward_connect_verify_upstream(
+                    &state,
+                    Some(listener_cfg),
+                    listener_name,
+                    host.as_str(),
+                );
                 let upstream = resolve_upstream(&action, &state, listener_name)?;
                 let rate_limit_ctx = RateLimitContext::from_identity(
                     remote_addr.ip(),

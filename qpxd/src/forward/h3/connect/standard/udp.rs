@@ -167,8 +167,8 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     };
 
     if let Some(upstream) = upstream {
-        let listener_trust = state
-            .ingress_edge_settings(handler.listener_name.as_ref())
+        let listener_cfg = state.ingress_edge_settings(handler.listener_name.as_ref());
+        let listener_trust = listener_cfg
             .map(crate::forward::connect::listener_upstream_trust)
             .transpose()?
             .flatten();
@@ -177,17 +177,12 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             target_host: host.as_str(),
             target_port: port,
             proxy_name: proxy_name.as_str(),
-            verify_upstream: state
-                .ingress_edge_settings(handler.listener_name.as_ref())
-                .and_then(|listener| listener.tls_inspection.as_ref())
-                .map(|cfg| {
-                    cfg.verify_upstream
-                        && !state.tls_verify_exception_matches(
-                            handler.listener_name.as_ref(),
-                            host.as_str(),
-                        )
-                })
-                .unwrap_or(true),
+            verify_upstream: crate::forward::connect::forward_connect_verify_upstream(
+                &state,
+                listener_cfg,
+                handler.listener_name.as_ref(),
+                host.as_str(),
+            ),
             trust: listener_trust.as_deref(),
             timeout_dur: upstream_timeout,
             datagram_channel_capacity: state.plan.limits.h3.datagram_channel_capacity,

@@ -7,7 +7,7 @@ use super::extended::{
 use super::{
     H3PolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
 };
-use crate::forward::connect::listener_upstream_trust;
+use crate::forward::connect::{forward_connect_verify_upstream, listener_upstream_trust};
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
 use crate::http::protocol::l7::finalize_response_with_headers;
@@ -142,17 +142,14 @@ pub(crate) async fn handle_h3_extended_connect(
         }
     };
 
-    let verify_upstream = state
-        .ingress_edge_settings(handler.listener_name.as_ref())
-        .and_then(|listener| listener.tls_inspection.as_ref())
-        .map(|cfg| {
-            cfg.verify_upstream
-                && !state
-                    .tls_verify_exception_matches(handler.listener_name.as_ref(), host.as_str())
-        })
-        .unwrap_or(true);
-    let listener_trust = state
-        .ingress_edge_settings(handler.listener_name.as_ref())
+    let listener_cfg = state.ingress_edge_settings(handler.listener_name.as_ref());
+    let verify_upstream = forward_connect_verify_upstream(
+        &state,
+        listener_cfg,
+        handler.listener_name.as_ref(),
+        host.as_str(),
+    );
+    let listener_trust = listener_cfg
         .map(listener_upstream_trust)
         .transpose()?
         .flatten();
