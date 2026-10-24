@@ -10,6 +10,16 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::{TcpListener, TcpStream};
 
 #[test]
+fn http_uri_to_http1_uri_preserves_absolute_request_target() {
+    let uri = "https://example.test/path?q=1"
+        .parse::<::http::Uri>()
+        .expect("valid URI");
+    let converted =
+        http_uri_to_http1_uri(&uri, "test URI").expect("valid HTTP/2 URI converts to HTTP/1 URI");
+    assert_eq!(converted, uri);
+}
+
+#[test]
 fn scheduler_buffer_budget_preserves_single_stream_throughput_and_bounds_multiplexing() {
     assert_eq!(h2_scheduler_buffer_budget(0), 64 * 1024);
     assert_eq!(h2_scheduler_buffer_budget(1), 64 * 1024);

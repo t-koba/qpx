@@ -1,6 +1,6 @@
 use crate::http::codec::h2::{
     h1_headers_to_http, h2_response_to_hyper_with_inflight, http_headers_to_h1,
-    parse_declared_content_length,
+    http_uri_to_http1_uri, parse_declared_content_length,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::upstream::raw_http1::Http1ResponseWithInterim;
@@ -72,7 +72,10 @@ pub(super) async fn send_h2_request_with_sender(
     let declared_length = parse_declared_content_length(&parts.headers)?;
     let mut request = Http1Request::builder()
         .method(parts.method.as_str())
-        .uri(http_uri_to_http1_uri(&parts.uri)?)
+        .uri(http_uri_to_http1_uri(
+            &parts.uri,
+            "invalid HTTP/2 upstream URI",
+        )?)
         .body(())?;
     *request.headers_mut() = http_headers_to_h1(&parts.headers)?;
     // RFC 9110 section 8.6: the value a sender writes is one decimal, so
@@ -208,26 +211,4 @@ async fn recv_h2_response_with_interim(
             H2ResponseEvent::Final(response) => return Ok((interim, response)),
         }
     }
-}
-
-fn http_uri_to_http1_uri(uri: &Uri) -> Result<::http::Uri> {
-    uri.to_string()
-        .parse::<::http::Uri>()
-        .or_else(|_| {
-            let mut builder = ::http::Uri::builder();
-            if let Some(scheme) = uri.scheme_str() {
-                builder = builder.scheme(scheme);
-            }
-            if let Some(authority) = uri.authority() {
-                builder = builder.authority(authority.as_str());
-            }
-            builder
-                .path_and_query(
-                    uri.path_and_query()
-                        .map(|value| value.as_str())
-                        .unwrap_or("/"),
-                )
-                .build()
-        })
-        .map_err(|err| anyhow!("invalid HTTP/2 upstream URI: {err}"))
 }

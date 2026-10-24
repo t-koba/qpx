@@ -68,6 +68,24 @@ impl Default for H2TransportTuning {
     }
 }
 
+pub(crate) fn http_uri_to_http1_uri(uri: &::http::Uri, error_context: &str) -> Result<::http::Uri> {
+    uri.to_string()
+        .parse::<::http::Uri>()
+        .or_else(|_| {
+            let mut builder = ::http::Uri::builder();
+            if let Some(scheme) = uri.scheme_str() {
+                builder = builder.scheme(scheme);
+            }
+            if let Some(authority) = uri.authority() {
+                builder = builder.authority(authority.as_str());
+            }
+            builder
+                .path_and_query(uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"))
+                .build()
+        })
+        .map_err(|err| anyhow!("{error_context}: {err}"))
+}
+
 pub(crate) fn tuned_h2_client_builder() -> h2::client::Builder {
     tuned_h2_client_builder_with(H2TransportTuning::default())
 }

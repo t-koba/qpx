@@ -1,4 +1,6 @@
-use crate::http::codec::h2::{h1_headers_to_http, http_headers_to_h1, tuned_h2_client_builder};
+use crate::http::codec::h2::{
+    h1_headers_to_http, http_headers_to_h1, http_uri_to_http1_uri, tuned_h2_client_builder,
+};
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use ::http::{
     HeaderMap as Http1HeaderMap, Method, Request, Request as Http1Request,
@@ -156,7 +158,10 @@ pub(super) async fn open_upstream_h2_extended_connect_stream(
         normalize_h2_upstream_connect_headers(uri, sanitized_headers, proxy_name)?;
     let mut request = Http1Request::builder()
         .method(::http::Method::CONNECT)
-        .uri(http_uri_to_http1_uri(uri)?)
+        .uri(http_uri_to_http1_uri(
+            uri,
+            "invalid HTTP/2 extended CONNECT uri",
+        )?)
         .body(())?;
     *request.version_mut() = ::http::Version::HTTP_2;
     *request.headers_mut() = normalized_headers;
@@ -233,24 +238,6 @@ pub(super) fn default_port_for_scheme(scheme: &str) -> u16 {
         "https" | "wss" | "h2" => 443,
         _ => 443,
     }
-}
-
-fn http_uri_to_http1_uri(uri: &Uri) -> Result<::http::Uri> {
-    uri.to_string()
-        .parse::<::http::Uri>()
-        .or_else(|_| {
-            let mut builder = ::http::Uri::builder();
-            if let Some(scheme) = uri.scheme_str() {
-                builder = builder.scheme(scheme);
-            }
-            if let Some(authority) = uri.authority() {
-                builder = builder.authority(authority.as_str());
-            }
-            builder
-                .path_and_query(uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/"))
-                .build()
-        })
-        .map_err(|e| anyhow!("invalid HTTP/2 extended CONNECT uri: {e}"))
 }
 
 pub(super) fn spawn_h2_extended_connect_relay(
