@@ -103,25 +103,13 @@ where
             ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
         )
     {
-        let verify_upstream = listener_cfg
-            .tls_inspection
-            .as_ref()
-            .map(|cfg| {
-                let verify = cfg.verify_upstream;
-                #[cfg(feature = "mitm")]
-                {
-                    verify
-                        && !state.tls_verify_exception_matches(
-                            listener_name,
-                            sni_for_match
-                                .or(host_for_match_owned.as_deref())
-                                .unwrap_or_default(),
-                        )
-                }
-                #[cfg(not(feature = "mitm"))]
-                verify
-            })
-            .unwrap_or(true);
+        let verify_upstream = state.tls_verify_upstream(
+            Some(listener_cfg),
+            listener_name,
+            sni_for_match
+                .or(host_for_match_owned.as_deref())
+                .unwrap_or_default(),
+        );
         let preview_domain = sni_for_match
             .or(host_for_match_owned.as_deref())
             .unwrap_or_default();
@@ -356,14 +344,8 @@ where
                 .clone()
                 .ok_or_else(|| anyhow!("mitm not available for transparent inspect"))?;
 
-            let verify_upstream = listener_cfg
-                .tls_inspection
-                .as_ref()
-                .map(|cfg| {
-                    cfg.verify_upstream
-                        && !state.tls_verify_exception_matches(listener_name, sni_host.as_str())
-                })
-                .unwrap_or(true);
+            let verify_upstream =
+                state.tls_verify_upstream(Some(listener_cfg), listener_name, sni_host.as_str());
 
             let mitm_context = TransparentMitmContext {
                 connect_target,

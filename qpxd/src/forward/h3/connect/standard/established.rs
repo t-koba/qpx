@@ -1,5 +1,5 @@
 use super::super::super::super::connect::{
-    ConnectPolicyInput, decide_connect_action_from_tls_metadata, forward_connect_verify_upstream,
+    ConnectPolicyInput, decide_connect_action_from_tls_metadata,
 };
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::build_h3_connect_success_response;
@@ -103,8 +103,7 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
             ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
         )
     {
-        let preview_verify = forward_connect_verify_upstream(
-            &state,
+        let preview_verify = state.tls_verify_upstream(
             Some(listener_cfg),
             handler.listener_name.as_ref(),
             host.as_str(),
@@ -260,12 +259,8 @@ async fn finish_h3_connect_mitm(input: H3ConnectMitmFinish) -> Result<()> {
     if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
         return Ok(());
     }
-    let verify_upstream = forward_connect_verify_upstream(
-        &state,
-        listener_cfg,
-        handler.listener_name.as_ref(),
-        host.as_str(),
-    );
+    let verify_upstream =
+        state.tls_verify_upstream(listener_cfg, handler.listener_name.as_ref(), host.as_str());
     let Some(mitm) = state.security.destination.tls.mitm.clone() else {
         return Ok(());
     };

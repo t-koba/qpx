@@ -174,8 +174,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             target_host: host.as_str(),
             target_port: port,
             proxy_name: proxy_name.as_str(),
-            verify_upstream: crate::forward::connect::forward_connect_verify_upstream(
-                &state,
+            verify_upstream: state.tls_verify_upstream(
                 listener_cfg,
                 handler.listener_name.as_ref(),
                 host.as_str(),

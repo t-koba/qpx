@@ -1,6 +1,6 @@
 use super::{
     ConnectPolicyInput, decide_connect_action_from_client_hello,
-    decide_connect_action_from_tls_metadata, forward_connect_verify_upstream, resolve_upstream,
+    decide_connect_action_from_tls_metadata, resolve_upstream,
 };
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
@@ -251,8 +251,7 @@ async fn prepare_connect_upstream_after_preview(
         && listener_cfg.requires_upstream_cert_preview
         && connect_action_uses_upstream(&action)
     {
-        let preview_verify = forward_connect_verify_upstream(
-            &state,
+        let preview_verify = state.tls_verify_upstream(
             Some(listener_cfg),
             ctx.listener_name.as_str(),
             ctx.host.as_str(),

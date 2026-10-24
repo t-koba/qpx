@@ -314,6 +314,20 @@ impl RuntimeState {
             false
         }
     }
+
+    pub(crate) fn tls_verify_upstream(
+        &self,
+        listener_cfg: Option<&CompiledListenerSettings>,
+        listener_name: &str,
+        host: &str,
+    ) -> bool {
+        listener_cfg
+            .and_then(|l| l.tls_inspection.as_ref())
+            .map(|cfg| {
+                cfg.verify_upstream && !self.tls_verify_exception_matches(listener_name, host)
+            })
+            .unwrap_or(true)
+    }
 }
 
 #[cfg(test)]
