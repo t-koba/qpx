@@ -29,6 +29,20 @@ async fn recv_stream_datagram(datagrams: &mut Option<qpx_h3::StreamDatagrams>) -
     }
 }
 
+async fn abort_owned_h3_driver_tasks(
+    datagram_task: Option<tokio::task::JoinHandle<()>>,
+    driver: Option<tokio::task::JoinHandle<()>>,
+) {
+    if let Some(task) = datagram_task {
+        task.abort();
+        let _ = task.await;
+    }
+    if let Some(driver) = driver {
+        driver.abort();
+        let _ = driver.await;
+    }
+}
+
 pub(crate) use self::connect_upstream::QpxH3UpstreamSessionPool;
 pub(super) use self::handler::{ForwardQpxHandler, h3_body_read_timeout};
 

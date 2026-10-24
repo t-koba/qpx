@@ -626,7 +626,7 @@ async fn finish_qpx_extended_connect_stream(
             h3_timeout,
         )
         .await?;
-        abort_qpx_extended_driver(datagram_task, driver).await;
+        super::abort_owned_h3_driver_tasks(datagram_task, driver).await;
         return Ok(());
     }
 
@@ -669,29 +669,15 @@ async fn finish_qpx_extended_connect_stream(
     if let Err(err) = relay {
         warn!(error = ?err, "forward HTTP/3 qpx-h3 extended CONNECT relay failed");
     }
-    abort_qpx_extended_driver(datagram_task, driver).await;
+    super::abort_owned_h3_driver_tasks(datagram_task, driver).await;
     Ok(())
-}
-
-async fn abort_qpx_extended_driver(
-    datagram_task: Option<tokio::task::JoinHandle<()>>,
-    driver: Option<tokio::task::JoinHandle<()>>,
-) {
-    if let Some(task) = datagram_task {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(driver) = driver {
-        driver.abort();
-        let _ = driver.await;
-    }
 }
 
 #[cfg(test)]
 mod tests {
     #[tokio::test]
     async fn cleanup_skips_session_driver_and_aborts_owned_tasks() {
-        super::abort_qpx_extended_driver(None, None).await;
+        super::super::abort_owned_h3_driver_tasks(None, None).await;
 
         let (driver_tx, driver_rx) = tokio::sync::oneshot::channel::<()>();
         let driver = tokio::spawn(async move {
@@ -703,7 +689,7 @@ mod tests {
             let _ = datagram_rx.await;
         });
         let datagram_abort = datagram_task.abort_handle();
-        super::abort_qpx_extended_driver(Some(datagram_task), Some(driver)).await;
+        super::super::abort_owned_h3_driver_tasks(Some(datagram_task), Some(driver)).await;
         assert!(driver_abort.is_finished());
         assert!(datagram_abort.is_finished());
         assert!(driver_tx.is_closed());

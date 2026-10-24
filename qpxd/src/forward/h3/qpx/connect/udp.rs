@@ -243,7 +243,8 @@ async fn relay_opened_chained_connect_udp(
     {
         warn!(error = ?err, "forward HTTP/3 qpx-h3 CONNECT-UDP chained relay failed");
     }
-    super::abort_qpx_extended_driver(upstream_chain.datagram_task, upstream_chain.driver).await;
+    super::super::abort_owned_h3_driver_tasks(upstream_chain.datagram_task, upstream_chain.driver)
+        .await;
     Ok(())
 }
 

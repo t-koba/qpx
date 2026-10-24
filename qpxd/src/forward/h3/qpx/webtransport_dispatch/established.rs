@@ -110,7 +110,7 @@ pub(super) async fn relay_established_webtransport(
             h3_body_read_timeout(&handler.runtime),
         )
         .await?;
-        abort_webtransport_driver(datagram_task, driver).await;
+        super::super::abort_owned_h3_driver_tasks(datagram_task, driver).await;
         return Ok(());
     }
 
@@ -158,7 +158,7 @@ pub(super) async fn relay_established_webtransport(
     if let Err(err) = relay_result {
         warn!(error = ?err, "forward HTTP/3 WebTransport relay failed");
     }
-    abort_webtransport_driver(datagram_task, driver).await;
+    super::super::abort_owned_h3_driver_tasks(datagram_task, driver).await;
     Ok(())
 }
 
@@ -222,25 +222,11 @@ fn collect_webtransport_flow_limits(
     })
 }
 
-async fn abort_webtransport_driver(
-    datagram_task: Option<tokio::task::JoinHandle<()>>,
-    driver: Option<tokio::task::JoinHandle<()>>,
-) {
-    if let Some(task) = datagram_task {
-        task.abort();
-        let _ = task.await;
-    }
-    if let Some(driver) = driver {
-        driver.abort();
-        let _ = driver.await;
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[tokio::test]
     async fn cleanup_skips_session_driver_and_aborts_owned_tasks() {
-        super::abort_webtransport_driver(None, None).await;
+        super::super::super::abort_owned_h3_driver_tasks(None, None).await;
 
         let (driver_tx, driver_rx) = tokio::sync::oneshot::channel::<()>();
         let driver = tokio::spawn(async move {
@@ -252,7 +238,7 @@ mod tests {
             let _ = datagram_rx.await;
         });
         let datagram_abort = datagram_task.abort_handle();
-        super::abort_webtransport_driver(Some(datagram_task), Some(driver)).await;
+        super::super::super::abort_owned_h3_driver_tasks(Some(datagram_task), Some(driver)).await;
         assert!(driver_abort.is_finished());
         assert!(datagram_abort.is_finished());
         assert!(driver_tx.is_closed());
