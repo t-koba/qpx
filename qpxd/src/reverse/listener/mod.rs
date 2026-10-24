@@ -5,7 +5,9 @@ use super::{
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
-use crate::server::connection_permit::accept_tcp_with_connection_permit;
+use crate::server::connection_permit::{
+    accept_tcp_with_connection_permit, prepare_accepted_stream,
+};
 use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
@@ -173,13 +175,8 @@ pub(super) async fn run_reverse_http_acceptor(
         else {
             break;
         };
-        let _ = stream.set_nodelay(true);
-        let local_port = match stream.local_addr() {
-            Ok(addr) => addr.port(),
-            Err(err) => {
-                warn!(error = ?err, "failed to resolve reverse local addr");
-                continue;
-            }
+        let Some(local_port) = prepare_accepted_stream(&stream, "reverse") else {
+            continue;
         };
         let xdp_cfg = xdp_cfg.clone();
         let reverse = reverse.clone();

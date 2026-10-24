@@ -60,6 +60,17 @@ pub(crate) async fn accept_tcp_with_connection_permit(
     }
 }
 
+pub(crate) fn prepare_accepted_stream(stream: &TcpStream, acceptor: &'static str) -> Option<u16> {
+    let _ = stream.set_nodelay(true);
+    match stream.local_addr() {
+        Ok(addr) => Some(addr.port()),
+        Err(err) => {
+            warn!(error = ?err, "failed to resolve {acceptor} local addr");
+            None
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -88,6 +99,11 @@ mod tests {
             client.await.unwrap().unwrap().local_addr().unwrap()
         );
         assert_eq!(stream.peer_addr().unwrap(), remote_addr);
+        assert_eq!(
+            prepare_accepted_stream(&stream, "test"),
+            Some(listener.local_addr().unwrap().port())
+        );
+        assert!(stream.nodelay().unwrap());
         assert_eq!(semaphore.available_permits(), 0);
         drop(permit);
         assert_eq!(semaphore.available_permits(), 1);

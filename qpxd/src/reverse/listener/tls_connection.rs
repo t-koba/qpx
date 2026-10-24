@@ -8,7 +8,9 @@ use crate::reverse::{
     ReloadableReverse, record_reverse_connection_filter_block, reverse_connection_filter_match,
     reverse_tls_fingerprints_required,
 };
-use crate::server::connection_permit::accept_tcp_with_connection_permit;
+use crate::server::connection_permit::{
+    accept_tcp_with_connection_permit, prepare_accepted_stream,
+};
 use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::tls::{extract_client_hello_info_with_fingerprints, read_client_hello_with_timeout};
 use anyhow::Result;
@@ -108,13 +110,8 @@ pub(crate) async fn run_reverse_tls_acceptor(
         else {
             break;
         };
-        let _ = stream.set_nodelay(true);
-        let local_port = match stream.local_addr() {
-            Ok(addr) => addr.port(),
-            Err(err) => {
-                warn!(error = ?err, "failed to resolve reverse local addr");
-                continue;
-            }
+        let Some(local_port) = prepare_accepted_stream(&stream, "reverse") else {
+            continue;
         };
         let reverse = reverse.clone();
         let xdp_cfg = xdp_cfg.clone();
@@ -171,13 +168,8 @@ pub(crate) async fn run_reverse_tls_acceptor(
         else {
             break;
         };
-        let _ = stream.set_nodelay(true);
-        let local_port = match stream.local_addr() {
-            Ok(addr) => addr.port(),
-            Err(err) => {
-                warn!(error = ?err, "failed to resolve reverse local addr");
-                continue;
-            }
+        let Some(local_port) = prepare_accepted_stream(&stream, "reverse") else {
+            continue;
         };
         let reverse = reverse.clone();
         let xdp_cfg = xdp_cfg.clone();

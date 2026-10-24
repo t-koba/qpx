@@ -6,7 +6,9 @@ use crate::http::metrics as http_metrics;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 use crate::server::acceptors::join_acceptor_tasks;
-use crate::server::connection_permit::accept_tcp_with_connection_permit;
+use crate::server::connection_permit::{
+    accept_tcp_with_connection_permit, prepare_accepted_stream,
+};
 #[cfg(feature = "http3")]
 use crate::server::control::SidecarControl;
 use crate::tcp_bindings::filter::{
@@ -117,13 +119,8 @@ async fn run_forward_acceptor(
         else {
             break;
         };
-        let _ = stream.set_nodelay(true);
-        let local_port = match stream.local_addr() {
-            Ok(addr) => addr.port(),
-            Err(err) => {
-                warn!(error = ?err, "failed to resolve forward local addr");
-                continue;
-            }
+        let Some(local_port) = prepare_accepted_stream(&stream, "forward") else {
+            continue;
         };
         let runtime = runtime.clone();
         let listener_name = listener_name.clone();
