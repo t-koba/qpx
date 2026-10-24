@@ -70,7 +70,7 @@ pub(super) async fn run_tcp_server_set(
     mut listener_bindings: std::collections::HashMap<String, Vec<tokio::net::TcpListener>>,
     mut reverse_bindings: std::collections::HashMap<String, Vec<tokio::net::TcpListener>>,
     reverse_runtimes: std::collections::HashMap<String, reverse::ReloadableReverse>,
-    mut shutdown: watch::Receiver<bool>,
+    shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let mut tasks: JoinSet<(String, Result<()>)> = JoinSet::new();
 
@@ -117,40 +117,13 @@ pub(super) async fn run_tcp_server_set(
         });
     }
 
-    if tasks.is_empty() {
-        wait_for_empty_server_set_stop(&mut shutdown, |stop| *stop).await;
-        return Ok(());
-    }
-
-    loop {
-        tokio::select! {
-            changed = shutdown.changed() => {
-                if changed.is_err() || *shutdown.borrow() {
-                    break;
-                }
-            }
-            joined = tasks.join_next() => {
-                match joined {
-                    Some(Ok((label, Ok(())))) => {
-                        return finish_server_tasks_after_success(
-                            tasks, &label, &shutdown, |stop| *stop,
-                        ).await;
-                    }
-                    Some(Ok((label, Err(err)))) => {
-                        tasks.abort_all();
-                        return Err(err).with_context(|| format!("{label} failed"));
-                    }
-                    Some(Err(err)) => {
-                        tasks.abort_all();
-                        return Err(anyhow::anyhow!("task join failed: {err}"));
-                    }
-                    None => return Err(anyhow::anyhow!("no tcp listener/reverse tasks running")),
-                }
-            }
-        }
-    }
-
-    drain_server_tasks(tasks).await
+    await_server_tasks(
+        tasks,
+        shutdown,
+        |stop| *stop,
+        "no tcp listener/reverse tasks running",
+    )
+    .await
 }
 
 async fn run_exportable_sidecar_server_set(args: ExportableSidecarServerSet) -> Result<()> {
@@ -375,7 +348,7 @@ async fn run_brokered_h3_server_set(
         String,
         crate::http3::quinn_socket::QuinnEndpointSocket,
     >,
-    mut control: watch::Receiver<SidecarControl>,
+    control: watch::Receiver<SidecarControl>,
 ) -> Result<()> {
     let mut tasks: JoinSet<(String, Result<()>)> = JoinSet::new();
 
@@ -445,15 +418,32 @@ async fn run_brokered_h3_server_set(
         });
     }
 
+    await_server_tasks(
+        tasks,
+        control,
+        |mode| mode.should_stop(),
+        "no brokered HTTP/3 sidecar tasks running",
+    )
+    .await
+}
+
+// TCP and brokered HTTP/3 share stop-and-drain supervision. Exportable
+// sidecars keep their separate lifecycle in await_exportable_sidecar_tasks.
+async fn await_server_tasks<T>(
+    mut tasks: JoinSet<(String, Result<()>)>,
+    mut control: watch::Receiver<T>,
+    should_stop: impl Fn(&T) -> bool,
+    no_tasks_error: &str,
+) -> Result<()> {
     if tasks.is_empty() {
-        wait_for_empty_server_set_stop(&mut control, |mode| mode.should_stop()).await;
+        wait_for_empty_server_set_stop(&mut control, should_stop).await;
         return Ok(());
     }
 
     loop {
         tokio::select! {
             changed = control.changed() => {
-                if changed.is_err() || control.borrow().should_stop() {
+                if changed.is_err() || should_stop(&control.borrow()) {
                     break;
                 }
             }
@@ -461,7 +451,7 @@ async fn run_brokered_h3_server_set(
                 match joined {
                     Some(Ok((label, Ok(())))) => {
                         return finish_server_tasks_after_success(
-                            tasks, &label, &control, |mode| mode.should_stop(),
+                            tasks, &label, &control, should_stop,
                         ).await;
                     }
                     Some(Ok((label, Err(err)))) => {
@@ -472,7 +462,7 @@ async fn run_brokered_h3_server_set(
                         tasks.abort_all();
                         return Err(anyhow::anyhow!("task join failed: {err}"));
                     }
-                    None => return Err(anyhow::anyhow!("no brokered HTTP/3 sidecar tasks running")),
+                    None => return Err(anyhow::anyhow!("{no_tasks_error}")),
                 }
             }
         }
@@ -484,8 +474,7 @@ async fn run_brokered_h3_server_set(
 /// Wait for stop when a server set has no tasks to supervise.
 ///
 /// Returns once the watch sender closes or the caller-provided stop
-/// predicate observes the current value. Supervision of nonempty task sets
-/// stays with each caller.
+/// predicate observes the current value.
 async fn wait_for_empty_server_set_stop<T>(
     control: &mut watch::Receiver<T>,
     should_stop: impl Fn(&T) -> bool,
@@ -604,6 +593,149 @@ mod tests {
             .expect("drain completed")
             .expect("orderly completion");
         did_finish.await.expect("sibling finished normally");
+    }
+
+    async fn assert_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) {
+        assert!(
+            std::future::poll_fn(|cx| { std::task::Poll::Ready(future.as_mut().poll(cx)) })
+                .await
+                .is_pending()
+        );
+    }
+
+    async fn assert_supervisor_stop<T: Clone>(running: T, stop: T, should_stop: fn(&T) -> bool) {
+        for empty in [false, true] {
+            for close_sender in [false, true] {
+                let (sender, control) = watch::channel(running.clone());
+                let mut tasks = JoinSet::new();
+                let (release, wait) = oneshot::channel();
+                let (finished, did_finish) = oneshot::channel();
+                if !empty {
+                    tasks.spawn(async move {
+                        wait.await.expect("release child");
+                        finished.send(()).expect("report completion");
+                        ("gated".to_owned(), Ok(()))
+                    });
+                }
+                let supervision = await_server_tasks(tasks, control, should_stop, "no tasks");
+                tokio::pin!(supervision);
+                assert_pending(supervision.as_mut()).await;
+                assert!(sender.send(running.clone()).is_ok(), "still supervising");
+                assert_pending(supervision.as_mut()).await;
+                if close_sender {
+                    drop(sender);
+                } else {
+                    assert!(sender.send(stop.clone()).is_ok(), "request stop");
+                }
+                if !empty {
+                    // Stop must drain the gated child, not cancel it or return early.
+                    assert_pending(supervision.as_mut()).await;
+                    release.send(()).expect("child not aborted");
+                }
+                tokio::time::timeout(Duration::from_secs(5), supervision)
+                    .await
+                    .expect("supervisor completed")
+                    .expect("orderly stop");
+                if !empty {
+                    did_finish.await.expect("child finished normally");
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_waits_and_drains_for_both_control_types() {
+        assert_supervisor_stop(false, true, |stop| *stop).await;
+        for stop in [SidecarControl::Stop, SidecarControl::ExportForUpgrade] {
+            assert_supervisor_stop(SidecarControl::Running, stop, |mode| mode.should_stop()).await;
+        }
+    }
+
+    async fn assert_supervisor_success_race<T>(stop: T, should_stop: fn(&T) -> bool) {
+        let mut tasks = ready_success().await;
+        let (release, wait) = oneshot::channel();
+        tasks.spawn(async move {
+            wait.await.expect("release sibling");
+            ("sibling".to_owned(), Ok(()))
+        });
+        let (_sender, control) = watch::channel(stop);
+        // No changed() notification: only the completed child is ready. The
+        // supervisor must inspect the current control value and drain its sibling.
+        let supervision = await_server_tasks(tasks, control, should_stop, "no tasks");
+        tokio::pin!(supervision);
+        assert_pending(supervision.as_mut()).await;
+        release.send(()).expect("sibling not aborted");
+        tokio::time::timeout(Duration::from_secs(5), supervision)
+            .await
+            .expect("drain completed")
+            .expect("current stop permits success");
+    }
+
+    #[tokio::test]
+    async fn supervisor_success_checks_current_stop_for_both_control_types() {
+        assert_supervisor_success_race(true, |stop| *stop).await;
+        for stop in [SidecarControl::Stop, SidecarControl::ExportForUpgrade] {
+            assert_supervisor_success_race(stop, |mode| mode.should_stop()).await;
+        }
+    }
+
+    async fn assert_supervisor_errors<T: Clone>(running: T, stop: T, should_stop: fn(&T) -> bool) {
+        for stopping in [false, true] {
+            for failure in 0..3 {
+                if stopping && failure == 0 {
+                    continue; // Successful exits during stop are tested above.
+                }
+                let (sender, mut control) = watch::channel(running.clone());
+                if stopping {
+                    assert!(sender.send(stop.clone()).is_ok(), "request stop");
+                    control.borrow_and_update(); // Force the join/completion path.
+                }
+                let mut tasks = JoinSet::new();
+                let (guard, dropped) = oneshot::channel::<()>();
+                tasks.spawn(async move {
+                    let _guard = guard;
+                    std::future::pending::<()>().await;
+                    ("pending sibling".to_owned(), Ok(()))
+                });
+                tasks.spawn(async move {
+                    assert_ne!(failure, 2, "child panic");
+                    let result = if failure == 1 {
+                        Err(anyhow::anyhow!("child failure"))
+                    } else {
+                        Ok(())
+                    };
+                    ("child".to_owned(), result)
+                });
+                let err = tokio::time::timeout(
+                    Duration::from_secs(5),
+                    await_server_tasks(tasks, control, should_stop, "no tasks"),
+                )
+                .await
+                .expect("supervisor completed")
+                .expect_err("unexpected success or failure is fatal");
+                match failure {
+                    0 => assert_eq!(err.to_string(), "child exited"),
+                    1 => assert_eq!(format!("{err:#}"), "child failed: child failure"),
+                    _ => {
+                        assert!(err.to_string().starts_with("task join failed:"));
+                        assert!(err.to_string().contains("child panic"));
+                    }
+                }
+                tokio::time::timeout(Duration::from_secs(5), dropped)
+                    .await
+                    .expect("sibling aborted")
+                    .expect_err("sibling guard dropped without completion");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn supervisor_preserves_errors_and_aborts_siblings_for_both_control_types() {
+        assert_supervisor_errors(false, true, |stop| *stop).await;
+        assert_supervisor_errors(SidecarControl::Running, SidecarControl::Stop, |mode| {
+            mode.should_stop()
+        })
+        .await;
     }
 
     #[tokio::test]
