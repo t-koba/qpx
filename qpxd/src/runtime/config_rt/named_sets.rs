@@ -1,9 +1,10 @@
+use super::append_unique_strings;
 use anyhow::{Result, anyhow};
 use qpx_core::config::{
     CertificateMatchConfig, Config, IdentityMatchConfig, MatchConfig, NamedSetKind, RuleConfig,
     TlsFingerprintMatchConfig, TlsPassthroughMatchConfig,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs;
 
 #[derive(Debug, Clone)]
@@ -104,19 +105,6 @@ fn load_named_set_registry(config: &Config) -> Result<HashMap<String, LoadedName
         );
     }
     Ok(registry)
-}
-
-fn append_unique_strings(out: &mut Vec<String>, values: impl IntoIterator<Item = String>) {
-    let mut seen = out.iter().cloned().collect::<HashSet<_>>();
-    for value in values {
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if seen.insert(value.to_string()) {
-            out.push(value.to_string());
-        }
-    }
 }
 
 fn expand_rule_named_sets(

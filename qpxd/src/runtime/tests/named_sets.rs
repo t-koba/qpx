@@ -7,7 +7,13 @@ fn expand_named_sets_in_listener_rules() {
         NamedSetConfig {
             name: "corp_domains".to_string(),
             kind: NamedSetKind::Domain,
-            values: vec!["*.corp.example".to_string(), "api.internal".to_string()],
+            values: vec![
+                " *.corp.example ".to_string(),
+                "*.corp.example".to_string(),
+                " api.internal ".to_string(),
+                " ".to_string(),
+                "API.internal".to_string(),
+            ],
             file: None,
         },
         NamedSetConfig {
@@ -66,7 +72,11 @@ fn expand_named_sets_in_listener_rules() {
         .expect("match");
     assert_eq!(
         rule_match.host,
-        vec!["*.corp.example".to_string(), "api.internal".to_string()]
+        vec![
+            "*.corp.example".to_string(),
+            "api.internal".to_string(),
+            "API.internal".to_string(),
+        ]
     );
     assert_eq!(rule_match.path, vec!["re:^/internal/.*$".to_string()]);
 }
@@ -215,7 +225,13 @@ fn expand_upstream_trust_profiles_merges_inline_overrides() {
                 upstream_trust_profile: Some("corp".to_string()),
                 upstream_trust: Some(UpstreamTlsTrustConfig {
                     pin_sha256: vec!["bb".repeat(32)],
-                    issuer: vec!["Inline Issuer".to_string()],
+                    issuer: vec![
+                        " Inline Issuer ".to_string(),
+                        "Corp Issuer".to_string(),
+                        "corp issuer".to_string(),
+                        " corp issuer ".to_string(),
+                        " ".to_string(),
+                    ],
                     san_dns: Vec::new(),
                     san_uri: vec!["spiffe://inline".to_string()],
                     client_cert: Some("/tmp/inline.crt".to_string()),
@@ -252,7 +268,11 @@ fn expand_upstream_trust_profiles_merges_inline_overrides() {
     assert_eq!(trust.pin_sha256.len(), 2);
     assert_eq!(
         trust.issuer,
-        vec!["Corp Issuer".to_string(), "Inline Issuer".to_string()]
+        vec![
+            "Corp Issuer".to_string(),
+            "Inline Issuer".to_string(),
+            "corp issuer".to_string(),
+        ]
     );
     assert_eq!(trust.san_dns, vec!["*.corp.example".to_string()]);
     assert_eq!(trust.san_uri, vec!["spiffe://inline".to_string()]);
