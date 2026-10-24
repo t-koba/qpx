@@ -132,14 +132,12 @@ where
         &access_cfg,
     );
 
-    let header_read_timeout = Duration::from_millis(
-        runtime
-            .state()
-            .plan
-            .limits
-            .timeouts
-            .http_header_read_timeout_ms,
-    );
+    let header_read_timeout = runtime
+        .state()
+        .plan
+        .limits
+        .timeouts
+        .http_header_read_timeout();
     serve_http1_with_interim_and_capacity(
         client_tls,
         service,

@@ -482,3 +482,19 @@ fn upstream_body_read_timeout_clamps_zero_without_changing_nonzero_values() {
         std::time::Duration::from_millis(250)
     );
 }
+
+#[test]
+fn http_header_read_timeout_uses_configured_milliseconds() {
+    let timeouts = super::types::TimeoutLimits {
+        upstream_http_timeout_ms: 0,
+        tls_peek_timeout_ms: 0,
+        http_header_read_timeout_ms: 125,
+        upgrade_wait_timeout_ms: 0,
+        tunnel_idle_timeout_ms: 0,
+        h3_read_timeout_ms: 0,
+    };
+    assert_eq!(
+        timeouts.http_header_read_timeout(),
+        std::time::Duration::from_millis(125)
+    );
+}

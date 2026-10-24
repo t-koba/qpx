@@ -147,8 +147,7 @@ pub(super) async fn tunnel_connect(
                 .await?;
                 let upstream_cert = Arc::new(upstream_cert);
                 let connect_host = host.clone();
-                let header_read_timeout =
-                    Duration::from_millis(state.plan.limits.timeouts.http_header_read_timeout_ms);
+                let header_read_timeout = state.plan.limits.timeouts.http_header_read_timeout();
                 let body_channel_capacity = state.plan.limits.body.body_channel_capacity;
                 let access_cfg = state.resources.access_log.clone();
                 let access_name = Arc::<str>::from(listener_name.as_str());

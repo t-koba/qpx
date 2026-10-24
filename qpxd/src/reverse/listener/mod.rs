@@ -52,15 +52,13 @@ async fn prepare_reverse_accepted_stream(
     std::net::SocketAddr,
     Duration,
 )> {
-    let header_read_timeout = Duration::from_millis(
-        reverse
-            .runtime
-            .state()
-            .plan
-            .limits
-            .timeouts
-            .http_header_read_timeout_ms,
-    );
+    let header_read_timeout = reverse
+        .runtime
+        .state()
+        .plan
+        .limits
+        .timeouts
+        .http_header_read_timeout();
     let (stream, remote_addr) =
         match resolve_remote_addr_with_xdp(stream, remote_addr, xdp_cfg, header_read_timeout).await
         {

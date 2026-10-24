@@ -63,6 +63,10 @@ impl TimeoutLimits {
     pub(crate) fn upstream_body_read_timeout(&self) -> Duration {
         Duration::from_millis(self.upstream_http_timeout_ms.max(1))
     }
+
+    pub(crate) fn http_header_read_timeout(&self) -> Duration {
+        Duration::from_millis(self.http_header_read_timeout_ms)
+    }
 }
 
 #[derive(Clone, Copy)]

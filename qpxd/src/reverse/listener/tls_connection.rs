@@ -303,15 +303,13 @@ async fn handle_tls_connection(
     // below rustls would only combine already-encrypted records and would not
     // avoid their per-record encryption and allocation costs.
     let tls_stream = crate::reverse::tls::AdaptiveWriteCoalescer::new(tls_stream);
-    let header_read_timeout = Duration::from_millis(
-        reverse
-            .runtime
-            .state()
-            .plan
-            .limits
-            .timeouts
-            .http_header_read_timeout_ms,
-    );
+    let header_read_timeout = reverse
+        .runtime
+        .state()
+        .plan
+        .limits
+        .timeouts
+        .http_header_read_timeout();
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), peer_certificates);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
@@ -384,15 +382,13 @@ async fn handle_tls_connection(
         return Ok(());
     }
     let negotiated_h2 = negotiated_alpn.as_deref() == Some(b"h2".as_slice());
-    let header_read_timeout = Duration::from_millis(
-        reverse
-            .runtime
-            .state()
-            .plan
-            .limits
-            .timeouts
-            .http_header_read_timeout_ms,
-    );
+    let header_read_timeout = reverse
+        .runtime
+        .state()
+        .plan
+        .limits
+        .timeouts
+        .http_header_read_timeout();
     let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();

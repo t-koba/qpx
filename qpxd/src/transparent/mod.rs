@@ -169,14 +169,12 @@ async fn handle_connection(
 ) -> Result<()> {
     let started = Instant::now();
     let _ = stream.set_nodelay(true);
-    let metadata_timeout = Duration::from_millis(
-        runtime
-            .state()
-            .plan
-            .limits
-            .timeouts
-            .http_header_read_timeout_ms,
-    );
+    let metadata_timeout = runtime
+        .state()
+        .plan
+        .limits
+        .timeouts
+        .http_header_read_timeout();
     let (mut stream, remote_addr, original_target) = resolver
         .resolve_original_target(stream, remote_addr, metadata_timeout)
         .await?;

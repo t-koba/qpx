@@ -14,7 +14,6 @@ use qpx_observability::handler_fn;
 use std::convert::Infallible;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use tokio::time::Duration;
 use tracing::error;
 
 mod dispatch;
@@ -33,8 +32,7 @@ where
 {
     let listener_name = listener_name.to_string();
     let state = runtime.state();
-    let header_read_timeout =
-        Duration::from_millis(state.plan.limits.timeouts.http_header_read_timeout_ms);
+    let header_read_timeout = state.plan.limits.timeouts.http_header_read_timeout();
     let body_channel_capacity = state.plan.limits.body.body_channel_capacity;
     let access_cfg = state.resources.access_log.clone();
     let access_name = Arc::<str>::from(listener_name.as_str());

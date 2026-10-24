@@ -29,7 +29,7 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
-use tokio::time::{Duration, Instant};
+use tokio::time::Instant;
 use tracing::{debug, error, info, warn};
 
 mod connect;
@@ -127,14 +127,12 @@ async fn run_forward_acceptor(
         let xdp_cfg = xdp_cfg.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let header_read_timeout = Duration::from_millis(
-                runtime
-                    .state()
-                    .plan
-                    .limits
-                    .timeouts
-                    .http_header_read_timeout_ms,
-            );
+            let header_read_timeout = runtime
+                .state()
+                .plan
+                .limits
+                .timeouts
+                .http_header_read_timeout();
             let (stream, effective_remote_addr) = match resolve_remote_addr_with_xdp(
                 stream,
                 remote_addr,

@@ -300,9 +300,7 @@ async fn finish_h3_connect_mitm(input: H3ConnectMitmFinish) -> Result<()> {
         mitm,
         verify_upstream,
         trust: listener_trust,
-        header_read_timeout: Duration::from_millis(
-            state.plan.limits.timeouts.http_header_read_timeout_ms,
-        ),
+        header_read_timeout: state.plan.limits.timeouts.http_header_read_timeout(),
         upstream_timeout,
         tunnel_idle_timeout,
     })
