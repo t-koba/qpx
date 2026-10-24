@@ -3,8 +3,8 @@ use super::RateLimitContext;
 use super::key::{
     KeyKind, LimiterKey, make_limiter_key, max_entries_for_key_kind, shard_count_for_key_kind,
 };
+use super::nonzero_capacity;
 use lru::LruCache;
-use std::num::NonZeroUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::Instant;
@@ -65,13 +65,6 @@ impl QuotaState {
             );
         };
         entry
-    }
-}
-
-fn nonzero_capacity(value: usize) -> NonZeroUsize {
-    match NonZeroUsize::new(value.max(1)) {
-        Some(capacity) => capacity,
-        None => unreachable!("usize::max(1) is always non-zero"),
     }
 }
 

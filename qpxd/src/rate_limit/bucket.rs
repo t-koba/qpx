@@ -4,10 +4,10 @@ use super::key::{
     DEFAULT_ENTRY_TTL, KeyKind, LimiterKey, make_limiter_key, max_entries_for_key_kind,
     shard_count_for_key_kind,
 };
+use super::nonzero_capacity;
 use arc_swap::ArcSwapOption;
 use lru::LruCache;
 use parking_lot::Mutex;
-use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -230,13 +230,6 @@ impl LimiterInner {
 struct HotBucketEntry {
     key: LimiterKey,
     entry: Arc<BucketEntry>,
-}
-
-fn nonzero_capacity(value: usize) -> NonZeroUsize {
-    match NonZeroUsize::new(value.max(1)) {
-        Some(capacity) => capacity,
-        None => unreachable!("usize::max(1) is always non-zero"),
-    }
 }
 
 #[derive(Debug, Clone)]
