@@ -58,11 +58,8 @@ pub(super) fn spawn_empty_sidecar_server_set(
     mut control: watch::Receiver<SidecarControl>,
 ) -> tokio::task::JoinHandle<Result<()>> {
     tokio::spawn(async move {
-        loop {
-            if control.changed().await.is_err() || control.borrow().should_stop() {
-                return Ok(());
-            }
-        }
+        wait_for_empty_server_set_stop(&mut control, |mode| mode.should_stop()).await;
+        Ok(())
     })
 }
 
@@ -121,11 +118,8 @@ pub(super) async fn run_tcp_server_set(
     }
 
     if tasks.is_empty() {
-        loop {
-            if shutdown.changed().await.is_err() || *shutdown.borrow() {
-                return Ok(());
-            }
-        }
+        wait_for_empty_server_set_stop(&mut shutdown, |stop| *stop).await;
+        return Ok(());
     }
 
     loop {
@@ -324,11 +318,8 @@ async fn await_exportable_sidecar_tasks(
     mut control: watch::Receiver<SidecarControl>,
 ) -> Result<()> {
     if tasks.is_empty() {
-        loop {
-            if control.changed().await.is_err() || control.borrow().should_stop() {
-                return Ok(());
-            }
-        }
+        wait_for_empty_server_set_stop(&mut control, |mode| mode.should_stop()).await;
+        return Ok(());
     }
 
     let mut stop_mode = SidecarControl::Running;
@@ -455,11 +446,8 @@ async fn run_brokered_h3_server_set(
     }
 
     if tasks.is_empty() {
-        loop {
-            if control.changed().await.is_err() || control.borrow().should_stop() {
-                return Ok(());
-            }
-        }
+        wait_for_empty_server_set_stop(&mut control, |mode| mode.should_stop()).await;
+        return Ok(());
     }
 
     loop {
@@ -491,6 +479,22 @@ async fn run_brokered_h3_server_set(
     }
 
     drain_server_tasks(tasks).await
+}
+
+/// Wait for stop when a server set has no tasks to supervise.
+///
+/// Returns once the watch sender closes or the caller-provided stop
+/// predicate observes the current value. Supervision of nonempty task sets
+/// stays with each caller.
+async fn wait_for_empty_server_set_stop<T>(
+    control: &mut watch::Receiver<T>,
+    should_stop: impl Fn(&T) -> bool,
+) {
+    loop {
+        if control.changed().await.is_err() || should_stop(&control.borrow()) {
+            return;
+        }
+    }
 }
 
 // A child can observe stop and finish before the supervisor selects changed().
@@ -600,6 +604,50 @@ mod tests {
             .expect("drain completed")
             .expect("orderly completion");
         did_finish.await.expect("sibling finished normally");
+    }
+
+    #[tokio::test]
+    async fn empty_server_set_wait_exits_on_stop_request() {
+        let (sender, mut shutdown) = watch::channel(false);
+        sender.send(true).expect("request shutdown");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_empty_server_set_stop(&mut shutdown, |stop| *stop),
+        )
+        .await
+        .expect("TCP stop request exits");
+
+        let (sender, mut control) = watch::channel(SidecarControl::Running);
+        sender
+            .send(SidecarControl::Stop)
+            .expect("request sidecar stop");
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_empty_server_set_stop(&mut control, |mode| mode.should_stop()),
+        )
+        .await
+        .expect("sidecar stop request exits");
+    }
+
+    #[tokio::test]
+    async fn empty_server_set_wait_exits_on_sender_closure() {
+        let (sender, mut shutdown) = watch::channel(false);
+        drop(sender);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_empty_server_set_stop(&mut shutdown, |stop| *stop),
+        )
+        .await
+        .expect("closed TCP sender exits");
+
+        let (sender, mut control) = watch::channel(SidecarControl::Running);
+        drop(sender);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_for_empty_server_set_stop(&mut control, |mode| mode.should_stop()),
+        )
+        .await
+        .expect("closed sidecar sender exits");
     }
 
     #[tokio::test]
