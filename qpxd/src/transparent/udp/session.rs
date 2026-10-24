@@ -1,5 +1,6 @@
 #[cfg(test)]
 use crate::http3::quic_packet::parse_quic_short_dcid;
+use crate::http3::quic_packet::{decode_cid_len, encode_cid_len};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 #[cfg(test)]
 use std::collections::HashMap;
@@ -382,12 +383,4 @@ impl SessionIndex {
         self.known_server_cid_lens.clear();
         drained
     }
-}
-
-fn encode_cid_len(value: Option<u8>) -> u8 {
-    value.unwrap_or(0)
-}
-
-fn decode_cid_len(value: u8) -> Option<u8> {
-    if value == 0 { None } else { Some(value) }
 }

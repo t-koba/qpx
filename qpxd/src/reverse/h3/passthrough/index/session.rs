@@ -7,7 +7,7 @@ use tokio::net::UdpSocket;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
-use crate::http3::quic_packet::QuicConnectionId;
+use crate::http3::quic_packet::{QuicConnectionId, decode_cid_len, encode_cid_len};
 
 const TOUCH_COALESCE_MS: u64 = 1_000;
 
@@ -205,12 +205,4 @@ pub(in crate::reverse::h3::passthrough) fn should_queue_touch_at(
 pub(in crate::reverse::h3::passthrough) struct SessionTouch {
     pub(in crate::reverse::h3::passthrough) seen_ms: u64,
     pub(in crate::reverse::h3::passthrough) session_id: u64,
-}
-
-fn encode_cid_len(value: Option<u8>) -> u8 {
-    value.unwrap_or(0)
-}
-
-fn decode_cid_len(value: u8) -> Option<u8> {
-    if value == 0 { None } else { Some(value) }
 }

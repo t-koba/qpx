@@ -194,6 +194,14 @@ pub(crate) fn connection_id_len_bit(len: u8) -> Option<u32> {
         .then_some(1u32 << len)
 }
 
+pub(crate) fn encode_cid_len(value: Option<u8>) -> u8 {
+    value.unwrap_or(0)
+}
+
+pub(crate) fn decode_cid_len(value: u8) -> Option<u8> {
+    if value == 0 { None } else { Some(value) }
+}
+
 pub(crate) fn record_known_connection_id_len(bits: &AtomicU32, len: u8) {
     if let Some(bit) = connection_id_len_bit(len) {
         bits.fetch_or(bit, Ordering::Relaxed);
