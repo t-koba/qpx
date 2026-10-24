@@ -2,6 +2,7 @@
 use crate::http3::quic_packet::parse_quic_short_dcid;
 use crate::http3::quic_packet::{decode_cid_len, encode_cid_len};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
+use crate::relay_task::RelayTask;
 #[cfg(test)]
 use std::collections::HashMap;
 use std::collections::HashSet;
@@ -10,7 +11,6 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 mod index;
 
@@ -34,7 +34,7 @@ pub(super) struct TransparentUdpSession {
     client_cid_len: AtomicU8,
     server_cid_len: AtomicU8,
     cids: StdMutex<HashSet<QuicConnectionId>>,
-    relay_task: StdMutex<Option<JoinHandle<()>>>,
+    pub(super) relay_task: RelayTask,
     pub(super) limits: AppliedRateLimits,
     pub(super) rate_limit_ctx: RateLimitContext,
     pub(super) _concurrency_permits: crate::rate_limit::ConcurrencyPermits,
@@ -78,7 +78,7 @@ impl TransparentUdpSession {
             client_cid_len: AtomicU8::new(0),
             server_cid_len: AtomicU8::new(0),
             cids: StdMutex::new(HashSet::new()),
-            relay_task: StdMutex::new(None),
+            relay_task: RelayTask::default(),
             limits,
             rate_limit_ctx,
             _concurrency_permits: concurrency_permits,
@@ -154,20 +154,6 @@ impl TransparentUdpSession {
             .iter()
             .copied()
             .collect()
-    }
-
-    pub(super) fn attach_relay_task(&self, task: JoinHandle<()>) {
-        *self
-            .relay_task
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(task);
-    }
-
-    pub(super) fn take_relay_task(&self) -> Option<JoinHandle<()>> {
-        self.relay_task
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .take()
     }
 }
 

@@ -38,6 +38,7 @@ mod ipc_client;
 mod policy_context;
 mod pool;
 mod rate_limit;
+mod relay_task;
 mod reverse;
 mod runtime;
 mod server;

@@ -276,7 +276,7 @@ async fn start_udp_session(input: StartUdpSessionInput<'_>) -> Result<bool> {
         input.idle_timeout,
         input.run_started,
     );
-    session.attach_relay_task(relay_task);
+    session.relay_task.attach(relay_task);
     let delay = match apply_udp_bandwidth_controls(
         &input.rate_limit_ctx,
         &input.request_limits,

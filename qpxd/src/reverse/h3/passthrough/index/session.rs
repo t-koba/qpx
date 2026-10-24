@@ -3,9 +3,9 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 
+use crate::relay_task::RelayTask;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::task::JoinHandle;
 
 use crate::http3::quic_packet::{QuicConnectionId, decode_cid_len, encode_cid_len};
 
@@ -23,7 +23,7 @@ pub(in crate::reverse::h3::passthrough) struct PassthroughSession {
     client_cid_len: AtomicU8,
     server_cid_len: AtomicU8,
     pub(super) cids: StdMutex<HashSet<QuicConnectionId>>,
-    relay_task: StdMutex<Option<JoinHandle<()>>>,
+    pub(in crate::reverse::h3::passthrough) relay_task: RelayTask,
 }
 
 impl PassthroughSession {
@@ -48,7 +48,7 @@ impl PassthroughSession {
             client_cid_len: AtomicU8::new(0),
             server_cid_len: AtomicU8::new(0),
             cids: StdMutex::new(HashSet::new()),
-            relay_task: StdMutex::new(None),
+            relay_task: RelayTask::default(),
         }
     }
 
@@ -163,20 +163,6 @@ impl PassthroughSession {
             .iter()
             .copied()
             .collect()
-    }
-
-    pub(in crate::reverse::h3::passthrough) fn attach_relay_task(&self, task: JoinHandle<()>) {
-        *self
-            .relay_task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(task);
-    }
-
-    pub(in crate::reverse::h3::passthrough) fn take_relay_task(&self) -> Option<JoinHandle<()>> {
-        self.relay_task
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .take()
     }
 }
 

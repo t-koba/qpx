@@ -369,7 +369,7 @@ async fn create_passthrough_session(
                 run_started: ctx.run_started,
                 max_amplification: ctx.max_amplification,
             });
-            session.attach_relay_task(relay_task);
+            session.relay_task.attach(relay_task);
         }
     }
     Ok(Some((socket_session_id, socket)))
@@ -401,7 +401,7 @@ async fn drain_passthrough_sessions(
     }
     for task in drained
         .iter()
-        .filter_map(|(_, session)| session.take_relay_task())
+        .filter_map(|(_, session)| session.relay_task.take())
     {
         task.await
             .map_err(|err| anyhow!("reverse h3 passthrough relay join failed: {err}"))?;
@@ -504,7 +504,7 @@ async fn restore_passthrough_sessions(
             run_started,
             max_amplification,
         });
-        session.attach_relay_task(relay_task);
+        session.relay_task.attach(relay_task);
         next_session_id = next_session_id.max(restored.session_id.wrapping_add(1));
     }
     Ok(next_session_id)

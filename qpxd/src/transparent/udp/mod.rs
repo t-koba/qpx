@@ -242,7 +242,7 @@ async fn drain_transparent_udp_sessions(
     }
     for task in drained
         .iter()
-        .filter_map(|(_, session)| session.take_relay_task())
+        .filter_map(|(_, session)| session.relay_task.take())
     {
         task.await
             .map_err(|err| anyhow!("transparent UDP relay join failed: {err}"))?;
@@ -360,7 +360,7 @@ async fn restore_transparent_udp_sessions(
             idle_timeout,
             run_started,
         );
-        session.attach_relay_task(relay_task);
+        session.relay_task.attach(relay_task);
         next_session_id = next_session_id.max(restored.session_id.wrapping_add(1));
     }
     Ok(next_session_id)
