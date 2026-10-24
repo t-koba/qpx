@@ -103,16 +103,11 @@ where
             ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
         )
     {
-        let verify_upstream = state.tls_verify_upstream(
-            Some(listener_cfg),
-            listener_name,
-            sni_for_match
-                .or(host_for_match_owned.as_deref())
-                .unwrap_or_default(),
-        );
         let preview_domain = sni_for_match
             .or(host_for_match_owned.as_deref())
             .unwrap_or_default();
+        let verify_upstream =
+            state.tls_verify_upstream(Some(listener_cfg), listener_name, preview_domain);
         let preview_upstream = resolve_upstream(&decision.action, &state, listener_cfg)?;
         let upstream_timeout =
             Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms);
