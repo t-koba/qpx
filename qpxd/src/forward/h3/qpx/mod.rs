@@ -4,6 +4,7 @@ use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::Result;
+use bytes::Bytes;
 use qpx_core::config::{
     ConnectIpConfig, ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig,
 };
@@ -19,6 +20,14 @@ mod relay;
 mod response;
 mod webtransport;
 mod webtransport_dispatch;
+
+async fn recv_stream_datagram(datagrams: &mut Option<qpx_h3::StreamDatagrams>) -> Option<Bytes> {
+    if let Some(datagrams) = datagrams.as_mut() {
+        datagrams.receiver.recv().await
+    } else {
+        std::future::pending::<Option<Bytes>>().await
+    }
+}
 
 pub(crate) use self::connect_upstream::QpxH3UpstreamSessionPool;
 pub(super) use self::handler::{ForwardQpxHandler, h3_body_read_timeout};

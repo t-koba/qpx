@@ -38,13 +38,7 @@ pub(super) async fn relay_qpx_extended_connect_stream(
         let mut downstream_datagram_scratch = BytesMut::new();
         loop {
             tokio::select! {
-                down_payload = async {
-                    if let Some(datagrams) = downstream_datagrams.as_mut() {
-                        datagrams.receiver.recv().await
-                    } else {
-                        std::future::pending::<Option<Bytes>>().await
-                    }
-                } => {
+                down_payload = super::recv_stream_datagram(&mut downstream_datagrams) => {
                     let Some(payload) = down_payload else {
                         break;
                     };
@@ -57,13 +51,7 @@ pub(super) async fn relay_qpx_extended_connect_stream(
                     }
                     activity.touch();
                 }
-                up_payload = async {
-                    if let Some(datagrams) = upstream_datagrams.as_mut() {
-                        datagrams.receiver.recv().await
-                    } else {
-                        std::future::pending::<Option<Bytes>>().await
-                    }
-                } => {
+                up_payload = super::recv_stream_datagram(&mut upstream_datagrams) => {
                     let Some(payload) = up_payload else {
                         break;
                     };
@@ -168,13 +156,7 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 }
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            payload = async {
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            payload = super::recv_stream_datagram(&mut downstream_datagrams) => {
                 let Some(payload) = payload else { break };
                 validate_connect_ip_datagram(&payload, &downstream_policy)?;
                 if let Some(datagrams) = upstream_datagrams.as_mut() {
@@ -186,13 +168,7 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 }
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            payload = async {
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            payload = super::recv_stream_datagram(&mut upstream_datagrams) => {
                 let Some(payload) = payload else { break };
                 validate_connect_ip_datagram(&payload, &upstream_policy)?;
                 if let Some(datagrams) = downstream_datagrams.as_mut() {
@@ -260,13 +236,7 @@ pub(super) async fn relay_qpx_connect_ip_device(
                 }
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            payload = async {
-                if let Some(datagrams) = datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            payload = super::recv_stream_datagram(&mut datagrams) => {
                 let Some(payload) = payload else { break };
                 validate_connect_ip_datagram(&payload, &downstream_policy)?;
                 let (_, offset) = decode_quic_varint(&payload)
@@ -399,13 +369,7 @@ pub(super) async fn relay_qpx_connect_udp_stream(
                     }
                 }
             }
-            payload = async {
-                if let Some(datagrams) = datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            payload = super::recv_stream_datagram(&mut datagrams) => {
                 let Some(payload) = payload else {
                     break;
                 };
@@ -543,13 +507,7 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                     None => break,
                 }
             }
-            down_payload = async {
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            down_payload = super::recv_stream_datagram(&mut downstream_datagrams) => {
                 let Some(payload) = down_payload else {
                     break;
                 };
@@ -582,13 +540,7 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                     .as_mut()
                     .reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            up_payload = async {
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            up_payload = super::recv_stream_datagram(&mut upstream_datagrams) => {
                 let Some(payload) = up_payload else {
                     break;
                 };

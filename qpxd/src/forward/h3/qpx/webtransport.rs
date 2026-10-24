@@ -260,13 +260,7 @@ async fn relay_request_stream(ctx: WebTransportRequestRelayContext) -> Result<()
                     }
                 }
             }
-            down_payload = async {
-                if let Some(datagrams) = downstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            down_payload = super::recv_stream_datagram(&mut downstream_datagrams) => {
                 let Some(payload) = down_payload else {
                     break;
                 };
@@ -286,13 +280,7 @@ async fn relay_request_stream(ctx: WebTransportRequestRelayContext) -> Result<()
                     activity.touch();
                 }
             }
-            up_payload = async {
-                if let Some(datagrams) = upstream_datagrams.as_mut() {
-                    datagrams.receiver.recv().await
-                } else {
-                    std::future::pending::<Option<Bytes>>().await
-                }
-            } => {
+            up_payload = super::recv_stream_datagram(&mut upstream_datagrams) => {
                 let Some(payload) = up_payload else {
                     break;
                 };
