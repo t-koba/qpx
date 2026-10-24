@@ -51,12 +51,7 @@ impl SharedSessionIndex {
         &self,
         session_id: u64,
     ) -> Option<Arc<TransparentUdpSession>> {
-        self.session_shard(session_id)
-            .sessions
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&session_id)
-            .cloned()
+        crate::index_read::read_cloned(&self.session_shard(session_id).sessions, &session_id)
     }
 
     pub(in crate::transparent::udp) fn insert(
@@ -234,13 +229,7 @@ impl SharedSessionIndex {
     }
 
     fn session_by_cid(&self, cid: QuicConnectionId) -> Option<(u64, Arc<TransparentUdpSession>)> {
-        let session_id = self
-            .cid_shard(cid)
-            .by_cid
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&cid)
-            .copied()?;
+        let session_id = crate::index_read::read_cloned(&self.cid_shard(cid).by_cid, &cid)?;
         self.session(session_id)
             .map(|session| (session_id, session))
     }
@@ -300,12 +289,7 @@ impl SharedSessionIndex {
     }
 
     fn cid_owner(&self, cid: QuicConnectionId) -> Option<u64> {
-        self.cid_shard(cid)
-            .by_cid
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&cid)
-            .copied()
+        crate::index_read::read_cloned(&self.cid_shard(cid).by_cid, &cid)
     }
 
     pub(in crate::transparent::udp) fn evict_expired(

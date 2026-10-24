@@ -60,12 +60,7 @@ impl SharedSessionIndex {
         &self,
         session_id: u64,
     ) -> Option<Arc<PassthroughSession>> {
-        self.session_shard(session_id)
-            .sessions
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&session_id)
-            .cloned()
+        crate::index_read::read_cloned(&self.session_shard(session_id).sessions, &session_id)
     }
 
     pub(in crate::reverse::h3::passthrough) fn session_count(&self) -> usize {
@@ -265,13 +260,7 @@ impl SharedSessionIndex {
         &self,
         cid: QuicConnectionId,
     ) -> Option<(u64, Arc<PassthroughSession>)> {
-        let id = self
-            .cid_shard(cid)
-            .by_cid
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&cid)
-            .copied()?;
+        let id = crate::index_read::read_cloned(&self.cid_shard(cid).by_cid, &cid)?;
         self.session(id).map(|session| (id, session))
     }
 
@@ -331,12 +320,7 @@ impl SharedSessionIndex {
         &self,
         cid: QuicConnectionId,
     ) -> Option<u64> {
-        self.cid_shard(cid)
-            .by_cid
-            .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .get(&cid)
-            .copied()
+        crate::index_read::read_cloned(&self.cid_shard(cid).by_cid, &cid)
     }
 
     pub(in crate::reverse::h3::passthrough) fn drain_session_touches(

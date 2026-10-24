@@ -34,6 +34,8 @@ mod ftp;
 mod http;
 #[cfg(feature = "http3")]
 mod http3;
+#[cfg(feature = "http3")]
+mod index_read;
 mod ipc_client;
 mod policy_context;
 mod pool;
