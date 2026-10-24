@@ -10,7 +10,7 @@ mod upstream;
 use self::chained::relay_h3_connect_udp_stream_chained;
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
 use super::super::{apply_connect_udp_bandwidth_controls, forward_udp_capsules};
-use crate::http::dispatch::{DispatchOutcome, ProxyKind};
+use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::capsule::{
     CapsuleBuffer, decode_connect_udp_payload, encode_datagram_capsule_context_header,
@@ -19,11 +19,9 @@ use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::h3_buf_to_bytes;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::H3ServerRequestStream;
-use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
-use hyper::StatusCode;
 use qpx_core::config::ConnectUdpConfig;
 use std::net::SocketAddr;
 use tokio::net::{UdpSocket, lookup_host};
@@ -228,24 +226,16 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             true,
             response_headers.as_deref(),
         )?;
-        emit_audit_log(
-            &state,
-            AuditRecord {
-                kind: ProxyKind::Forward,
-                name: handler.listener_name.as_ref(),
-                remote_ip: conn.remote_addr.ip(),
-                host: Some(host.as_str()),
-                sni: Some(host.as_str()),
-                method: Some("CONNECT"),
-                path: audit_path.as_deref(),
-                outcome: DispatchOutcome::Allow,
-                status: Some(StatusCode::OK.as_u16()),
-                matched_rule: matched_rule_name,
-                matched_route: None,
-                decision_service_policy_id: decision_service_policy_id.as_deref(),
-            },
-            &log_context,
-        );
+        super::super::emit_h3_connect_allow_audit(super::super::H3ConnectAllowAuditContext {
+            state: &state,
+            listener_name: handler.listener_name.as_ref(),
+            remote_ip: conn.remote_addr.ip(),
+            host: host.as_str(),
+            path: audit_path.as_deref(),
+            matched_rule: matched_rule_name,
+            decision_service_policy_id: decision_service_policy_id.as_deref(),
+            log_context: &log_context,
+        });
         let response_send_timeout = Duration::from_secs(connect_udp_cfg.idle_timeout_secs.max(1));
         timeout(response_send_timeout, req_stream.send_response(response))
             .await
@@ -322,24 +312,16 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         true,
         response_headers.as_deref(),
     )?;
-    emit_audit_log(
-        &state,
-        AuditRecord {
-            kind: ProxyKind::Forward,
-            name: handler.listener_name.as_ref(),
-            remote_ip: conn.remote_addr.ip(),
-            host: Some(host.as_str()),
-            sni: Some(host.as_str()),
-            method: Some("CONNECT"),
-            path: audit_path.as_deref(),
-            outcome: DispatchOutcome::Allow,
-            status: Some(StatusCode::OK.as_u16()),
-            matched_rule: matched_rule_name,
-            matched_route: None,
-            decision_service_policy_id: decision_service_policy_id.as_deref(),
-        },
-        &log_context,
-    );
+    super::super::emit_h3_connect_allow_audit(super::super::H3ConnectAllowAuditContext {
+        state: &state,
+        listener_name: handler.listener_name.as_ref(),
+        remote_ip: conn.remote_addr.ip(),
+        host: host.as_str(),
+        path: audit_path.as_deref(),
+        matched_rule: matched_rule_name,
+        decision_service_policy_id: decision_service_policy_id.as_deref(),
+        log_context: &log_context,
+    });
     let response_send_timeout = Duration::from_secs(connect_udp_cfg.idle_timeout_secs.max(1));
     timeout(response_send_timeout, req_stream.send_response(response))
         .await

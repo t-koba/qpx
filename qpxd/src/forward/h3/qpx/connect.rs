@@ -12,11 +12,11 @@ use super::response::{
     send_qpx_response_stream, send_qpx_static_response,
     upstream_qpx_extended_connect_error_response,
 };
+use crate::forward::h3::connect::{H3ConnectAllowAuditContext, emit_h3_connect_allow_audit};
 use crate::forward::request::resolve_upstream;
-use crate::http::dispatch::{DispatchOutcome, ProxyKind};
+use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
 use crate::http::protocol::l7::finalize_response_with_headers;
-use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::TransportScope;
 use crate::upstream::connect::connect_tunnel_target;
 use anyhow::{Result, anyhow};
@@ -262,24 +262,16 @@ async fn run_qpx_traditional_connect_tunnel(
     )
     .await
     .map_err(|_| anyhow!("qpx-h3 CONNECT response head send timed out"))??;
-    emit_audit_log(
-        &state,
-        AuditRecord {
-            kind: ProxyKind::Forward,
-            name: handler.listener_name.as_ref(),
-            remote_ip: conn.remote_addr.ip(),
-            host: Some(host.as_str()),
-            sni: Some(host.as_str()),
-            method: Some("CONNECT"),
-            path: audit_path.as_deref(),
-            outcome: DispatchOutcome::Allow,
-            status: Some(StatusCode::OK.as_u16()),
-            matched_rule: matched_rule_name,
-            matched_route: None,
-            decision_service_policy_id: decision_service_policy_id.as_deref(),
-        },
-        &log_context,
-    );
+    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
+        state: &state,
+        listener_name: handler.listener_name.as_ref(),
+        remote_ip: conn.remote_addr.ip(),
+        host: host.as_str(),
+        path: audit_path.as_deref(),
+        matched_rule: matched_rule_name,
+        decision_service_policy_id: decision_service_policy_id.as_deref(),
+        log_context: &log_context,
+    });
 
     let (client_write, client_read) = req_stream.split();
     let (server_read, server_write) = tokio::io::split(server.io);
@@ -642,24 +634,16 @@ async fn finish_qpx_extended_connect_stream(
     timeout(h3_timeout, req_stream.send_response_head(&established))
         .await
         .map_err(|_| anyhow!("qpx-h3 CONNECT response head send timed out"))??;
-    emit_audit_log(
+    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
         state,
-        AuditRecord {
-            kind: ProxyKind::Forward,
-            name: handler.listener_name.as_ref(),
-            remote_ip: conn.remote_addr.ip(),
-            host: Some(host),
-            sni: Some(host),
-            method: Some("CONNECT"),
-            path: audit_path,
-            outcome: DispatchOutcome::Allow,
-            status: Some(StatusCode::OK.as_u16()),
-            matched_rule,
-            matched_route: None,
-            decision_service_policy_id,
-        },
+        listener_name: handler.listener_name.as_ref(),
+        remote_ip: conn.remote_addr.ip(),
+        host,
+        path: audit_path,
+        matched_rule,
+        decision_service_policy_id,
         log_context,
-    );
+    });
     let relay = if let Some(policies) = connect_ip_policies {
         relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
             downstream: req_stream,

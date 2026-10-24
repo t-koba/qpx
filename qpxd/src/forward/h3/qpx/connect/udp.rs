@@ -5,13 +5,13 @@ use super::super::connect_upstream::{
 use super::super::relay::{relay_qpx_connect_udp_stream, relay_qpx_connect_udp_stream_chained};
 use super::super::response::{QpxPolicyResponseContext, send_qpx_policy_response};
 use super::prepare::PreparedQpxConnect;
+use crate::forward::h3::connect::{H3ConnectAllowAuditContext, emit_h3_connect_allow_audit};
 use crate::forward::request::resolve_upstream_url;
-use crate::http::dispatch::{DispatchOutcome, ProxyKind};
+use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::l7::finalize_response_with_headers;
-use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
+use hyper::Response;
 use qpx_core::config::ConnectUdpConfig;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
@@ -289,24 +289,16 @@ async fn send_connect_udp_success_head(
 ) -> Result<()> {
     let proxy_name = ctx.state.plan.identity.proxy_name.as_ref();
     let response = build_qpx_connect_success_head(proxy_name, true, ctx.response_headers)?;
-    emit_audit_log(
-        ctx.state,
-        AuditRecord {
-            kind: ProxyKind::Forward,
-            name: ctx.handler.listener_name.as_ref(),
-            remote_ip: ctx.conn.remote_addr.ip(),
-            host: Some(ctx.host),
-            sni: Some(ctx.host),
-            method: Some("CONNECT"),
-            path: ctx.audit_path,
-            outcome: DispatchOutcome::Allow,
-            status: Some(StatusCode::OK.as_u16()),
-            matched_rule: ctx.matched_rule,
-            matched_route: None,
-            decision_service_policy_id: ctx.decision_service_policy_id,
-        },
-        ctx.log_context,
-    );
+    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
+        state: ctx.state,
+        listener_name: ctx.handler.listener_name.as_ref(),
+        remote_ip: ctx.conn.remote_addr.ip(),
+        host: ctx.host,
+        path: ctx.audit_path,
+        matched_rule: ctx.matched_rule,
+        decision_service_policy_id: ctx.decision_service_policy_id,
+        log_context: ctx.log_context,
+    });
     timeout(
         ctx.send_timeouts.1,
         req_stream.send_response_head(&response),

@@ -7,12 +7,11 @@ use super::super::webtransport::{
     QpxWebTransportRelayContext, WebTransportFlowLimits, relay_qpx_webtransport_session,
 };
 use super::ForwardQpxHandler;
+use crate::forward::h3::connect::{H3ConnectAllowAuditContext, emit_h3_connect_allow_audit};
 use crate::http3::codec::sanitize_interim_response_for_h3;
-use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::RuntimeState;
 use anyhow::{Result, anyhow};
-use hyper::StatusCode;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_observability::access_log::RequestLogContext;
 use tokio::time::{Duration, timeout};
@@ -122,18 +121,16 @@ pub(super) async fn relay_established_webtransport(
     )
     .await
     .map_err(|_| anyhow!("forward qpx-h3 extended CONNECT response send timeout"))??;
-    emit_allow_audit(
+    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
         state,
-        handler,
-        conn,
-        AllowAuditContext {
-            host,
-            audit_path,
-            matched_rule,
-            decision_service_policy_id,
-            log_context,
-        },
-    );
+        listener_name: handler.listener_name.as_ref(),
+        remote_ip: conn.remote_addr.ip(),
+        host,
+        path: audit_path,
+        matched_rule,
+        decision_service_policy_id,
+        log_context,
+    });
 
     let flow_limits =
         collect_webtransport_flow_limits(state, handler, matched_rule, rate_limit_profile)?;
@@ -223,40 +220,6 @@ fn collect_webtransport_flow_limits(
             TransportScope::WebtransportDatagramUpstream,
         )?,
     })
-}
-
-struct AllowAuditContext<'a> {
-    host: &'a str,
-    audit_path: Option<&'a str>,
-    matched_rule: Option<&'a str>,
-    decision_service_policy_id: Option<&'a str>,
-    log_context: &'a RequestLogContext,
-}
-
-fn emit_allow_audit(
-    state: &RuntimeState,
-    handler: &ForwardQpxHandler,
-    conn: &qpx_h3::ConnectionInfo,
-    ctx: AllowAuditContext<'_>,
-) {
-    emit_audit_log(
-        state,
-        AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Forward,
-            name: handler.listener_name.as_ref(),
-            remote_ip: conn.remote_addr.ip(),
-            host: Some(ctx.host),
-            sni: Some(ctx.host),
-            method: Some("CONNECT"),
-            path: ctx.audit_path,
-            outcome: crate::http::dispatch::DispatchOutcome::Allow,
-            status: Some(StatusCode::OK.as_u16()),
-            matched_rule: ctx.matched_rule,
-            matched_route: None,
-            decision_service_policy_id: ctx.decision_service_policy_id,
-        },
-        ctx.log_context,
-    );
 }
 
 async fn abort_webtransport_driver(
