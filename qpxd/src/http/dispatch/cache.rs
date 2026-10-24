@@ -275,15 +275,12 @@ pub(crate) async fn write_dispatch_cache_result(
                 request_headers_snapshot: snapshot,
                 revalidation_state: input.revalidation_state,
                 request_collapse_guard: input.request_collapse_guard,
-                body_read_timeout: std::time::Duration::from_millis(
-                    input
-                        .state
-                        .plan
-                        .limits
-                        .timeouts
-                        .upstream_http_timeout_ms
-                        .max(1),
-                ),
+                body_read_timeout: input
+                    .state
+                    .plan
+                    .limits
+                    .timeouts
+                    .upstream_body_read_timeout(),
                 writeback_admission: &input.state.cache.writeback_admission,
                 backends: &input.state.cache.backends,
             },

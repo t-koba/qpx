@@ -160,14 +160,11 @@ fn maybe_spawn_forward_background_revalidation(
                 request_headers_snapshot: &snapshot,
                 revalidation_state: Some(state),
                 request_collapse_guard: None,
-                body_read_timeout: std::time::Duration::from_millis(
-                    runtime_state
-                        .plan
-                        .limits
-                        .timeouts
-                        .upstream_http_timeout_ms
-                        .max(1),
-                ),
+                body_read_timeout: runtime_state
+                    .plan
+                    .limits
+                    .timeouts
+                    .upstream_body_read_timeout(),
                 writeback_admission: &runtime_state.cache.writeback_admission,
                 backends,
             },

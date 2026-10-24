@@ -810,15 +810,12 @@ async fn serve_raw_cache_miss(
         qpxd_cache::CacheStoreContext {
             timing: qpxd_cache::CacheStoreTiming {
                 response_delay_secs,
-                body_read_timeout: std::time::Duration::from_millis(
-                    prepared
-                        .state
-                        .plan
-                        .limits
-                        .timeouts
-                        .upstream_http_timeout_ms
-                        .max(1),
-                ),
+                body_read_timeout: prepared
+                    .state
+                    .plan
+                    .limits
+                    .timeouts
+                    .upstream_body_read_timeout(),
                 request_collapse_guard: None,
             },
             writeback_admission: &prepared.state.cache.writeback_admission,

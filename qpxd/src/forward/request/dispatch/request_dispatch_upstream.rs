@@ -280,15 +280,12 @@ async fn apply_forward_response_policy(
                     .body
                     .max_observed_response_body_bytes,
             ),
-            read_timeout: std::time::Duration::from_millis(
-                input
-                    .state
-                    .plan
-                    .limits
-                    .timeouts
-                    .upstream_http_timeout_ms
-                    .max(1),
-            ),
+            read_timeout: input
+                .state
+                .plan
+                .limits
+                .timeouts
+                .upstream_body_read_timeout(),
             force_body: false,
         },
         http_modules: input.http_modules,

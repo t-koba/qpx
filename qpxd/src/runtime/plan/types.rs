@@ -14,6 +14,7 @@ use qpx_core::prefilter::MatchPrefilterHint;
 use qpx_core::rules::RuleMatchContext;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use std::sync::Arc;
+use std::time::Duration;
 
 #[derive(Clone)]
 pub struct RuntimePlan {
@@ -56,6 +57,12 @@ pub struct TimeoutLimits {
     pub upgrade_wait_timeout_ms: u64,
     pub tunnel_idle_timeout_ms: u64,
     pub h3_read_timeout_ms: u64,
+}
+
+impl TimeoutLimits {
+    pub(crate) fn upstream_body_read_timeout(&self) -> Duration {
+        Duration::from_millis(self.upstream_http_timeout_ms.max(1))
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -458,3 +458,27 @@ fn request_side_fail_closed_merges_field_by_field() {
         }
     );
 }
+
+#[test]
+fn upstream_body_read_timeout_clamps_zero_without_changing_nonzero_values() {
+    let timeouts = super::types::TimeoutLimits {
+        upstream_http_timeout_ms: 0,
+        tls_peek_timeout_ms: 0,
+        http_header_read_timeout_ms: 0,
+        upgrade_wait_timeout_ms: 0,
+        tunnel_idle_timeout_ms: 0,
+        h3_read_timeout_ms: 0,
+    };
+    assert_eq!(
+        timeouts.upstream_body_read_timeout(),
+        std::time::Duration::from_millis(1)
+    );
+    let timeouts = super::types::TimeoutLimits {
+        upstream_http_timeout_ms: 250,
+        ..timeouts
+    };
+    assert_eq!(
+        timeouts.upstream_body_read_timeout(),
+        std::time::Duration::from_millis(250)
+    );
+}

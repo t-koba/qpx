@@ -11,7 +11,6 @@ use super::{
 };
 use crate::http::dispatch::finalize_dispatch_stale_if_error_response;
 use anyhow::Result;
-use tokio::time::Duration;
 
 pub(super) async fn handle_reverse_success(
     input: ReverseSuccessInput<'_>,
@@ -63,9 +62,7 @@ pub(super) async fn handle_reverse_success(
             max_observed_response_body_bytes: route.plan.response_body_observation_limit(
                 state.plan.limits.body.max_observed_response_body_bytes,
             ),
-            response_body_read_timeout: Duration::from_millis(
-                state.plan.limits.timeouts.upstream_http_timeout_ms.max(1),
-            ),
+            response_body_read_timeout: state.plan.limits.timeouts.upstream_body_read_timeout(),
             force_response_body_observation: false,
         },
         http_modules,

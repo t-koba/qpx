@@ -22,7 +22,6 @@ use qpx_http::protocol::semantics::response_status_has_no_body;
 use qpxd_cache::parse_cache_control_response_directives;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
-use tokio::time::Duration;
 
 #[cfg(test)]
 use super::HttpModuleRequestView;
@@ -156,14 +155,12 @@ impl ResponseCompressionModule {
             HeaderValue::from_static(encoding.http_name()),
         );
         append_vary_accept_encoding(&mut parts.headers);
-        let body_read_timeout = Duration::from_millis(
-            ctx.runtime_state()
-                .plan
-                .limits
-                .timeouts
-                .upstream_http_timeout_ms
-                .max(1),
-        );
+        let body_read_timeout = ctx
+            .runtime_state()
+            .plan
+            .limits
+            .timeouts
+            .upstream_body_read_timeout();
         let body = stream_compressed_body(
             body,
             encoding,
@@ -213,14 +210,12 @@ impl ResponseCompressionModule {
             return Ok(DictionaryCompressionOutcome::Unchanged(response));
         }
         let (mut parts, body) = response.into_parts();
-        let timeout_duration = Duration::from_millis(
-            ctx.runtime_state()
-                .plan
-                .limits
-                .timeouts
-                .upstream_http_timeout_ms
-                .max(1),
-        );
+        let timeout_duration = ctx
+            .runtime_state()
+            .plan
+            .limits
+            .timeouts
+            .upstream_body_read_timeout();
         let body = tokio::time::timeout(timeout_duration, to_bytes(body))
             .await
             .map_err(|_| anyhow!("dictionary compression body read timed out"))??;

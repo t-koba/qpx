@@ -213,9 +213,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             max_body_bytes: selected_plan.response_body_observation_limit(
                 state.plan.limits.body.max_observed_response_body_bytes,
             ),
-            read_timeout: std::time::Duration::from_millis(
-                timeouts.upstream_http_timeout_ms.max(1),
-            ),
+            read_timeout: timeouts.upstream_body_read_timeout(),
             force_body: false,
         },
         http_modules: &mut http_modules,
