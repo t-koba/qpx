@@ -6,7 +6,18 @@ use qpx_core::tls::extract_upstream_certificate_info;
 #[cfg(feature = "http3")]
 use quinn::crypto::rustls::QuicClientConfig;
 use quinn::crypto::rustls::QuicServerConfig;
+#[cfg(feature = "http3")]
+use std::net::SocketAddr;
 use std::sync::Arc;
+
+#[cfg(feature = "http3")]
+pub(crate) fn upstream_client_bind_addr(remote_addr: SocketAddr) -> SocketAddr {
+    if remote_addr.is_ipv4() {
+        SocketAddr::from(([0, 0, 0, 0], 0))
+    } else {
+        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
+    }
+}
 
 #[cfg(feature = "http3")]
 pub(crate) fn build_h3_client_config(

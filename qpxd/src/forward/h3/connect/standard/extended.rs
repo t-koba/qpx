@@ -115,11 +115,7 @@ pub(super) async fn open_upstream_extended_connect_stream(
         Err(_) => return Err(anyhow!("extended CONNECT upstream resolution timed out")),
     };
 
-    let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
-    };
+    let bind_addr = crate::http3::quic::upstream_client_bind_addr(upstream_addr);
     let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(build_h3_client_config(input.verify_upstream, input.trust)?);
 

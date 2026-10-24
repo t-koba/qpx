@@ -1,7 +1,6 @@
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::hash::Hash;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::lookup_host;
 use tokio::sync::Mutex;
@@ -213,11 +212,7 @@ async fn connect_qpx_h3_upstream_session(
         Ok(Err(err)) => return Err(anyhow!(err)),
         Err(_) => return Err(anyhow!("qpx-h3 upstream resolution timed out")),
     };
-    let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
-    };
+    let bind_addr = crate::http3::quic::upstream_client_bind_addr(upstream_addr);
     let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(crate::http3::quic::build_h3_client_config(
         key.verify_upstream,

@@ -321,11 +321,7 @@ async fn connect_h3_origin(
         .map_err(|_| anyhow!("HTTP/3 upstream DNS resolution timed out"))??
         .next()
         .ok_or_else(|| anyhow!("HTTP/3 upstream resolved no addresses"))?;
-    let bind_addr: SocketAddr = if upstream_addr.is_ipv4() {
-        SocketAddr::from(([0, 0, 0, 0], 0))
-    } else {
-        SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 0], 0))
-    };
+    let bind_addr = crate::http3::quic::upstream_client_bind_addr(upstream_addr);
     let mut endpoint = quinn::Endpoint::client(bind_addr)?;
     endpoint.set_default_client_config(build_h3_client_config(true, trust)?);
     let connection = timeout(
