@@ -1,6 +1,6 @@
 use crate::http::codec::h2::{
-    h1_headers_to_http, h2_response_to_hyper_with_inflight, http_headers_to_h1,
-    http_uri_to_http1_uri, parse_declared_content_length,
+    InflightCounterGuard, h1_headers_to_http, h2_response_to_hyper_with_inflight,
+    http_headers_to_h1, http_uri_to_http1_uri, parse_declared_content_length,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::upstream::raw_http1::Http1ResponseWithInterim;
@@ -14,7 +14,7 @@ use qpx_http::body::Body;
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::AtomicUsize;
 use std::task::Poll;
 
 pub(super) fn prepare_proxy_h2_request(
@@ -67,7 +67,7 @@ pub(super) async fn send_h2_request_with_sender(
     upstream_cert: Option<UpstreamCertificateInfo>,
     inflight_streams: Option<Arc<AtomicUsize>>,
 ) -> Result<Http1ResponseWithInterim> {
-    let inflight = H2InflightReservation::new(inflight_streams);
+    let inflight = InflightCounterGuard::reserve(inflight_streams);
     let (parts, mut body) = req.into_parts();
     let declared_length = parse_declared_content_length(&parts.headers)?;
     let mut request = Http1Request::builder()
@@ -100,29 +100,6 @@ pub(super) async fn send_h2_request_with_sender(
         upstream_cert,
         response_finalized: false,
     })
-}
-
-struct H2InflightReservation(Option<Arc<AtomicUsize>>);
-
-impl H2InflightReservation {
-    fn new(counter: Option<Arc<AtomicUsize>>) -> Self {
-        if let Some(counter) = &counter {
-            counter.fetch_add(1, Ordering::Relaxed);
-        }
-        Self(counter)
-    }
-
-    fn into_counter(mut self) -> Option<Arc<AtomicUsize>> {
-        self.0.take()
-    }
-}
-
-impl Drop for H2InflightReservation {
-    fn drop(&mut self) {
-        if let Some(counter) = self.0.take() {
-            counter.fetch_sub(1, Ordering::Relaxed);
-        }
-    }
 }
 
 async fn stream_request_body_to_h2(

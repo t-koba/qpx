@@ -399,6 +399,24 @@ async fn h2_response_does_not_invent_a_content_length() {
     assert!(fields.is_empty());
 }
 
+#[test]
+fn inflight_counter_guard_releases_on_drop_and_transfers_once() {
+    let counter = Arc::new(AtomicUsize::new(0));
+    let reservation = InflightCounterGuard::reserve(Some(counter.clone()));
+    assert_eq!(counter.load(Ordering::Relaxed), 1);
+
+    let transferred = reservation.into_counter().expect("reserved counter");
+    assert_eq!(counter.load(Ordering::Relaxed), 1);
+    drop(InflightCounterGuard::from_existing(Some(transferred)));
+    assert_eq!(counter.load(Ordering::Relaxed), 0);
+
+    {
+        let _reservation = InflightCounterGuard::reserve(Some(counter.clone()));
+        assert_eq!(counter.load(Ordering::Relaxed), 1);
+    }
+    assert_eq!(counter.load(Ordering::Relaxed), 0);
+}
+
 #[tokio::test]
 async fn empty_h2_response_releases_inflight_immediately() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");

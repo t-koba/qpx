@@ -667,9 +667,26 @@ pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result
 #[error("HTTP/2 request header fields exceeded configured limits")]
 struct H2HeaderCountTooLarge;
 
-struct InflightRelease(Option<Arc<AtomicUsize>>);
+pub(crate) struct InflightCounterGuard(Option<Arc<AtomicUsize>>);
 
-impl Drop for InflightRelease {
+impl InflightCounterGuard {
+    pub(crate) fn from_existing(counter: Option<Arc<AtomicUsize>>) -> Self {
+        Self(counter)
+    }
+
+    pub(crate) fn reserve(counter: Option<Arc<AtomicUsize>>) -> Self {
+        if let Some(counter) = &counter {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        Self(counter)
+    }
+
+    pub(crate) fn into_counter(mut self) -> Option<Arc<AtomicUsize>> {
+        self.0.take()
+    }
+}
+
+impl Drop for InflightCounterGuard {
     fn drop(&mut self) {
         if let Some(counter) = self.0.take() {
             counter.fetch_sub(1, Ordering::Relaxed);
@@ -686,7 +703,7 @@ pub(crate) fn h2_response_body_with_inflight(
     inflight: Option<Arc<AtomicUsize>>,
 ) -> Body {
     if body.is_end_stream() {
-        drop(InflightRelease(inflight));
+        drop(InflightCounterGuard::from_existing(inflight));
         return Body::empty();
     }
     Body::wrap(H2RecvBody::response(body, inflight))
@@ -727,7 +744,7 @@ fn body_from_h2_stream(body: RecvStream, _body_channel_capacity: usize) -> Body 
 
 enum H2RecvBodyKind {
     Request { seen: u64 },
-    Response { _inflight: InflightRelease },
+    Response { _inflight: InflightCounterGuard },
 }
 
 enum H2RecvBodyState {
@@ -757,7 +774,7 @@ impl H2RecvBody {
         Self {
             body: Some(body),
             kind: H2RecvBodyKind::Response {
-                _inflight: InflightRelease(inflight),
+                _inflight: InflightCounterGuard::from_existing(inflight),
             },
             state: H2RecvBodyState::Data,
             read_timer: None,
