@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 /// The longest connection id a QUIC endpoint may use.
 pub(crate) const MAX_CONNECTION_ID_LEN: u8 = 20;
@@ -191,6 +192,12 @@ pub(crate) fn connection_id_len_bit(len: u8) -> Option<u32> {
     (1..=MAX_CONNECTION_ID_LEN)
         .contains(&len)
         .then_some(1u32 << len)
+}
+
+pub(crate) fn record_known_connection_id_len(bits: &AtomicU32, len: u8) {
+    if let Some(bit) = connection_id_len_bit(len) {
+        bits.fetch_or(bit, Ordering::Relaxed);
+    }
 }
 
 /// Visits the known connection-id lengths, shortest first, until `f` returns

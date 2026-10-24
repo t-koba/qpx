@@ -1,8 +1,8 @@
 use super::{
-    MAX_CIDS_PER_SESSION, QuicConnectionId, TransparentUdpSession, connection_id_len_bit,
-    find_by_known_connection_id_len, observe_client_quic_packet, observe_upstream_quic_packet,
-    parse_quic_long_header,
+    MAX_CIDS_PER_SESSION, QuicConnectionId, TransparentUdpSession, find_by_known_connection_id_len,
+    observe_client_quic_packet, observe_upstream_quic_packet, parse_quic_long_header,
 };
+use crate::http3::quic_packet::record_known_connection_id_len;
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -85,7 +85,7 @@ impl SharedSessionIndex {
         cids: Vec<QuicConnectionId>,
     ) {
         if let Some(server_cid_len) = session.server_cid_len() {
-            self.record_known_server_cid_len(server_cid_len);
+            record_known_connection_id_len(&self.known_server_cid_len_bits, server_cid_len);
         }
         self.insert(session_id, session);
         self.register_cids(session_id, cids);
@@ -178,7 +178,7 @@ impl SharedSessionIndex {
         self.register_cids(session_id, observation.connection_ids.into_iter().flatten());
         if let Some(len) = observation.server_cid_len {
             session.set_server_cid_len(len);
-            self.record_known_server_cid_len(len);
+            record_known_connection_id_len(&self.known_server_cid_len_bits, len);
         }
         if let Some(len) = observation.client_cid_len
             && session.client_cid_len().is_none()
@@ -356,13 +356,6 @@ impl SharedSessionIndex {
         }
         self.known_server_cid_len_bits.store(0, Ordering::Relaxed);
         drained
-    }
-
-    fn record_known_server_cid_len(&self, len: u8) {
-        if let Some(bit) = connection_id_len_bit(len) {
-            self.known_server_cid_len_bits
-                .fetch_or(bit, Ordering::Relaxed);
-        }
     }
 }
 

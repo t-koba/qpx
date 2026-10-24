@@ -8,9 +8,9 @@ use tokio::sync::mpsc;
 
 use super::session::{PassthroughSession, SessionTouch};
 use crate::http3::quic_packet::{
-    QuicConnectionId, client_packet_needs_cid_index_update, connection_id_len_bit,
-    find_by_known_connection_id_len, observe_client_quic_packet, observe_upstream_quic_packet,
-    parse_quic_long_header,
+    QuicConnectionId, client_packet_needs_cid_index_update, find_by_known_connection_id_len,
+    observe_client_quic_packet, observe_upstream_quic_packet, parse_quic_long_header,
+    record_known_connection_id_len,
 };
 
 const MAX_CIDS_PER_SESSION: usize = 32;
@@ -145,7 +145,7 @@ impl SharedSessionIndex {
         cids: Vec<QuicConnectionId>,
     ) {
         if let Some(server_cid_len) = session.server_cid_len() {
-            self.record_known_server_cid_len(server_cid_len);
+            record_known_connection_id_len(&self.known_server_cid_len_bits, server_cid_len);
         }
         self.insert_new(session_id, session);
         self.register_cids(session_id, cids);
@@ -209,7 +209,7 @@ impl SharedSessionIndex {
         self.register_cids(session_id, observation.connection_ids.into_iter().flatten());
         if let Some(len) = observation.server_cid_len {
             session.set_server_cid_len(len);
-            self.record_known_server_cid_len(len);
+            record_known_connection_id_len(&self.known_server_cid_len_bits, len);
         }
         if let Some(len) = observation.client_cid_len
             && session.client_cid_len().is_none()
@@ -444,12 +444,5 @@ impl SharedSessionIndex {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clear();
         drained
-    }
-
-    fn record_known_server_cid_len(&self, len: u8) {
-        if let Some(bit) = connection_id_len_bit(len) {
-            self.known_server_cid_len_bits
-                .fetch_or(bit, Ordering::Relaxed);
-        }
     }
 }

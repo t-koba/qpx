@@ -2,7 +2,7 @@ use super::state::RouteState;
 use super::{ROUTE_STATE_REFRESH_INTERVAL, ROUTE_STATE_SHARDS};
 use crate::http3::quic_packet::{
     QuicConnectionId, connection_id_len_bit, for_each_known_connection_id_len,
-    parse_quic_long_header, parse_quic_short_dcid,
+    parse_quic_long_header, parse_quic_short_dcid, record_known_connection_id_len,
 };
 use arc_swap::ArcSwap;
 use std::collections::HashMap;
@@ -60,7 +60,7 @@ impl SharedRouteState {
                 self.insert_cid(cid, now);
             }
             if long.dcid_len > 0 {
-                self.record_server_cid_len(long.dcid_len);
+                record_known_connection_id_len(&self.known_server_cid_len_bits, long.dcid_len);
             }
             return;
         }
@@ -82,7 +82,7 @@ impl SharedRouteState {
                 self.insert_cid(cid, now);
             }
             if long.scid_len > 0 {
-                self.record_server_cid_len(long.scid_len);
+                record_known_connection_id_len(&self.known_server_cid_len_bits, long.scid_len);
             }
         }
     }
@@ -199,13 +199,6 @@ impl SharedRouteState {
             .is_none_or(|seen_secs| {
                 now_secs.saturating_sub(*seen_secs) >= ROUTE_STATE_REFRESH_INTERVAL.as_secs()
             })
-    }
-
-    fn record_server_cid_len(&self, len: u8) {
-        if let Some(bit) = connection_id_len_bit(len) {
-            self.known_server_cid_len_bits
-                .fetch_or(bit, Ordering::Relaxed);
-        }
     }
 
     fn server_cid_len_known(&self, len: u8) -> bool {
