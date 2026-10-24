@@ -1,6 +1,6 @@
 use crate::http::codec::h1_common::{
-    TransferEncodingClassificationError, has_only_chunked_transfer_encoding_values,
-    is_sanitized_hop_header, raw_has_connection_token,
+    TransferEncodingClassificationError, append_header_line,
+    has_only_chunked_transfer_encoding_values, is_sanitized_hop_header, raw_has_connection_token,
 };
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
@@ -306,13 +306,6 @@ fn take_header_buffer(required_capacity: usize) -> BytesMut {
         buffer.reserve(required_capacity);
         buffer
     })
-}
-
-fn append_header_line(out: &mut BytesMut, name: &[u8], value: &[u8]) {
-    out.extend_from_slice(name);
-    out.extend_from_slice(b": ");
-    out.extend_from_slice(value);
-    out.extend_from_slice(b"\r\n");
 }
 
 fn validate_field_values(headers: &[httparse::Header<'_>]) -> Result<()> {

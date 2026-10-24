@@ -121,12 +121,16 @@ pub(crate) fn has_only_chunked_transfer_encoding_values<'a>(
     }
 }
 
+pub(crate) fn append_header_line(out: &mut impl BufMut, name: &[u8], value: &[u8]) {
+    out.put_slice(name);
+    out.put_slice(b": ");
+    out.put_slice(value);
+    out.put_slice(b"\r\n");
+}
+
 pub(crate) fn serialize_headers(headers: &HeaderMap, out: &mut impl BufMut) -> Result<()> {
     for (name, value) in headers {
-        out.put_slice(name.as_str().as_bytes());
-        out.put_slice(b": ");
-        out.put_slice(value.as_bytes());
-        out.put_slice(b"\r\n");
+        append_header_line(out, name.as_str().as_bytes(), value.as_bytes());
     }
     Ok(())
 }

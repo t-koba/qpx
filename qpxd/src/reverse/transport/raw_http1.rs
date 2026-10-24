@@ -2,7 +2,9 @@ use super::mirrors::{
     record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
 };
 use super::{InterimList, ReverseConnInfo};
-use crate::http::codec::h1_common::{is_sanitized_hop_header, raw_has_connection_token};
+use crate::http::codec::h1_common::{
+    append_header_line, is_sanitized_hop_header, raw_has_connection_token,
+};
 use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
 use crate::reverse::{CompiledReverse, ReloadableReverse};
 use crate::upstream::origin::{
@@ -959,13 +961,6 @@ fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {
         .iter()
         .any(|header| header.name.eq_ignore_ascii_case("upgrade"))
         || raw_has_connection_token(headers, b"upgrade")
-}
-
-fn append_header_line(out: &mut BytesMut, name: &[u8], value: &[u8]) {
-    out.extend_from_slice(name);
-    out.extend_from_slice(b": ");
-    out.extend_from_slice(value);
-    out.extend_from_slice(b"\r\n");
 }
 
 #[cfg(test)]
