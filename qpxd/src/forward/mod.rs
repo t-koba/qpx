@@ -13,7 +13,9 @@ use crate::tcp_bindings::filter::{
     ConnectionFilterStage, emit_connection_filter_audit, evaluate_connection_filter,
 };
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
-use anyhow::{Result, anyhow};
+use anyhow::Result;
+#[cfg(feature = "http3")]
+use anyhow::anyhow;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::config::IngressEdgeConfig;
 use qpx_core::rules::RuleMatchContext;
