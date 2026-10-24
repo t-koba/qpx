@@ -107,9 +107,3 @@ pub(super) fn evaluate_tls_policy_decision(
             .unwrap_or(false),
     })
 }
-
-pub(super) fn listener_requires_upstream_cert_preview(
-    listener_cfg: &crate::runtime::CompiledListenerSettings,
-) -> bool {
-    listener_cfg.requires_upstream_cert_preview
-}

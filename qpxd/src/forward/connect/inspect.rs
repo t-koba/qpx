@@ -154,9 +154,3 @@ pub(in crate::forward) fn listener_upstream_tls_settings(
         forward_connect_verify_upstream(state, Some(listener_cfg), listener_name, host);
     Ok((verify_upstream, trust))
 }
-
-pub(in crate::forward) fn listener_requires_upstream_cert_preview(
-    listener_cfg: &crate::runtime::CompiledListenerSettings,
-) -> bool {
-    listener_cfg.requires_upstream_cert_preview
-}

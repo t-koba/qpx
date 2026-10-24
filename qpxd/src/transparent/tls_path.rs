@@ -97,7 +97,7 @@ where
         upstream_cert: None,
     })?;
     if client_hello.is_some()
-        && listener_requires_upstream_cert_preview(listener_cfg)
+        && listener_cfg.requires_upstream_cert_preview
         && matches!(
             decision.action.kind,
             ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
@@ -414,7 +414,4 @@ mod mitm;
 #[cfg(feature = "mitm")]
 use self::mitm::{TransparentMitmContext, transparent_mitm};
 mod policy;
-use self::policy::{
-    TransparentTlsPolicyInput, evaluate_tls_policy_decision,
-    listener_requires_upstream_cert_preview,
-};
+use self::policy::{TransparentTlsPolicyInput, evaluate_tls_policy_decision};

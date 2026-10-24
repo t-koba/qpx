@@ -52,7 +52,6 @@ pub(super) use self::inspect::listener_upstream_tls_settings;
 pub(super) use self::inspect::{
     ConnectPolicyInput, decide_connect_action_from_client_hello,
     decide_connect_action_from_tls_metadata, forward_connect_verify_upstream,
-    listener_requires_upstream_cert_preview,
 };
 #[cfg(all(
     feature = "http3",

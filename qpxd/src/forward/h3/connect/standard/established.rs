@@ -1,6 +1,5 @@
 use super::super::super::super::connect::{
     ConnectPolicyInput, decide_connect_action_from_tls_metadata, forward_connect_verify_upstream,
-    listener_requires_upstream_cert_preview,
 };
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::build_h3_connect_success_response;
@@ -98,7 +97,7 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
     let listener_trust = listener_cfg.upstream_tls_trust();
     let mut server = Some(server);
     if let Some(client_hello) = client_hello.as_ref()
-        && listener_requires_upstream_cert_preview(listener_cfg)
+        && listener_cfg.requires_upstream_cert_preview
         && matches!(
             action.kind,
             ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
