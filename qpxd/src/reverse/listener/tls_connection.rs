@@ -86,70 +86,12 @@ where
     }
 }
 
-#[cfg(feature = "tls-rustls")]
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 struct ReverseTlsContext {
     reverse: ReloadableReverse,
 }
 
-#[cfg(feature = "tls-rustls")]
-pub(crate) async fn run_reverse_tls_acceptor(
-    listener: TcpListener,
-    xdp_cfg: Option<crate::xdp::CompiledXdpConfig>,
-    reverse: ReloadableReverse,
-    mut shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let semaphore = reverse.runtime.state().connection_semaphore.clone();
-    loop {
-        let Some((permit, stream, remote_addr)) = accept_tcp_with_connection_permit(
-            &listener,
-            &semaphore,
-            &mut shutdown,
-            "reverse TLS accept failed",
-        )
-        .await?
-        else {
-            break;
-        };
-        let Some(local_port) = prepare_accepted_stream(&stream, "reverse") else {
-            continue;
-        };
-        let reverse = reverse.clone();
-        let xdp_cfg = xdp_cfg.clone();
-        let reverse_name = reverse.name.clone();
-        tokio::spawn(async move {
-            let _permit = permit;
-            let Some((stream, remote_addr, _header_read_timeout)) =
-                prepare_reverse_accepted_stream(
-                    &reverse,
-                    stream,
-                    remote_addr,
-                    xdp_cfg.as_ref(),
-                    local_port,
-                )
-                .await
-            else {
-                return;
-            };
-            let reverse_name_for_log = reverse_name.clone();
-            let ctx = ReverseTlsContext { reverse };
-            if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {
-                record_reverse_tls_connection_error(
-                    &err,
-                    reverse_name_for_log.as_ref(),
-                    remote_addr,
-                );
-            }
-        });
-    }
-    Ok(())
-}
-
-#[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
-struct ReverseTlsContext {
-    reverse: ReloadableReverse,
-}
-
-#[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
+#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) async fn run_reverse_tls_acceptor(
     listener: TcpListener,
     xdp_cfg: Option<crate::xdp::CompiledXdpConfig>,
