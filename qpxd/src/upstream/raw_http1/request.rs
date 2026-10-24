@@ -1,4 +1,5 @@
 use super::parse_declared_content_length;
+use crate::http::body::{poll_body_data_now, poll_body_trailers_now};
 use crate::http::codec::h1::write::{chunk_size_header, write_vectored_all};
 use crate::http::codec::h1_common::serialize_headers;
 use anyhow::{Result, anyhow};
@@ -8,7 +9,6 @@ use hyper::header::{
 };
 use hyper::{Method, Request, Version};
 use qpx_http::body::Body;
-use std::future::{Future, poll_fn};
 use std::task::Poll;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
 
@@ -27,7 +27,10 @@ where
     let declared_length = parse_declared_content_length(&headers)?;
     let body_is_end_stream = http_body::Body::is_end_stream(&body);
     let first_chunk = if declared_length.is_none() && !body_is_end_stream {
-        poll_body_data_now(&mut body).await?
+        match poll_body_data_now(&mut body).await? {
+            Poll::Ready(chunk) => chunk,
+            Poll::Pending => None,
+        }
     } else {
         None
     };
@@ -190,30 +193,6 @@ fn append_http1_request_target(
     } else {
         head.extend_from_slice(b"/");
     }
-}
-
-async fn poll_body_data_now(body: &mut Body) -> Result<Option<Bytes>> {
-    poll_fn(|cx| {
-        let future = body.data();
-        let mut future = std::pin::pin!(future);
-        match Future::poll(future.as_mut(), cx) {
-            Poll::Ready(chunk) => Poll::Ready(chunk.transpose().map_err(Into::into)),
-            Poll::Pending => Poll::Ready(Ok(None)),
-        }
-    })
-    .await
-}
-
-async fn poll_body_trailers_now(body: &mut Body) -> Result<Option<HeaderMap>> {
-    poll_fn(|cx| {
-        let future = body.trailers();
-        let mut future = std::pin::pin!(future);
-        match Future::poll(future.as_mut(), cx) {
-            Poll::Ready(trailers) => Poll::Ready(trailers.map_err(Into::into)),
-            Poll::Pending => Poll::Ready(Ok(None)),
-        }
-    })
-    .await
 }
 
 async fn write_content_length_body<S>(

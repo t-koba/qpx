@@ -1,6 +1,7 @@
 use super::write::{chunk_size_header, write_vectored_all};
 use super::zero_copy::ZeroCopySocket;
 use super::{RESPONSE_WRITE_TIMEOUT, parse_declared_content_length};
+use crate::http::body::{poll_body_data_now, poll_body_trailers_now};
 use crate::http::codec::h1_common::{has_only_chunked_transfer_encoding, serialize_headers};
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::{
@@ -16,6 +17,7 @@ use hyper::header::{
 };
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::response_status_has_no_body;
+#[cfg(not(target_os = "linux"))]
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
 use std::task::Poll;
@@ -303,7 +305,7 @@ where
     let mut first_body_error = None;
     let mut body_data_finished = false;
     if !matches!(body_kind, ResponseBodyKind::Empty) && file_region.is_none() {
-        match poll_response_body_data_now(&mut body).await {
+        match poll_body_data_now(&mut body).await {
             Ok(Poll::Ready(chunk)) => {
                 body_data_finished = chunk.is_none();
                 first_chunk = chunk;
@@ -312,7 +314,7 @@ where
             Err(err) => first_body_error = Some(err),
         }
         if first_body_error.is_none() && body_data_finished {
-            match poll_response_trailers_now(&mut body).await {
+            match poll_body_trailers_now(&mut body).await {
                 Ok(trailers) => first_trailers = trailers,
                 Err(err) => first_body_error = Some(err),
             }
@@ -977,32 +979,6 @@ where
     .await
     .map_err(|_| anyhow!("HTTP/1 response write timed out"))?
     .map_err(Into::into)
-}
-
-async fn poll_response_body_data_now(body: &mut Body) -> Result<Poll<Option<Bytes>>> {
-    poll_fn(|cx| {
-        let future = body.data();
-        let mut future = std::pin::pin!(future);
-        match Future::poll(future.as_mut(), cx) {
-            Poll::Ready(chunk) => {
-                Poll::Ready(chunk.transpose().map(Poll::Ready).map_err(Into::into))
-            }
-            Poll::Pending => Poll::Ready(Ok(Poll::Pending)),
-        }
-    })
-    .await
-}
-
-async fn poll_response_trailers_now(body: &mut Body) -> Result<Option<HeaderMap>> {
-    poll_fn(|cx| {
-        let future = body.trailers();
-        let mut future = std::pin::pin!(future);
-        match Future::poll(future.as_mut(), cx) {
-            Poll::Ready(trailers) => Poll::Ready(trailers.map_err(Into::into)),
-            Poll::Pending => Poll::Ready(Ok(None)),
-        }
-    })
-    .await
 }
 
 async fn flush_with_timeout<W>(writer: &mut W) -> Result<()>
