@@ -157,6 +157,7 @@ mod tests {
         use crate::reverse::transport::{InterimList, ReverseConnInfo};
         use hyper::{Method, Request, Response, StatusCode, Version};
         use qpx_http::body::{Body, to_bytes};
+        use std::time::Duration;
 
         // Exercise the real policy, cache, health, finalizer and capture owners with
         // synthetic responses; no transport or lifecycle callbacks are substituted.
