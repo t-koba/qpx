@@ -6,7 +6,9 @@ use anyhow::{Result, anyhow};
 use http::HeaderMap;
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::rules::RuleMatchContext;
-use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
+#[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
+use qpx_core::tls::CompiledUpstreamTlsTrust;
+use qpx_core::tls::UpstreamCertificateInfo;
 use std::net::SocketAddr;
 
 pub(in crate::forward) struct ConnectPolicyInput<'a> {
@@ -126,15 +128,6 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
     }
 }
 
-pub(in crate::forward) fn listener_upstream_trust(
-    listener_cfg: &crate::runtime::CompiledListenerSettings,
-) -> Result<Option<std::sync::Arc<CompiledUpstreamTlsTrust>>> {
-    Ok(listener_cfg
-        .tls_inspection
-        .as_ref()
-        .and_then(|cfg| cfg.upstream_trust.clone()))
-}
-
 pub(in crate::forward) fn forward_connect_verify_upstream(
     state: &crate::runtime::RuntimeState,
     listener_cfg: Option<&crate::runtime::CompiledListenerSettings>,
@@ -156,7 +149,7 @@ pub(in crate::forward) fn listener_upstream_tls_settings(
     let listener_cfg = state
         .ingress_edge_settings(listener_name)
         .ok_or_else(|| anyhow!("listener not found"))?;
-    let trust = listener_upstream_trust(listener_cfg)?;
+    let trust = listener_cfg.upstream_tls_trust();
     let verify_upstream =
         forward_connect_verify_upstream(state, Some(listener_cfg), listener_name, host);
     Ok((verify_upstream, trust))

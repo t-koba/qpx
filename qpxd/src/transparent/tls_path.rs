@@ -84,7 +84,7 @@ where
     let effective_policy = base_plan.policy_context.clone();
     let identity =
         resolve_identity(&state, &effective_policy, remote_addr.ip(), None, None).await?;
-    let listener_trust = listener_upstream_trust(listener_cfg)?;
+    let listener_trust = listener_cfg.upstream_tls_trust();
     let mut decision = evaluate_tls_policy_decision(TransparentTlsPolicyInput {
         runtime: &runtime,
         listener_name,
@@ -416,5 +416,5 @@ use self::mitm::{TransparentMitmContext, transparent_mitm};
 mod policy;
 use self::policy::{
     TransparentTlsPolicyInput, evaluate_tls_policy_decision,
-    listener_requires_upstream_cert_preview, listener_upstream_trust,
+    listener_requires_upstream_cert_preview,
 };

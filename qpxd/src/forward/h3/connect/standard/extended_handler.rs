@@ -7,7 +7,7 @@ use super::extended::{
 use super::{
     H3PolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
 };
-use crate::forward::connect::{forward_connect_verify_upstream, listener_upstream_trust};
+use crate::forward::connect::forward_connect_verify_upstream;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
 use crate::http::protocol::l7::finalize_response_with_headers;
@@ -149,10 +149,7 @@ pub(crate) async fn handle_h3_extended_connect(
         handler.listener_name.as_ref(),
         host.as_str(),
     );
-    let listener_trust = listener_cfg
-        .map(listener_upstream_trust)
-        .transpose()?
-        .flatten();
+    let listener_trust = listener_cfg.and_then(|cfg| cfg.upstream_tls_trust());
 
     let upstream = match open_upstream_extended_connect_stream(OpenUpstreamExtendedConnectInput {
         req_head: &req_head,

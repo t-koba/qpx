@@ -168,10 +168,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
 
     if let Some(upstream) = upstream {
         let listener_cfg = state.ingress_edge_settings(handler.listener_name.as_ref());
-        let listener_trust = listener_cfg
-            .map(crate::forward::connect::listener_upstream_trust)
-            .transpose()?
-            .flatten();
+        let listener_trust = listener_cfg.and_then(|cfg| cfg.upstream_tls_trust());
         let upstream_params = UpstreamConnectUdpParams {
             upstream: &upstream,
             target_host: host.as_str(),

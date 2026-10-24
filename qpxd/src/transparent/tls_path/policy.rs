@@ -5,9 +5,8 @@ use crate::tls::TlsClientHelloInfo;
 use anyhow::{Result, anyhow};
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::RuleMatchContext;
-use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
+use qpx_core::tls::UpstreamCertificateInfo;
 use std::net::SocketAddr;
-use std::sync::Arc;
 
 #[derive(Debug, Clone)]
 pub(super) struct TransparentTlsDecision {
@@ -107,15 +106,6 @@ pub(super) fn evaluate_tls_policy_decision(
             .map(|auth| !auth.require.is_empty())
             .unwrap_or(false),
     })
-}
-
-pub(super) fn listener_upstream_trust(
-    listener_cfg: &crate::runtime::CompiledListenerSettings,
-) -> Result<Option<Arc<CompiledUpstreamTlsTrust>>> {
-    Ok(listener_cfg
-        .tls_inspection
-        .as_ref()
-        .and_then(|cfg| cfg.upstream_trust.clone()))
 }
 
 pub(super) fn listener_requires_upstream_cert_preview(

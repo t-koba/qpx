@@ -312,6 +312,14 @@ pub struct CompiledTlsInspectionSettings {
     pub(crate) upstream_trust: Option<Arc<CompiledUpstreamTlsTrust>>,
 }
 
+impl CompiledListenerSettings {
+    pub(crate) fn upstream_tls_trust(&self) -> Option<Arc<CompiledUpstreamTlsTrust>> {
+        self.tls_inspection
+            .as_ref()
+            .and_then(|cfg| cfg.upstream_trust.clone())
+    }
+}
+
 #[derive(Clone)]
 pub struct CompiledReverseEdge {
     pub name: Arc<str>,

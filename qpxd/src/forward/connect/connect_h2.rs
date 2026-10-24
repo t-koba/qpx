@@ -4,7 +4,6 @@ use super::extended::{
     H2ExtendedConnectUpstream, default_port_for_scheme, open_upstream_h2_extended_connect_stream,
     spawn_h2_extended_connect_relay,
 };
-use super::inspect::listener_upstream_trust;
 use crate::destination::DestinationInputs;
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
@@ -376,7 +375,7 @@ pub(super) async fn handle_h2_extended_connect(
         proxy_name,
         upstream_url.as_deref(),
         upstream_timeout,
-        listener_upstream_trust(listener_cfg)?.as_deref(),
+        listener_cfg.upstream_tls_trust().as_deref(),
     )
     .await
     {

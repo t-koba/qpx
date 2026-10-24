@@ -1,7 +1,7 @@
 use super::{
     ConnectPolicyInput, decide_connect_action_from_client_hello,
     decide_connect_action_from_tls_metadata, forward_connect_verify_upstream,
-    listener_requires_upstream_cert_preview, listener_upstream_trust, resolve_upstream,
+    listener_requires_upstream_cert_preview, resolve_upstream,
 };
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
@@ -73,7 +73,7 @@ pub(super) async fn tunnel_connect(
     let upgraded = timeout(upgrade_wait, crate::http::protocol::upgrade::on(&mut req)).await??;
     let (client_io, client_hello, action) =
         prepare_connect_client_io(upgraded, &runtime, &ctx).await?;
-    let listener_upstream_trust = listener_upstream_trust(listener_cfg)?;
+    let listener_upstream_trust = listener_cfg.upstream_tls_trust();
     let (action, server) = prepare_connect_upstream_after_preview(
         &runtime,
         listener_cfg,
