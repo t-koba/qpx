@@ -5,7 +5,6 @@ use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_http::protocol::semantics::capsule_protocol_enabled;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
 use tokio::time::{Duration, timeout};

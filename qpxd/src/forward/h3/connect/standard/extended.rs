@@ -12,7 +12,6 @@ use bytes::Bytes;
 use hyper::Response;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::net::lookup_host;
 use tokio::time::{Duration, timeout};

@@ -14,7 +14,6 @@ use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_request_trailers;
 use std::collections::HashMap;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::net::lookup_host;
