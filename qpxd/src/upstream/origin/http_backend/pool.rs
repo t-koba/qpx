@@ -635,12 +635,7 @@ where
     F: FnOnce() -> V,
 {
     let shard = &pool[qpx_http::sharding::modulo(&key, DIRECT_ORIGIN_POOL_SHARDS)];
-    if let Some(slot) = shard
-        .read()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .get(&key)
-        .cloned()
-    {
+    if let Some(slot) = crate::index_read::read_cloned(shard, &key) {
         return slot;
     }
     let mut guard = shard
