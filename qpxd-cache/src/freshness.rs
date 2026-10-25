@@ -1,7 +1,7 @@
 use super::types::{
     ByteRangeSpec, CachedResponseEnvelope, IfRangeCondition, RequestDirectives, ResponseDirectives,
 };
-use http::header::{AGE, DATE, ETAG, EXPIRES, IF_NONE_MATCH, LAST_MODIFIED};
+use http::header::{AGE, DATE, EXPIRES, IF_NONE_MATCH};
 use qpx_core::config::CachePolicyConfig;
 
 pub fn current_age_secs(envelope: &CachedResponseEnvelope, now_ms: u64) -> u64 {
@@ -75,7 +75,7 @@ pub fn conditional_not_modified(
         if req.if_none_match.iter().any(|tag| tag == "*") {
             return true;
         }
-        if let Some(etag) = envelope.header_str(&ETAG)
+        if let Some(etag) = envelope.etag()
             && req
                 .if_none_match
                 .iter()
@@ -89,9 +89,7 @@ pub fn conditional_not_modified(
 
     if let (Some(if_modified_since), Some(last_modified)) = (
         req.if_modified_since,
-        envelope
-            .header_str(&LAST_MODIFIED)
-            .and_then(parse_http_date_secs),
+        envelope.last_modified().and_then(parse_http_date_secs),
     ) && last_modified <= if_modified_since
     {
         return true;
@@ -107,9 +105,7 @@ pub fn precondition_failed(req: &RequestDirectives, envelope: &CachedResponseEnv
 
     if let (Some(if_unmodified_since), Some(last_modified)) = (
         req.if_unmodified_since,
-        envelope
-            .header_str(&LAST_MODIFIED)
-            .and_then(parse_http_date_secs),
+        envelope.last_modified().and_then(parse_http_date_secs),
     ) && last_modified > if_unmodified_since
     {
         return true;
@@ -151,7 +147,7 @@ fn if_match_succeeds(req: &RequestDirectives, envelope: &CachedResponseEnvelope)
     if req.if_match.iter().any(|tag| tag == "*") {
         return true;
     }
-    let Some(etag) = envelope.header_str(&ETAG) else {
+    let Some(etag) = envelope.etag() else {
         return false;
     };
     req.if_match
@@ -176,7 +172,7 @@ fn strong_etag_eq(lhs: &str, rhs: &str) -> bool {
 fn if_range_matches(condition: &IfRangeCondition, envelope: &CachedResponseEnvelope) -> bool {
     match condition {
         IfRangeCondition::Etag(expected) => envelope
-            .header_str(&ETAG)
+            .etag()
             .is_some_and(|etag| strong_etag_eq(expected, etag)),
         // RFC 9110 §§13.1.5, 8.8.2.2: an If-Range date matches only on
         // exact equality (unlike If-Unmodified-Since's <= test), and only
@@ -189,10 +185,8 @@ fn if_range_matches(condition: &IfRangeCondition, envelope: &CachedResponseEnvel
         // evidence the date branch is false and Range is ignored, so a
         // same-second rewrite can never yield a stitched 206.
         IfRangeCondition::Date(expected) => {
-            let last_modified = envelope
-                .header_str(&LAST_MODIFIED)
-                .and_then(parse_http_date_secs);
-            let date = envelope.header_str(&DATE).and_then(parse_http_date_secs);
+            let last_modified = envelope.last_modified().and_then(parse_http_date_secs);
+            let date = envelope.date().and_then(parse_http_date_secs);
             match (last_modified, date) {
                 (Some(last_modified), Some(date)) => {
                     last_modified == *expected && date > last_modified

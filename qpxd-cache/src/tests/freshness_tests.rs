@@ -654,3 +654,74 @@ async fn must_revalidate_blocks_stale_if_error_at_exact_expiry() {
     state.envelope.stored_at_ms = now.saturating_sub(60_000);
     assert!(maybe_build_stale_if_error_response(&state).await.is_none());
 }
+
+#[test]
+fn fixed_envelope_accessors_preserve_first_value_and_invalid_text_behavior() {
+    let mut headers = http::HeaderMap::new();
+    headers.append(
+        http::header::ETAG,
+        http::HeaderValue::from_static("\"first\""),
+    );
+    headers.append(
+        http::header::ETAG,
+        http::HeaderValue::from_static("\"second\""),
+    );
+    headers.append(
+        http::header::LAST_MODIFIED,
+        http::HeaderValue::from_static("Mon, 01 Jan 2024 00:00:00 GMT"),
+    );
+    headers.append(
+        http::header::LAST_MODIFIED,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    headers.append(
+        http::header::DATE,
+        http::HeaderValue::from_static("Wed, 03 Jan 2024 00:00:00 GMT"),
+    );
+    headers.append(
+        http::header::DATE,
+        http::HeaderValue::from_static("Thu, 04 Jan 2024 00:00:00 GMT"),
+    );
+    let envelope = envelope_with_hydrated_headers(headers);
+
+    assert_eq!(envelope.etag(), Some("\"first\""));
+    assert_eq!(
+        envelope.last_modified(),
+        Some("Mon, 01 Jan 2024 00:00:00 GMT")
+    );
+    assert_eq!(envelope.date(), Some("Wed, 03 Jan 2024 00:00:00 GMT"));
+
+    let mut invalid_first = http::HeaderMap::new();
+    invalid_first.append(
+        http::header::ETAG,
+        http::HeaderValue::from_bytes(&[0xff]).expect("obs-text header value"),
+    );
+    invalid_first.append(
+        http::header::ETAG,
+        http::HeaderValue::from_static("\"valid\""),
+    );
+    assert_eq!(envelope_with_hydrated_headers(invalid_first).etag(), None);
+}
+
+fn envelope_with_hydrated_headers(headers: http::HeaderMap) -> CachedResponseEnvelope {
+    let envelope = CachedResponseEnvelope {
+        status: 200,
+        headers: Vec::new(),
+        body: CachedBody::default(),
+        body_len: 0,
+        stored_at_ms: 0,
+        initial_age_secs: 0,
+        response_delay_secs: 0,
+        freshness_lifetime_secs: 0,
+        vary_headers: Vec::new(),
+        vary_values: Vec::new(),
+        header_map: Default::default(),
+        response_directives: Default::default(),
+        response_header_values: Default::default(),
+    };
+    envelope
+        .header_map
+        .set(Box::new(headers))
+        .expect("fresh lock");
+    envelope
+}

@@ -14,7 +14,7 @@ use super::types::{
 use super::util::{cache_namespace, now_millis};
 use super::vary::matches_vary;
 use anyhow::Result;
-use http::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
+use http::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_content_length::HeaderView;
@@ -379,8 +379,8 @@ pub fn attach_revalidation_headers(
         return false;
     }
 
-    let etag = state.envelope.header_str(&ETAG);
-    let last_modified = state.envelope.header_str(&LAST_MODIFIED);
+    let etag = state.envelope.etag();
+    let last_modified = state.envelope.last_modified();
     let mut attached = false;
 
     if let Some(v) = etag

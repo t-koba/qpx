@@ -359,7 +359,7 @@ pub struct CachedResponseEnvelope {
     /// built once on first access so lookup-path freshness/directive parsing does
     /// not rebuild a `HeaderMap` from the stored `Vec` on every call. Boxed to keep
     /// `CachedResponseEnvelope` small (it is embedded by value in several enums).
-    /// Access via [`CachedResponseEnvelope::header_map`] / [`CachedResponseEnvelope::header_str`].
+    /// Access via [`CachedResponseEnvelope::header_map`] and the fixed validator/date accessors.
     pub header_map: OnceLock<Box<http::HeaderMap>>,
     /// Parsed response cache directives derived from `header_map`. They are immutable
     /// for the lifetime of an envelope, so repeated hot-cache lookups reuse one parse.
@@ -386,9 +386,25 @@ impl CachedResponseEnvelope {
             .get_or_init(|| Box::new(super::entry::header_map_from_vec(&self.headers)))
     }
 
-    /// First case-insensitive value for `name` from the hydrated headers.
-    pub fn header_str(&self, name: &http::HeaderName) -> Option<&str> {
-        self.header_map().get(name).and_then(|v| v.to_str().ok())
+    /// First case-insensitive ETag value from the hydrated headers.
+    pub fn etag(&self) -> Option<&str> {
+        self.header_map()
+            .get(http::header::ETAG)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    /// First case-insensitive Last-Modified value from the hydrated headers.
+    pub fn last_modified(&self) -> Option<&str> {
+        self.header_map()
+            .get(http::header::LAST_MODIFIED)
+            .and_then(|value| value.to_str().ok())
+    }
+
+    /// First case-insensitive Date value from the hydrated headers.
+    pub fn date(&self) -> Option<&str> {
+        self.header_map()
+            .get(http::header::DATE)
+            .and_then(|value| value.to_str().ok())
     }
 
     pub fn response_directives(&self) -> &ResponseDirectives {
