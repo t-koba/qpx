@@ -19,6 +19,7 @@ use anyhow::Result;
 use http::header::{AUTHORIZATION, CONTENT_LOCATION, EXPIRES, SET_COOKIE};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_content_length::HeaderView;
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -130,7 +131,7 @@ pub async fn maybe_store(
     let initial_age_secs =
         initial_age_secs(response.headers(), now, context.timing.response_delay_secs);
     let Some(vary_values) = cache_vary_values(
-        request_headers,
+        HeaderView::new(request_headers),
         &vary,
         storage_key.content_digest.as_deref(),
     ) else {
@@ -387,7 +388,7 @@ pub async fn revalidate_not_modified(
             freshness_lifetime_secs: freshness,
             vary_headers: vary_headers.clone(),
             vary_values: refreshed_vary_values(
-                request_headers,
+                HeaderView::new(request_headers),
                 &vary_headers,
                 &state.envelope.vary_values,
             ),
@@ -416,7 +417,7 @@ pub async fn revalidate_not_modified(
         freshness_lifetime_secs: freshness,
         vary_headers: vary_headers.clone(),
         vary_values: refreshed_vary_values(
-            request_headers,
+            HeaderView::new(request_headers),
             &vary_headers,
             &state.envelope.vary_values,
         ),
@@ -550,7 +551,7 @@ fn has_explicit_freshness(
 }
 
 fn cache_vary_values(
-    request_headers: &http::HeaderMap,
+    request_headers: HeaderView<'_>,
     vary_headers: &[String],
     content_digest: Option<&str>,
 ) -> Option<Vec<(String, String)>> {
@@ -562,7 +563,7 @@ fn cache_vary_values(
 }
 
 fn refreshed_vary_values(
-    request_headers: &http::HeaderMap,
+    request_headers: HeaderView<'_>,
     vary_headers: &[String],
     previous: &[(String, String)],
 ) -> Vec<(String, String)> {

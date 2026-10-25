@@ -533,13 +533,14 @@ pub fn canonical_content_length_value(length: u64) -> HeaderValue {
     HeaderValue::from(length)
 }
 
-/// Opaque header view for `RuleMatchContext`-based policy matching.
+/// Opaque header view for policy matching and cache Vary selection.
 ///
-/// Matchers using that context receive this view instead of the raw map.
+/// Matchers using `RuleMatchContext` receive this view instead of the raw map.
 /// Its closed predicates expose no raw accessor, `Deref`, conversion, or
 /// value callback; Debug also hides the map. This boundary does not enforce
 /// header ownership elsewhere in the workspace. Trace diagnostics intentionally
-/// expose the selected textual value.
+/// expose the selected textual value. Cache Vary selection deliberately exposes
+/// a normalized textual projection; this is not whole-workspace ownership.
 ///
 /// Configured names remain case-insensitive and dynamic. Predicates require a
 /// textual value: invalid `to_str()` values are skipped, and value order is
@@ -585,10 +586,50 @@ pub struct HeaderDiagnostic {
     pub matched: bool,
 }
 
+/// Closed result of selecting a field's ordered textual values.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HeaderTextSelection {
+    /// The name is invalid or at least one value is not representable as text.
+    Unrepresentable,
+    /// No field value exists for the validated name.
+    Absent,
+    /// All values, individually trimmed and comma-joined in encounter order.
+    Present(String),
+}
+
 impl<'a> HeaderView<'a> {
-    /// Borrows a header map for closed policy matching.
+    /// Borrows a header map for closed selection and policy matching.
     pub fn new(map: &'a HeaderMap) -> Self {
         Self { inner: map }
+    }
+
+    /// Selects a validated, case-insensitive name as trimmed, comma-joined text.
+    ///
+    /// Unlike policy predicates, any non-textual duplicate fails the selection.
+    /// This deliberate Vary escape preserves literal field text, including
+    /// Content-Length spelling; it does not parse or canonicalize a declaration.
+    /// Cache policy and absent/present sentinel encoding belong to the caller.
+    pub fn joined_text(&self, name: &str) -> HeaderTextSelection {
+        let Ok(name) = http::HeaderName::from_bytes(name.as_bytes()) else {
+            return HeaderTextSelection::Unrepresentable;
+        };
+        let mut joined = None;
+        for value in self.inner.get_all(name).iter() {
+            let Ok(text) = value.to_str() else {
+                return HeaderTextSelection::Unrepresentable;
+            };
+            match &mut joined {
+                None => joined = Some(text.trim().to_owned()),
+                Some(out) => {
+                    out.push(',');
+                    out.push_str(text.trim());
+                }
+            }
+        }
+        match joined {
+            None => HeaderTextSelection::Absent,
+            Some(text) => HeaderTextSelection::Present(text),
+        }
     }
 
     /// Whether any textual value for `name` matches, without allocating.
@@ -631,6 +672,54 @@ impl<'a> HeaderView<'a> {
 mod tests {
     use super::*;
     use http::HeaderValue;
+
+    #[test]
+    fn header_view_joined_text_validates_names_and_distinguishes_absent_from_empty() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-value", HeaderValue::from_static(""));
+        let view = HeaderView::new(&headers);
+        for name in ["", "bad name", "x-value:", "é"] {
+            assert_eq!(view.joined_text(name), HeaderTextSelection::Unrepresentable);
+        }
+        assert_eq!(view.joined_text("x-missing"), HeaderTextSelection::Absent);
+        assert_eq!(
+            view.joined_text("X-Value"),
+            HeaderTextSelection::Present(String::new())
+        );
+    }
+
+    #[test]
+    fn header_view_joined_text_preserves_order_and_trims_each_duplicate() {
+        let mut headers = HeaderMap::new();
+        for value in [" \tsecond ", "", " first\t", " a, b "] {
+            headers.append("x-value", HeaderValue::from_static(value));
+        }
+        assert_eq!(
+            HeaderView::new(&headers).joined_text("X-VALUE"),
+            HeaderTextSelection::Present("second,,first,a, b".to_owned())
+        );
+    }
+
+    #[test]
+    fn header_view_joined_text_rejects_any_non_textual_duplicate() {
+        for invalid_position in 0..3 {
+            let mut headers = HeaderMap::new();
+            for position in 0..3 {
+                headers.append(
+                    "x-value",
+                    if position == invalid_position {
+                        HeaderValue::from_bytes(&[0x80]).unwrap()
+                    } else {
+                        HeaderValue::from_static("ascii")
+                    },
+                );
+            }
+            assert_eq!(
+                HeaderView::new(&headers).joined_text("x-value"),
+                HeaderTextSelection::Unrepresentable
+            );
+        }
+    }
 
     #[test]
     fn header_view_debug_redacts_values_including_context_headers_and_trailers() {

@@ -231,7 +231,7 @@ fn vary_matching_works() {
         freshness_lifetime_secs: 30,
         vary_headers: vec!["accept-language".to_string()],
         vary_values: super::vary::vary_values_from_request_headers(
-            &req_headers,
+            qpx_core::http_content_length::HeaderView::new(&req_headers),
             &["accept-language".to_string()],
         )
         .expect("encodable vary selector"),
@@ -239,5 +239,9 @@ fn vary_matching_works() {
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
-    assert!(matches_vary(&req_headers, None, &envelope));
+    assert!(matches_vary(
+        qpx_core::http_content_length::HeaderView::new(&req_headers),
+        None,
+        &envelope,
+    ));
 }

@@ -17,6 +17,7 @@ use anyhow::Result;
 use http::header::{ETAG, IF_MODIFIED_SINCE, IF_NONE_MATCH, LAST_MODIFIED};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_content_length::HeaderView;
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ pub async fn lookup(
         return Ok(LookupOutcome::Miss);
     };
 
+    let vary_headers = HeaderView::new(request_headers);
     let namespace = cache_namespace(policy, "default");
     if can_use_hot_response_candidate(request_method, &req) {
         let storage_key = key.primary_index_storage_key_arc();
@@ -51,7 +53,7 @@ pub async fn lookup(
             key.primary_default_variant_storage_key().as_ref(),
             now,
         )? && matches_vary(
-            request_headers,
+            vary_headers,
             key.content_digest.as_deref(),
             candidate.envelope.as_ref(),
         ) && matches!(
@@ -93,7 +95,7 @@ pub async fn lookup(
         let Some(envelope) = envelope else {
             continue;
         };
-        if !matches_vary(request_headers, key.content_digest.as_deref(), &envelope) {
+        if !matches_vary(vary_headers, key.content_digest.as_deref(), &envelope) {
             continue;
         }
         let disposition = classify_for_request(&req, &envelope, now);
