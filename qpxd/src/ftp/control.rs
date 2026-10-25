@@ -15,17 +15,35 @@ pub(super) async fn open_list_with_mode_fallback(
     path: Option<&str>,
     deadline: FtpDeadline,
 ) -> Result<FtpDataTransfer> {
-    match open_list_once_passive(addr, user, pass, path, deadline).await {
+    match open_transfer_once_passive(
+        addr,
+        user,
+        pass,
+        list_command(path),
+        "LIST",
+        "LIST finalize",
+        deadline,
+    )
+    .await
+    {
         Ok(list) => Ok(list),
-        Err(passive_err) => open_list_once_active(addr, user, pass, path, deadline)
-            .await
-            .map_err(|active_err| {
-                anyhow!(
-                    "FTP LIST failed in passive and active mode: passive={}, active={}",
-                    passive_err,
-                    active_err
-                )
-            }),
+        Err(passive_err) => open_transfer_once_active(
+            addr,
+            user,
+            pass,
+            list_command(path),
+            "LIST",
+            "LIST finalize",
+            deadline,
+        )
+        .await
+        .map_err(|active_err| {
+            anyhow!(
+                "FTP LIST failed in passive and active mode: passive={}, active={}",
+                passive_err,
+                active_err
+            )
+        }),
     }
 }
 
@@ -267,11 +285,13 @@ pub(super) fn ensure_safe_ftp_path(path: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-async fn open_list_once_passive(
+pub(super) async fn open_transfer_once_passive(
     addr: SocketAddr,
     user: &str,
     pass: &str,
-    path: Option<&str>,
+    command: String,
+    command_context: &'static str,
+    finalize_context: &'static str,
     deadline: FtpDeadline,
 ) -> Result<FtpDataTransfer> {
     let mut client = BasicFtpClient::connect(addr, deadline).await?;
@@ -279,20 +299,22 @@ async fn open_list_once_passive(
     let data_addr = passive_data_addr(&mut client).await?;
     let data = deadline.connect(data_addr).await?;
     client
-        .expect_command(list_command(path), &[125, 150], "LIST")
+        .expect_command(command, &[125, 150], command_context)
         .await?;
     Ok(FtpDataTransfer {
         client,
         data,
-        finalize_context: "LIST finalize",
+        finalize_context,
     })
 }
 
-async fn open_list_once_active(
+pub(super) async fn open_transfer_once_active(
     addr: SocketAddr,
     user: &str,
     pass: &str,
-    path: Option<&str>,
+    command: String,
+    command_context: &'static str,
+    finalize_context: &'static str,
     deadline: FtpDeadline,
 ) -> Result<FtpDataTransfer> {
     let mut client = BasicFtpClient::connect(addr, deadline).await?;
@@ -302,14 +324,14 @@ async fn open_list_once_active(
         .expect_command(port_command(listener.local_addr()?)?, &[200], "PORT")
         .await?;
     client
-        .expect_command(list_command(path), &[125, 150], "LIST")
+        .expect_command(command, &[125, 150], command_context)
         .await?;
     let expected_peer = client.control_stream().peer_addr()?.ip();
     let data = accept_active_data(listener, expected_peer, deadline).await?;
     Ok(FtpDataTransfer {
         client,
         data,
-        finalize_context: "LIST finalize",
+        finalize_context,
     })
 }
 

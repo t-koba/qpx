@@ -1,9 +1,6 @@
 #[cfg(test)]
 use super::ResponseBodyTooLarge;
-use super::control::{
-    BasicFtpClient, FtpDeadline, accept_active_data, active_data_listener, passive_data_addr,
-    port_command,
-};
+use super::control::{FtpDeadline, open_transfer_once_active, open_transfer_once_passive};
 use super::transfer::FtpDataTransfer;
 use super::{OperationTimedOut, RequestBodyTooLarge};
 use anyhow::{Result, anyhow};
@@ -24,64 +21,36 @@ pub(super) async fn open_get_file_with_mode_fallback(
     path: &str,
     deadline: FtpDeadline,
 ) -> Result<FtpDataTransfer> {
-    match open_get_file_once_passive(addr, user, pass, path, deadline).await {
+    match open_transfer_once_passive(
+        addr,
+        user,
+        pass,
+        format!("RETR {path}"),
+        "RETR",
+        "RETR finalize",
+        deadline,
+    )
+    .await
+    {
         Ok(data) => Ok(data),
-        Err(passive_err) => open_get_file_once_active(addr, user, pass, path, deadline)
-            .await
-            .map_err(|active_err| {
-                anyhow!(
-                    "FTP GET failed in passive and active mode: passive={}, active={}",
-                    passive_err,
-                    active_err
-                )
-            }),
+        Err(passive_err) => open_transfer_once_active(
+            addr,
+            user,
+            pass,
+            format!("RETR {path}"),
+            "RETR",
+            "RETR finalize",
+            deadline,
+        )
+        .await
+        .map_err(|active_err| {
+            anyhow!(
+                "FTP GET failed in passive and active mode: passive={}, active={}",
+                passive_err,
+                active_err
+            )
+        }),
     }
-}
-
-async fn open_get_file_once_passive(
-    addr: SocketAddr,
-    user: &str,
-    pass: &str,
-    path: &str,
-    deadline: FtpDeadline,
-) -> Result<FtpDataTransfer> {
-    let mut client = BasicFtpClient::connect(addr, deadline).await?;
-    client.login(user, pass).await?;
-    let data_addr = passive_data_addr(&mut client).await?;
-    let data = deadline.connect(data_addr).await?;
-    client
-        .expect_command(format!("RETR {path}"), &[125, 150], "RETR")
-        .await?;
-    Ok(FtpDataTransfer {
-        client,
-        data,
-        finalize_context: "RETR finalize",
-    })
-}
-
-async fn open_get_file_once_active(
-    addr: SocketAddr,
-    user: &str,
-    pass: &str,
-    path: &str,
-    deadline: FtpDeadline,
-) -> Result<FtpDataTransfer> {
-    let mut client = BasicFtpClient::connect(addr, deadline).await?;
-    client.login(user, pass).await?;
-    let listener = active_data_listener(client.control_stream()).await?;
-    client
-        .expect_command(port_command(listener.local_addr()?)?, &[200], "PORT")
-        .await?;
-    client
-        .expect_command(format!("RETR {path}"), &[125, 150], "RETR")
-        .await?;
-    let expected_peer = client.control_stream().peer_addr()?.ip();
-    let data = accept_active_data(listener, expected_peer, deadline).await?;
-    Ok(FtpDataTransfer {
-        client,
-        data,
-        finalize_context: "RETR finalize",
-    })
 }
 
 pub(super) async fn put_file_with_mode_fallback(
@@ -93,65 +62,37 @@ pub(super) async fn put_file_with_mode_fallback(
     max_body_bytes: usize,
     deadline: FtpDeadline,
 ) -> Result<()> {
-    let transfer = match open_put_once_passive(addr, user, pass, path, deadline).await {
+    let transfer = match open_transfer_once_passive(
+        addr,
+        user,
+        pass,
+        format!("STOR {path}"),
+        "STOR",
+        "STOR finalize",
+        deadline,
+    )
+    .await
+    {
         Ok(transfer) => transfer,
-        Err(passive_err) => open_put_once_active(addr, user, pass, path, deadline)
-            .await
-            .map_err(|active_err| {
-                anyhow!(
-                    "FTP PUT failed in passive and active mode: passive={}, active={}",
-                    passive_err,
-                    active_err
-                )
-            })?,
+        Err(passive_err) => open_transfer_once_active(
+            addr,
+            user,
+            pass,
+            format!("STOR {path}"),
+            "STOR",
+            "STOR finalize",
+            deadline,
+        )
+        .await
+        .map_err(|active_err| {
+            anyhow!(
+                "FTP PUT failed in passive and active mode: passive={}, active={}",
+                passive_err,
+                active_err
+            )
+        })?,
     };
     write_ftp_upload_body(transfer, body, max_body_bytes).await
-}
-
-async fn open_put_once_passive(
-    addr: SocketAddr,
-    user: &str,
-    pass: &str,
-    path: &str,
-    deadline: FtpDeadline,
-) -> Result<FtpDataTransfer> {
-    let mut client = BasicFtpClient::connect(addr, deadline).await?;
-    client.login(user, pass).await?;
-    let data_addr = passive_data_addr(&mut client).await?;
-    let data = deadline.connect(data_addr).await?;
-    client
-        .expect_command(format!("STOR {path}"), &[125, 150], "STOR")
-        .await?;
-    Ok(FtpDataTransfer {
-        client,
-        data,
-        finalize_context: "STOR finalize",
-    })
-}
-
-async fn open_put_once_active(
-    addr: SocketAddr,
-    user: &str,
-    pass: &str,
-    path: &str,
-    deadline: FtpDeadline,
-) -> Result<FtpDataTransfer> {
-    let mut client = BasicFtpClient::connect(addr, deadline).await?;
-    client.login(user, pass).await?;
-    let listener = active_data_listener(client.control_stream()).await?;
-    client
-        .expect_command(port_command(listener.local_addr()?)?, &[200], "PORT")
-        .await?;
-    client
-        .expect_command(format!("STOR {path}"), &[125, 150], "STOR")
-        .await?;
-    let expected_peer = client.control_stream().peer_addr()?.ip();
-    let data = accept_active_data(listener, expected_peer, deadline).await?;
-    Ok(FtpDataTransfer {
-        client,
-        data,
-        finalize_context: "STOR finalize",
-    })
 }
 
 async fn write_ftp_upload_body(
