@@ -28,7 +28,7 @@ fn construction_preserves_ordered_duplicates_and_binary_body() {
 
 #[test]
 fn parsing_and_ipc_transfer_preserve_pairs_without_http_value_validation() {
-    let headers = b" Status : 201 Created\r\n Set-Cookie : a=1 \r\nset-cookie: b=2\r\nsTaTuS: 202 Accepted extra tokens\r\nSet-Cookie: c=3\r\nContent-Length: not-a-number\r\ncontent-length: 7\r\nX-Control: a\x01b\r\nX-Unicode: caf\xc3\xa9\r\n\r\n";
+    let headers = b" Status : 201 Created\r\n Set-Cookie : a=1 \r\nset-cookie: b=2\r\nsTaTuS: 202 Accepted extra tokens\r\nSet-Cookie: c=3\r\nContent-Length: not-a-number\r\ncontent-length: 7\r\nX-Control: a\x01b\r\nX-Unicode: \x63af\xc3\xa9\r\n\r\n";
     let body = b"\xff\0body\n\n";
     let data = [headers.as_slice(), body].concat();
     let head = CgiResponse::parse_cgi_head(&data).unwrap();
@@ -45,7 +45,7 @@ fn parsing_and_ipc_transfer_preserve_pairs_without_http_value_validation() {
     assert_eq!(
         normalized.as_ref(),
         [
-            b"Status: 202\r\nSet-Cookie: a=1\r\nset-cookie: b=2\r\nSet-Cookie: c=3\r\nContent-Length: not-a-number\r\ncontent-length: 7\r\nX-Control: a\x01b\r\nX-Unicode: caf\xc3\xa9\r\n\r\n".as_slice(),
+            b"Status: 202\r\nSet-Cookie: a=1\r\nset-cookie: b=2\r\nSet-Cookie: c=3\r\nContent-Length: not-a-number\r\ncontent-length: 7\r\nX-Control: a\x01b\r\nX-Unicode: \x63af\xc3\xa9\r\n\r\n".as_slice(),
             body,
         ].concat()
     );
