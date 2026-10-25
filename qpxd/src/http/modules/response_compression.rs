@@ -23,9 +23,6 @@ use qpxd_cache::parse_cache_control_response_directives;
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-#[cfg(test)]
-use super::HttpModuleRequestView;
-
 mod accept;
 mod metrics;
 mod streaming;
@@ -311,11 +308,12 @@ impl HttpModule for ResponseCompressionModule {
 
 #[cfg(test)]
 fn select_response_encoding(
-    request: &HttpModuleRequestView<'_>,
+    request_method: &Method,
+    request_headers: &HeaderMap,
     config: &ResponseCompressionModuleConfig,
     response: &Response<Body>,
 ) -> Result<Option<ContentEncoding>> {
-    select_response_encoding_parts(request.method(), request.headers(), config, response)
+    select_response_encoding_parts(request_method, request_headers, config, response)
 }
 
 /// Whether an explicit identity quality outranks an encoding: identity

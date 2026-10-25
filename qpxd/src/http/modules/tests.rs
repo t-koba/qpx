@@ -1,4 +1,5 @@
-use super::template::{
+use super::execution::subrequest::SubrequestModule;
+use super::execution::template::{
     CompiledTemplate, TemplateModifier, TemplatePart, TemplateVariable, compile_template,
     render_template,
 };
@@ -15,7 +16,6 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time::Duration;
-use subrequest::SubrequestModule;
 
 fn module_test_runtime() -> Runtime {
     Runtime::new(Config {
@@ -505,8 +505,9 @@ fn sync_frozen_request_rebuilds_after_request_change() {
 
     assert!(ctx.sync_frozen_request(&req));
     let frozen = ctx.frozen_request().expect("frozen request");
+    let template = compile_template("{request.header.X-Module:header}").expect("template");
     assert_eq!(
-        frozen.headers().get("x-module"),
-        Some(&HeaderValue::from_static("changed"))
+        render_template(&template, &frozen, &ctx).expect("rendered"),
+        "changed"
     );
 }

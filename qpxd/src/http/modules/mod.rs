@@ -4,8 +4,6 @@ mod execution;
 mod headers;
 mod registry;
 mod response_compression;
-mod subrequest;
-mod template;
 mod traits;
 
 #[cfg(test)]

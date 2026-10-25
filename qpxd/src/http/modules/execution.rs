@@ -1,3 +1,8 @@
+#[path = "subrequest/mod.rs"]
+pub(super) mod subrequest;
+#[path = "template.rs"]
+pub(super) mod template;
+
 use super::{
     CacheLookupStatus, CompiledHttpModuleChain, HttpModuleEvent, HttpModuleStage,
     RequestHeadersOutcome, RetryEvent,
@@ -71,6 +76,14 @@ impl FrozenRequestSnapshot {
     }
 }
 
+/// A semantic view of an HTTP module request. Raw headers are intentionally private.
+///
+/// ```compile_fail
+/// use qpxd::module_api::HttpModuleRequestView;
+/// fn cannot_read_raw_headers(view: &HttpModuleRequestView<'_>) {
+///     let _ = view.headers();
+/// }
+/// ```
 pub struct HttpModuleRequestView<'a> {
     inner: RequestViewInner<'a>,
 }
@@ -154,7 +167,7 @@ impl<'a> HttpModuleRequestView<'a> {
         }
     }
 
-    pub fn headers(&self) -> &HeaderMap {
+    fn headers(&self) -> &HeaderMap {
         match self.inner {
             RequestViewInner::Live(request) => request.headers(),
             RequestViewInner::Frozen(request) => &request.headers,

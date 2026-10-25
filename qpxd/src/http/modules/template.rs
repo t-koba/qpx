@@ -1,5 +1,5 @@
-use super::headers::parse_header_name;
-use super::{HttpModuleContext, HttpModuleRequestView};
+use crate::http::modules::execution::{HttpModuleContext, HttpModuleRequestView};
+use crate::http::modules::headers::parse_header_name;
 use anyhow::{Context, Result, anyhow};
 use http::{HeaderName, HeaderValue};
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
@@ -7,12 +7,12 @@ use std::net::IpAddr;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
-pub(super) struct CompiledTemplate {
-    pub(super) parts: Arc<[TemplatePart]>,
+pub(in crate::http::modules) struct CompiledTemplate {
+    pub(in crate::http::modules) parts: Arc<[TemplatePart]>,
 }
 
 impl CompiledTemplate {
-    pub(super) fn summary(&self) -> String {
+    pub(in crate::http::modules) fn summary(&self) -> String {
         self.parts
             .iter()
             .map(TemplatePart::summary)
@@ -22,7 +22,7 @@ impl CompiledTemplate {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum TemplatePart {
+pub(in crate::http::modules) enum TemplatePart {
     Literal(Arc<str>),
     Placeholder {
         variable: TemplateVariable,
@@ -42,7 +42,7 @@ impl TemplatePart {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum TemplateVariable {
+pub(in crate::http::modules) enum TemplateVariable {
     ProxyKind,
     ProxyName,
     ScopeName,
@@ -87,7 +87,7 @@ impl TemplateVariable {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(super) enum TemplateModifier {
+pub(in crate::http::modules) enum TemplateModifier {
     UrlQuery,
     PathSegment,
     Header,
@@ -105,7 +105,7 @@ impl TemplateModifier {
     }
 }
 
-pub(super) fn compile_template(template: &str) -> Result<CompiledTemplate> {
+pub(in crate::http::modules) fn compile_template(template: &str) -> Result<CompiledTemplate> {
     let mut parts = Vec::new();
     let mut rest = template;
     loop {
@@ -180,7 +180,7 @@ fn parse_template_placeholder(placeholder: &str) -> Result<(TemplateVariable, Te
     Ok((variable, modifier))
 }
 
-pub(super) fn render_template(
+pub(in crate::http::modules) fn render_template(
     template: &CompiledTemplate,
     request: &HttpModuleRequestView<'_>,
     ctx: &HttpModuleContext,

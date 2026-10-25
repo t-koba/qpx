@@ -1,4 +1,4 @@
-use super::{HttpModuleFactory, cache_purge, response_compression, subrequest};
+use super::{HttpModuleFactory, cache_purge, response_compression};
 use anyhow::{Result, anyhow};
 use std::collections::HashMap;
 use std::sync::{Arc, OnceLock};
@@ -31,7 +31,10 @@ impl HttpModuleRegistryBuilder {
     pub fn with_builtins() -> Self {
         let mut builder = Self::new();
         builder.register_builtin("cache_purge", cache_purge::CachePurgeModuleFactory);
-        builder.register_builtin("subrequest", subrequest::SubrequestModuleFactory);
+        builder.register_builtin(
+            "subrequest",
+            super::execution::subrequest::SubrequestModuleFactory,
+        );
         builder.register_builtin(
             "response_compression",
             response_compression::ResponseCompressionModuleFactory,

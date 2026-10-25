@@ -149,7 +149,6 @@ fn event_stream_compression_requires_explicit_force() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let request = HttpModuleRequestView::from_request(&request);
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/event-stream")
@@ -172,11 +171,15 @@ fn event_stream_compression_requires_explicit_force() {
         dictionary: None,
     };
 
-    let selected = select_response_encoding(&request, &config, &response).expect("select encoding");
+    let selected =
+        select_response_encoding(request.method(), request.headers(), &config, &response)
+            .expect("select encoding");
     assert_eq!(selected, None);
 
     config.force_compress_event_stream = true;
-    let selected = select_response_encoding(&request, &config, &response).expect("select encoding");
+    let selected =
+        select_response_encoding(request.method(), request.headers(), &config, &response)
+            .expect("select encoding");
     assert_eq!(selected, Some(ContentEncoding::Gzip));
 }
 
@@ -203,7 +206,6 @@ fn no_body_success_responses_are_not_compressed() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let connect_request = HttpModuleRequestView::from_request(&connect_request);
     let connect_response = Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/plain")
@@ -211,8 +213,13 @@ fn no_body_success_responses_are_not_compressed() {
         .body(Body::empty())
         .expect("response");
     assert_eq!(
-        select_response_encoding(&connect_request, &config, &connect_response)
-            .expect("select encoding"),
+        select_response_encoding(
+            connect_request.method(),
+            connect_request.headers(),
+            &config,
+            &connect_response
+        )
+        .expect("select encoding"),
         None
     );
 
@@ -221,7 +228,6 @@ fn no_body_success_responses_are_not_compressed() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let get_request = HttpModuleRequestView::from_request(&get_request);
     let reset_content_response = Response::builder()
         .status(StatusCode::RESET_CONTENT)
         .header(CONTENT_TYPE, "text/plain")
@@ -229,8 +235,13 @@ fn no_body_success_responses_are_not_compressed() {
         .body(Body::empty())
         .expect("response");
     assert_eq!(
-        select_response_encoding(&get_request, &config, &reset_content_response)
-            .expect("select encoding"),
+        select_response_encoding(
+            get_request.method(),
+            get_request.headers(),
+            &config,
+            &reset_content_response
+        )
+        .expect("select encoding"),
         None
     );
 }
@@ -257,7 +268,6 @@ fn response_no_transform_disables_compression() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let get_request = HttpModuleRequestView::from_request(&get_request);
     let compressible = Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/plain")
@@ -266,7 +276,13 @@ fn response_no_transform_disables_compression() {
         .body(Body::empty())
         .expect("response");
     assert_eq!(
-        select_response_encoding(&get_request, &config, &compressible).expect("select encoding"),
+        select_response_encoding(
+            get_request.method(),
+            get_request.headers(),
+            &config,
+            &compressible
+        )
+        .expect("select encoding"),
         Some(ContentEncoding::Gzip)
     );
     let frozen = Response::builder()
@@ -280,7 +296,13 @@ fn response_no_transform_disables_compression() {
         .body(Body::empty())
         .expect("response");
     assert_eq!(
-        select_response_encoding(&get_request, &config, &frozen).expect("select encoding"),
+        select_response_encoding(
+            get_request.method(),
+            get_request.headers(),
+            &config,
+            &frozen
+        )
+        .expect("select encoding"),
         None
     );
     // The dictionary path gates on the same shared predicate.
@@ -363,7 +385,6 @@ fn identity_response_carries_vary_when_compression_negotiable() {
         .header(http::header::ACCEPT_ENCODING, "gzip;q=0")
         .body(Body::empty())
         .expect("request");
-    let request = HttpModuleRequestView::from_request(&request);
     let mut response = Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/plain")
@@ -372,7 +393,8 @@ fn identity_response_carries_vary_when_compression_negotiable() {
         .body(Body::empty())
         .expect("response");
     assert_eq!(
-        select_response_encoding(&request, &config, &response).expect("select encoding"),
+        select_response_encoding(request.method(), request.headers(), &config, &response)
+            .expect("select encoding"),
         None
     );
     // Selection alone leaves identity unmarked: the old observable gap.
@@ -519,7 +541,6 @@ fn explicit_identity_quality_beats_lower_encoding() {
         .header(http::header::ACCEPT_ENCODING, "gzip;q=0.1, identity;q=1")
         .body(Body::empty())
         .expect("request");
-    let request = HttpModuleRequestView::from_request(&request);
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/plain")
@@ -527,7 +548,8 @@ fn explicit_identity_quality_beats_lower_encoding() {
         .body(Body::empty())
         .expect("response");
     assert_eq!(
-        select_response_encoding(&request, &config, &response).expect("select encoding"),
+        select_response_encoding(request.method(), request.headers(), &config, &response)
+            .expect("select encoding"),
         None
     );
 }
@@ -541,7 +563,6 @@ fn higher_encoding_quality_beats_identity() {
             .header(http::header::ACCEPT_ENCODING, accept)
             .body(Body::empty())
             .expect("request");
-        let request = HttpModuleRequestView::from_request(&request);
         let response = Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_TYPE, "text/plain")
@@ -549,7 +570,8 @@ fn higher_encoding_quality_beats_identity() {
             .body(Body::empty())
             .expect("response");
         assert_eq!(
-            select_response_encoding(&request, &config, &response).expect("select encoding"),
+            select_response_encoding(request.method(), request.headers(), &config, &response)
+                .expect("select encoding"),
             Some(ContentEncoding::Gzip),
             "encoding keeps ties and higher quality for {accept:?}"
         );

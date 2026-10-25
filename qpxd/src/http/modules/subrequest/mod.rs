@@ -1,8 +1,11 @@
-use super::headers::{parse_header_name, parse_module_settings};
-use super::template::{CompiledTemplate, compile_template, render_template};
-use super::{
-    HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
-    HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
+use crate::http::modules::execution::template::{
+    CompiledTemplate, compile_template, render_template,
+};
+use crate::http::modules::execution::{HttpModuleContext, HttpModuleRequestView};
+use crate::http::modules::headers::{parse_header_name, parse_module_settings};
+use crate::http::modules::{
+    HttpModule, HttpModuleCapabilities, HttpModuleEvent, HttpModuleFactory, HttpModuleStage,
+    ModuleStages, RequestHeadersOutcome,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -20,13 +23,14 @@ use std::sync::Arc;
 use tokio::time::{Duration, timeout};
 use tracing::warn;
 
+#[path = "ssrf.rs"]
 mod ssrf;
 
 use self::ssrf::{
     host_is_non_global_ip, redirect_host_resolves_to_private_ip, resolve_public_subrequest_addr,
 };
 
-pub(super) struct SubrequestModuleFactory;
+pub(in crate::http::modules) struct SubrequestModuleFactory;
 
 impl HttpModuleFactory for SubrequestModuleFactory {
     fn build(&self, spec: &HttpModuleConfig) -> Result<Arc<dyn HttpModule>> {
@@ -37,7 +41,7 @@ impl HttpModuleFactory for SubrequestModuleFactory {
 }
 
 #[derive(Clone)]
-pub(super) struct SubrequestModule {
+pub(in crate::http::modules) struct SubrequestModule {
     name: Arc<str>,
     phase: SubrequestPhase,
     method: Method,
@@ -56,7 +60,7 @@ pub(super) struct SubrequestModule {
 }
 
 impl SubrequestModule {
-    pub(super) fn new(config: SubrequestModuleConfig) -> Result<Self> {
+    pub(in crate::http::modules) fn new(config: SubrequestModuleConfig) -> Result<Self> {
         if config.allowed_schemes.is_empty() {
             return Err(anyhow!(
                 "subrequest {} allowed_schemes must not be empty",
@@ -160,7 +164,7 @@ impl SubrequestModule {
         Ok(req)
     }
 
-    pub(super) fn validate_url(&self, url: &str) -> Result<http::Uri> {
+    pub(in crate::http::modules) fn validate_url(&self, url: &str) -> Result<http::Uri> {
         let uri: http::Uri = url
             .parse()
             .with_context(|| format!("invalid subrequest URL for {}", self.name))?;
@@ -255,7 +259,7 @@ impl SubrequestModule {
         }))
     }
 
-    pub(super) async fn validate_redirect_location(
+    pub(in crate::http::modules) async fn validate_redirect_location(
         &self,
         location: Option<&HeaderValue>,
         timeout_dur: Duration,
@@ -557,4 +561,5 @@ fn response_exceeds_max_response_bytes(headers: &HeaderMap, max_response_bytes: 
 }
 
 #[cfg(test)]
+#[path = "tests.rs"]
 mod tests;
