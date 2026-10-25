@@ -1,4 +1,5 @@
 use crate::config::HeaderMatch;
+use crate::http_content_length::{HeaderPredicate, HeaderView};
 use crate::prefilter::StringInterner;
 use anyhow::anyhow;
 use regex::Regex;
@@ -55,90 +56,78 @@ pub(super) fn build_header_matchers(
 
 pub(super) fn fast_headers_match(
     matchers: &[HeaderMatcherFast],
-    headers: Option<&http::HeaderMap>,
+    headers: Option<HeaderView<'_>>,
 ) -> bool {
     if matchers.is_empty() {
         return true;
     }
-    let Some(headers) = headers else {
+    let Some(view) = headers else {
         return false;
     };
-    matchers.iter().all(|matcher| {
-        headers
-            .get_all(matcher.name.as_ref())
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .any(|value| match &matcher.mode {
-                HeaderFastMode::Present => true,
-                HeaderFastMode::Exact(expected) => value == expected.as_ref(),
-            })
+    matchers.iter().all(|matcher| match &matcher.mode {
+        HeaderFastMode::Present => view.matches(matcher.name.as_ref(), HeaderPredicate::Present),
+        HeaderFastMode::Exact(expected) => view.matches(
+            matcher.name.as_ref(),
+            HeaderPredicate::Exact(expected.as_ref()),
+        ),
     })
 }
 
 pub(super) fn regex_headers_match(
     matchers: &[HeaderMatcherRegex],
-    headers: Option<&http::HeaderMap>,
+    headers: Option<HeaderView<'_>>,
 ) -> bool {
     if matchers.is_empty() {
         return true;
     }
-    let Some(headers) = headers else {
+    let Some(view) = headers else {
         return false;
     };
     matchers.iter().all(|matcher| {
-        headers
-            .get_all(matcher.name.as_ref())
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .any(|value| matcher.regex.is_match(value))
+        view.matches(
+            matcher.name.as_ref(),
+            HeaderPredicate::Regex(&matcher.regex),
+        )
     })
 }
 
 pub(super) fn trace_fast_header(
     matcher: &HeaderMatcherFast,
-    headers: Option<&http::HeaderMap>,
+    headers: Option<HeaderView<'_>>,
 ) -> (String, Option<String>, bool) {
     let configured = match &matcher.mode {
         HeaderFastMode::Present => "<present>".to_string(),
         HeaderFastMode::Exact(expected) => expected.to_string(),
     };
-    let (actual, result) = match &matcher.mode {
-        HeaderFastMode::Present => matching_header_value(headers, matcher.name.as_ref(), |_| true),
-        HeaderFastMode::Exact(expected) => {
-            matching_header_value(headers, matcher.name.as_ref(), |value| {
-                value == expected.as_ref()
-            })
-        }
+    let diagnostic = match headers {
+        Some(view) => match &matcher.mode {
+            HeaderFastMode::Present => view.trace(matcher.name.as_ref(), HeaderPredicate::Present),
+            HeaderFastMode::Exact(expected) => view.trace(
+                matcher.name.as_ref(),
+                HeaderPredicate::Exact(expected.as_ref()),
+            ),
+        },
+        None => crate::http_content_length::HeaderDiagnostic {
+            actual: None,
+            matched: false,
+        },
     };
-    (configured, actual, result)
+    (configured, diagnostic.actual, diagnostic.matched)
 }
 
 pub(super) fn trace_regex_header(
     matcher: &HeaderMatcherRegex,
-    headers: Option<&http::HeaderMap>,
+    headers: Option<HeaderView<'_>>,
 ) -> (Option<String>, bool) {
-    matching_header_value(headers, matcher.name.as_ref(), |value| {
-        matcher.regex.is_match(value)
-    })
-}
-
-fn matching_header_value(
-    headers: Option<&http::HeaderMap>,
-    name: &str,
-    mut predicate: impl FnMut(&str) -> bool,
-) -> (Option<String>, bool) {
-    let mut first = None;
-    if let Some(headers) = headers {
-        for value in headers
-            .get_all(name)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-        {
-            first.get_or_insert(value);
-            if predicate(value) {
-                return (Some(value.to_string()), true);
-            }
-        }
-    }
-    (first.map(str::to_string), false)
+    let diagnostic = match headers {
+        Some(view) => view.trace(
+            matcher.name.as_ref(),
+            HeaderPredicate::Regex(&matcher.regex),
+        ),
+        None => crate::http_content_length::HeaderDiagnostic {
+            actual: None,
+            matched: false,
+        },
+    };
+    (diagnostic.actual, diagnostic.matched)
 }

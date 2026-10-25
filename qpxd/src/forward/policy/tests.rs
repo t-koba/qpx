@@ -267,7 +267,7 @@ async fn staged_policy_does_not_request_body_for_later_size_rule_after_header_ma
         method: Some("GET"),
         host: Some("example.com"),
         path: Some("/"),
-        headers: Some(&headers),
+        headers: Some(qpx_core::http_content_length::HeaderView::new(&headers)),
         user_groups: &[],
         posture: &[],
         ..Default::default()

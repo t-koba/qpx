@@ -271,7 +271,7 @@ pub mod fuzz_support {
             method: (!method.is_empty()).then_some(method),
             host: (!host.is_empty()).then_some(host),
             path: (!path.is_empty()).then_some(path),
-            headers: Some(&headers),
+            headers: Some(qpx_core::http_content_length::HeaderView::new(&headers)),
             ..Default::default()
         };
         let _ = engine.matcher_candidate_indices(&ctx);

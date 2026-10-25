@@ -112,7 +112,7 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-mode", HeaderValue::from_static("fast"));
         let ctx = RuleMatchContext {
-            headers: Some(&headers),
+            headers: Some(qpx_core::http_content_length::HeaderView::new(&headers)),
             user_groups: &[],
             posture: &[],
             ..Default::default()

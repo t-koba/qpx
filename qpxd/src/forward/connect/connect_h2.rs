@@ -149,7 +149,9 @@ pub(super) async fn handle_h2_extended_connect(
         scheme: Some(scheme.as_str()),
         http_version: Some(http_version_label(req_version)),
         alpn: Some("h2"),
-        headers: Some(&sanitized_headers),
+        headers: Some(qpx_core::http_content_length::HeaderView::new(
+            &sanitized_headers,
+        )),
         ..Default::default()
     };
     crate::http::policy::rule_context::apply_identity(&mut ctx, &identity);

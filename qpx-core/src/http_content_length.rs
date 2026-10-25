@@ -533,10 +533,155 @@ pub fn canonical_content_length_value(length: u64) -> HeaderValue {
     HeaderValue::from(length)
 }
 
+/// Opaque header view for `RuleMatchContext`-based policy matching.
+///
+/// Matchers using that context receive this view instead of the raw map.
+/// Its closed predicates expose no raw accessor, `Deref`, conversion, or
+/// value callback; Debug also hides the map. This boundary does not enforce
+/// header ownership elsewhere in the workspace. Trace diagnostics intentionally
+/// expose the selected textual value.
+///
+/// Configured names remain case-insensitive and dynamic. Predicates require a
+/// textual value: invalid `to_str()` values are skipped, and value order is
+/// preserved. Traces report the first matching value, else the first textual
+/// value. An absent context map cannot match a nonempty matcher list.
+///
+/// ```compile_fail
+/// use http::HeaderMap;
+/// use qpx_core::http_content_length::HeaderView;
+///
+/// let map = HeaderMap::new();
+/// let view = HeaderView::new(&map);
+/// let _ = view.inner;
+/// ```
+#[derive(Clone, Copy)]
+pub struct HeaderView<'a> {
+    inner: &'a HeaderMap,
+}
+
+impl std::fmt::Debug for HeaderView<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HeaderView").finish_non_exhaustive()
+    }
+}
+
+/// Closed predicates evaluated by the header owner, never by a value callback.
+#[derive(Clone, Copy)]
+pub enum HeaderPredicate<'a> {
+    /// At least one textual value exists, including an empty value.
+    Present,
+    /// A textual value equals the configured string.
+    Exact(&'a str),
+    /// A textual value matches the compiled expression.
+    Regex(&'a regex::Regex),
+}
+
+/// The diagnostic a header trace reports for one configured name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HeaderDiagnostic {
+    /// The first matching textual value, else the first textual value.
+    pub actual: Option<String>,
+    /// Whether a textual value matched.
+    pub matched: bool,
+}
+
+impl<'a> HeaderView<'a> {
+    /// Borrows a header map for closed policy matching.
+    pub fn new(map: &'a HeaderMap) -> Self {
+        Self { inner: map }
+    }
+
+    /// Whether any textual value for `name` matches, without allocating.
+    pub fn matches(&self, name: &str, predicate: HeaderPredicate<'_>) -> bool {
+        self.evaluate(name, predicate).1
+    }
+
+    /// Reports the first matching textual value, else the first textual value.
+    pub fn trace(&self, name: &str, predicate: HeaderPredicate<'_>) -> HeaderDiagnostic {
+        let (actual, matched) = self.evaluate(name, predicate);
+        HeaderDiagnostic {
+            actual: actual.map(str::to_owned),
+            matched,
+        }
+    }
+
+    fn evaluate(&self, name: &str, predicate: HeaderPredicate<'_>) -> (Option<&str>, bool) {
+        let mut first = None;
+        for value in self
+            .inner
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+        {
+            first.get_or_insert(value);
+            let matched = match predicate {
+                HeaderPredicate::Present => true,
+                HeaderPredicate::Exact(expected) => value == expected,
+                HeaderPredicate::Regex(regex) => regex.is_match(value),
+            };
+            if matched {
+                return (Some(value), true);
+            }
+        }
+        (first, false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use http::HeaderValue;
+
+    #[test]
+    fn header_view_debug_redacts_values_including_context_headers_and_trailers() {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_LENGTH, HeaderValue::from_static("9384756102938475"));
+        let view = HeaderView::new(&headers);
+        let context = crate::rules::RuleMatchContext {
+            headers: Some(view),
+            rpc_trailers: Some(view),
+            ..Default::default()
+        };
+        assert_eq!(format!("{view:?}"), "HeaderView { .. }");
+        for rendered in [
+            format!("{view:?}"),
+            format!("{view:#?}"),
+            format!("{context:?}"),
+            format!("{context:#?}"),
+        ] {
+            assert!(!rendered.contains("9384756102938475"));
+            assert!(!rendered.contains("content-length"));
+        }
+    }
+
+    #[test]
+    fn header_view_predicates_require_text_but_accept_empty_text() {
+        let mut headers = HeaderMap::new();
+        headers.append("x-value", HeaderValue::from_bytes(&[0xff]).unwrap());
+        let regex = regex::Regex::new("^$").unwrap();
+        for actual in [None, Some("")] {
+            if let Some(value) = actual {
+                headers.append("x-value", HeaderValue::from_static(value));
+            }
+            let view = HeaderView::new(&headers);
+            for predicate in [
+                HeaderPredicate::Present,
+                HeaderPredicate::Exact(""),
+                HeaderPredicate::Regex(&regex),
+            ] {
+                for (name, expected) in [("X-Value", actual), ("x-missing", None)] {
+                    assert_eq!(view.matches(name, predicate), expected.is_some());
+                    assert_eq!(
+                        view.trace(name, predicate),
+                        HeaderDiagnostic {
+                            actual: expected.map(str::to_owned),
+                            matched: expected.is_some(),
+                        }
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn canonical_content_length_value_writes_one_decimal() {

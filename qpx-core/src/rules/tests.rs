@@ -1,5 +1,6 @@
 use super::*;
 use crate::config::{ActionKind, MatchConfig};
+use crate::http_content_length::HeaderView;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 fn action(kind: ActionKind) -> ActionConfig {
@@ -251,7 +252,7 @@ fn regex_headers_stay_on_slow_path() {
         sni: None,
         method: Some("GET"),
         path: Some("/"),
-        headers: Some(&headers),
+        headers: Some(HeaderView::new(&headers)),
         user: None,
         user_groups: &[],
         device_id: None,

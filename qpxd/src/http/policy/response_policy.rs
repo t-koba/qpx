@@ -289,7 +289,9 @@ pub(crate) async fn apply_listener_response_policy(
     if !body_observation.force_body {
         let mut early_ctx = ctx;
         early_ctx.response_status = Some(response.status().as_u16());
-        early_ctx.headers = Some(response.headers());
+        early_ctx.headers = Some(qpx_core::http_content_length::HeaderView::new(
+            response.headers(),
+        ));
         if let Some(request_rpc) = request_rpc {
             early_ctx.rpc_protocol = request_rpc.protocol.as_deref();
             early_ctx.rpc_service = request_rpc.service.as_deref();
@@ -355,7 +357,10 @@ pub(crate) async fn apply_listener_response_policy(
             ctx.rpc_status = response_rpc.status.as_deref();
             ctx.rpc_message_size = response_rpc.message_size;
             ctx.rpc_message = response_rpc.message.as_deref();
-            ctx.rpc_trailers = response_rpc.trailers.as_ref();
+            ctx.rpc_trailers = response_rpc
+                .trailers
+                .as_ref()
+                .map(qpx_core::http_content_length::HeaderView::new);
         } else if let Some(request_rpc) = request_rpc {
             ctx.rpc_protocol = request_rpc.protocol.as_deref();
             ctx.rpc_service = request_rpc.service.as_deref();
@@ -368,7 +373,9 @@ pub(crate) async fn apply_listener_response_policy(
     }
     ctx.response_status = Some(response.status().as_u16());
     ctx.response_size = observed_response_size(&response);
-    ctx.headers = Some(response.headers());
+    ctx.headers = Some(qpx_core::http_content_length::HeaderView::new(
+        response.headers(),
+    ));
 
     for idx in candidates.indices {
         let Some(rule) = engine.rule_at(idx) else {

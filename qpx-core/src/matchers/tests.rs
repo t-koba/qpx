@@ -3,6 +3,7 @@ use crate::config::{
     DestinationDimensionMatchConfig, DestinationMatchConfig, HeaderMatch, MatchConfig,
     RpcMatchConfig,
 };
+use crate::http_content_length::HeaderView;
 use crate::prefilter::StringInterner;
 use crate::rules::RuleMatchContext;
 use http::HeaderMap;
@@ -232,7 +233,7 @@ fn compiled_match_supports_rpc_response_trailers() {
     trailers.insert("grpc-message", HeaderValue::from_static("unavailable"));
     let ctx = RuleMatchContext {
         rpc_status: Some("14"),
-        rpc_trailers: Some(&trailers),
+        rpc_trailers: Some(HeaderView::new(&trailers)),
         ..Default::default()
     };
     assert!(compiled.matches(&ctx));
@@ -276,7 +277,7 @@ fn known_request_response_rule_match_does_not_evaluate_headers() {
     let mut request_headers = HeaderMap::new();
     request_headers.insert("x-response-mode", HeaderValue::from_static("fast"));
     let ctx = RuleMatchContext {
-        headers: Some(&request_headers),
+        headers: Some(HeaderView::new(&request_headers)),
         ..Default::default()
     };
 
@@ -478,7 +479,7 @@ fn header_trace_reports_later_duplicate_exact_match() {
     headers.append("x-token", HeaderValue::from_static("other"));
     headers.append("x-token", HeaderValue::from_static("secret"));
     let ctx = RuleMatchContext {
-        headers: Some(&headers),
+        headers: Some(HeaderView::new(&headers)),
         ..Default::default()
     };
     assert!(compiled.matches(&ctx));
@@ -518,7 +519,7 @@ fn header_trace_reports_first_value_when_no_duplicate_exact_match() {
     headers.append("x-token", HeaderValue::from_static("other"));
     headers.append("x-token", HeaderValue::from_static("another"));
     let ctx = RuleMatchContext {
-        headers: Some(&headers),
+        headers: Some(HeaderView::new(&headers)),
         ..Default::default()
     };
     assert!(!compiled.matches(&ctx));
@@ -557,7 +558,7 @@ fn header_trace_reports_later_duplicate_regex_match() {
     headers.append("x-tag", HeaderValue::from_static("nope"));
     headers.append("x-tag", HeaderValue::from_static("ab123"));
     let ctx = RuleMatchContext {
-        headers: Some(&headers),
+        headers: Some(HeaderView::new(&headers)),
         ..Default::default()
     };
     assert!(compiled.matches(&ctx));
@@ -596,7 +597,7 @@ fn header_trace_reports_first_value_when_no_duplicate_regex_match() {
     headers.append("x-tag", HeaderValue::from_static("nope"));
     headers.append("x-tag", HeaderValue::from_static("still-no"));
     let ctx = RuleMatchContext {
-        headers: Some(&headers),
+        headers: Some(HeaderView::new(&headers)),
         ..Default::default()
     };
     assert!(!compiled.matches(&ctx));
@@ -638,4 +639,175 @@ fn impossible_request_size_never_matches() {
             "request-size <0 must never match {request_size}"
         );
     }
+}
+
+#[test]
+fn header_view_presence_matches_any_textual_value_in_order() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "X-Present".to_string(),
+            value: None,
+            regex: None,
+        }],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut headers = HeaderMap::new();
+    headers.append("x-present", HeaderValue::from_static("one"));
+    headers.append("x-present", HeaderValue::from_static("two"));
+    let ctx = RuleMatchContext {
+        headers: Some(HeaderView::new(&headers)),
+        ..Default::default()
+    };
+    assert!(compiled.matches(&ctx));
+    let trace = compiled.matches_with_trace(&ctx);
+    assert!(trace.result);
+    let actual = trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header {
+                name,
+                actual,
+                result,
+                ..
+            } if name == "x-present" => Some((actual.clone(), *result)),
+            _ => None,
+        })
+        .expect("header reason");
+    assert!(actual.1);
+    assert_eq!(actual.0.as_deref(), Some("one"));
+}
+
+#[test]
+fn header_view_skips_non_textual_values_for_match_and_trace() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "x-bin".to_string(),
+            value: Some("secret".to_string()),
+            regex: None,
+        }],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut headers = HeaderMap::new();
+    headers.append(
+        "x-bin",
+        HeaderValue::from_bytes(&[0xff, 0xfe]).expect("opaque value"),
+    );
+    headers.append("x-bin", HeaderValue::from_static("secret"));
+    let ctx = RuleMatchContext {
+        headers: Some(HeaderView::new(&headers)),
+        ..Default::default()
+    };
+    assert!(compiled.matches(&ctx));
+    let trace = compiled.matches_with_trace(&ctx);
+    assert!(trace.result);
+    let actual = trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header { name, actual, .. } if name == "x-bin" => Some(actual.clone()),
+            _ => None,
+        })
+        .expect("header reason");
+    assert_eq!(actual.as_deref(), Some("secret"));
+
+    let mut only_opaque = HeaderMap::new();
+    only_opaque.append(
+        "x-bin",
+        HeaderValue::from_bytes(&[0xff]).expect("opaque value"),
+    );
+    let opaque_ctx = RuleMatchContext {
+        headers: Some(HeaderView::new(&only_opaque)),
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&opaque_ctx));
+    let opaque_trace = compiled.matches_with_trace(&opaque_ctx);
+    assert!(!opaque_trace.result);
+    let opaque_actual = opaque_trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header { name, actual, .. } if name == "x-bin" => Some(actual.clone()),
+            _ => None,
+        })
+        .expect("header reason");
+    assert_eq!(opaque_actual, None);
+}
+
+#[test]
+fn header_view_missing_map_never_matches_nonempty_matchers() {
+    let cfg = MatchConfig {
+        headers: vec![HeaderMatch {
+            name: "x-missing".to_string(),
+            value: None,
+            regex: None,
+        }],
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let ctx = RuleMatchContext {
+        headers: None,
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&ctx));
+    let trace = compiled.matches_with_trace(&ctx);
+    assert!(!trace.result);
+    let (actual, result) = trace
+        .reasons
+        .iter()
+        .find_map(|reason| match reason {
+            MatchReason::Header {
+                name,
+                actual,
+                result,
+                ..
+            } if name == "x-missing" => Some((actual.clone(), *result)),
+            _ => None,
+        })
+        .expect("header reason");
+    assert!(!result);
+    assert_eq!(actual, None);
+
+    let mut headers = HeaderMap::new();
+    headers.insert("x-other", HeaderValue::from_static("value"));
+    let wrong_ctx = RuleMatchContext {
+        headers: Some(HeaderView::new(&headers)),
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&wrong_ctx));
+}
+
+#[test]
+fn header_view_rpc_trailers_share_owner_semantics() {
+    let cfg = MatchConfig {
+        rpc: Some(RpcMatchConfig {
+            trailers: vec![HeaderMatch {
+                name: "grpc-message".to_string(),
+                value: Some("unavailable".to_string()),
+                regex: None,
+            }],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let mut interner = StringInterner::default();
+    let (compiled, _) = CompiledMatch::compile(&cfg, &mut interner).expect("compile");
+    let mut trailers = HeaderMap::new();
+    trailers.append("grpc-message", HeaderValue::from_static("ok"));
+    trailers.append("grpc-message", HeaderValue::from_static("unavailable"));
+    let ctx = RuleMatchContext {
+        rpc_trailers: Some(HeaderView::new(&trailers)),
+        ..Default::default()
+    };
+    assert!(compiled.matches(&ctx));
+    let absent = RuleMatchContext {
+        rpc_trailers: None,
+        ..Default::default()
+    };
+    assert!(!compiled.matches(&absent));
 }

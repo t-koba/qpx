@@ -44,7 +44,7 @@ pub(crate) fn build_request_rule_match_context(
         upstream_cert,
     } = input;
     let mut ctx = base.rule_match_context();
-    ctx.headers = Some(headers);
+    ctx.headers = Some(qpx_core::http_content_length::HeaderView::new(headers));
     ctx.request_size = request_size;
     destination.apply_to_rule_context(&mut ctx);
     apply_identity(&mut ctx, identity);
@@ -71,7 +71,7 @@ pub(crate) fn build_response_rule_match_context(
         upstream_cert,
     } = input;
     let mut ctx = base.rule_match_context();
-    ctx.headers = headers;
+    ctx.headers = headers.map(qpx_core::http_content_length::HeaderView::new);
     ctx.response_status = Some(response_status);
     ctx.response_size = response_size;
     destination.apply_to_rule_context(&mut ctx);
@@ -143,7 +143,10 @@ fn apply_rpc<'a>(ctx: &mut RuleMatchContext<'a>, rpc: &'a RpcMatchContext) {
     ctx.rpc_status = rpc.status.as_deref();
     ctx.rpc_message_size = rpc.message_size;
     ctx.rpc_message = rpc.message.as_deref();
-    ctx.rpc_trailers = rpc.trailers.as_ref();
+    ctx.rpc_trailers = rpc
+        .trailers
+        .as_ref()
+        .map(qpx_core::http_content_length::HeaderView::new);
 }
 
 #[cfg(test)]

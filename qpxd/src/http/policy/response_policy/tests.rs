@@ -493,7 +493,9 @@ fn response_request_observation_does_not_evaluate_response_headers_against_reque
             method: Some("POST"),
             host: Some("rpc.example.com"),
             path: Some("/demo.Echo/Say"),
-            headers: Some(&request_headers),
+            headers: Some(qpx_core::http_content_length::HeaderView::new(
+                &request_headers,
+            )),
             ..Default::default()
         },
     );

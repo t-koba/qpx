@@ -80,7 +80,9 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
         tls_version: input.client_hello.tls_version.as_deref(),
         ja3: input.client_hello.ja3.as_deref(),
         ja4: input.client_hello.ja4.as_deref(),
-        headers: Some(input.sanitized_headers),
+        headers: Some(qpx_core::http_content_length::HeaderView::new(
+            input.sanitized_headers,
+        )),
         upstream_cert_present: input.upstream_cert.map(|cert| cert.present),
         upstream_cert_subject: input.upstream_cert.and_then(|cert| cert.subject.as_deref()),
         upstream_cert_issuer: input.upstream_cert.and_then(|cert| cert.issuer.as_deref()),

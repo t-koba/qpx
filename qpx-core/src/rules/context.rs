@@ -1,5 +1,7 @@
 use std::net::IpAddr;
 
+use crate::http_content_length::HeaderView;
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct RuleMatchContext<'a> {
     pub src_ip: Option<IpAddr>,
@@ -47,8 +49,8 @@ pub struct RuleMatchContext<'a> {
     pub rpc_status: Option<&'a str>,
     pub rpc_message_size: Option<u64>,
     pub rpc_message: Option<&'a str>,
-    pub rpc_trailers: Option<&'a http::HeaderMap>,
-    pub headers: Option<&'a http::HeaderMap>,
+    pub rpc_trailers: Option<HeaderView<'a>>,
+    pub headers: Option<HeaderView<'a>>,
     pub user: Option<&'a str>,
     pub user_groups: &'a [String],
     pub device_id: Option<&'a str>,

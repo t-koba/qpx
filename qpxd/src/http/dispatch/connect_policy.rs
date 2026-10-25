@@ -39,7 +39,7 @@ pub(crate) fn build_dispatch_connect_rule_context<'a>(
         authority: Some(authority),
         http_version: Some(http_version),
         alpn,
-        headers: Some(headers),
+        headers: Some(qpx_core::http_content_length::HeaderView::new(headers)),
         ..Default::default()
     };
     crate::http::policy::rule_context::apply_identity(&mut ctx, identity);
