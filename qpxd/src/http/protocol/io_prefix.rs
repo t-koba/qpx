@@ -1,4 +1,4 @@
-use bytes::{Bytes, BytesMut};
+use bytes::{Buf, Bytes, BytesMut};
 use std::io::IoSlice;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -11,20 +11,15 @@ use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 pub struct PrefixedIo<I> {
     inner: I,
     prefix: Bytes,
-    pos: usize,
 }
 
 impl<I> PrefixedIo<I> {
     pub fn new(inner: I, prefix: Bytes) -> Self {
-        Self {
-            inner,
-            prefix,
-            pos: 0,
-        }
+        Self { inner, prefix }
     }
 
     pub fn into_inner_with_leading_prefix(self, leading: Bytes) -> (I, Bytes) {
-        let remaining = self.prefix.slice(self.pos..);
+        let remaining = self.prefix;
         if remaining.is_empty() {
             return (self.inner, leading);
         }
@@ -44,11 +39,10 @@ impl<I: AsyncRead + Unpin> AsyncRead for PrefixedIo<I> {
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<std::io::Result<()>> {
-        if self.pos < self.prefix.len() && buf.remaining() > 0 {
-            let available = &self.prefix[self.pos..];
-            let to_copy = available.len().min(buf.remaining());
-            buf.put_slice(&available[..to_copy]);
-            self.pos += to_copy;
+        if !self.prefix.is_empty() && buf.remaining() > 0 {
+            let to_copy = self.prefix.len().min(buf.remaining());
+            buf.put_slice(&self.prefix[..to_copy]);
+            self.prefix.advance(to_copy);
             return Poll::Ready(Ok(()));
         }
         Pin::new(&mut self.inner).poll_read(cx, buf)
@@ -88,19 +82,21 @@ impl<I: AsyncWrite + Unpin> AsyncWrite for PrefixedIo<I> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::AsyncReadExt;
     use tokio::net::{TcpListener, TcpStream};
 
-    #[test]
-    fn leading_prefix_is_combined_with_unread_existing_prefix() {
-        let prefixed = PrefixedIo {
-            inner: 7_u8,
-            prefix: Bytes::from_static(b"abcdef"),
-            pos: 2,
-        };
+    #[tokio::test]
+    async fn leading_prefix_is_combined_with_unread_existing_prefix() {
+        let mut prefixed = PrefixedIo::new(tokio::io::empty(), Bytes::from_static(b"abcdef"));
+        let mut consumed = [0; 2];
+        prefixed
+            .read_exact(&mut consumed)
+            .await
+            .expect("read prefix");
 
-        let (inner, prefix) = prefixed.into_inner_with_leading_prefix(Bytes::from_static(b"12"));
+        let (_inner, prefix) = prefixed.into_inner_with_leading_prefix(Bytes::from_static(b"12"));
 
-        assert_eq!(inner, 7);
+        assert_eq!(consumed, *b"ab");
         assert_eq!(prefix, b"12cdef"[..]);
     }
 
