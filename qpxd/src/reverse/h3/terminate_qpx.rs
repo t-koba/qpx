@@ -233,6 +233,17 @@ impl ReverseQpxHandler {
             Ok::<_, anyhow::Error>(result.unwrap_or_else(|impossible| match impossible {}))
         };
         let (mut response_stream, mut request_body_stream) = req_stream.split();
+        let grpc_observer = request_streaming
+            .observe_grpc_messages
+            .then(|| {
+                crate::http::rpc::streaming_rpc_observer(
+                    &request_headers,
+                    None,
+                    Some(request_streaming.max_grpc_message_bytes),
+                    Some(request_streaming.max_grpc_web_trailer_bytes),
+                )
+            })
+            .flatten();
         let relay_body_fut = crate::http3::qpx_stream::relay_qpx_request_body_observed_from_recv(
             &mut request_body_stream,
             sender,
@@ -240,10 +251,8 @@ impl ReverseQpxHandler {
                 read_timeout: Duration::from_millis(request_streaming.body_read_timeout_ms),
                 max_body_bytes: request_streaming.max_request_body_bytes,
                 declared_content_length,
-                request_headers: &request_headers,
+                grpc_observer,
                 listener_name: Some(self.reverse.name.as_ref()),
-                max_grpc_message_bytes: Some(request_streaming.max_grpc_message_bytes),
-                max_grpc_web_trailer_bytes: Some(request_streaming.max_grpc_web_trailer_bytes),
                 // The relay wrapper below owns the stream budget: it cancels
                 // the relay at expiry instead of failing it, so the inner
                 // relay must not abort the stream on the same instant.

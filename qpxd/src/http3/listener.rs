@@ -295,18 +295,25 @@ async fn handle_stream<H: H3RequestHandler>(
     let request_read_timeout = Duration::from_millis(request_streaming.body_read_timeout_ms);
     let max_request_body_bytes = request_streaming.max_request_body_bytes;
     let listener_name = limits.listener_name.clone();
-    let max_grpc_message_bytes = request_streaming.max_grpc_message_bytes;
-    let max_grpc_web_trailer_bytes = request_streaming.max_grpc_web_trailer_bytes;
+    let grpc_observer = request_streaming
+        .observe_grpc_messages
+        .then(|| {
+            crate::http::rpc::streaming_rpc_observer(
+                &request_headers,
+                None,
+                Some(request_streaming.max_grpc_message_bytes),
+                Some(request_streaming.max_grpc_web_trailer_bytes),
+            )
+        })
+        .flatten();
     let (body, request_body_completion) = h3_incoming_body(
         recv_stream,
         H3IncomingBodyOptions {
             read_timeout: request_read_timeout,
             max_body_bytes: max_request_body_bytes,
             declared_content_length,
-            request_headers,
+            grpc_observer,
             listener_name,
-            max_grpc_message_bytes: Some(max_grpc_message_bytes),
-            max_grpc_web_trailer_bytes: Some(max_grpc_web_trailer_bytes),
             grpc_stream_deadline: grpc_deadline.map(|deadline| deadline.instant()),
             observe_grpc_messages: request_streaming.observe_grpc_messages,
             drain_control: limits.request_body_drain.clone(),

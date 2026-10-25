@@ -189,6 +189,17 @@ impl ForwardQpxHandler {
             }
         };
         let (mut response_stream, mut request_body_stream) = req_stream.split();
+        let grpc_observer = listener_streaming
+            .observe_grpc_messages
+            .then(|| {
+                crate::http::rpc::streaming_rpc_observer(
+                    &request_headers,
+                    None,
+                    Some(listener_streaming.max_grpc_message_bytes),
+                    Some(listener_streaming.max_grpc_web_trailer_bytes),
+                )
+            })
+            .flatten();
         let relay_body_fut = crate::http3::qpx_stream::relay_qpx_request_body_observed_from_recv(
             &mut request_body_stream,
             sender,
@@ -196,10 +207,8 @@ impl ForwardQpxHandler {
                 read_timeout: Duration::from_millis(listener_streaming.body_read_timeout_ms),
                 max_body_bytes: listener_streaming.max_request_body_bytes,
                 declared_content_length,
-                request_headers: &request_headers,
+                grpc_observer,
                 listener_name: Some(self.listener_name.as_ref()),
-                max_grpc_message_bytes: Some(listener_streaming.max_grpc_message_bytes),
-                max_grpc_web_trailer_bytes: Some(listener_streaming.max_grpc_web_trailer_bytes),
                 // The relay wrapper below owns the stream budget: it cancels
                 // the relay at expiry instead of failing it, so the inner
                 // relay must not abort the stream on the same instant.

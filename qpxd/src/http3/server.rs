@@ -28,10 +28,8 @@ pub(crate) struct H3IncomingBodyOptions {
     pub read_timeout: Duration,
     pub max_body_bytes: usize,
     pub declared_content_length: Option<u64>,
-    pub request_headers: HeaderMap,
+    pub grpc_observer: Option<crate::http::rpc::streaming::StreamingRpcObserver>,
     pub listener_name: Arc<str>,
-    pub max_grpc_message_bytes: Option<u64>,
-    pub max_grpc_web_trailer_bytes: Option<u64>,
     pub grpc_stream_deadline: Option<Instant>,
     pub observe_grpc_messages: bool,
     pub drain_control: H3RequestBodyDrainControl,
@@ -135,17 +133,6 @@ impl H3IncomingBody {
         options: H3IncomingBodyOptions,
         completion_tx: oneshot::Sender<H3IncomingBodyResult>,
     ) -> Self {
-        let grpc_observer = options
-            .observe_grpc_messages
-            .then(|| {
-                crate::http::rpc::streaming_rpc_observer(
-                    &options.request_headers,
-                    None,
-                    options.max_grpc_message_bytes,
-                    options.max_grpc_web_trailer_bytes,
-                )
-            })
-            .flatten();
         Self {
             recv_stream: Some(recv_stream),
             read_timeout: options.read_timeout,
@@ -153,7 +140,7 @@ impl H3IncomingBody {
             declared_content_length: options.declared_content_length,
             listener_name: options.listener_name,
             observe_grpc_messages: options.observe_grpc_messages,
-            grpc_observer,
+            grpc_observer: options.grpc_observer,
             grpc_stream_deadline: options.grpc_stream_deadline,
             operation_timeout: Box::pin(tokio::time::sleep(options.read_timeout)),
             operation_timeout_armed: false,

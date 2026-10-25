@@ -9,10 +9,8 @@ pub(crate) struct QpxRequestBodyRelayOptions<'a> {
     pub(crate) read_timeout: Duration,
     pub(crate) max_body_bytes: usize,
     pub(crate) declared_content_length: Option<u64>,
-    pub(crate) request_headers: &'a HeaderMap,
+    pub(crate) grpc_observer: Option<crate::http::rpc::streaming::StreamingRpcObserver>,
     pub(crate) listener_name: Option<&'a str>,
-    pub(crate) max_grpc_message_bytes: Option<u64>,
-    pub(crate) max_grpc_web_trailer_bytes: Option<u64>,
     pub(crate) grpc_stream_deadline: Option<Instant>,
     pub(crate) observe_grpc_messages: bool,
 }
@@ -59,17 +57,7 @@ async fn relay_qpx_request_body_observed_inner(
     sender: &mut Sender,
     options: QpxRequestBodyRelayOptions<'_>,
 ) -> Result<(u64, Option<crate::http::rpc::FramedBodySummary>)> {
-    let mut grpc_observer = options
-        .observe_grpc_messages
-        .then(|| {
-            crate::http::rpc::streaming_rpc_observer(
-                options.request_headers,
-                None,
-                options.max_grpc_message_bytes,
-                options.max_grpc_web_trailer_bytes,
-            )
-        })
-        .flatten();
+    let mut grpc_observer = options.grpc_observer;
     let mut bytes_read = 0usize;
     let mut receiver_open = true;
     loop {
