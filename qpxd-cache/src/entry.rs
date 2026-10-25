@@ -59,7 +59,7 @@ pub fn response_from_envelope_for_request(
         .flatten();
     let Some(range) = range else {
         let content_length =
-            head_response.then(|| stored_content_length(envelope).unwrap_or(full_len));
+            head_response.then(|| envelope.declared_content_length().unwrap_or(full_len));
         return build_response(BuildResponseParams {
             envelope,
             now_ms,
@@ -319,19 +319,6 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
     Ok(response)
 }
 
-/// The Content-Length that the stored response declares.
-///
-/// The stored headers are a list of name-value pairs rather than a header
-/// map, so the pairs go to the owner's named-value entry point, which finds
-/// the field's own values: the member grammar and the conflict rule stay in
-/// one place, and this site does not select the field's values itself.
-fn stored_content_length(envelope: &CachedResponseEnvelope) -> Option<u64> {
-    let named = envelope.headers.iter().map(|(name, value)| (name, value));
-    qpx_core::http_content_length::declared_content_length_in_named_values(named)
-        .ok()
-        .flatten()
-}
-
 pub fn resolve_range(range: &ByteRangeSpec, len: u64) -> Option<(u64, u64)> {
     if len == 0 {
         return None;
@@ -385,11 +372,19 @@ mod tests {
     #[test]
     fn the_stored_length_is_the_owners_reading() {
         assert_eq!(
-            stored_content_length(&envelope_with_content_length("42")),
+            envelope_with_content_length("42").declared_content_length(),
             Some(42)
         );
         assert_eq!(
-            stored_content_length(&envelope_with_content_length("42, 42")),
+            envelope_with_content_length("42, 42").declared_content_length(),
+            Some(42)
+        );
+        assert_eq!(
+            envelope_with_headers(vec![
+                ("content-length".to_string(), "42".to_string()),
+                ("Content-Length".to_string(), "42".to_string()),
+            ])
+            .declared_content_length(),
             Some(42)
         );
     }
@@ -397,7 +392,7 @@ mod tests {
     #[test]
     fn the_stored_length_refuses_a_signed_member() {
         assert_eq!(
-            stored_content_length(&envelope_with_content_length("+42")),
+            envelope_with_content_length("+42").declared_content_length(),
             None
         );
     }
@@ -405,7 +400,7 @@ mod tests {
     #[test]
     fn the_stored_length_refuses_conflicting_members() {
         assert_eq!(
-            stored_content_length(&envelope_with_content_length("42, 43")),
+            envelope_with_content_length("42, 43").declared_content_length(),
             None
         );
     }
@@ -413,7 +408,7 @@ mod tests {
     #[test]
     fn the_stored_length_of_an_empty_value_is_absent() {
         assert_eq!(
-            stored_content_length(&envelope_with_content_length("")),
+            envelope_with_content_length("").declared_content_length(),
             None
         );
     }
@@ -421,7 +416,7 @@ mod tests {
     #[test]
     fn a_response_without_the_field_declares_no_length() {
         assert_eq!(
-            stored_content_length(&envelope_with_headers(Vec::new())),
+            envelope_with_headers(Vec::new()).declared_content_length(),
             None
         );
     }

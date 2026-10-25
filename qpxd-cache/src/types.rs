@@ -346,7 +346,7 @@ impl std::fmt::Debug for RevalidationState {
 #[derive(Debug, Clone)]
 pub struct CachedResponseEnvelope {
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    pub(crate) headers: Vec<(String, String)>,
     pub body: CachedBody,
     pub body_len: u64,
     pub stored_at_ms: u64,
@@ -360,7 +360,7 @@ pub struct CachedResponseEnvelope {
     /// not rebuild a `HeaderMap` from the stored `Vec` on every call. Boxed to keep
     /// `CachedResponseEnvelope` small (it is embedded by value in several enums).
     /// Access via [`CachedResponseEnvelope::header_map`] and the fixed validator/date accessors.
-    pub header_map: OnceLock<Box<http::HeaderMap>>,
+    pub(crate) header_map: OnceLock<Box<http::HeaderMap>>,
     /// Parsed response cache directives derived from `header_map`. They are immutable
     /// for the lifetime of an envelope, so repeated hot-cache lookups reuse one parse.
     pub response_directives: OnceLock<ResponseDirectives>,
@@ -381,9 +381,18 @@ pub(crate) struct CachedResponseHeaderValues {
 impl CachedResponseEnvelope {
     /// Returns the hydrated `HeaderMap` for this envelope, building it once from
     /// the stored `headers` on first access.
-    pub fn header_map(&self) -> &http::HeaderMap {
+    pub(crate) fn header_map(&self) -> &http::HeaderMap {
         self.header_map
             .get_or_init(|| Box::new(super::entry::header_map_from_vec(&self.headers)))
+    }
+
+    /// Returns the stored response's declared length using qpx-core's shared
+    /// Content-Length grammar and duplicate-conflict handling.
+    pub(crate) fn declared_content_length(&self) -> Option<u64> {
+        let named = self.headers.iter().map(|(name, value)| (name, value));
+        qpx_core::http_content_length::declared_content_length_in_named_values(named)
+            .ok()
+            .flatten()
     }
 
     /// First case-insensitive ETag value from the hydrated headers.
