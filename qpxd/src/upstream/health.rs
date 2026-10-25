@@ -117,12 +117,10 @@ impl AdaptiveEjection {
 
     /// Clears the counters.
     pub(crate) fn reset(&self) {
-        reset_adaptive_stats(
-            &self.successes,
-            &self.failures,
-            &self.latency_total_ms,
-            &self.latency_samples,
-        );
+        self.successes.store(0, Ordering::Relaxed);
+        self.failures.store(0, Ordering::Relaxed);
+        self.latency_total_ms.store(0, Ordering::Relaxed);
+        self.latency_samples.store(0, Ordering::Relaxed);
     }
 }
 
@@ -152,19 +150,6 @@ fn maybe_trim_adaptive_window(
             Some(current / 2)
         })
         .ok();
-}
-
-/// Clear adaptive counters when requested by the endpoint owner.
-fn reset_adaptive_stats(
-    successes: &AtomicU32,
-    failures: &AtomicU32,
-    latency_total_ms: &AtomicU64,
-    latency_samples: &AtomicU32,
-) {
-    successes.store(0, Ordering::Relaxed);
-    failures.store(0, Ordering::Relaxed);
-    latency_total_ms.store(0, Ordering::Relaxed);
-    latency_samples.store(0, Ordering::Relaxed);
 }
 
 /// Why an endpoint was ejected.
@@ -389,16 +374,20 @@ mod tests {
     }
 
     #[test]
-    fn adaptive_stats_reset_to_zero() {
-        let successes = AtomicU32::new(17);
-        let failures = AtomicU32::new(18);
-        let latency_total_ms = AtomicU64::new(101);
-        let latency_samples = AtomicU32::new(36);
-        reset_adaptive_stats(&successes, &failures, &latency_total_ms, &latency_samples);
-        assert_eq!(successes.load(Ordering::Relaxed), 0);
-        assert_eq!(failures.load(Ordering::Relaxed), 0);
-        assert_eq!(latency_total_ms.load(Ordering::Relaxed), 0);
-        assert_eq!(latency_samples.load(Ordering::Relaxed), 0);
+    fn adaptive_stats_reset_to_zero_without_changing_backoff() {
+        let adaptive = AdaptiveEjection {
+            successes: AtomicU32::new(17),
+            failures: AtomicU32::new(18),
+            latency_total_ms: AtomicU64::new(101),
+            latency_samples: AtomicU32::new(36),
+            backoff_shift: AtomicU32::new(3),
+        };
+        adaptive.reset();
+        assert_eq!(adaptive.successes.load(Ordering::Relaxed), 0);
+        assert_eq!(adaptive.failures.load(Ordering::Relaxed), 0);
+        assert_eq!(adaptive.latency_total_ms.load(Ordering::Relaxed), 0);
+        assert_eq!(adaptive.latency_samples.load(Ordering::Relaxed), 0);
+        assert_eq!(adaptive.backoff_shift.load(Ordering::Relaxed), 3);
     }
 
     #[test]
