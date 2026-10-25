@@ -22,20 +22,25 @@ pub async fn spawn_slow_chunked_backend(
             let Ok((mut stream, _)) = listener.accept().await else {
                 return;
             };
-            if read_request_head(&mut stream).await.is_err() {
+            if let Err(err) = read_request_head(&mut stream).await {
+                eprintln!("backend {port}: request head failed: {err}");
                 continue;
             }
-            if serve_slow_chunked_response(
+            eprintln!("backend {port}: serving chunked response");
+            match serve_slow_chunked_response(
                 &mut stream,
                 &chunks,
                 &response_headers,
                 trailers.as_deref(),
             )
             .await
-            .is_ok()
             {
-                closed_for_task.store(true, Ordering::SeqCst);
-                return;
+                Ok(()) => {
+                    eprintln!("backend {port}: chunked response complete");
+                    closed_for_task.store(true, Ordering::SeqCst);
+                    return;
+                }
+                Err(err) => eprintln!("backend {port}: chunked response failed: {err}"),
             }
         }
     });
@@ -189,37 +194,76 @@ pub async fn spawn_infinite_stream_backend(
     (port, task, closed)
 }
 
+// The close is a test event, not a timer: an H3 RESET_STREAM may overtake
+// queued HEADERS/DATA unless the client has already observed the partial body.
 pub async fn spawn_abort_after_partial_backend(
     response_line: &'static str,
     headers: Vec<(&'static str, &'static str)>,
     partial_body: &'static [u8],
-    delay_before_abort: Duration,
-) -> (u16, JoinHandle<()>) {
+) -> (
+    u16,
+    JoinHandle<std::io::Result<()>>,
+    tokio::sync::oneshot::Sender<()>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let port = listener.local_addr().expect("addr").port();
+    let (abort, observed_partial) = tokio::sync::oneshot::channel();
     let task = tokio::spawn(async move {
+        let mut request_stream = None;
         for _ in 0..8 {
-            let Ok((mut stream, _)) = listener.accept().await else {
-                return;
-            };
-            if read_request_head(&mut stream).await.is_err() {
-                continue;
+            let (mut stream, _) = listener.accept().await?;
+            match read_request_head(&mut stream).await {
+                Ok(()) => {
+                    request_stream = Some(stream);
+                    break;
+                }
+                Err(err)
+                    if matches!(
+                        err.kind(),
+                        std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+                    ) =>
+                {
+                    eprintln!("backend {port}: skipped empty probe connection: {err}");
+                }
+                Err(err) => return Err(err),
             }
-            let mut head = format!("{response_line}\r\n");
-            for (name, value) in &headers {
-                head.push_str(name);
-                head.push_str(": ");
-                head.push_str(value);
-                head.push_str("\r\n");
-            }
-            head.push_str("\r\n");
-            let _ = stream.write_all(head.as_bytes()).await;
-            let _ = stream.write_all(partial_body).await;
-            sleep(delay_before_abort).await;
-            return;
         }
+        let Some(mut stream) = request_stream else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionAborted,
+                "no request head received after 8 connections",
+            ));
+        };
+
+        let mut head = format!("{response_line}\r\n");
+        for (name, value) in &headers {
+            head.push_str(name);
+            head.push_str(": ");
+            head.push_str(value);
+            head.push_str("\r\n");
+        }
+        head.push_str("\r\n");
+        stream.write_all(head.as_bytes()).await?;
+        stream.write_all(partial_body).await?;
+        stream.flush().await?;
+        eprintln!(
+            "backend {port}: partial response written; waiting for client DATA acknowledgement"
+        );
+        tokio::time::timeout(Duration::from_secs(30), observed_partial)
+            .await
+            .map_err(|_| {
+                std::io::Error::new(
+                    std::io::ErrorKind::TimedOut,
+                    "client did not acknowledge partial DATA",
+                )
+            })?
+            .map_err(|_| std::io::Error::other("client dropped partial DATA acknowledgement"))?;
+        eprintln!(
+            "backend {port}: client observed partial DATA; closing short Content-Length response"
+        );
+        Ok(())
     });
-    (port, task)
+    (port, task, abort)
 }
 
 pub async fn spawn_grpc_backend(

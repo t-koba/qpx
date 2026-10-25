@@ -154,23 +154,52 @@ async fn client_cancel_propagates_to_upstream() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upstream_abort_resets_h3_stream() -> Result<()> {
-    let (backend_port, backend_task) = streaming_backend::spawn_abort_after_partial_backend(
+    let (backend_port, backend_task, abort) = streaming_backend::spawn_abort_after_partial_backend(
         "HTTP/1.1 200 OK",
         vec![("content-length", "10")],
         b"partial",
-        Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
+    let (proxy, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
-    let response = request_h3(port, &cert_path, "/abort", &[], false).await?;
+    let response = request_h3_inner(
+        port,
+        &cert_path,
+        "/abort",
+        &[],
+        false,
+        true,
+        Some((b"partial".len(), abort)),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "partial response request failed; backend {backend_port}{}",
+            proxy.log_tail()
+        )
+    })?;
 
-    assert_eq!(response.status, http::StatusCode::OK);
-    assert!(
-        response.data_error.is_some(),
-        "expected stream reset on partial upstream body"
+    assert_eq!(
+        response.status,
+        http::StatusCode::OK,
+        "backend {backend_port}; body={:?}; data_error={:?}{}",
+        String::from_utf8_lossy(&response.body),
+        response.data_error,
+        proxy.log_tail()
     );
-    backend_task.await?;
+    assert_eq!(response.body, b"partial", "{}", proxy.log_tail());
+    let error = response.data_error.as_deref().with_context(|| {
+        format!(
+            "expected stream reset after partial upstream body; backend {backend_port}{}",
+            proxy.log_tail()
+        )
+    })?;
+    assert!(
+        error.contains("Remote reset"),
+        "expected H3 reset, got {error}{}",
+        proxy.log_tail()
+    );
+    backend_task.await??;
     Ok(())
 }
 
@@ -279,70 +308,110 @@ async fn grpc_web_text_base64_boundary_split() -> Result<()> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn trailers_preserved_through_streaming() -> Result<()> {
-    let mut missing_trailers = 0usize;
-    for _ in 0..3 {
-        let (backend_port, backend_task, _closed) = streaming_backend::spawn_slow_chunked_backend(
-            vec![(Bytes::from_static(b"done"), Duration::ZERO)],
-            vec![("content-type", "text/plain")],
-            Some(vec![("grpc-status", "0"), ("x-trailer", "kept")]),
+    let (backend_port, backend_task, _closed) = streaming_backend::spawn_slow_chunked_backend(
+        vec![(Bytes::from_static(b"done"), Duration::ZERO)],
+        vec![("content-type", "text/plain")],
+        Some(vec![("grpc-status", "0"), ("x-trailer", "kept")]),
+    )
+    .await;
+    let (proxy, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
+
+    let response = request_h3(port, &cert_path, "/trailers", &[], false)
+        .await
+        .with_context(|| {
+            format!(
+                "trailers request failed; backend {backend_port}{}",
+                proxy.log_tail()
+            )
+        })?;
+    assert_eq!(
+        response.status,
+        http::StatusCode::OK,
+        "backend {backend_port}; body={:?}; data_error={:?}{}",
+        String::from_utf8_lossy(&response.body),
+        response.data_error,
+        proxy.log_tail()
+    );
+    assert!(
+        response.data_error.is_none(),
+        "unexpected body error: {:?}{}",
+        response.data_error,
+        proxy.log_tail()
+    );
+    let trailers = response.trailers.with_context(|| {
+        format!(
+            "missing trailers; backend {backend_port}{}",
+            proxy.log_tail()
         )
-        .await;
-        let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
-
-        let response = request_h3(port, &cert_path, "/trailers", &[], false).await?;
-
-        assert_eq!(response.status, http::StatusCode::OK);
-        if let Some(trailers) = response.trailers {
-            assert_eq!(
-                trailers
-                    .get("grpc-status")
-                    .and_then(|value| value.to_str().ok()),
-                Some("0")
-            );
-            assert_eq!(
-                trailers
-                    .get("x-trailer")
-                    .and_then(|value| value.to_str().ok()),
-                Some("kept")
-            );
-            backend_task.await?;
-            return Ok(());
-        }
-
-        missing_trailers += 1;
-        backend_task.await?;
-    }
-    Err(anyhow!(
-        "HTTP/3 trailers were not observed after {missing_trailers} attempts"
-    ))
+    })?;
+    assert_eq!(
+        trailers
+            .get("grpc-status")
+            .and_then(|value| value.to_str().ok()),
+        Some("0"),
+        "{}",
+        proxy.log_tail()
+    );
+    assert_eq!(
+        trailers
+            .get("x-trailer")
+            .and_then(|value| value.to_str().ok()),
+        Some("kept"),
+        "{}",
+        proxy.log_tail()
+    );
+    backend_task.await?;
+    Ok(())
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn partial_failure_no_double_response() -> Result<()> {
-    let (backend_port, backend_task) = streaming_backend::spawn_abort_after_partial_backend(
+    let (backend_port, backend_task, abort) = streaming_backend::spawn_abort_after_partial_backend(
         "HTTP/1.1 200 OK",
         vec![("content-length", "10")],
         b"partial",
-        Duration::from_millis(50),
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
+    let (proxy, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
-    let response = request_h3(port, &cert_path, "/partial", &[], false).await?;
+    let response = request_h3_inner(
+        port,
+        &cert_path,
+        "/partial",
+        &[],
+        false,
+        true,
+        Some((b"partial".len(), abort)),
+    )
+    .await
+    .with_context(|| {
+        format!(
+            "partial response request failed; backend {backend_port}{}",
+            proxy.log_tail()
+        )
+    })?;
 
-    assert_eq!(response.status, http::StatusCode::OK);
-    assert_ne!(response.status, http::StatusCode::BAD_GATEWAY);
-    assert!(
-        response
-            .body
-            .windows(b"partial".len())
-            .any(|window| window == b"partial")
+    assert_eq!(
+        response.status,
+        http::StatusCode::OK,
+        "backend {backend_port}; body={:?}; data_error={:?}{}",
+        String::from_utf8_lossy(&response.body),
+        response.data_error,
+        proxy.log_tail()
     );
+    assert_eq!(response.body, b"partial", "{}", proxy.log_tail());
+    let error = response.data_error.as_deref().with_context(|| {
+        format!(
+            "expected stream reset after partial upstream body; backend {backend_port}{}",
+            proxy.log_tail()
+        )
+    })?;
     assert!(
-        response.data_error.is_some(),
-        "partial response must end with stream reset"
+        error.contains("Remote reset"),
+        "expected H3 reset, got {error}{}",
+        proxy.log_tail()
     );
-    backend_task.await?;
+    backend_task.await??;
     Ok(())
 }
 
@@ -685,7 +754,16 @@ async fn request_h3(
     headers: &[(&str, &str)],
     close_after_first_data: bool,
 ) -> Result<H3ReadResult> {
-    request_h3_inner(port, ca_cert, path, headers, close_after_first_data, true).await
+    request_h3_inner(
+        port,
+        ca_cert,
+        path,
+        headers,
+        close_after_first_data,
+        true,
+        None,
+    )
+    .await
 }
 
 async fn request_h3_counting(
@@ -694,7 +772,7 @@ async fn request_h3_counting(
     path: &str,
     headers: &[(&str, &str)],
 ) -> Result<H3ReadResult> {
-    request_h3_inner(port, ca_cert, path, headers, false, false).await
+    request_h3_inner(port, ca_cert, path, headers, false, false, None).await
 }
 
 async fn request_h3_inner(
@@ -704,6 +782,7 @@ async fn request_h3_inner(
     headers: &[(&str, &str)],
     close_after_first_data: bool,
     collect_body: bool,
+    mut abort_after_bytes: Option<(usize, tokio::sync::oneshot::Sender<()>)>,
 ) -> Result<H3ReadResult> {
     let mut endpoint = build_quinn_client_endpoint()?;
     endpoint.set_default_client_config(build_h3_test_client_config(ca_cert)?);
@@ -760,6 +839,15 @@ async fn request_h3_inner(
                     body.extend_from_slice(&chunk.copy_to_bytes(chunk_len));
                 } else {
                     chunk.advance(chunk_len);
+                }
+                if abort_after_bytes
+                    .as_ref()
+                    .is_some_and(|(len, _)| body_len >= *len)
+                {
+                    let (_, abort) = abort_after_bytes.take().expect("partial DATA signal");
+                    abort.send(()).map_err(|_| {
+                        anyhow!("backend closed before client observed partial DATA")
+                    })?;
                 }
                 if close_after_first_data {
                     conn.close(quinn::VarInt::from_u32(0), b"client cancel");
