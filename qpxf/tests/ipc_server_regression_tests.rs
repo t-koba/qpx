@@ -136,7 +136,10 @@ handlers:
             method: method.to_string(),
             uri: script_name.to_string(),
             server_protocol: "HTTP/2".to_string(),
-            headers: vec![("Host".to_string(), "localhost".to_string())],
+            headers: qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(vec![(
+                "Host".to_string(),
+                "localhost".to_string(),
+            )]),
             params,
             verified_identity: None,
             authorization_decision: None,

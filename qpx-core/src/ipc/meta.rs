@@ -1,3 +1,6 @@
+mod headers;
+pub use headers::{IpcRequestHeaders, IpcResponseHeaders};
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -10,7 +13,8 @@ pub struct IpcRequestMeta {
     pub method: String,
     pub uri: String,
     pub server_protocol: String,
-    pub headers: Vec<(String, String)>,
+    #[serde(with = "headers::request_wire")]
+    pub headers: IpcRequestHeaders,
     pub params: HashMap<String, String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -104,5 +108,6 @@ impl AuthorizationDecisionContext {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IpcResponseMeta {
     pub status: u16,
-    pub headers: Vec<(String, String)>,
+    #[serde(with = "headers::response_wire")]
+    pub headers: IpcResponseHeaders,
 }

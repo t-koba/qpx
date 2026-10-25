@@ -1,6 +1,6 @@
 use super::ClientConnInfo;
 use hyper::Request;
-use qpx_core::ipc::meta::IpcRequestMeta;
+use qpx_core::ipc::meta::{IpcRequestHeaders, IpcRequestMeta};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::connection_nominated_header_names;
 use std::collections::{HashMap, HashSet};
@@ -16,7 +16,7 @@ pub(super) fn build_ipc_meta(
     verified_identity: Option<qpx_core::ipc::meta::VerifiedIdentityContext>,
     authorization_decision: Option<qpx_core::ipc::meta::AuthorizationDecisionContext>,
 ) -> IpcRequestMeta {
-    let mut headers = Vec::new();
+    let mut headers = IpcRequestHeaders::default();
     let connection_tokens: HashSet<_> = connection_nominated_header_names(req.headers()).collect();
     let mut has_host = false;
     for (name, value) in req.headers() {
@@ -92,19 +92,13 @@ mod tests {
             .insert("x-kept", HeaderValue::from_static("value"));
 
         let meta = build_ipc_meta(&req, ClientConnInfo::default(), None, None);
-        assert!(!meta.headers.iter().any(|(name, _)| name == "x-private"));
-        assert!(!meta.headers.iter().any(|(name, _)| name == "x-second"));
-        assert!(!meta.headers.iter().any(|(name, _)| name == "upgrade"));
-        assert!(
-            meta.headers
-                .iter()
-                .any(|(name, value)| name == "x-kept" && value == "value")
-        );
-        assert!(
-            meta.headers
-                .iter()
-                .any(|(name, value)| name == "host" && value == "example.test")
-        );
+        let wire = serde_json::to_value(&meta).expect("wire metadata");
+        let pairs = wire["headers"].as_array().expect("header pairs");
+        for name in ["x-private", "x-second", "upgrade"] {
+            assert!(!pairs.iter().any(|pair| pair[0] == name));
+        }
+        assert!(pairs.contains(&serde_json::json!(["x-kept", "value"])));
+        assert!(pairs.contains(&serde_json::json!(["host", "example.test"])));
     }
 
     #[test]

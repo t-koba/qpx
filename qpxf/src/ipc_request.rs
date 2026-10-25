@@ -6,7 +6,7 @@ use std::sync::Arc;
 use crate::executor::{CgiRequest, Executor};
 use crate::router::Router;
 use qpx_core::http_content_length::ContentLengthError;
-use qpx_core::ipc::meta::{IpcRequestMeta, IpcResponseMeta};
+use qpx_core::ipc::meta::{IpcRequestHeaders, IpcRequestMeta, IpcResponseHeaders, IpcResponseMeta};
 
 pub(crate) struct IpcPlainResponse {
     pub(crate) status: u16,
@@ -32,21 +32,20 @@ pub(crate) struct IpcRequestPlan {
 pub(crate) fn plaintext_meta(status: u16) -> IpcResponseMeta {
     IpcResponseMeta {
         status,
-        headers: vec![("Content-Type".to_string(), "text/plain".to_string())],
+        headers: IpcResponseHeaders::from_pairs(vec![(
+            "Content-Type".to_string(),
+            "text/plain".to_string(),
+        )]),
     }
 }
 
-pub(crate) fn declared_content_length(headers: &[(String, String)]) -> Result<Option<usize>> {
-    let named = headers
-        .iter()
-        .map(|(name, value)| (name.as_str(), value.as_str()));
-    let declared = qpx_core::http_content_length::declared_content_length_in_named_values(named)
-        .map_err(|err| match err {
-            ContentLengthError::Conflicting => anyhow!("conflicting Content-Length values"),
-            ContentLengthError::InvalidValue | ContentLengthError::InvalidHeader => {
-                anyhow!("invalid Content-Length value")
-            }
-        })?;
+pub(crate) fn declared_content_length(headers: &IpcRequestHeaders) -> Result<Option<usize>> {
+    let declared = headers.declared_content_length().map_err(|err| match err {
+        ContentLengthError::Conflicting => anyhow!("conflicting Content-Length values"),
+        ContentLengthError::InvalidValue | ContentLengthError::InvalidHeader => {
+            anyhow!("invalid Content-Length value")
+        }
+    })?;
     let Some(length) = declared else {
         return Ok(None);
     };
@@ -78,14 +77,7 @@ pub(crate) fn plan_ipc_request(
         .map_err(|e| anyhow!("invalid IPC request URI: {e}"))?;
     let request_path = uri.path().to_string();
     let query_string = uri.query().unwrap_or("").to_string();
-    let header_host = meta
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("host"))
-        .map(|(_, v)| v.as_str());
-    let route_host = header_host
-        .and_then(host_only)
-        .or_else(|| uri.authority().and_then(|a| host_only(a.as_str())));
+    let route_host = meta.headers.route_host(&uri);
 
     let (executor, matched_prefix, verified_context) =
         match router.route(request_path.as_str(), route_host.as_deref()) {
@@ -95,21 +87,13 @@ pub(crate) fn plan_ipc_request(
     let (script_name, path_info) =
         split_script_name_path_info(request_path.as_str(), matched_prefix.as_deref());
 
-    let header_host = header_host.or_else(|| uri.authority().map(|a| a.as_str()));
-    let (server_name, server_port) = header_host
-        .map(host_port)
-        .unwrap_or((Some("localhost".to_string()), Some(80)));
+    let (server_name, server_port) = meta.headers.server_name_and_port(&uri);
 
     let declared_stdin_bytes = match declared_content_length(&meta.headers) {
         Ok(value) => value,
         Err(_) => return Ok(Err(IpcPlainResponse::new(400, b"invalid content-length"))),
     };
-    let content_type = meta
-        .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-        .map(|(_, v)| v.clone())
-        .unwrap_or_default();
+    let content_type = meta.headers.content_type();
     let remote_addr = meta.params.get("REMOTE_ADDR").cloned();
     let remote_port = meta.params.get("REMOTE_PORT").and_then(|p| p.parse().ok());
     let cgi_req = CgiRequest {
@@ -121,11 +105,11 @@ pub(crate) fn plan_ipc_request(
         content_length: declared_stdin_bytes.unwrap_or(0),
         declared_content_length: declared_stdin_bytes,
         server_protocol: meta.server_protocol,
-        server_name: server_name.unwrap_or_else(|| "localhost".to_string()),
-        server_port: server_port.unwrap_or(80),
+        server_name,
+        server_port,
         remote_addr,
         remote_port,
-        http_headers: crate::executor::RequestHeaders::from_http_pairs(meta.headers),
+        http_headers: meta.headers.into_cgi_headers(),
         matched_prefix,
         identity_env: verified_context_env(
             meta.verified_identity.as_ref(),
@@ -239,46 +223,6 @@ fn normalize_script_name(prefix: &str, fallback: &str) -> String {
     }
 }
 
-fn host_only(authority: &str) -> Option<String> {
-    let authority = authority.trim();
-    if authority.is_empty() {
-        return None;
-    }
-    if let Some(v6) = authority.strip_prefix('[') {
-        let end = v6.find(']')?;
-        return Some(v6[..end].to_string());
-    }
-    Some(
-        authority
-            .split_once(':')
-            .map(|(h, _)| h)
-            .unwrap_or(authority)
-            .to_string(),
-    )
-}
-
-fn host_port(authority: &str) -> (Option<String>, Option<u16>) {
-    let authority = authority.trim();
-    if authority.is_empty() {
-        return (None, None);
-    }
-    if let Some(v6) = authority.strip_prefix('[') {
-        let end = match v6.find(']') {
-            Some(v) => v,
-            None => return (None, None),
-        };
-        let host = v6[..end].to_string();
-        let rest = &v6[end + 1..];
-        let port = rest.strip_prefix(':').and_then(|p| p.parse::<u16>().ok());
-        return (Some(host), port);
-    }
-    let (host, port) = authority
-        .split_once(':')
-        .map(|(h, p)| (h.to_string(), p.parse::<u16>().ok()))
-        .unwrap_or((authority.to_string(), None));
-    (Some(host), port)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{declared_content_length, split_script_name_path_info, verified_context_env};
@@ -307,12 +251,69 @@ mod tests {
     }
 
     #[test]
+    fn ipc_plan_preserves_routing_cgi_joins_and_length_validation() {
+        let config = serde_json::from_value(serde_json::json!({
+            "handlers": [{
+                "match": {"path_prefix": "/app", "host": "first.test"},
+                "backend": {"type": "scgi", "address": "127.0.0.1:9000"}
+            }]
+        }))
+        .unwrap();
+        let router = crate::router::Router::new(&config).unwrap();
+        let meta: qpx_core::ipc::meta::IpcRequestMeta = serde_json::from_value(serde_json::json!({
+            "method": "POST", "uri": "https://uri.test/app/path?q=1",
+            "server_protocol": "HTTP/2", "params": {},
+            "headers": [
+                ["HOST", "first.test:8080"], ["Host", "ignored.test"],
+                ["Content-Type", "text/plain"], ["content-type", "ignored/type"],
+                ["X-Dup", "first"], ["x-dup", "second"],
+                ["Cookie", "a=1"], ["COOKIE", "b=2"],
+                ["Content-Length", "5"], ["content-length", "5, 5"]
+            ]
+        }))
+        .unwrap();
+        let plan = match super::plan_ipc_request(meta.clone(), &router, 1024, 1024).unwrap() {
+            Ok(plan) => plan,
+            Err(response) => panic!("unexpected status {}", response.status),
+        };
+        assert_eq!(plan.expected_stdin_bytes, Some(5));
+        let req = plan.cgi_req;
+        assert_eq!(req.script_name, "/app");
+        assert_eq!(req.path_info, "/path");
+        assert_eq!(req.query_string, "q=1");
+        assert_eq!(req.server_name, "first.test");
+        assert_eq!(req.server_port, 8080);
+        assert_eq!(req.content_type, "text/plain");
+        assert_eq!(req.declared_content_length, Some(5));
+        let env = req.cgi_environment().into_variables();
+        assert_eq!(env["HTTP_HOST"], "first.test:8080, ignored.test");
+        assert_eq!(env["HTTP_X_DUP"], "first, second");
+        assert_eq!(env["HTTP_COOKIE"], "a=1; b=2");
+        assert_eq!(env["CONTENT_TYPE"], "text/plain");
+        assert_eq!(env["CONTENT_LENGTH"], "5");
+        for invalid in ["6", "+5", "nope"] {
+            let mut rejected = meta.clone();
+            rejected
+                .headers
+                .push(("Content-Length".into(), invalid.into()));
+            match super::plan_ipc_request(rejected, &router, 1024, 1024).unwrap() {
+                Err(response) => assert_eq!(response.status, 400),
+                Ok(_) => panic!("invalid length accepted"),
+            }
+        }
+    }
+
+    #[test]
     fn declared_content_length_accepts_repeated_equal_values() {
         let headers = vec![
             ("Content-Length".to_string(), "5".to_string()),
             ("content-length".to_string(), "5, 5".to_string()),
         ];
-        assert_eq!(declared_content_length(&headers).expect("length"), Some(5));
+        assert_eq!(
+            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+                .expect("length"),
+            Some(5)
+        );
     }
 
     #[test]
@@ -321,13 +322,19 @@ mod tests {
             ("Content-Length".to_string(), "5".to_string()),
             ("content-length".to_string(), "6".to_string()),
         ];
-        assert!(declared_content_length(&headers).is_err());
+        assert!(
+            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+                .is_err()
+        );
     }
 
     #[test]
     fn declared_content_length_rejects_invalid_values() {
         let headers = vec![("Content-Length".to_string(), "nope".to_string())];
-        assert!(declared_content_length(&headers).is_err());
+        assert!(
+            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+                .is_err()
+        );
     }
 
     #[test]
@@ -335,7 +342,10 @@ mod tests {
         // The owner's grammar is `1*DIGIT`, so a leading plus sign names no
         // length and the request is refused.
         let headers = vec![("Content-Length".to_string(), "+5".to_string())];
-        assert!(declared_content_length(&headers).is_err());
+        assert!(
+            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+                .is_err()
+        );
     }
 
     #[test]

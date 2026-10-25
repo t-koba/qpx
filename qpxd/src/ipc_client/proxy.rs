@@ -169,10 +169,9 @@ async fn proxy_ipc_backend(
         read_frame(&mut conn.stream).await?
     };
 
-    let mut builder = Response::builder().status(validate_ipc_response_status(res_meta.status)?);
-    for (k, v) in res_meta.headers {
-        builder = builder.header(k, v);
-    }
+    let builder = res_meta.headers.apply_to_response(
+        Response::builder().status(validate_ipc_response_status(res_meta.status)?),
+    );
 
     let (mut sender, body) = Body::channel_with_capacity(16);
 

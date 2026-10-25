@@ -81,7 +81,10 @@ async fn shm_response_meta_returns_before_body_writer_after_fast_response() {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let response_meta = IpcResponseMeta {
         status: 200,
-        headers: vec![("content-type".to_string(), "text/plain".to_string())],
+        headers: qpx_core::ipc::meta::IpcResponseHeaders::from_pairs(vec![(
+            "content-type".to_string(),
+            "text/plain".to_string(),
+        )]),
     };
     let writer = tokio::spawn(async move {
         write_frame(&mut server, &response_meta)
@@ -118,4 +121,29 @@ async fn downstream_body_closed_reports_dropped_receiver() {
     let mut sender = sender;
     assert!(downstream_body_closed(&mut sender).await);
     assert!(sender.is_closed());
+}
+
+#[test]
+fn ipc_response_headers_reconstruct_ordered_duplicates() {
+    let meta: IpcResponseMeta = serde_json::from_str(
+        r#"{"status":201,"headers":[["Content-Type","text/plain"],["Set-Cookie","a=1"],["set-cookie","b=2"],["X-Dup","first"],["x-dup","second"]]}"#,
+    ).expect("IPC response wire");
+    let builder = meta.headers.apply_to_response(
+        hyper::Response::builder().status(validate_ipc_response_status(meta.status).unwrap()),
+    );
+    let response = builder.body(Body::empty()).unwrap();
+    assert_eq!(response.status(), 201);
+    assert_eq!(response.headers()["content-type"], "text/plain");
+    for (name, expected) in [
+        ("set-cookie", ["a=1", "b=2"]),
+        ("x-dup", ["first", "second"]),
+    ] {
+        let actual: Vec<_> = response
+            .headers()
+            .get_all(name)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(actual, expected);
+    }
 }
