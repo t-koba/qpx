@@ -44,17 +44,17 @@ where
         Poll::Ready(Ok(()))
     }
 
-    fn poll_write_with_pending(
+    fn poll_pending_prefix(
         &mut self,
         cx: &mut Context<'_>,
         buffer: &[u8],
-    ) -> Poll<io::Result<usize>> {
+    ) -> Poll<io::Result<Option<usize>>> {
         loop {
             let pending = &self.buffered[self.written..];
             if pending.is_empty() {
                 self.buffered.clear();
                 self.written = 0;
-                return Pin::new(&mut self.inner).poll_write(cx, buffer);
+                return Poll::Ready(Ok(None));
             }
             let buffers = [IoSlice::new(pending), IoSlice::new(buffer)];
             let count = ready!(Pin::new(&mut self.inner).poll_write_vectored(cx, &buffers))?;
@@ -71,7 +71,18 @@ where
             let consumed = count - pending.len();
             self.buffered.clear();
             self.written = 0;
-            return Poll::Ready(Ok(consumed));
+            return Poll::Ready(Ok(Some(consumed)));
+        }
+    }
+
+    fn poll_write_with_pending(
+        &mut self,
+        cx: &mut Context<'_>,
+        buffer: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        match ready!(self.poll_pending_prefix(cx, buffer))? {
+            Some(consumed) => Poll::Ready(Ok(consumed)),
+            None => Pin::new(&mut self.inner).poll_write(cx, buffer),
         }
     }
 
@@ -85,29 +96,9 @@ where
             .find(|buffer| !buffer.is_empty())
             .map(|buffer| buffer.as_ref())
             .unwrap_or_default();
-        loop {
-            let pending = &self.buffered[self.written..];
-            if pending.is_empty() {
-                self.buffered.clear();
-                self.written = 0;
-                return Pin::new(&mut self.inner).poll_write_vectored(cx, buffers);
-            }
-            let combined = [IoSlice::new(pending), IoSlice::new(first)];
-            let count = ready!(Pin::new(&mut self.inner).poll_write_vectored(cx, &combined))?;
-            if count == 0 {
-                return Poll::Ready(Err(io::Error::new(
-                    io::ErrorKind::WriteZero,
-                    "failed to drain coalesced write buffer",
-                )));
-            }
-            if count <= pending.len() {
-                self.written += count;
-                continue;
-            }
-            let consumed = count - pending.len();
-            self.buffered.clear();
-            self.written = 0;
-            return Poll::Ready(Ok(consumed));
+        match ready!(self.poll_pending_prefix(cx, first))? {
+            Some(consumed) => Poll::Ready(Ok(consumed)),
+            None => Pin::new(&mut self.inner).poll_write_vectored(cx, buffers),
         }
     }
 
