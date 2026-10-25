@@ -5,7 +5,7 @@ mod tests;
 
 use self::output::validate_secure_cgi_script;
 use self::output::{PreparedCgiScript, prepare_cgi_script_for_spawn, validate_secure_cgi_root};
-use super::{CgiRequest, CgiResponse, Execution, Executor};
+use super::{CgiRequest, CgiResponse, CgiResponseHeaders, Execution, Executor};
 use crate::config::CgiBackendConfig;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
@@ -315,7 +315,10 @@ impl Executor for CgiExecutor {
                 return Ok(immediate(
                     CgiResponse {
                         status: 404,
-                        headers: vec![("Content-Type".into(), "text/plain".into())],
+                        headers: CgiResponseHeaders::from_pairs(vec![(
+                            "Content-Type".into(),
+                            "text/plain".into(),
+                        )]),
                         body: Bytes::from_static(b"script not found"),
                     }
                     .to_cgi_output(),

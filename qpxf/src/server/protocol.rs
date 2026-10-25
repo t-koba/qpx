@@ -15,7 +15,7 @@ use crate::executor::{CgiResponse, Execution};
 use crate::ipc_request::{IpcPlainResponse, plaintext_meta, plan_ipc_request};
 use crate::router::Router;
 
-use qpx_core::ipc::meta::{IpcRequestMeta, IpcResponseHeaders, IpcResponseMeta};
+use qpx_core::ipc::meta::{IpcRequestMeta, IpcResponseMeta};
 use qpx_core::ipc::protocol::write_frame;
 use qpx_core::shm_ring::ShmRingBuffer;
 
@@ -161,12 +161,9 @@ fn consume_cgi_stdout_header(
             return Err(anyhow!("CGI output headers exceeded 65536 bytes"));
         }
         header_buf.extend_from_slice(&chunk[..chunk_header_end]);
-        let (status, headers, _) = CgiResponse::parse_cgi_head(header_buf.as_ref())?;
+        let (meta, _) = CgiResponse::parse_cgi_head(header_buf.as_ref())?.into_ipc_response();
         return Ok(Some(ParsedCgiOutputHead {
-            meta: IpcResponseMeta {
-                status,
-                headers: IpcResponseHeaders::from_pairs(headers),
-            },
+            meta,
             body_leftover: chunk.slice(chunk_header_end..),
         }));
     }
