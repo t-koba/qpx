@@ -556,23 +556,22 @@ impl DirectOriginPools {
     }
 
     fn trim_http1_idle(&self, max: usize) {
-        for shard in &self.plain {
-            for slot in shard
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .values()
-            {
-                slot.idle.trim(max);
-            }
-        }
-        for shard in &self.https {
-            for slot in shard
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .values()
-            {
-                slot.http1_idle.trim(max);
-            }
+        for_each_pool_slot(&self.plain, |slot| slot.idle.trim(max));
+        for_each_pool_slot(&self.https, |slot| slot.http1_idle.trim(max));
+    }
+}
+
+fn for_each_pool_slot<K, V, F>(pool: &[RwLock<HashMap<K, Arc<V>>>], mut f: F)
+where
+    F: FnMut(&Arc<V>),
+{
+    for shard in pool {
+        for slot in shard
+            .read()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .values()
+        {
+            f(slot);
         }
     }
 }
