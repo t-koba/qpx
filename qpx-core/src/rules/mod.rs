@@ -12,7 +12,7 @@ mod header_control;
 mod observation;
 
 pub use context::RuleMatchContext;
-pub use header_control::{CompiledHeaderControl, CompiledRegexReplace};
+pub use header_control::CompiledHeaderControl;
 pub use observation::CandidateRequestObservationRequirements;
 
 type Result<T> = std::result::Result<T, RuleCompileError>;

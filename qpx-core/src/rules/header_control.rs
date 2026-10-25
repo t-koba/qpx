@@ -2,9 +2,8 @@ use crate::config::HeaderControl;
 
 use super::Result;
 
-/// Compiled regex replacement for one HTTP header.
 #[derive(Debug, Clone)]
-pub struct CompiledRegexReplace {
+struct CompiledRegexReplace {
     header: http::header::HeaderName,
     pattern: regex::Regex,
     replace: String,
@@ -44,11 +43,6 @@ impl CompiledHeaderControl {
         })
     }
 
-    /// Returns request headers that should be replaced or inserted.
-    pub fn request_set(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
-        &self.request_set
-    }
-
     /// Returns a new header-control plan with `other` appended after `self`.
     pub fn merged(&self, other: &CompiledHeaderControl) -> Self {
         let mut merged = self.clone();
@@ -75,39 +69,41 @@ impl CompiledHeaderControl {
         merged
     }
 
-    /// Returns request headers that should be appended.
-    pub fn request_add(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
-        &self.request_add
+    /// Applies request mutations to `headers`.
+    ///
+    /// Returns the header names whose regex replacement produced an invalid
+    /// value, in execution order with repetitions preserved. Callers report
+    /// one diagnostic per entry.
+    pub fn apply_request(&self, headers: &mut http::HeaderMap) -> Vec<http::header::HeaderName> {
+        apply_mutations(
+            headers,
+            &self.request_set,
+            &self.request_add,
+            &self.request_remove,
+            &self.request_regex_replace,
+        )
     }
 
-    /// Returns request headers that should be removed.
-    pub fn request_remove(&self) -> &[http::header::HeaderName] {
-        &self.request_remove
+    /// Applies response mutations to `headers`.
+    ///
+    /// Returns the header names whose regex replacement produced an invalid
+    /// value, in execution order with repetitions preserved. Callers report
+    /// one diagnostic per entry.
+    pub fn apply_response(&self, headers: &mut http::HeaderMap) -> Vec<http::header::HeaderName> {
+        apply_mutations(
+            headers,
+            &self.response_set,
+            &self.response_add,
+            &self.response_remove,
+            &self.response_regex_replace,
+        )
     }
 
-    /// Returns request header regex replacements.
-    pub fn request_regex_replace(&self) -> &[CompiledRegexReplace] {
-        &self.request_regex_replace
-    }
-
-    /// Returns response headers that should be replaced or inserted.
-    pub fn response_set(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
-        &self.response_set
-    }
-
-    /// Returns response headers that should be appended.
-    pub fn response_add(&self) -> &[(http::header::HeaderName, http::HeaderValue)] {
-        &self.response_add
-    }
-
-    /// Returns response headers that should be removed.
-    pub fn response_remove(&self) -> &[http::header::HeaderName] {
-        &self.response_remove
-    }
-
-    /// Returns response header regex replacements.
-    pub fn response_regex_replace(&self) -> &[CompiledRegexReplace] {
-        &self.response_regex_replace
+    /// Number of response `set`/`add` entries, for capacity reservation only.
+    pub fn response_reserve_hint(&self) -> usize {
+        self.response_set
+            .len()
+            .saturating_add(self.response_add.len())
     }
 
     /// Reports whether this plan can modify response headers.
@@ -119,21 +115,36 @@ impl CompiledHeaderControl {
     }
 }
 
-impl CompiledRegexReplace {
-    /// Header to which the regex replacement applies.
-    pub fn header(&self) -> &http::header::HeaderName {
-        &self.header
+fn apply_mutations(
+    headers: &mut http::HeaderMap,
+    set: &[(http::header::HeaderName, http::HeaderValue)],
+    add: &[(http::header::HeaderName, http::HeaderValue)],
+    remove: &[http::header::HeaderName],
+    regex_replace: &[CompiledRegexReplace],
+) -> Vec<http::header::HeaderName> {
+    headers.reserve(set.len().saturating_add(add.len()));
+    for (name, value) in set {
+        headers.insert(name.clone(), value.clone());
     }
-
-    /// Compiled regex pattern.
-    pub fn pattern(&self) -> &regex::Regex {
-        &self.pattern
+    for (name, value) in add {
+        headers.append(name.clone(), value.clone());
     }
-
-    /// Replacement string passed to the regex engine.
-    pub fn replace(&self) -> &str {
-        &self.replace
+    for name in remove {
+        headers.remove(name);
     }
+    let mut invalid = Vec::new();
+    for replace in regex_replace {
+        let Some(value) = headers.get(&replace.header).and_then(|v| v.to_str().ok()) else {
+            continue;
+        };
+        let replaced = replace.pattern.replace_all(value, replace.replace.as_str());
+        if let Ok(new_value) = http::HeaderValue::from_str(replaced.as_ref()) {
+            headers.insert(replace.header.clone(), new_value);
+        } else {
+            invalid.push(replace.header.clone());
+        }
+    }
+    invalid
 }
 
 fn compile_header_set(
@@ -178,4 +189,271 @@ fn compile_regex_replace(
         });
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::RegexReplace;
+    use std::collections::HashMap;
+
+    fn empty_control() -> HeaderControl {
+        HeaderControl {
+            request_set: HashMap::new(),
+            request_add: HashMap::new(),
+            request_remove: Vec::new(),
+            request_regex_replace: Vec::new(),
+            response_set: HashMap::new(),
+            response_add: HashMap::new(),
+            response_remove: Vec::new(),
+            response_regex_replace: Vec::new(),
+        }
+    }
+
+    fn compile(control: &HeaderControl) -> CompiledHeaderControl {
+        CompiledHeaderControl::compile(control).expect("compile header control")
+    }
+
+    fn response_control(
+        set: Vec<(&str, &str)>,
+        add: Vec<(&str, &str)>,
+        remove: Vec<&str>,
+        regex: Vec<(&str, &str, &str)>,
+    ) -> CompiledHeaderControl {
+        let mut raw = empty_control();
+        for (name, value) in set {
+            raw.response_set.insert(name.to_string(), value.to_string());
+        }
+        for (name, value) in add {
+            raw.response_add.insert(name.to_string(), value.to_string());
+        }
+        raw.response_remove = remove.into_iter().map(str::to_string).collect();
+        raw.response_regex_replace = regex
+            .into_iter()
+            .map(|(header, pattern, replace)| RegexReplace {
+                header: header.to_string(),
+                pattern: pattern.to_string(),
+                replace: replace.to_string(),
+            })
+            .collect();
+        compile(&raw)
+    }
+
+    fn request_control(
+        set: Vec<(&str, &str)>,
+        regex: Vec<(&str, &str, &str)>,
+    ) -> CompiledHeaderControl {
+        let mut raw = empty_control();
+        for (name, value) in set {
+            raw.request_set.insert(name.to_string(), value.to_string());
+        }
+        raw.request_regex_replace = regex
+            .into_iter()
+            .map(|(header, pattern, replace)| RegexReplace {
+                header: header.to_string(),
+                pattern: pattern.to_string(),
+                replace: replace.to_string(),
+            })
+            .collect();
+        compile(&raw)
+    }
+
+    #[test]
+    fn regex_without_match_collapses_duplicates() {
+        let control = response_control(vec![], vec![], vec![], vec![("x-dup", "zzz", "yyy")]);
+        let mut headers = http::HeaderMap::new();
+        headers.append("x-dup", http::HeaderValue::from_static("a"));
+        headers.append("x-dup", http::HeaderValue::from_static("a"));
+        assert_eq!(headers.get_all("x-dup").iter().count(), 2);
+        let invalid = control.apply_response(&mut headers);
+        assert!(invalid.is_empty());
+        let values: Vec<_> = headers.get_all("x-dup").iter().collect();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0], "a");
+    }
+
+    #[test]
+    fn invalid_first_value_text_skips_silently() {
+        let control = response_control(vec![], vec![], vec![], vec![("x-opaque", "a", "b")]);
+        let mut headers = http::HeaderMap::new();
+        let opaque = http::HeaderValue::from_bytes(b"\xff").expect("opaque value");
+        headers.append("x-opaque", opaque.clone());
+        headers.append("x-opaque", http::HeaderValue::from_static("valid"));
+        let invalid = control.apply_response(&mut headers);
+        assert!(invalid.is_empty());
+        let values: Vec<_> = headers.get_all("x-opaque").iter().collect();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0], &opaque);
+        assert_eq!(values[1], "valid");
+    }
+
+    #[test]
+    fn invalid_generated_value_leaves_header_and_continues() {
+        let control = response_control(
+            vec![],
+            vec![],
+            vec![],
+            vec![("x-bad", "ok", "bad\nvalue"), ("x-good", "ok", "fine")],
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-bad", http::HeaderValue::from_static("ok"));
+        headers.insert("x-good", http::HeaderValue::from_static("ok"));
+        let invalid = control.apply_response(&mut headers);
+        assert_eq!(invalid, vec!["x-bad"]);
+        assert_eq!(headers.get("x-bad").unwrap(), "ok");
+        assert_eq!(headers.get("x-good").unwrap(), "fine");
+    }
+
+    #[test]
+    fn repeated_failures_preserve_order_and_repetition() {
+        let control = response_control(
+            vec![],
+            vec![],
+            vec![],
+            vec![
+                ("x-first", "ok", "bad\none"),
+                ("x-second", "ok", "bad\ntwo"),
+                ("x-first", "ok", "bad\nthree"),
+            ],
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-first", http::HeaderValue::from_static("ok"));
+        headers.insert("x-second", http::HeaderValue::from_static("ok"));
+        let invalid = control.apply_response(&mut headers);
+        assert_eq!(invalid.len(), 3);
+        assert_eq!(invalid[0], "x-first");
+        assert_eq!(invalid[1], "x-second");
+        assert_eq!(invalid[2], "x-first");
+        assert_eq!(headers.get("x-first").unwrap(), "ok");
+        assert_eq!(headers.get("x-second").unwrap(), "ok");
+    }
+
+    #[test]
+    fn later_replacements_see_earlier_results() {
+        let control = response_control(
+            vec![],
+            vec![],
+            vec![],
+            vec![("x-chain", "foo", "bar"), ("x-chain", "bar", "baz")],
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-chain", http::HeaderValue::from_static("foo"));
+        let invalid = control.apply_response(&mut headers);
+        assert!(invalid.is_empty());
+        assert_eq!(headers.get("x-chain").unwrap(), "baz");
+    }
+
+    #[test]
+    fn replacement_expands_captures_for_all_matches() {
+        let control = response_control(
+            vec![],
+            vec![],
+            vec![],
+            vec![("x-expand", "(mid)", "prefix-$1-suffix")],
+        );
+        let mut headers = http::HeaderMap::new();
+        headers.insert("x-expand", http::HeaderValue::from_static("mid mid"));
+        let invalid = control.apply_response(&mut headers);
+        assert!(invalid.is_empty());
+        assert_eq!(
+            headers.get("x-expand").unwrap(),
+            "prefix-mid-suffix prefix-mid-suffix"
+        );
+    }
+
+    #[test]
+    fn mutation_stages_run_set_add_remove_then_regex() {
+        let control = response_control(
+            vec![("x-stage", "set"), ("x-remove", "set")],
+            vec![("x-stage", "add"), ("x-remove", "add")],
+            vec!["x-remove"],
+            vec![
+                ("x-stage", "set", "regex"),
+                ("x-remove", ".*", "reappeared"),
+            ],
+        );
+        let mut headers = http::HeaderMap::new();
+        let invalid = control.apply_response(&mut headers);
+        assert!(invalid.is_empty());
+        let stage_values: Vec<_> = headers.get_all("x-stage").iter().collect();
+        assert_eq!(stage_values.len(), 1);
+        assert_eq!(stage_values[0], "regex");
+        assert!(!headers.contains_key("x-remove"));
+    }
+
+    #[test]
+    fn merged_conflict_prefers_later_set() {
+        let base = response_control(vec![("x-merge", "base")], vec![], vec![], vec![]);
+        let extra = response_control(vec![("x-merge", "extra")], vec![], vec![], vec![]);
+        let merged = base.merged(&extra);
+        let mut headers = http::HeaderMap::new();
+        let invalid = merged.apply_response(&mut headers);
+        assert!(invalid.is_empty());
+        assert_eq!(headers.get("x-merge").unwrap(), "extra");
+    }
+
+    #[test]
+    fn merged_keeps_set_before_add_across_plans() {
+        let mut base_raw = empty_control();
+        base_raw
+            .response_add
+            .insert("x-cross".to_string(), "base-add".to_string());
+        let base = compile(&base_raw);
+        let mut extra_raw = empty_control();
+        extra_raw
+            .response_set
+            .insert("x-cross".to_string(), "extra-set".to_string());
+        let extra = compile(&extra_raw);
+        let merged = base.merged(&extra);
+        let mut headers = http::HeaderMap::new();
+        let invalid = merged.apply_response(&mut headers);
+        assert!(invalid.is_empty());
+        let values: Vec<_> = headers
+            .get_all("x-cross")
+            .iter()
+            .map(|v| v.to_str().expect("text").to_string())
+            .collect();
+        assert_eq!(
+            values,
+            vec!["extra-set".to_string(), "base-add".to_string()]
+        );
+    }
+
+    #[test]
+    fn request_and_response_plans_are_isolated() {
+        let mut raw = empty_control();
+        raw.request_set
+            .insert("x-req".to_string(), "req".to_string());
+        raw.response_set
+            .insert("x-resp".to_string(), "resp".to_string());
+        let control = compile(&raw);
+        let mut request_headers = http::HeaderMap::new();
+        let mut response_headers = http::HeaderMap::new();
+        assert!(control.apply_request(&mut request_headers).is_empty());
+        assert!(control.apply_response(&mut response_headers).is_empty());
+        assert_eq!(request_headers.get("x-req").unwrap(), "req");
+        assert!(request_headers.get("x-resp").is_none());
+        assert_eq!(response_headers.get("x-resp").unwrap(), "resp");
+        assert!(response_headers.get("x-req").is_none());
+    }
+
+    #[test]
+    fn configured_content_length_mutation_applies() {
+        let request = request_control(vec![("content-length", "5")], vec![]);
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static("99"),
+        );
+        assert!(request.apply_request(&mut headers).is_empty());
+        assert_eq!(headers.get(http::header::CONTENT_LENGTH).unwrap(), "5");
+
+        let response = response_control(vec![("content-length", "7")], vec![], vec![], vec![]);
+        let mut response_headers = http::HeaderMap::new();
+        assert!(response.apply_response(&mut response_headers).is_empty());
+        assert_eq!(
+            response_headers.get(http::header::CONTENT_LENGTH).unwrap(),
+            "7"
+        );
+    }
 }

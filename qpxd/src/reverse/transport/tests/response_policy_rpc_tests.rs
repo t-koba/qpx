@@ -63,18 +63,10 @@ async fn response_rule_can_force_local_response_and_merge_headers() {
         } => {
             assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
             let headers = headers.expect("merged headers");
-            assert!(
-                headers
-                    .response_set()
-                    .iter()
-                    .any(|(name, value)| name == "x-base" && value == "route")
-            );
-            assert!(
-                headers
-                    .response_set()
-                    .iter()
-                    .any(|(name, value)| name == "x-rule" && value == "local")
-            );
+            let mut merged = http::HeaderMap::new();
+            assert!(headers.apply_response(&mut merged).is_empty());
+            assert_eq!(merged.get("x-base").expect("x-base"), "route");
+            assert_eq!(merged.get("x-rule").expect("x-rule"), "local");
         }
         ListenerResponsePolicyDecision::Continue { .. } => panic!("expected local response"),
     }

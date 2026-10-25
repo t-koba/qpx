@@ -186,12 +186,7 @@ pub(crate) async fn finalize_dispatch_cached_response(
     } else {
         http_modules.prepare_downstream_response(response).await?
     };
-    let route_response_fields = headers.map_or(0, |control| {
-        control
-            .response_set()
-            .len()
-            .saturating_add(control.response_add().len())
-    });
+    let route_response_fields = headers.map_or(0, |control| control.response_reserve_hint());
     let route_metadata_fields = plan
         .api_metadata
         .as_deref()

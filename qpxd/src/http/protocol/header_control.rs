@@ -1,4 +1,4 @@
-use qpx_core::rules::{CompiledHeaderControl, CompiledRegexReplace};
+use qpx_core::rules::CompiledHeaderControl;
 
 pub(crate) trait HeaderTransform {
     fn apply_request_transform(&self, headers: &mut http::HeaderMap);
@@ -7,23 +7,23 @@ pub(crate) trait HeaderTransform {
 
 impl HeaderTransform for CompiledHeaderControl {
     fn apply_request_transform(&self, headers: &mut http::HeaderMap) {
-        apply_header_mutations(
-            headers,
-            self.request_set(),
-            self.request_add(),
-            self.request_remove(),
-            self.request_regex_replace(),
-        );
+        for name in self.apply_request(headers) {
+            crate::http::metrics::header_regex_replace_invalid(crate::runtime::metric_names());
+            tracing::warn!(
+                header = %name,
+                "header regex_replace produced invalid HeaderValue; mutation skipped"
+            );
+        }
     }
 
     fn apply_response_transform(&self, headers: &mut http::HeaderMap) {
-        apply_header_mutations(
-            headers,
-            self.response_set(),
-            self.response_add(),
-            self.response_remove(),
-            self.response_regex_replace(),
-        );
+        for name in self.apply_response(headers) {
+            crate::http::metrics::header_regex_replace_invalid(crate::runtime::metric_names());
+            tracing::warn!(
+                header = %name,
+                "header regex_replace produced invalid HeaderValue; mutation skipped"
+            );
+        }
     }
 }
 
@@ -53,41 +53,4 @@ pub(crate) fn apply_response_headers(
         return;
     };
     control.apply_response_transform(headers);
-}
-
-fn apply_header_mutations(
-    headers: &mut http::HeaderMap,
-    set: &[(http::header::HeaderName, http::HeaderValue)],
-    add: &[(http::header::HeaderName, http::HeaderValue)],
-    remove: &[http::header::HeaderName],
-    regex_replace: &[CompiledRegexReplace],
-) {
-    headers.reserve(set.len().saturating_add(add.len()));
-    for (name, value) in set {
-        headers.insert(name.clone(), value.clone());
-    }
-
-    for (name, value) in add {
-        headers.append(name.clone(), value.clone());
-    }
-
-    for name in remove {
-        headers.remove(name);
-    }
-
-    for replace in regex_replace {
-        let Some(value) = headers.get(replace.header()).and_then(|v| v.to_str().ok()) else {
-            continue;
-        };
-        let replaced = replace.pattern().replace_all(value, replace.replace());
-        if let Ok(new_value) = http::HeaderValue::from_str(replaced.as_ref()) {
-            headers.insert(replace.header().clone(), new_value);
-        } else {
-            crate::http::metrics::header_regex_replace_invalid(crate::runtime::metric_names());
-            tracing::warn!(
-                header = %replace.header(),
-                "header regex_replace produced invalid HeaderValue; mutation skipped"
-            );
-        }
-    }
 }
