@@ -145,13 +145,10 @@ where
         if buffer.is_empty() {
             return Poll::Ready(Ok(0));
         }
-        if this.can_buffer(buffer.len()) {
-            this.buffered.reserve(buffer.len());
-            this.buffered.extend_from_slice(buffer);
-            return Poll::Ready(Ok(buffer.len()));
-        }
         if buffer.len() < DIRECT_WRITE_THRESHOLD {
-            ready!(this.poll_drain(cx))?;
+            if !this.can_buffer(buffer.len()) {
+                ready!(this.poll_drain(cx))?;
+            }
             this.buffered.reserve(buffer.len());
             this.buffered.extend_from_slice(buffer);
             Poll::Ready(Ok(buffer.len()))
@@ -189,12 +186,10 @@ where
         if bytes == 0 {
             return Poll::Ready(Ok(0));
         }
-        if this.can_buffer(bytes) {
-            this.buffer_slices(buffers, bytes);
-            return Poll::Ready(Ok(bytes));
-        }
         if bytes < DIRECT_WRITE_THRESHOLD {
-            ready!(this.poll_drain(cx))?;
+            if !this.can_buffer(bytes) {
+                ready!(this.poll_drain(cx))?;
+            }
             this.buffer_slices(buffers, bytes);
             Poll::Ready(Ok(bytes))
         } else {
