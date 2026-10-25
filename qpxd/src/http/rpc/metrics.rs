@@ -139,20 +139,18 @@ fn emit_grpc_stream_duration_metric(
     streaming: &str,
     duration: Duration,
 ) {
-    histogram!(
+    for name in [
         "qpx_grpc_stream_duration_seconds",
-        "listener" => listener.to_string(),
-        "protocol" => protocol.to_string(),
-        "streaming" => streaming.to_string()
-    )
-    .record(duration.as_secs_f64());
-    histogram!(
         "qpx_rpc_stream_duration_seconds",
-        "listener" => listener.to_string(),
-        "protocol" => protocol.to_string(),
-        "streaming" => streaming.to_string()
-    )
-    .record(duration.as_secs_f64());
+    ] {
+        histogram!(
+            name,
+            "listener" => listener.to_string(),
+            "protocol" => protocol.to_string(),
+            "streaming" => streaming.to_string()
+        )
+        .record(duration.as_secs_f64());
+    }
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
