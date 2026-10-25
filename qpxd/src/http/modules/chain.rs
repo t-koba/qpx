@@ -177,12 +177,12 @@ impl CompiledHttpModuleChain {
         request: &hyper::Request<qpx_http::body::Body>,
         init: impl FnOnce() -> HttpModuleSessionInit<'a>,
     ) -> HttpModuleExecution {
-        if self.is_empty()
-            || self
-                .session_modules
+        if self.is_empty() || {
+            let request_view = super::HttpModuleRequestView::from_request(request);
+            self.session_modules
                 .iter()
-                .all(|module| module.module.is_inactive_for_request(request))
-        {
+                .all(|module| module.module.is_inactive_for_request(&request_view))
+        } {
             HttpModuleExecution::empty()
         } else {
             HttpModuleExecution::new(

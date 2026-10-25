@@ -1,4 +1,4 @@
-use super::HttpModuleContext;
+use super::{HttpModuleContext, HttpModuleRequestView, HttpModuleResponseView};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use http::StatusCode;
@@ -384,18 +384,18 @@ pub trait HttpModule: Send + Sync {
         Vec::new()
     }
 
-    fn applies_to_request_headers(&self, _request: &Request<Body>) -> bool {
+    fn applies_to_request_headers(&self, _request: &HttpModuleRequestView<'_>) -> bool {
         true
     }
 
-    fn is_inactive_for_request(&self, _request: &Request<Body>) -> bool {
+    fn is_inactive_for_request(&self, _request: &HttpModuleRequestView<'_>) -> bool {
         false
     }
 
     fn applies_to_downstream_response(
         &self,
         _ctx: &HttpModuleContext,
-        _response: &Response<Body>,
+        _response: &HttpModuleResponseView<'_>,
     ) -> bool {
         true
     }

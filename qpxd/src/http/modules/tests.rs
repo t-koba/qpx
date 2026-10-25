@@ -511,3 +511,126 @@ fn sync_frozen_request_rebuilds_after_request_change() {
         "changed"
     );
 }
+
+#[test]
+fn predicate_request_view_has_header_matches_live_and_frozen() {
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("https://example.com/resource")
+        .header("x-probe", "1")
+        .body(Body::empty())
+        .expect("request");
+    let live = HttpModuleRequestView::from_request(&req);
+    assert!(live.has_header(&HeaderName::from_static("x-probe")));
+    assert!(!live.has_header(&HeaderName::from_static("x-missing")));
+
+    let mut ctx = module_test_context();
+    assert!(ctx.sync_frozen_request(&req));
+    let frozen = ctx.frozen_request().expect("frozen request");
+    assert!(frozen.has_header(&HeaderName::from_static("x-probe")));
+    assert!(!frozen.has_header(&HeaderName::from_static("x-missing")));
+}
+
+#[test]
+fn predicate_response_view_exposes_status_and_header_presence() {
+    use super::HttpModuleResponseView;
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("x-probe", "1")
+        .body(Body::empty())
+        .expect("response");
+    let view = HttpModuleResponseView::from_response(&response);
+    assert_eq!(view.status(), StatusCode::OK);
+    assert_eq!(view.version(), response.version());
+    assert!(view.has_header(&HeaderName::from_static("x-probe")));
+    assert!(!view.has_header(&HeaderName::from_static("x-missing")));
+}
+
+struct PredicateProbeModule;
+
+#[async_trait::async_trait]
+impl crate::module_api::HttpModule for PredicateProbeModule {
+    fn capabilities(&self) -> crate::module_api::HttpModuleCapabilities {
+        crate::module_api::HttpModuleCapabilities::headers_only(
+            crate::module_api::ModuleStages::REQUEST_HEADERS,
+        )
+    }
+
+    fn applies_to_request_headers(
+        &self,
+        request: &crate::module_api::HttpModuleRequestView<'_>,
+    ) -> bool {
+        request.has_header(&HeaderName::from_static("x-probe"))
+    }
+
+    fn is_inactive_for_request(
+        &self,
+        request: &crate::module_api::HttpModuleRequestView<'_>,
+    ) -> bool {
+        !request.has_header(&HeaderName::from_static("x-probe"))
+    }
+
+    fn applies_to_downstream_response(
+        &self,
+        _ctx: &crate::module_api::HttpModuleContext,
+        response: &crate::module_api::HttpModuleResponseView<'_>,
+    ) -> bool {
+        response.status() == StatusCode::OK
+            && response.has_header(&HeaderName::from_static("x-probe"))
+    }
+
+    async fn call<'a>(
+        &self,
+        _stage: crate::module_api::HttpModuleStage,
+        _ctx: &mut crate::module_api::HttpModuleContext,
+        event: crate::module_api::HttpModuleEvent<'a>,
+    ) -> anyhow::Result<crate::module_api::HttpModuleEvent<'a>> {
+        Ok(event)
+    }
+}
+
+#[test]
+fn predicate_probe_module_uses_semantic_views() {
+    use super::HttpModuleResponseView;
+    let module = PredicateProbeModule;
+    let req = Request::builder()
+        .method(Method::GET)
+        .uri("https://example.com/resource")
+        .header("x-probe", "1")
+        .body(Body::empty())
+        .expect("request");
+    let view = crate::module_api::HttpModuleRequestView::from_request(&req);
+    assert!(module.applies_to_request_headers(&view));
+    assert!(!module.is_inactive_for_request(&view));
+
+    let plain = Request::builder()
+        .method(Method::GET)
+        .uri("https://example.com/resource")
+        .body(Body::empty())
+        .expect("request");
+    let plain_view = crate::module_api::HttpModuleRequestView::from_request(&plain);
+    assert!(!module.applies_to_request_headers(&plain_view));
+    assert!(module.is_inactive_for_request(&plain_view));
+
+    let ctx = module_test_context();
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("x-probe", "1")
+        .body(Body::empty())
+        .expect("response");
+    let response_view = HttpModuleResponseView::from_response(&response);
+    assert!(module.applies_to_downstream_response(
+        &ctx as &crate::module_api::HttpModuleContext,
+        &response_view
+    ));
+
+    let missing = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::empty())
+        .expect("response");
+    let missing_view = HttpModuleResponseView::from_response(&missing);
+    assert!(!module.applies_to_downstream_response(
+        &ctx as &crate::module_api::HttpModuleContext,
+        &missing_view
+    ));
+}

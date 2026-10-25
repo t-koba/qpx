@@ -1,7 +1,8 @@
 use super::headers::parse_module_settings;
 use super::{
     BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
-    HttpModuleFactory, HttpModuleStage, ModuleStages,
+    HttpModuleFactory, HttpModuleRequestView, HttpModuleResponseView, HttpModuleStage,
+    ModuleStages,
 };
 use crate::http::media_type::raw_media_type;
 use anyhow::{Result, anyhow};
@@ -264,18 +265,18 @@ impl HttpModule for ResponseCompressionModule {
         capabilities
     }
 
-    fn applies_to_request_headers(&self, request: &hyper::Request<Body>) -> bool {
-        self.has_compression_variants() && request.headers().contains_key(ACCEPT_ENCODING)
+    fn applies_to_request_headers(&self, request: &HttpModuleRequestView<'_>) -> bool {
+        self.has_compression_variants() && request.has_header(&ACCEPT_ENCODING)
     }
 
-    fn is_inactive_for_request(&self, _request: &hyper::Request<Body>) -> bool {
+    fn is_inactive_for_request(&self, _request: &HttpModuleRequestView<'_>) -> bool {
         !self.has_compression_variants()
     }
 
     fn applies_to_downstream_response(
         &self,
         _ctx: &HttpModuleContext,
-        _response: &Response<Body>,
+        _response: &HttpModuleResponseView<'_>,
     ) -> bool {
         self.has_compression_variants()
     }

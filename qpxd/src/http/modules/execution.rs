@@ -174,6 +174,11 @@ impl<'a> HttpModuleRequestView<'a> {
         }
     }
 
+    /// Returns whether this request contains the named header.
+    pub fn has_header(&self, name: &HeaderName) -> bool {
+        self.headers().contains_key(name)
+    }
+
     pub fn uri(&self) -> &http::Uri {
         match self.inner {
             RequestViewInner::Live(request) => request.uri(),
@@ -186,6 +191,41 @@ impl<'a> HttpModuleRequestView<'a> {
             RequestViewInner::Live(request) => Cow::Owned(request.uri().to_string()),
             RequestViewInner::Frozen(request) => Cow::Owned(request.uri.to_string()),
         }
+    }
+}
+
+/// An opaque borrowed view of a downstream response for module predicates.
+///
+/// Raw headers are intentionally private.
+///
+/// ```compile_fail
+/// use qpxd::module_api::HttpModuleResponseView;
+/// fn cannot_read_raw_headers(view: &HttpModuleResponseView<'_>) {
+///     let _ = view.headers();
+/// }
+/// ```
+pub struct HttpModuleResponseView<'a> {
+    response: &'a Response<Body>,
+}
+
+impl<'a> HttpModuleResponseView<'a> {
+    pub(super) fn from_response(response: &'a Response<Body>) -> Self {
+        Self { response }
+    }
+
+    /// Returns the response status.
+    pub fn status(&self) -> StatusCode {
+        self.response.status()
+    }
+
+    /// Returns the response HTTP version.
+    pub fn version(&self) -> Version {
+        self.response.version()
+    }
+
+    /// Returns whether this response contains the named header.
+    pub fn has_header(&self, name: &HeaderName) -> bool {
+        self.response.headers().contains_key(name)
     }
 }
 
@@ -445,7 +485,11 @@ impl HttpModuleExecution {
             return Ok(RequestHeadersOutcome::Continue);
         };
         for module in chain.request_headers.iter() {
-            if !module.module.applies_to_request_headers(req) {
+            let applies = {
+                let request_view = HttpModuleRequestView::from_request(&*req);
+                module.module.applies_to_request_headers(&request_view)
+            };
+            if !applies {
                 continue;
             }
             let label = module.label();
@@ -560,10 +604,13 @@ impl HttpModuleExecution {
         context.set_response_status(response.status());
         context.apply_pending_response_headers(response.headers_mut());
         for module in chain.downstream_response.iter() {
-            if !module
-                .module
-                .applies_to_downstream_response(context, &response)
-            {
+            let applies = {
+                let response_view = HttpModuleResponseView::from_response(&response);
+                module
+                    .module
+                    .applies_to_downstream_response(context, &response_view)
+            };
+            if !applies {
                 continue;
             }
             let label = module.label();

@@ -65,7 +65,8 @@ pub mod module_api {
     pub use crate::http::modules::{
         BodyAccess, CacheLookupStatus, HttpModule, HttpModuleCapabilities, HttpModuleContext,
         HttpModuleEvent, HttpModuleFactory, HttpModuleRegistry, HttpModuleRegistryBuilder,
-        HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome, RetryEvent,
+        HttpModuleRequestView, HttpModuleResponseView, HttpModuleStage, ModuleStages,
+        RequestHeadersOutcome, RetryEvent,
     };
     pub use qpx_http::body::{Body, BodyError, Sender};
 

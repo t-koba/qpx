@@ -1,7 +1,7 @@
 use super::headers::{compile_literal_headers, parse_module_settings};
 use super::{
     HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
-    HttpModuleStage, ModuleStages, RequestHeadersOutcome,
+    HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -110,11 +110,11 @@ impl HttpModule for CachePurgeModule {
         capabilities
     }
 
-    fn applies_to_request_headers(&self, request: &hyper::Request<Body>) -> bool {
+    fn applies_to_request_headers(&self, request: &HttpModuleRequestView<'_>) -> bool {
         self.matches(request.method())
     }
 
-    fn is_inactive_for_request(&self, request: &hyper::Request<Body>) -> bool {
+    fn is_inactive_for_request(&self, request: &HttpModuleRequestView<'_>) -> bool {
         !self.matches(request.method())
     }
 

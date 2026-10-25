@@ -10,7 +10,7 @@ mod traits;
 mod tests;
 
 pub(crate) use chain::{CompiledHttpModuleChain, compile_http_modules};
-pub use execution::{HttpModuleContext, HttpModuleRequestView};
+pub use execution::{HttpModuleContext, HttpModuleRequestView, HttpModuleResponseView};
 pub(crate) use execution::{HttpModuleExecution, HttpModuleSessionInit};
 pub(crate) use registry::default_http_module_registry;
 pub use registry::{HttpModuleRegistry, HttpModuleRegistryBuilder};
