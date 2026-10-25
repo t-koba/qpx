@@ -5,6 +5,7 @@ use super::execution::template::{
 };
 use super::*;
 use crate::runtime::Runtime;
+use bytes::Bytes;
 use http::header::{HOST, LOCATION};
 use http::{HeaderName, HeaderValue, Method, Request, Response, StatusCode};
 use qpx_core::config::{
@@ -633,4 +634,221 @@ fn predicate_probe_module_uses_semantic_views() {
         &ctx as &crate::module_api::HttpModuleContext,
         &missing_view
     ));
+}
+
+#[test]
+fn event_facade_response_mutations_preserve_same_name_value_order() {
+    use super::{HttpModuleResponse, RequestHeadersOutcome};
+    use http::HeaderName;
+
+    let raw = Response::builder()
+        .status(StatusCode::OK)
+        .header("x-first", "1")
+        .header("x-second", "2")
+        .body(Body::empty())
+        .expect("response");
+    let mut response = HttpModuleResponse::from_inner(raw);
+
+    response.set_header(
+        HeaderName::from_static("x-event"),
+        HeaderValue::from_static("one"),
+    );
+    response.append_header(
+        HeaderName::from_static("x-event"),
+        HeaderValue::from_static("two"),
+    );
+    let values: Vec<_> = response
+        .as_inner_mut()
+        .headers()
+        .get_all("x-event")
+        .iter()
+        .map(|value| value.to_str().expect("value").to_owned())
+        .collect();
+    assert_eq!(values, vec!["one".to_owned(), "two".to_owned()]);
+
+    // Replacing collapses duplicates while preserving other headers.
+    response.set_header(
+        HeaderName::from_static("x-event"),
+        HeaderValue::from_static("three"),
+    );
+    let values: Vec<_> = response
+        .as_inner_mut()
+        .headers()
+        .get_all("x-event")
+        .iter()
+        .map(|value| value.to_str().expect("value").to_owned())
+        .collect();
+    assert_eq!(values, vec!["three".to_owned()]);
+    assert!(response.has_header(&HeaderName::from_static("x-first")));
+    assert!(response.has_header(&HeaderName::from_static("x-second")));
+
+    assert!(response.remove_header(&HeaderName::from_static("x-event")));
+    assert!(!response.has_header(&HeaderName::from_static("x-event")));
+
+    // Short-circuit keeps the Box shape and the mutated headers.
+    response.set_header(
+        HeaderName::from_static("x-short"),
+        HeaderValue::from_static("1"),
+    );
+    response.set_status(StatusCode::FORBIDDEN);
+    let outcome = RequestHeadersOutcome::Respond(Box::new(response));
+    let RequestHeadersOutcome::Respond(boxed) = outcome else {
+        panic!("expected respond");
+    };
+    assert_eq!(boxed.status(), StatusCode::FORBIDDEN);
+    assert!(boxed.has_header(&HeaderName::from_static("x-short")));
+}
+
+#[test]
+fn event_facade_header_mutations_preserve_obs_text_bytes() {
+    use super::{HttpModuleRequest, HttpModuleResponse};
+
+    let name = HeaderName::from_static("x-octets");
+    let first = b"first-\x80\xff";
+    let second = b"second-\xfe\x81";
+    let mut request = Request::new(Body::empty());
+    {
+        let mut facade = HttpModuleRequest::new(&mut request);
+        facade.set_header(
+            name.clone(),
+            HeaderValue::from_bytes(first).expect("valid obs-text"),
+        );
+        facade.append_header(
+            name.clone(),
+            HeaderValue::from_bytes(second).expect("valid obs-text"),
+        );
+    }
+    let values: Vec<_> = request
+        .headers()
+        .get_all(&name)
+        .iter()
+        .map(HeaderValue::as_bytes)
+        .collect();
+    assert_eq!(values, vec![first.as_slice(), second.as_slice()]);
+
+    let mut response = HttpModuleResponse::new(StatusCode::OK, Body::empty());
+    response.set_header(
+        name.clone(),
+        HeaderValue::from_bytes(first).expect("valid obs-text"),
+    );
+    response.append_header(
+        name.clone(),
+        HeaderValue::from_bytes(second).expect("valid obs-text"),
+    );
+    let raw = response.into_inner();
+    let values: Vec<_> = raw
+        .headers()
+        .get_all(&name)
+        .iter()
+        .map(HeaderValue::as_bytes)
+        .collect();
+    assert_eq!(values, vec![first.as_slice(), second.as_slice()]);
+}
+
+#[tokio::test]
+async fn event_facade_body_move_round_trip() {
+    use super::{HttpModuleRequest, HttpModuleResponse};
+
+    let mut response = HttpModuleResponse::new(StatusCode::OK, Body::from("downstream"));
+    let body = response.take_body();
+    assert_eq!(
+        qpx_http::body::to_bytes(body)
+            .await
+            .expect("bytes")
+            .as_ref(),
+        b"downstream"
+    );
+    // take_body leaves an empty body behind.
+    assert_eq!(
+        qpx_http::body::to_bytes(response.take_body())
+            .await
+            .expect("bytes")
+            .as_ref(),
+        b""
+    );
+    response.set_body(Body::from("again"));
+    assert_eq!(
+        qpx_http::body::to_bytes(response.take_body())
+            .await
+            .expect("bytes")
+            .as_ref(),
+        b"again"
+    );
+
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("https://example.com/resource")
+        .body(Body::from("upstream"))
+        .expect("request");
+    let mut facade = HttpModuleRequest::new(&mut req);
+    assert_eq!(facade.method(), Method::GET);
+    facade.set_method(Method::POST);
+    assert_eq!(facade.method(), Method::POST);
+    facade.set_header(
+        HeaderName::from_static("x-event"),
+        HeaderValue::from_static("1"),
+    );
+    assert!(facade.has_header(&HeaderName::from_static("x-event")));
+    let body = facade.take_body();
+    assert_eq!(
+        qpx_http::body::to_bytes(body)
+            .await
+            .expect("bytes")
+            .as_ref(),
+        b"upstream"
+    );
+    facade.set_body(Body::from("replaced"));
+    assert_eq!(
+        qpx_http::body::to_bytes(facade.take_body())
+            .await
+            .expect("bytes")
+            .as_ref(),
+        b"replaced"
+    );
+}
+
+#[tokio::test]
+async fn event_facade_moves_a_live_channel_body() {
+    use super::HttpModuleResponse;
+
+    let (mut sender, body) = Body::channel_with_capacity(1);
+    let mut response = HttpModuleResponse::new(StatusCode::OK, Body::empty());
+    response.set_body(body);
+    let body = response.take_body();
+
+    let producer = tokio::spawn(async move {
+        sender.send_data(Bytes::from_static(b"first")).await?;
+        sender.send_data(Bytes::from_static(b"second")).await?;
+        Ok::<(), qpx_http::body::BodyError>(())
+    });
+    let bytes = qpx_http::body::to_bytes(body).await.expect("stream bytes");
+    producer.await.expect("producer task").expect("send chunks");
+    assert_eq!(bytes.as_ref(), b"firstsecond");
+}
+
+#[test]
+fn event_facade_request_mutations_sync_to_frozen_snapshot() {
+    use super::HttpModuleRequest;
+    use http::HeaderName;
+
+    let mut ctx = module_test_context();
+    let mut req = Request::builder()
+        .method(Method::GET)
+        .uri("https://example.com/resource")
+        .body(Body::empty())
+        .expect("request");
+    assert!(ctx.sync_frozen_request(&req));
+
+    {
+        let mut facade = HttpModuleRequest::new(&mut req);
+        facade.set_method(Method::POST);
+        facade.set_header(
+            HeaderName::from_static("x-event"),
+            HeaderValue::from_static("1"),
+        );
+    }
+    assert!(ctx.sync_frozen_request(&req));
+    let frozen = ctx.frozen_request().expect("frozen");
+    assert_eq!(frozen.method(), Method::POST);
+    assert!(frozen.has_header(&HeaderName::from_static("x-event")));
 }

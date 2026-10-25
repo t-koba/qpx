@@ -1,7 +1,9 @@
 use crate::http::modules::execution::template::{
     CompiledTemplate, compile_template, render_template,
 };
-use crate::http::modules::execution::{HttpModuleContext, HttpModuleRequestView};
+use crate::http::modules::execution::{
+    HttpModuleContext, HttpModuleRequest, HttpModuleRequestView, HttpModuleResponse,
+};
 use crate::http::modules::headers::{parse_header_name, parse_module_settings};
 use crate::http::modules::{
     HttpModule, HttpModuleCapabilities, HttpModuleEvent, HttpModuleFactory, HttpModuleStage,
@@ -334,11 +336,13 @@ impl SubrequestModule {
         &self,
         subresponse: &Response<Body>,
         ctx: &mut HttpModuleContext,
-        req: &mut Request<Body>,
+        req: &mut HttpModuleRequest<'_>,
     ) {
         for (from, to) in &self.copy_to_request {
             if let Some(value) = subresponse.headers().get(from) {
-                req.headers_mut().insert(to.clone(), value.clone());
+                req.as_raw_mut()
+                    .headers_mut()
+                    .insert(to.clone(), value.clone());
                 ctx.remember_request_header(to.clone(), value.clone());
             }
         }
@@ -353,7 +357,7 @@ impl SubrequestModule {
         &self,
         subresponse: &Response<Body>,
         ctx: &mut HttpModuleContext,
-        response: &mut Response<Body>,
+        response: &mut HttpModuleResponse,
     ) {
         for (from, to) in &self.copy_to_request {
             if let Some(value) = subresponse.headers().get(from) {
@@ -362,7 +366,10 @@ impl SubrequestModule {
         }
         for (from, to) in &self.copy_to_response {
             if let Some(value) = subresponse.headers().get(from) {
-                response.headers_mut().insert(to.clone(), value.clone());
+                response
+                    .as_inner_mut()
+                    .headers_mut()
+                    .insert(to.clone(), value.clone());
             }
         }
     }
@@ -415,7 +422,7 @@ impl HttpModule for SubrequestModule {
     ) -> Result<HttpModuleEvent<'a>> {
         match stage {
             HttpModuleStage::RequestHeaders => {
-                let HttpModuleEvent::RequestHeaders(request) = event else {
+                let HttpModuleEvent::RequestHeaders(mut request) = event else {
                     return Err(anyhow!("subrequest received invalid request_headers event"));
                 };
                 if !matches!(self.phase, SubrequestPhase::RequestHeaders) {
@@ -424,16 +431,18 @@ impl HttpModule for SubrequestModule {
                     ));
                 }
                 let subrequest = {
-                    let request_view = HttpModuleRequestView::from_request(request);
+                    let request_view = request.as_view();
                     self.build_subrequest(ctx, &request_view)?
                 };
                 let subresponse = self.run_built_request(ctx, subrequest).await?;
                 if self.should_return_response(&subresponse) {
                     return Ok(HttpModuleEvent::RequestHeadersResult(
-                        RequestHeadersOutcome::Respond(Box::new(subresponse)),
+                        RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::from_inner(
+                            subresponse,
+                        ))),
                     ));
                 }
-                self.apply_request_response_headers(&subresponse, ctx, request);
+                self.apply_request_response_headers(&subresponse, ctx, &mut request);
                 Ok(HttpModuleEvent::RequestHeadersResult(
                     RequestHeadersOutcome::Continue,
                 ))
@@ -449,7 +458,9 @@ impl HttpModule for SubrequestModule {
                 }
                 let subresponse = self.run_frozen(ctx).await?;
                 if self.should_return_response(&subresponse) {
-                    return Ok(HttpModuleEvent::DownstreamResponse(subresponse));
+                    return Ok(HttpModuleEvent::DownstreamResponse(
+                        HttpModuleResponse::from_inner(subresponse),
+                    ));
                 }
                 self.apply_subrequest_response_headers(&subresponse, ctx, &mut response);
                 Ok(HttpModuleEvent::DownstreamResponse(response))

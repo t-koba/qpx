@@ -229,6 +229,274 @@ impl<'a> HttpModuleResponseView<'a> {
     }
 }
 
+/// An opaque borrowed mutable HTTP request for module events.
+///
+/// The transport [`Request`] stays inside the owner; modules see only
+/// semantic views, scalar operations, named header operations and body
+/// moves. There is intentionally no access to the raw header map, raw
+/// values, iterators, callbacks, `Deref`, parts or transport conversions.
+///
+/// ```compile_fail
+/// use qpxd::module_api::{Body, HttpModuleRequest};
+/// fn no_raw(request: &HttpModuleRequest<'_>) {
+///     let _ = request.headers();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use qpxd::module_api::{Body, HttpModuleRequest};
+/// fn no_raw_mut(request: &mut HttpModuleRequest<'_>) {
+///     let _ = request.headers_mut();
+/// }
+/// ```
+/// Caller-supplied header values are mutation inputs only; setters do not
+/// return a previous value.
+///
+/// ```compile_fail
+/// use http::{HeaderName, HeaderValue};
+/// use qpxd::module_api::HttpModuleRequest;
+/// fn no_previous_value(facade: &mut HttpModuleRequest<'_>) {
+///     let _: Option<HeaderValue> = facade.set_header(
+///         HeaderName::from_static("x-example"), HeaderValue::from_static("new"));
+/// }
+/// ```
+pub struct HttpModuleRequest<'a> {
+    inner: &'a mut Request<Body>,
+}
+
+impl<'a> HttpModuleRequest<'a> {
+    pub(super) fn new(request: &'a mut Request<Body>) -> Self {
+        Self { inner: request }
+    }
+
+    /// Returns the request method.
+    pub fn method(&self) -> &Method {
+        self.inner.method()
+    }
+
+    /// Replaces the request method.
+    pub fn set_method(&mut self, method: Method) {
+        *self.inner.method_mut() = method;
+    }
+
+    /// Returns the request version.
+    pub fn version(&self) -> Version {
+        self.inner.version()
+    }
+
+    /// Replaces the request version.
+    pub fn set_version(&mut self, version: Version) {
+        *self.inner.version_mut() = version;
+    }
+
+    /// Returns the request URI.
+    pub fn uri(&self) -> &http::Uri {
+        self.inner.uri()
+    }
+
+    /// Replaces the request URI.
+    pub fn set_uri(&mut self, uri: http::Uri) {
+        *self.inner.uri_mut() = uri;
+    }
+
+    /// Returns the request scheme, if present.
+    pub fn scheme(&self) -> Option<&str> {
+        self.inner.uri().scheme_str()
+    }
+
+    /// Returns the request host, falling back to the Host header.
+    pub fn host(&self) -> Option<&str> {
+        self.inner.uri().host().or_else(|| {
+            self.inner
+                .headers()
+                .get(HOST)
+                .and_then(|value| value.to_str().ok())
+        })
+    }
+
+    /// Returns the request path.
+    pub fn path(&self) -> &str {
+        self.inner.uri().path()
+    }
+
+    /// Returns the request query, if present.
+    pub fn query(&self) -> Option<&str> {
+        self.inner.uri().query()
+    }
+
+    /// Returns the request authority, if present.
+    pub fn authority(&self) -> Option<&str> {
+        self.inner.uri().authority().map(|value| value.as_str())
+    }
+
+    /// Returns the request URI as a string.
+    pub fn uri_string(&self) -> Cow<'_, str> {
+        Cow::Owned(self.inner.uri().to_string())
+    }
+
+    /// Returns a semantic view of this request.
+    pub fn as_view(&self) -> HttpModuleRequestView<'_> {
+        HttpModuleRequestView::from_request(&*self.inner)
+    }
+
+    /// Returns whether this request contains the named header.
+    pub fn has_header(&self, name: &HeaderName) -> bool {
+        self.inner.headers().contains_key(name)
+    }
+
+    /// Replaces all values of the named request header.
+    pub fn set_header(&mut self, name: HeaderName, value: HeaderValue) {
+        self.inner.headers_mut().insert(name, value);
+    }
+
+    /// Appends a value to the named request header, preserving order.
+    pub fn append_header(&mut self, name: HeaderName, value: HeaderValue) {
+        self.inner.headers_mut().append(name, value);
+    }
+
+    /// Removes the named request header, returning whether it was present.
+    pub fn remove_header(&mut self, name: &HeaderName) -> bool {
+        let present = self.inner.headers().contains_key(name);
+        if present {
+            self.inner.headers_mut().remove(name);
+        }
+        present
+    }
+
+    /// Takes the request body, leaving an empty body behind.
+    pub fn take_body(&mut self) -> Body {
+        std::mem::replace(self.inner.body_mut(), Body::empty())
+    }
+
+    /// Replaces the request body.
+    pub fn set_body(&mut self, body: Body) {
+        *self.inner.body_mut() = body;
+    }
+
+    pub(super) fn as_raw(&self) -> &Request<Body> {
+        self.inner
+    }
+
+    pub(super) fn as_raw_mut(&mut self) -> &mut Request<Body> {
+        self.inner
+    }
+}
+
+/// An opaque owned HTTP response for module events and short-circuits.
+///
+/// Transport storage stays private; modules use semantic views, scalar
+/// setters, named header operations and body moves. There is intentionally
+/// no access to the raw header map, raw values, iterators, callbacks,
+/// `Deref`, parts, builders or transport conversions.
+///
+/// ```compile_fail
+/// use qpxd::module_api::HttpModuleResponse;
+/// fn no_raw(response: &HttpModuleResponse) {
+///     let _ = response.headers();
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use qpxd::module_api::HttpModuleResponse;
+/// fn no_parts(response: HttpModuleResponse) {
+///     let _ = response.into_parts();
+/// }
+/// ```
+/// Caller-supplied header values are mutation inputs only; setters do not
+/// return a previous value.
+///
+/// ```compile_fail
+/// use http::{HeaderName, HeaderValue};
+/// use qpxd::module_api::HttpModuleResponse;
+/// fn no_previous_value(facade: &mut HttpModuleResponse) {
+///     let _: Option<HeaderValue> = facade.set_header(
+///         HeaderName::from_static("x-example"), HeaderValue::from_static("new"));
+/// }
+/// ```
+pub struct HttpModuleResponse {
+    inner: Response<Body>,
+}
+
+impl HttpModuleResponse {
+    /// Builds a short-circuit response from a status and a body.
+    pub fn new(status: StatusCode, body: Body) -> Self {
+        let mut inner = Response::new(body);
+        *inner.status_mut() = status;
+        Self { inner }
+    }
+
+    /// Returns the response status.
+    pub fn status(&self) -> StatusCode {
+        self.inner.status()
+    }
+
+    /// Replaces the response status.
+    pub fn set_status(&mut self, status: StatusCode) {
+        *self.inner.status_mut() = status;
+    }
+
+    /// Returns the response version.
+    pub fn version(&self) -> Version {
+        self.inner.version()
+    }
+
+    /// Replaces the response version.
+    pub fn set_version(&mut self, version: Version) {
+        *self.inner.version_mut() = version;
+    }
+
+    /// Returns a semantic view of this response.
+    pub fn as_view(&self) -> HttpModuleResponseView<'_> {
+        HttpModuleResponseView::from_response(&self.inner)
+    }
+
+    /// Returns whether this response contains the named header.
+    pub fn has_header(&self, name: &HeaderName) -> bool {
+        self.inner.headers().contains_key(name)
+    }
+
+    /// Replaces all values of the named response header.
+    pub fn set_header(&mut self, name: HeaderName, value: HeaderValue) {
+        self.inner.headers_mut().insert(name, value);
+    }
+
+    /// Appends a value to the named response header, preserving order.
+    pub fn append_header(&mut self, name: HeaderName, value: HeaderValue) {
+        self.inner.headers_mut().append(name, value);
+    }
+
+    /// Removes the named response header, returning whether it was present.
+    pub fn remove_header(&mut self, name: &HeaderName) -> bool {
+        let present = self.inner.headers().contains_key(name);
+        if present {
+            self.inner.headers_mut().remove(name);
+        }
+        present
+    }
+
+    /// Takes the response body, leaving an empty body behind.
+    pub fn take_body(&mut self) -> Body {
+        std::mem::replace(self.inner.body_mut(), Body::empty())
+    }
+
+    /// Replaces the response body.
+    pub fn set_body(&mut self, body: Body) {
+        *self.inner.body_mut() = body;
+    }
+
+    pub(super) fn from_inner(inner: Response<Body>) -> Self {
+        Self { inner }
+    }
+
+    pub(crate) fn into_inner(self) -> Response<Body> {
+        self.inner
+    }
+
+    pub(super) fn as_inner_mut(&mut self) -> &mut Response<Body> {
+        &mut self.inner
+    }
+}
+
 #[derive(Debug)]
 struct HttpModuleSession {
     proxy_kind: ProxyKind,
@@ -498,7 +766,7 @@ impl HttpModuleExecution {
                 .call(
                     HttpModuleStage::RequestHeaders,
                     context,
-                    HttpModuleEvent::RequestHeaders(req),
+                    HttpModuleEvent::RequestHeaders(HttpModuleRequest::new(&mut *req)),
                 )
                 .await
                 .with_context(|| format!("http module {label} request_headers failed"))?
@@ -555,7 +823,7 @@ impl HttpModuleExecution {
                 .call(
                     HttpModuleStage::UpstreamRequest,
                     context,
-                    HttpModuleEvent::UpstreamRequest(req),
+                    HttpModuleEvent::UpstreamRequest(HttpModuleRequest::new(&mut *req)),
                 )
                 .await
                 .with_context(|| format!("http module {label} upstream_request failed"))?
@@ -578,18 +846,20 @@ impl HttpModuleExecution {
         context.apply_pending_response_headers(response.headers_mut());
         for module in chain.upstream_response.iter() {
             let label = module.label();
-            response = module
+            let wrapped = module
                 .module
                 .call(
                     HttpModuleStage::UpstreamResponse,
                     context,
-                    HttpModuleEvent::UpstreamResponse(response),
+                    HttpModuleEvent::UpstreamResponse(HttpModuleResponse::from_inner(response)),
                 )
                 .await
                 .with_context(|| format!("http module {label} upstream_response failed"))?
                 .upstream_response(label)?;
-            context.set_response_status(response.status());
-            context.apply_pending_response_headers(response.headers_mut());
+            context.set_response_status(wrapped.status());
+            let mut wrapped = wrapped;
+            context.apply_pending_response_headers(wrapped.as_inner_mut().headers_mut());
+            response = wrapped.into_inner();
         }
         Ok(response)
     }
@@ -614,18 +884,20 @@ impl HttpModuleExecution {
                 continue;
             }
             let label = module.label();
-            response = module
+            let wrapped = module
                 .module
                 .call(
                     HttpModuleStage::DownstreamResponse,
                     context,
-                    HttpModuleEvent::DownstreamResponse(response),
+                    HttpModuleEvent::DownstreamResponse(HttpModuleResponse::from_inner(response)),
                 )
                 .await
                 .with_context(|| format!("http module {label} downstream_response failed"))?
                 .downstream_response(label)?;
-            context.set_response_status(response.status());
-            context.apply_pending_response_headers(response.headers_mut());
+            context.set_response_status(wrapped.status());
+            let mut wrapped = wrapped;
+            context.apply_pending_response_headers(wrapped.as_inner_mut().headers_mut());
+            response = wrapped.into_inner();
         }
         Ok(response)
     }

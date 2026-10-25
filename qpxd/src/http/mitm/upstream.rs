@@ -124,7 +124,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
             let response = prepare_http_module_local_response(
                 &mut http_modules,
-                *response,
+                (*response).into_inner(),
                 req_method,
                 proxy_name,
                 route_headers,

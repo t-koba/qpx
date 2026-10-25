@@ -63,7 +63,7 @@ pub(super) async fn prepare_reverse_modules(
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
             let response = prepare_http_module_local_response(
                 &mut http_modules,
-                *response,
+                (*response).into_inner(),
                 &audit_ctx.request_method,
                 proxy_name,
                 route_headers,

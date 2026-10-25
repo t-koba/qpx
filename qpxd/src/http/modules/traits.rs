@@ -1,10 +1,11 @@
-use super::{HttpModuleContext, HttpModuleRequestView, HttpModuleResponseView};
+use super::{
+    HttpModuleContext, HttpModuleRequest, HttpModuleRequestView, HttpModuleResponse,
+    HttpModuleResponseView,
+};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use http::StatusCode;
-use hyper::{Request, Response};
 use qpx_core::config::HttpModuleConfig;
-use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub trait HttpModuleFactory: Send + Sync {
@@ -299,7 +300,7 @@ mod tests {
 
 pub enum RequestHeadersOutcome {
     Continue,
-    Respond(Box<Response<Body>>),
+    Respond(Box<HttpModuleResponse>),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -315,12 +316,12 @@ pub enum HttpModuleStage {
 }
 
 pub enum HttpModuleEvent<'a> {
-    RequestHeaders(&'a mut Request<Body>),
+    RequestHeaders(HttpModuleRequest<'a>),
     RequestHeadersResult(RequestHeadersOutcome),
     CacheLookup(CacheLookupStatus),
-    UpstreamRequest(&'a mut Request<Body>),
-    UpstreamResponse(Response<Body>),
-    DownstreamResponse(Response<Body>),
+    UpstreamRequest(HttpModuleRequest<'a>),
+    UpstreamResponse(HttpModuleResponse),
+    DownstreamResponse(HttpModuleResponse),
     Retry(RetryEvent<'a>),
     Error(&'a anyhow::Error),
     Log {
@@ -350,7 +351,7 @@ impl<'a> HttpModuleEvent<'a> {
         }
     }
 
-    pub(super) fn upstream_response(self, module: &str) -> Result<Response<Body>> {
+    pub(super) fn upstream_response(self, module: &str) -> Result<HttpModuleResponse> {
         match self {
             Self::UpstreamResponse(response) => Ok(response),
             _ => Err(anyhow!(
@@ -359,7 +360,7 @@ impl<'a> HttpModuleEvent<'a> {
         }
     }
 
-    pub(super) fn downstream_response(self, module: &str) -> Result<Response<Body>> {
+    pub(super) fn downstream_response(self, module: &str) -> Result<HttpModuleResponse> {
         match self {
             Self::DownstreamResponse(response) => Ok(response),
             _ => Err(anyhow!(

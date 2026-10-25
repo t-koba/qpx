@@ -198,7 +198,7 @@ pub(super) async fn complete_transparent_request(
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
             let response = prepare_http_module_local_response(
                 &mut http_modules,
-                *response,
+                (*response).into_inner(),
                 &request_method,
                 proxy_name,
                 policy_headers,

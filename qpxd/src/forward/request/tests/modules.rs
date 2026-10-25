@@ -252,9 +252,11 @@ impl crate::module_api::HttpModuleFactory for TestResponseHeaderModuleFactory {
 #[async_trait::async_trait]
 impl crate::module_api::HttpModule for TestResponseHeaderModule {
     fn capabilities(&self) -> crate::module_api::HttpModuleCapabilities {
-        crate::module_api::HttpModuleCapabilities::headers_only(
+        let mut capabilities = crate::module_api::HttpModuleCapabilities::headers_only(
             crate::module_api::ModuleStages::DOWNSTREAM_RESPONSE,
-        )
+        );
+        capabilities.mutates_response_headers = true;
+        capabilities
     }
 
     async fn call<'a>(
@@ -269,9 +271,7 @@ impl crate::module_api::HttpModule for TestResponseHeaderModule {
         let crate::module_api::HttpModuleEvent::DownstreamResponse(mut response) = event else {
             anyhow::bail!("invalid downstream response event");
         };
-        response
-            .headers_mut()
-            .insert(self.header_name.clone(), self.header_value.clone());
+        response.set_header(self.header_name.clone(), self.header_value.clone());
         Ok(crate::module_api::HttpModuleEvent::DownstreamResponse(
             response,
         ))

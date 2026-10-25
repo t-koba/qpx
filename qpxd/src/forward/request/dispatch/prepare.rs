@@ -77,7 +77,7 @@ pub(super) async fn prepare_forward_dispatch(
     {
         let response = prepare_http_module_local_response(
             &mut http_modules,
-            *response,
+            (*response).into_inner(),
             request_method,
             proxy_name,
             headers,

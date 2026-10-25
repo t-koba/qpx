@@ -60,7 +60,16 @@ register custom module factories and then run the normal CLI/event loop.
 The public API surface is `qpxd::Daemon::builder()` plus
 `qpxd::module_api::{HttpModuleFactory, HttpModule, HttpModuleCapabilities,
 HttpModuleStage, HttpModuleEvent, ModuleStages, HttpModuleContext,
-HttpModuleRequestView, Body}`.
+HttpModuleRequest, HttpModuleRequestView, HttpModuleResponse,
+HttpModuleResponseView, Body}`.
+
+Request and response event payloads are opaque facades: `HttpModuleRequest`
+borrows the transport request while `HttpModuleResponse` owns the transport
+response. Modules use semantic views, scalar setters, named header
+presence/mutation operations and body moves; raw header maps, raw values,
+iterators, callbacks, `Deref`, parts and transport conversions are not
+exposed. Short-circuits build responses via
+`HttpModuleResponse::new(status, Body)`.
 
 Modules declare capabilities so `qpxd` compiles stage-indexed chains and only
 calls modules for the stages they need. Built-in compression runs only on
@@ -106,7 +115,10 @@ impl HttpModuleFactory for AddHeaderFactory {
 #[async_trait]
 impl HttpModule for AddHeader {
     fn capabilities(&self) -> HttpModuleCapabilities {
-        HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE)
+        let mut capabilities =
+            HttpModuleCapabilities::headers_only(ModuleStages::DOWNSTREAM_RESPONSE);
+        capabilities.mutates_response_headers = true;
+        capabilities
     }
 
     async fn call<'a>(
@@ -121,7 +133,7 @@ impl HttpModule for AddHeader {
         let HttpModuleEvent::DownstreamResponse(mut response) = event else {
             anyhow::bail!("invalid downstream response event");
         };
-        response.headers_mut().insert(self.name.clone(), self.value.clone());
+        response.set_header(self.name.clone(), self.value.clone());
         Ok(HttpModuleEvent::DownstreamResponse(response))
     }
 }

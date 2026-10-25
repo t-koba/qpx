@@ -1,7 +1,8 @@
 use super::headers::{compile_literal_headers, parse_module_settings};
 use super::{
     HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
-    HttpModuleRequestView, HttpModuleStage, ModuleStages, RequestHeadersOutcome,
+    HttpModuleRequestView, HttpModuleResponse, HttpModuleStage, ModuleStages,
+    RequestHeadersOutcome,
 };
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
@@ -139,14 +140,18 @@ impl HttpModule for CachePurgeModule {
         }
         if !self.authorized(ctx) {
             return Ok(HttpModuleEvent::RequestHeadersResult(
-                RequestHeadersOutcome::Respond(Box::new(self.build_forbidden_response())),
+                RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::from_inner(
+                    self.build_forbidden_response(),
+                ))),
             ));
         }
-        if let Some(key) = ctx.cache_request_key(request)? {
+        if let Some(key) = ctx.cache_request_key(request.as_raw())? {
             let _ = ctx.purge_cache_key(&key).await?;
         }
         Ok(HttpModuleEvent::RequestHeadersResult(
-            RequestHeadersOutcome::Respond(Box::new(self.build_response())),
+            RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::from_inner(
+                self.build_response(),
+            ))),
         ))
     }
 }

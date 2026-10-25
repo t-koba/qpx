@@ -1,8 +1,8 @@
 use super::headers::parse_module_settings;
 use super::{
     BodyAccess, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
-    HttpModuleFactory, HttpModuleRequestView, HttpModuleResponseView, HttpModuleStage,
-    ModuleStages,
+    HttpModuleFactory, HttpModuleRequestView, HttpModuleResponse, HttpModuleResponseView,
+    HttpModuleStage, ModuleStages,
 };
 use crate::http::media_type::raw_media_type;
 use anyhow::{Result, anyhow};
@@ -289,7 +289,7 @@ impl HttpModule for ResponseCompressionModule {
     ) -> Result<HttpModuleEvent<'a>> {
         match (stage, event) {
             (HttpModuleStage::RequestHeaders, HttpModuleEvent::RequestHeaders(request)) => {
-                if let Some(request) = CompressionRequest::from_request(request) {
+                if let Some(request) = CompressionRequest::from_request(request.as_raw()) {
                     ctx.extensions_mut().insert(request);
                 }
                 Ok(HttpModuleEvent::RequestHeadersResult(
@@ -300,7 +300,7 @@ impl HttpModule for ResponseCompressionModule {
                 HttpModuleStage::DownstreamResponse,
                 HttpModuleEvent::DownstreamResponse(response),
             ) => Ok(HttpModuleEvent::DownstreamResponse(
-                self.compress(ctx, response).await?,
+                HttpModuleResponse::from_inner(self.compress(ctx, response.into_inner()).await?),
             )),
             (_, event) => Ok(event),
         }
