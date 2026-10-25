@@ -190,6 +190,33 @@ fn projection_collisions_and_identity_precedence_are_not_unified() {
 }
 
 #[test]
+fn mixed_case_connection_fields_filter_nominated_headers() {
+    let fields = HashMap::from([
+        ("Connection".into(), "X-Secret".into()),
+        ("connection".into(), "X-Other".into()),
+        ("X-Secret".into(), "hidden".into()),
+        ("x-other".into(), "hidden".into()),
+        ("X-Visible".into(), "visible".into()),
+    ]);
+    let mut req = request();
+    req.http_headers = RequestHeaders::from_http_fields(fields);
+
+    let cgi = req.cgi_environment().into_variables();
+    assert!(!cgi.contains_key("HTTP_X_SECRET"));
+    assert!(!cgi.contains_key("HTTP_X_OTHER"));
+    assert_eq!(cgi["HTTP_X_VISIBLE"], "visible");
+
+    let persistent = req.persistent_environment(None).into_variables();
+    assert!(!persistent.iter().any(|(name, _)| name == "HTTP_X_SECRET"));
+    assert!(!persistent.iter().any(|(name, _)| name == "HTTP_X_OTHER"));
+    assert!(
+        persistent
+            .iter()
+            .any(|(name, value)| name == "HTTP_X_VISIBLE" && value == "visible")
+    );
+}
+
+#[test]
 fn debug_never_exposes_raw_header_names_or_values() {
     let mut req = request();
     req.http_headers = RequestHeaders::from_http_pairs(vec![(

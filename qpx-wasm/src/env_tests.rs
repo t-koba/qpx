@@ -164,6 +164,29 @@ async fn wasi_visible_collisions_and_extra_env_precedence_remain_ordered() {
     std::fs::remove_dir_all(module.parent().unwrap()).unwrap();
 }
 
+#[tokio::test]
+async fn wasi_visible_connection_filter_handles_mixed_case_field_names() {
+    let module = temp_file("mixed-case-connection.wat", ENV_GUEST);
+    let executor = WasmExecutor::new(test_config(module.clone(), true)).unwrap();
+    let fields = HashMap::from([
+        ("Connection".into(), "X-Secret".into()),
+        ("connection".into(), "X-Other".into()),
+        ("X-Secret".into(), "hidden".into()),
+        ("x-other".into(), "hidden".into()),
+        ("X-Visible".into(), "visible".into()),
+    ]);
+    let env = visible_env(
+        &executor,
+        request(0, RequestHeaders::from_http_fields(fields)),
+    )
+    .await;
+    assert!(values(&env, "HTTP_X_SECRET").is_empty());
+    assert!(values(&env, "HTTP_X_OTHER").is_empty());
+    assert_eq!(values(&env, "HTTP_X_VISIBLE"), ["visible"]);
+    drop(executor);
+    std::fs::remove_dir_all(module.parent().unwrap()).unwrap();
+}
+
 #[test]
 fn wasm_request_debug_does_not_reveal_header_fields() {
     let req = request(

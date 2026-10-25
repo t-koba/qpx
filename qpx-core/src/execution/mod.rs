@@ -181,13 +181,15 @@ impl CgiRequest {
 
 fn parse_connection_tokens(headers: &HashMap<String, String>) -> HashSet<String> {
     let mut out = HashSet::new();
-    let Some(value) = headers.get("connection") else {
-        return out;
-    };
-    for token in value.split(',') {
-        let token = token.trim();
-        if !token.is_empty() {
-            out.insert(token.to_ascii_lowercase());
+    for (name, value) in headers {
+        if !name.eq_ignore_ascii_case("connection") {
+            continue;
+        }
+        for token in value.split(',') {
+            let token = token.trim();
+            if !token.is_empty() {
+                out.insert(token.to_ascii_lowercase());
+            }
         }
     }
     out
