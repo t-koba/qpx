@@ -4,7 +4,7 @@ use super::key::{KeyKind, LimiterKey, make_limiter_key, shard_count_for_key_kind
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 struct ConcurrencyInner {
     counts: HashMap<LimiterKey, usize>,
 }
@@ -43,11 +43,7 @@ impl ConcurrencyLimiter {
         let shard_count = shard_count_for_key_kind(key_kind);
         debug_assert!(shard_count.is_power_of_two());
         let shards = (0..shard_count)
-            .map(|_| {
-                Mutex::new(ConcurrencyInner {
-                    counts: HashMap::new(),
-                })
-            })
+            .map(|_| Mutex::new(ConcurrencyInner::default()))
             .collect::<Vec<_>>();
         Self {
             key_kind,
