@@ -294,6 +294,19 @@ pub enum LookupOutcome {
     OnlyIfCachedMiss,
 }
 
+/// State carried by a cache lookup that may need origin revalidation.
+///
+/// The cached response envelope is intentionally internal to `qpxd-cache`;
+/// downstream users can pass this state through without reading its stored
+/// response headers.
+///
+/// ```compile_fail
+/// use qpxd_cache::RevalidationState;
+///
+/// fn read_cached_headers(state: &RevalidationState) {
+///     let _ = state.envelope.header_map();
+/// }
+/// ```
 #[derive(Clone)]
 pub struct RevalidationState {
     pub backend: Arc<dyn CacheBackend>,
@@ -301,7 +314,7 @@ pub struct RevalidationState {
     pub variant_key: String,
     pub request_method: Method,
     pub request_directives: RequestDirectives,
-    pub envelope: CachedResponseEnvelope,
+    pub(super) envelope: CachedResponseEnvelope,
     pub stale_if_error_secs: Option<u64>,
     /// Per-runtime background-revalidation registry, carried so the spawned task
     /// can dedupe without a process-global.
