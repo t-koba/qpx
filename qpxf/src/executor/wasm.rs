@@ -75,24 +75,7 @@ impl WasmExecutor {
 impl Executor for WasmExecutor {
     async fn start(&self, req: CgiRequest) -> Result<Execution> {
         let permit = self.acquire().await?;
-        let exec = self
-            .pick_instance()
-            .start(qpx_wasm::WasmRequest {
-                script_name: req.script_name,
-                path_info: req.path_info,
-                query_string: req.query_string,
-                request_method: req.request_method,
-                content_type: req.content_type,
-                content_length: req.content_length,
-                server_protocol: req.server_protocol,
-                server_name: req.server_name,
-                server_port: req.server_port,
-                remote_addr: req.remote_addr,
-                remote_port: req.remote_port,
-                http_headers: req.http_headers,
-                identity_env: req.identity_env,
-            })
-            .await?;
+        let exec = self.pick_instance().start(req.into_wasm_request()).await?;
         let done = tokio::spawn(async move {
             let result = exec.done.await.map_err(|err| anyhow::anyhow!(err))?;
             drop(permit);

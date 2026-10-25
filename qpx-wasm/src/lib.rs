@@ -1,11 +1,27 @@
 //! WASI preview1 executor used by qpxf WASM backends.
+//!
+//! Closed HTTP ingress; final WASI variables are available through
+//! [`WasmRequest::wasi_environment`], not raw header access.
+//!
+//! ```compile_fail,E0599
+//! use qpx_wasm::WasmRequest;
+//! fn raw(req: &WasmRequest) { let _ = req.http_headers.get("content-length"); }
+//! ```
+//! ```compile_fail,E0616
+//! use qpx_wasm::WasmRequest;
+//! fn raw(req: WasmRequest) { let _ = req.http_headers.0; }
+//! ```
+//! ```compile_fail,E0277
+//! use qpx_wasm::WasmRequest;
+//! fn raw(req: WasmRequest) { for _ in req.http_headers {} }
+//! ```
 
 #![warn(missing_docs)]
 #![forbid(unsafe_code)]
 
 use anyhow::anyhow;
 use bytes::{Buf, Bytes};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -89,36 +105,7 @@ struct PreparedInstance {
     instance: Instance,
 }
 
-/// CGI-style request metadata for one WASM execution.
-#[derive(Debug, Clone)]
-pub struct WasmRequest {
-    /// CGI `SCRIPT_NAME`.
-    pub script_name: String,
-    /// CGI `PATH_INFO`.
-    pub path_info: String,
-    /// CGI `QUERY_STRING`.
-    pub query_string: String,
-    /// CGI `REQUEST_METHOD`.
-    pub request_method: String,
-    /// Request content type.
-    pub content_type: String,
-    /// Request content length.
-    pub content_length: usize,
-    /// CGI `SERVER_PROTOCOL`.
-    pub server_protocol: String,
-    /// CGI `SERVER_NAME`.
-    pub server_name: String,
-    /// CGI `SERVER_PORT`.
-    pub server_port: u16,
-    /// Client remote address.
-    pub remote_addr: Option<String>,
-    /// Client remote port.
-    pub remote_port: Option<u16>,
-    /// HTTP headers converted to CGI-style names.
-    pub http_headers: HashMap<String, String>,
-    /// Verified identity environment supplied through QPX-IPC, never client headers.
-    pub identity_env: HashMap<String, String>,
-}
+pub use qpx_core::execution::{RequestHeaders, WasmRequest};
 
 /// Running WASM execution handles and I/O streams.
 pub struct WasmExecution {
@@ -688,38 +675,6 @@ fn enforce_module_size(module: &PathBuf, max_module_bytes: u64) -> Result<()> {
     Ok(())
 }
 
-fn is_hop_by_hop_header(name: &str) -> bool {
-    matches!(
-        name,
-        "connection"
-            | "keep-alive"
-            | "proxy"
-            | "proxy-connection"
-            | "proxy-authenticate"
-            | "proxy-authorization"
-            | "proxy-authentication-info"
-            | "te"
-            | "trailer"
-            | "trailers"
-            | "transfer-encoding"
-            | "upgrade"
-    )
-}
-
-fn parse_connection_tokens(headers: &HashMap<String, String>) -> HashSet<String> {
-    let mut out = HashSet::new();
-    let Some(value) = headers.get("connection") else {
-        return out;
-    };
-    for token in value.split(',') {
-        let token = token.trim();
-        if !token.is_empty() {
-            out.insert(token.to_ascii_lowercase());
-        }
-    }
-    out
-}
-
 struct WasmStoreData {
     wasi: WasiP1Ctx,
     limiter: MemoryLimiter,
@@ -751,74 +706,10 @@ impl ResourceLimiter for MemoryLimiter {
 
 fn build_wasi_ctx(req: &WasmRequest, extra_env: &HashMap<String, String>) -> WasiCtxBuilder {
     let mut builder = WasiCtxBuilder::new();
-    builder.env("GATEWAY_INTERFACE", "CGI/1.1");
-    builder.env("SERVER_PROTOCOL", &req.server_protocol);
-    builder.env(
-        "SERVER_SOFTWARE",
-        concat!("qpxf/", env!("CARGO_PKG_VERSION")),
-    );
-    builder.env("REQUEST_METHOD", &req.request_method);
-    builder.env("QUERY_STRING", &req.query_string);
-    builder.env("SCRIPT_NAME", &req.script_name);
-    builder.env("PATH_INFO", &req.path_info);
-    builder.env("SERVER_NAME", &req.server_name);
-    builder.env("SERVER_PORT", req.server_port.to_string());
-    if let Some(addr) = req.remote_addr.as_ref() {
-        builder.env("REMOTE_ADDR", addr);
-    }
-    if let Some(port) = req.remote_port {
-        builder.env("REMOTE_PORT", port.to_string());
-    }
-    if !req.content_type.is_empty() {
-        builder.env("CONTENT_TYPE", &req.content_type);
-    }
-    if req.content_length > 0 {
-        builder.env("CONTENT_LENGTH", req.content_length.to_string());
-    }
-    for (key, value) in &req.identity_env {
-        builder.env(key, value);
-    }
-    let connection_tokens = parse_connection_tokens(&req.http_headers);
-    for (key, value) in &req.http_headers {
-        let lower = key.to_ascii_lowercase();
-        if is_hop_by_hop_header(&lower) || connection_tokens.contains(lower.as_str()) {
-            continue;
-        }
-        let env_key = format!("HTTP_{}", key.to_uppercase().replace('-', "_"));
-        builder.env(&env_key, value);
-    }
-    for (key, value) in extra_env {
-        if wasm_extra_env_is_reserved(key) {
-            continue;
-        }
-        builder.env(key, value);
+    for (name, value) in req.wasi_environment(extra_env).into_variables() {
+        builder.env(name, value);
     }
     builder
-}
-
-fn wasm_extra_env_is_reserved(name: &str) -> bool {
-    let upper = name.trim().to_ascii_uppercase();
-    matches!(
-        upper.as_str(),
-        "AUTH_TYPE"
-            | "CONTENT_LENGTH"
-            | "CONTENT_TYPE"
-            | "GATEWAY_INTERFACE"
-            | "PATH_INFO"
-            | "PATH_TRANSLATED"
-            | "QUERY_STRING"
-            | "REMOTE_ADDR"
-            | "REMOTE_HOST"
-            | "REMOTE_IDENT"
-            | "REMOTE_PORT"
-            | "REMOTE_USER"
-            | "REQUEST_METHOD"
-            | "SCRIPT_NAME"
-            | "SERVER_NAME"
-            | "SERVER_PORT"
-            | "SERVER_PROTOCOL"
-            | "SERVER_SOFTWARE"
-    ) || upper.starts_with("HTTP_")
 }
 
 fn translate_wasm_exit(err: wasmtime::Error) -> Result<()> {
@@ -842,7 +733,7 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
+    pub(super) fn temp_file(name: &str, bytes: &[u8]) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(0);
         let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!("qpx-wasm-test-{}-{id}", std::process::id()));
@@ -852,7 +743,7 @@ mod tests {
         path
     }
 
-    fn test_config(module: PathBuf, precompile: bool) -> WasmExecutorConfig {
+    pub(super) fn test_config(module: PathBuf, precompile: bool) -> WasmExecutorConfig {
         WasmExecutorConfig {
             module,
             precompile,
@@ -936,7 +827,7 @@ mod tests {
                 server_port: 80,
                 remote_addr: None,
                 remote_port: None,
-                http_headers: HashMap::new(),
+                http_headers: RequestHeaders::default(),
                 identity_env: HashMap::new(),
             })
             .await
@@ -1000,7 +891,7 @@ mod tests {
                 server_port: 80,
                 remote_addr: None,
                 remote_port: None,
-                http_headers: HashMap::new(),
+                http_headers: RequestHeaders::default(),
                 identity_env: HashMap::new(),
             })
             .await
@@ -1039,7 +930,7 @@ mod tests {
                 server_port: 80,
                 remote_addr: None,
                 remote_port: None,
-                http_headers: HashMap::new(),
+                http_headers: RequestHeaders::default(),
                 identity_env: HashMap::new(),
             })
             .await
@@ -1054,3 +945,6 @@ mod tests {
         wait_for_idle(&executor, 1).await;
     }
 }
+
+#[cfg(test)]
+mod env_tests;

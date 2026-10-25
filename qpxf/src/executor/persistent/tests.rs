@@ -4,6 +4,7 @@ use super::fastcgi_io::{
 };
 use super::pool::FastCgiConnectionPool;
 use super::*;
+use std::collections::HashMap;
 use std::io::{Cursor, Read};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -64,7 +65,7 @@ fn gateway_env_does_not_duplicate_content_headers_as_http_vars() {
         server_port: 80,
         remote_addr: None,
         remote_port: None,
-        http_headers: headers,
+        http_headers: crate::executor::RequestHeaders::from_http_fields(headers),
         matched_prefix: None,
         identity_env: HashMap::new(),
     };
@@ -653,7 +654,7 @@ fn test_cgi_request_with_path(script_name: &str, path_info: &str) -> CgiRequest 
         server_port: 80,
         remote_addr: None,
         remote_port: None,
-        http_headers: HashMap::new(),
+        http_headers: crate::executor::RequestHeaders::default(),
         matched_prefix: None,
         identity_env: HashMap::new(),
     }

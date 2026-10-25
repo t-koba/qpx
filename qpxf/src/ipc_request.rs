@@ -125,7 +125,7 @@ pub(crate) fn plan_ipc_request(
         server_port: server_port.unwrap_or(80),
         remote_addr,
         remote_port,
-        http_headers: cgi_header_map(meta.headers),
+        http_headers: crate::executor::RequestHeaders::from_http_pairs(meta.headers),
         matched_prefix,
         identity_env: verified_context_env(
             meta.verified_identity.as_ref(),
@@ -277,21 +277,6 @@ fn host_port(authority: &str) -> (Option<String>, Option<u16>) {
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().ok()))
         .unwrap_or((authority.to_string(), None));
     (Some(host), port)
-}
-
-fn cgi_header_map(headers: Vec<(String, String)>) -> HashMap<String, String> {
-    let mut out: HashMap<String, String> = HashMap::new();
-    for (k, v) in headers {
-        let key = k.to_ascii_lowercase();
-        if let Some(existing) = out.get_mut(&key) {
-            let sep = if key == "cookie" { "; " } else { ", " };
-            existing.push_str(sep);
-            existing.push_str(&v);
-        } else {
-            out.insert(key, v);
-        }
-    }
-    out
 }
 
 #[cfg(test)]

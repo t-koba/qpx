@@ -2847,6 +2847,7 @@ version = "0.5.1"
 dependencies = [
  "anyhow",
  "bytes",
+ "qpx-core",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

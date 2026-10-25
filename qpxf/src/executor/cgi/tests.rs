@@ -51,12 +51,10 @@ fn build_env_does_not_duplicate_content_headers_as_http_vars() {
     req.content_type = "text/plain".to_string();
     req.content_length = 5;
     req.declared_content_length = Some(5);
-    req.http_headers.insert(
-        "content-type".to_string(),
-        "application/octet-stream".to_string(),
-    );
-    req.http_headers
-        .insert("content-length".to_string(), "99".to_string());
+    req.http_headers = crate::executor::RequestHeaders::from_http_pairs(vec![
+        ("content-type".into(), "application/octet-stream".into()),
+        ("content-length".into(), "99".into()),
+    ]);
 
     let env = executor.build_env(&req);
 
@@ -95,7 +93,7 @@ fn test_request(script_name: &str, path_info: &str, matched_prefix: Option<&str>
         server_port: 80,
         remote_addr: None,
         remote_port: None,
-        http_headers: HashMap::new(),
+        http_headers: crate::executor::RequestHeaders::default(),
         matched_prefix: matched_prefix.map(str::to_string),
         identity_env: HashMap::new(),
     }

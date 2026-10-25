@@ -1,3 +1,32 @@
+//! Streaming execution with closed request headers.
+//!
+//! Custom executors use [`CgiRequest::cgi_environment`] or
+//! [`CgiRequest::persistent_environment`] and consume the returned final artifact.
+//! HTTP headers are write-only ingress, not an inspection API:
+//!
+//! ```compile_fail,E0599
+//! use qpxf::executor::CgiRequest;
+//! fn raw(req: &CgiRequest) { let _ = req.http_headers.get("content-length"); }
+//! ```
+//! ```compile_fail,E0616
+//! use qpxf::executor::CgiRequest;
+//! fn raw(req: CgiRequest) { let _ = req.http_headers.0; }
+//! ```
+//! ```compile_fail,E0277
+//! use qpxf::executor::CgiRequest;
+//! fn raw(req: CgiRequest) { for _ in req.http_headers {} }
+//! ```
+//! ```compile_fail,E0277
+//! use qpxf::executor::CgiRequest;
+//! fn raw(req: CgiRequest) { let _ = serde_json::to_string(&req.http_headers); }
+//! ```
+//! ```compile_fail,E0061
+//! use qpxf::executor::CgiRequest;
+//! fn read_host_environment(req: &CgiRequest) {
+//!     let _ = req.cgi_environment(&["PATH".to_owned()]);
+//! }
+//! ```
+
 pub mod cgi;
 pub mod persistent;
 #[cfg(feature = "wasm")]
@@ -6,31 +35,11 @@ pub mod wasm;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::fmt::Write;
 use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
-/// A CGI-style request passed to an executor.
-#[derive(Debug, Clone)]
-pub struct CgiRequest {
-    pub script_name: String,
-    pub path_info: String,
-    pub query_string: String,
-    pub request_method: String,
-    pub content_type: String,
-    pub content_length: usize,
-    pub declared_content_length: Option<usize>,
-    pub server_protocol: String,
-    pub server_name: String,
-    pub server_port: u16,
-    pub remote_addr: Option<String>,
-    pub remote_port: Option<u16>,
-    pub http_headers: HashMap<String, String>,
-    /// The matched route prefix (if any), used for prefix-stripping in executors.
-    pub matched_prefix: Option<String>,
-    pub identity_env: HashMap<String, String>,
-}
+pub use qpx_core::execution::{CgiRequest, RequestHeaders};
 
 /// A running execution instance: stdin is fed by the IPC server, stdout/stderr
 /// are streamed back to the IPC client.

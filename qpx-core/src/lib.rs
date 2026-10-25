@@ -20,6 +20,8 @@ pub mod cors;
 pub mod dpop;
 /// Environment-variable substitution helpers for configuration loading.
 pub mod envsubst;
+/// Closed CGI and WASI execution metadata and final environments.
+pub mod execution;
 /// Shared exporter configuration and queue policy types.
 pub mod exporter;
 /// The HTTP token vocabulary: the RFC 9110 token grammar and the
