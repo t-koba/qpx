@@ -240,7 +240,8 @@ impl SubrequestModule {
         let response = timeout(timeout_dur, future)
             .await
             .with_context(|| format!("subrequest {} timed out", self.name))?
-            .with_context(|| format!("subrequest {} failed", self.name))?;
+            .with_context(|| format!("subrequest {} failed", self.name))?
+            .into_inner();
         if self.deny_redirects && response.status().is_redirection() {
             return Err(anyhow!("subrequest {} received a redirect", self.name));
         }

@@ -145,7 +145,11 @@ impl HttpModule for CachePurgeModule {
                 ))),
             ));
         }
-        if let Some(key) = ctx.cache_request_key(request.as_raw())? {
+        let key = {
+            let view = request.as_view();
+            ctx.cache_request_key(&view)?
+        };
+        if let Some(key) = key {
             let _ = ctx.purge_cache_key(&key).await?;
         }
         Ok(HttpModuleEvent::RequestHeadersResult(

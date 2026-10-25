@@ -852,3 +852,369 @@ fn event_facade_request_mutations_sync_to_frozen_snapshot() {
     assert_eq!(frozen.method(), Method::POST);
     assert!(frozen.has_header(&HeaderName::from_static("x-event")));
 }
+
+fn cache_test_policy() -> qpx_core::config::CachePolicyConfig {
+    qpx_core::config::CachePolicyConfig {
+        enabled: true,
+        backend: "test".to_string(),
+        namespace: None,
+        default_ttl_secs: None,
+        max_object_bytes: 1024 * 1024,
+        allow_set_cookie_store: false,
+        allow_authorization_without_vary_store: false,
+    }
+}
+
+fn cache_test_context(
+    policy: Option<qpx_core::config::CachePolicyConfig>,
+    default_scheme: Option<&str>,
+) -> HttpModuleContext {
+    HttpModuleContext::new(
+        module_test_runtime().state(),
+        HttpModuleSessionInit {
+            proxy_kind: crate::http::dispatch::ProxyKind::Forward,
+            proxy_name: "test-proxy",
+            scope_name: "test-scope",
+            route_name: Some("test-route"),
+            remote_ip: "127.0.0.1".parse::<IpAddr>().expect("ip"),
+            sni: None,
+            identity_user: None,
+            cache_policy: policy,
+            cache_default_scheme: default_scheme,
+        },
+    )
+}
+
+fn cache_key_parts(key: &qpxd_cache::CacheRequestKey) -> (String, String, String, String) {
+    (
+        key.method.to_string(),
+        key.scheme.to_string(),
+        key.authority.to_string(),
+        key.path_and_query.to_string(),
+    )
+}
+
+#[test]
+fn cache_request_key_live_and_frozen_agree_on_authority_vs_host() {
+    let ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    let absolute = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com/resource?x=1")
+        .header(HOST, "conflicting.example")
+        .body(Body::empty())
+        .expect("absolute request");
+    let origin = Request::builder()
+        .method(Method::GET)
+        .uri("/resource?x=1")
+        .header(HOST, "example.com")
+        .body(Body::empty())
+        .expect("origin request");
+
+    let live_absolute = HttpModuleRequestView::from_request(&absolute);
+    let live_origin = HttpModuleRequestView::from_request(&origin);
+    let absolute_key = ctx
+        .cache_request_key(&live_absolute)
+        .expect("absolute key")
+        .expect("some key");
+    let origin_key = ctx
+        .cache_request_key(&live_origin)
+        .expect("origin key")
+        .expect("some key");
+    assert_eq!(cache_key_parts(&absolute_key), cache_key_parts(&origin_key));
+
+    let mut frozen_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    assert!(frozen_ctx.sync_frozen_request(&origin));
+    let frozen = frozen_ctx.frozen_request().expect("frozen");
+    let frozen_key = frozen_ctx
+        .cache_request_key(&frozen)
+        .expect("frozen key")
+        .expect("some key");
+    assert_eq!(cache_key_parts(&origin_key), cache_key_parts(&frozen_key));
+
+    let mut frozen_absolute_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    assert!(frozen_absolute_ctx.sync_frozen_request(&absolute));
+    let frozen_absolute = frozen_absolute_ctx.frozen_request().expect("frozen");
+    let frozen_absolute_key = frozen_absolute_ctx
+        .cache_request_key(&frozen_absolute)
+        .expect("frozen absolute key")
+        .expect("some key");
+    assert_eq!(
+        cache_key_parts(&absolute_key),
+        cache_key_parts(&frozen_absolute_key)
+    );
+}
+
+#[test]
+fn cache_request_key_applies_default_scheme_and_strips_default_port() {
+    let ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    // Origin-form without a scheme falls back to the configured default.
+    let origin = Request::builder()
+        .method(Method::GET)
+        .uri("/asset")
+        .header(HOST, "Example.COM:80")
+        .body(Body::empty())
+        .expect("origin request");
+    let live = HttpModuleRequestView::from_request(&origin);
+    let key = ctx
+        .cache_request_key(&live)
+        .expect("key")
+        .expect("some key");
+    assert_eq!(key.scheme.as_ref(), "http");
+    assert_eq!(key.authority.as_ref(), "example.com");
+
+    let mut frozen_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    assert!(frozen_ctx.sync_frozen_request(&origin));
+    let frozen = frozen_ctx.frozen_request().expect("frozen");
+    let frozen_key = frozen_ctx
+        .cache_request_key(&frozen)
+        .expect("frozen key")
+        .expect("some key");
+    assert_eq!(cache_key_parts(&key), cache_key_parts(&frozen_key));
+
+    // A non-default port is preserved byte-exactly after normalization.
+    let explicit = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com:8080/asset")
+        .body(Body::empty())
+        .expect("explicit port request");
+    let live_explicit = HttpModuleRequestView::from_request(&explicit);
+    let explicit_key = ctx
+        .cache_request_key(&live_explicit)
+        .expect("explicit key")
+        .expect("some key");
+    assert_eq!(explicit_key.authority.as_ref(), "example.com:8080");
+
+    // HTTPS default ports and IPv6 authorities use the same cache owner.
+    let https_ctx = cache_test_context(Some(cache_test_policy()), Some("https"));
+    let ipv6 = Request::builder()
+        .method(Method::GET)
+        .uri("/asset")
+        .header(HOST, "[2001:db8::1]:443")
+        .body(Body::empty())
+        .expect("IPv6 request");
+    let ipv6_view = HttpModuleRequestView::from_request(&ipv6);
+    let ipv6_key = https_ctx
+        .cache_request_key(&ipv6_view)
+        .expect("IPv6 key")
+        .expect("some key");
+    assert_eq!(ipv6_key.scheme.as_ref(), "https");
+    // Keep the adapter aligned with the cache owner's authority normalization.
+    let direct_ipv6_key = qpxd_cache::CacheRequestKey::for_target(&ipv6, "https")
+        .expect("direct IPv6 key")
+        .expect("some direct key");
+    assert_eq!(
+        cache_key_parts(&ipv6_key),
+        cache_key_parts(&direct_ipv6_key)
+    );
+    let mut frozen_ipv6_ctx = cache_test_context(Some(cache_test_policy()), Some("https"));
+    assert!(frozen_ipv6_ctx.sync_frozen_request(&ipv6));
+    let frozen_ipv6 = frozen_ipv6_ctx.frozen_request().expect("frozen IPv6");
+    let frozen_ipv6_key = frozen_ipv6_ctx
+        .cache_request_key(&frozen_ipv6)
+        .expect("frozen IPv6 key")
+        .expect("some key");
+    assert_eq!(
+        cache_key_parts(&ipv6_key),
+        cache_key_parts(&frozen_ipv6_key)
+    );
+}
+
+#[test]
+fn cache_request_key_preserves_method_and_rejects_missing_or_invalid_host() {
+    let ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    let get = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com/resource")
+        .body(Body::empty())
+        .expect("GET request");
+    let get_key = ctx
+        .cache_request_key(&HttpModuleRequestView::from_request(&get))
+        .expect("GET key")
+        .expect("some key");
+    assert_eq!(get_key.method.as_ref(), "GET");
+
+    let head = Request::builder()
+        .method(Method::HEAD)
+        .uri("http://example.com/resource")
+        .body(Body::empty())
+        .expect("HEAD request");
+    let head_key = ctx
+        .cache_request_key(&HttpModuleRequestView::from_request(&head))
+        .expect("HEAD key")
+        .expect("some key");
+    assert_eq!(head_key.method.as_ref(), "HEAD");
+    assert_ne!(get_key.method, head_key.method);
+
+    let purge = Request::builder()
+        .method("PURGE")
+        .uri("http://example.com/resource")
+        .body(Body::empty())
+        .expect("purge request");
+    let live_purge = HttpModuleRequestView::from_request(&purge);
+    let purge_key = ctx
+        .cache_request_key(&live_purge)
+        .expect("purge key")
+        .expect("some key");
+    assert_eq!(purge_key.method.as_ref(), "PURGE");
+
+    let mut frozen_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    assert!(frozen_ctx.sync_frozen_request(&purge));
+    let frozen = frozen_ctx.frozen_request().expect("frozen");
+    let frozen_purge_key = frozen_ctx
+        .cache_request_key(&frozen)
+        .expect("frozen purge key")
+        .expect("some key");
+    assert_eq!(
+        cache_key_parts(&purge_key),
+        cache_key_parts(&frozen_purge_key)
+    );
+
+    // Origin-form without any Host or authority names no key.
+    let missing = Request::builder()
+        .method(Method::GET)
+        .uri("/resource")
+        .body(Body::empty())
+        .expect("missing host request");
+    let live_missing = HttpModuleRequestView::from_request(&missing);
+    assert!(ctx.cache_request_key(&live_missing).expect("key").is_none());
+    let mut missing_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    assert!(missing_ctx.sync_frozen_request(&missing));
+    let frozen_missing = missing_ctx.frozen_request().expect("frozen");
+    assert!(
+        missing_ctx
+            .cache_request_key(&frozen_missing)
+            .expect("frozen key")
+            .is_none()
+    );
+
+    // An empty Host value is invalid and also names no key.
+    let empty = Request::builder()
+        .method(Method::GET)
+        .uri("/resource")
+        .header(HOST, "")
+        .body(Body::empty())
+        .expect("empty host request");
+    let live_empty = HttpModuleRequestView::from_request(&empty);
+    assert!(ctx.cache_request_key(&live_empty).expect("key").is_none());
+    let mut empty_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    assert!(empty_ctx.sync_frozen_request(&empty));
+    let frozen_empty = empty_ctx.frozen_request().expect("frozen");
+    assert!(
+        empty_ctx
+            .cache_request_key(&frozen_empty)
+            .expect("frozen key")
+            .is_none()
+    );
+
+    // Obs-text cannot be lossily treated as a URI authority.
+    let mut obs_text_host = Request::builder()
+        .method(Method::GET)
+        .uri("/resource")
+        .body(Body::empty())
+        .expect("obs-text Host request");
+    obs_text_host.headers_mut().insert(
+        HOST,
+        HeaderValue::from_bytes(b"\x80").expect("obs-text HeaderValue"),
+    );
+    let live_obs_text = HttpModuleRequestView::from_request(&obs_text_host);
+    assert!(
+        ctx.cache_request_key(&live_obs_text)
+            .expect("key")
+            .is_none()
+    );
+    let mut obs_text_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
+    assert!(obs_text_ctx.sync_frozen_request(&obs_text_host));
+    let frozen_obs_text = obs_text_ctx.frozen_request().expect("frozen");
+    assert!(
+        obs_text_ctx
+            .cache_request_key(&frozen_obs_text)
+            .expect("frozen key")
+            .is_none()
+    );
+}
+
+#[test]
+fn cache_request_key_live_mutation_does_not_change_frozen_view() {
+    let mut ctx = cache_test_context(Some(cache_test_policy()), Some("https"));
+    let mut request = Request::builder()
+        .method(Method::GET)
+        .uri("/before?q=1")
+        .header(HOST, "before.example:443")
+        .body(Body::empty())
+        .expect("request");
+    assert!(ctx.sync_frozen_request(&request));
+    let frozen = ctx.frozen_request().expect("frozen");
+    let before = ctx
+        .cache_request_key(&frozen)
+        .expect("frozen key")
+        .expect("some key");
+
+    *request.method_mut() = Method::HEAD;
+    *request.uri_mut() = "/after?x=2".parse().expect("updated URI");
+    request
+        .headers_mut()
+        .insert(HOST, HeaderValue::from_static("after.example:8443"));
+    let live = HttpModuleRequestView::from_request(&request);
+    let after = ctx
+        .cache_request_key(&live)
+        .expect("live key")
+        .expect("some key");
+    assert_eq!(
+        cache_key_parts(&before),
+        (
+            "GET".to_string(),
+            "https".to_string(),
+            "before.example".to_string(),
+            "/before?q=1".to_string(),
+        )
+    );
+    assert_eq!(
+        cache_key_parts(&after),
+        (
+            "HEAD".to_string(),
+            "https".to_string(),
+            "after.example:8443".to_string(),
+            "/after?x=2".to_string(),
+        )
+    );
+    let frozen_after = ctx
+        .cache_request_key(&frozen)
+        .expect("frozen key after live mutation")
+        .expect("some frozen key");
+    assert_eq!(cache_key_parts(&before), cache_key_parts(&frozen_after));
+}
+
+#[test]
+fn cache_request_key_no_policy_returns_none_and_missing_default_scheme_errors() {
+    let request = Request::builder()
+        .method(Method::GET)
+        .uri("http://example.com/resource")
+        .body(Body::empty())
+        .expect("request");
+    let live = HttpModuleRequestView::from_request(&request);
+
+    let no_policy = cache_test_context(None, Some("http"));
+    assert!(no_policy.cache_request_key(&live).expect("key").is_none());
+    let mut no_policy_frozen = cache_test_context(None, Some("http"));
+    assert!(no_policy_frozen.sync_frozen_request(&request));
+    let frozen = no_policy_frozen.frozen_request().expect("frozen");
+    assert!(
+        no_policy_frozen
+            .cache_request_key(&frozen)
+            .expect("frozen key")
+            .is_none()
+    );
+
+    let missing_scheme = cache_test_context(Some(cache_test_policy()), None);
+    let err = missing_scheme
+        .cache_request_key(&live)
+        .expect_err("missing default scheme must fail");
+    assert!(err.to_string().contains("missing default scheme"));
+    let mut missing_frozen_ctx = cache_test_context(Some(cache_test_policy()), None);
+    assert!(missing_frozen_ctx.sync_frozen_request(&request));
+    let frozen = missing_frozen_ctx.frozen_request().expect("frozen");
+    let frozen_err = missing_frozen_ctx
+        .cache_request_key(&frozen)
+        .expect_err("frozen missing default scheme must fail");
+    assert!(frozen_err.to_string().contains("missing default scheme"));
+}

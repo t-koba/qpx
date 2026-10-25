@@ -635,28 +635,55 @@ impl HttpModuleContext {
         &self.runtime
     }
 
+    /// Queues a caller-supplied header for owner-managed response insertion.
+    ///
+    /// The value is an input only: this method returns no stored or displaced
+    /// value. When pending entries are applied, later entries with the same
+    /// name replace earlier ones, matching `HeaderMap::insert` semantics.
     pub fn queue_response_header(&mut self, name: HeaderName, value: HeaderValue) {
         self.session.pending_response_headers.push((name, value));
     }
 
-    pub async fn send_absolute_request(&self, req: Request<Body>) -> Result<Response<Body>> {
+    /// Sends a caller-owned absolute-form request, returning an opaque module response.
+    ///
+    /// The `Request` input stays caller-owned; the returned envelope wraps the raw
+    /// transport response without reading, buffering or cloning its body.
+    ///
+    /// ```compile_fail
+    /// use http::Request;
+    /// use qpxd::module_api::{Body, HttpModuleContext};
+    /// async fn cannot_read_raw_headers(ctx: &HttpModuleContext) {
+    ///     let response = ctx
+    ///         .send_absolute_request(Request::new(Body::empty()))
+    ///         .await
+    ///         .expect("response");
+    ///     let _ = response.headers();
+    /// }
+    /// ```
+    pub async fn send_absolute_request(&self, req: Request<Body>) -> Result<HttpModuleResponse> {
         let url = req.uri().to_string();
         let origin = OriginEndpoint::direct(url.as_str());
-        proxy_http(
+        let inner = proxy_http(
             &self.runtime.pools,
             req,
             &origin,
             self.session.proxy_name.as_str(),
             None,
         )
-        .await
+        .await?;
+        Ok(HttpModuleResponse::from_inner(inner))
     }
 
+    /// Sends a caller-owned absolute-form request to a pinned address.
+    ///
+    /// `connect_addr` is the physical socket while the request URI authority and
+    /// logical port stay the Host/TLS identity. The response is wrapped opaquely
+    /// without reading, buffering or cloning its body.
     pub async fn send_absolute_request_to_addr(
         &self,
         req: Request<Body>,
         connect_addr: SocketAddr,
-    ) -> Result<Response<Body>> {
+    ) -> Result<HttpModuleResponse> {
         let uri = req.uri();
         let scheme = uri
             .scheme_str()
@@ -678,17 +705,27 @@ impl HttpModuleContext {
             logical_port,
             host.to_string(),
         );
-        proxy_http(
+        let inner = proxy_http(
             &self.runtime.pools,
             req,
             &origin,
             self.session.proxy_name.as_str(),
             None,
         )
-        .await
+        .await?;
+        Ok(HttpModuleResponse::from_inner(inner))
     }
 
-    pub fn cache_request_key(&self, req: &Request<Body>) -> Result<Option<CacheRequestKey>> {
+    /// Builds the cache key for a module request view.
+    ///
+    /// Normalization stays owned by `CacheRequestKey::for_target`. Live views
+    /// delegate with their private raw request; frozen views rebuild a minimal
+    /// private request carrying the frozen method, URI and first Host value,
+    /// which are the only inputs the key builder reads.
+    pub fn cache_request_key(
+        &self,
+        request: &HttpModuleRequestView<'_>,
+    ) -> Result<Option<CacheRequestKey>> {
         let Some(_) = self.session.cache_policy.as_ref() else {
             return Ok(None);
         };
@@ -697,7 +734,19 @@ impl HttpModuleContext {
             .cache_default_scheme
             .as_deref()
             .ok_or_else(|| anyhow!("cache purge missing default scheme"))?;
-        CacheRequestKey::for_target(req, default_scheme)
+        match &request.inner {
+            RequestViewInner::Live(req) => CacheRequestKey::for_target(req, default_scheme),
+            RequestViewInner::Frozen(snapshot) => {
+                let mut builder = Request::builder()
+                    .method(snapshot.method.clone())
+                    .uri(snapshot.uri.clone());
+                if let Some(host) = snapshot.headers.get(HOST).cloned() {
+                    builder = builder.header(HOST, host);
+                }
+                let minimal = builder.body(Body::empty())?;
+                CacheRequestKey::for_target(&minimal, default_scheme)
+            }
+        }
     }
 
     pub async fn purge_cache_key(&self, key: &CacheRequestKey) -> Result<bool> {
