@@ -95,54 +95,51 @@ impl QuotaLimiter {
         }
     }
 
+    fn try_take_with_context(
+        &self,
+        ctx: &RateLimitContext,
+        cost: u64,
+        limit: u64,
+        used: impl FnOnce(&mut QuotaEntry) -> &mut u64,
+    ) -> Option<Duration> {
+        let now = Instant::now();
+        let key = make_limiter_key(self.key_kind, ctx);
+        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
+        let mut inner = self.shards[shard]
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let entry = inner.entry(key, now, self.interval);
+        if now.duration_since(entry.window_started) >= self.interval {
+            entry.window_started = now;
+            entry.requests_used = 0;
+            entry.bytes_used = 0;
+        }
+        let window_started = entry.window_started;
+        let used = used(entry);
+        if used.saturating_add(cost) > limit {
+            return Some(
+                self.interval
+                    .saturating_sub(now.duration_since(window_started)),
+            );
+        }
+        *used = used.saturating_add(cost);
+        None
+    }
+
     pub(crate) fn try_take_requests_with_context(
         &self,
         ctx: &RateLimitContext,
         cost: u64,
     ) -> Option<Duration> {
         let limit = self.request_limit?;
-        let now = Instant::now();
-        let key = make_limiter_key(self.key_kind, ctx);
-        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
-        let mut inner = self.shards[shard]
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry = inner.entry(key, now, self.interval);
-        if now.duration_since(entry.window_started) >= self.interval {
-            entry.window_started = now;
-            entry.requests_used = 0;
-            entry.bytes_used = 0;
-        }
-        if entry.requests_used.saturating_add(cost) > limit {
-            return Some(
-                self.interval
-                    .saturating_sub(now.duration_since(entry.window_started)),
-            );
-        }
-        entry.requests_used = entry.requests_used.saturating_add(cost);
-        None
+        self.try_take_with_context(ctx, cost, limit, |entry| &mut entry.requests_used)
     }
 
     pub(crate) fn try_take_bytes_with_context(&self, ctx: &RateLimitContext, cost: u64) -> bool {
         let Some(limit) = self.byte_limit else {
             return true;
         };
-        let now = Instant::now();
-        let key = make_limiter_key(self.key_kind, ctx);
-        let shard = qpx_http::sharding::masked(&key, self.shard_mask);
-        let mut inner = self.shards[shard]
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        let entry = inner.entry(key, now, self.interval);
-        if now.duration_since(entry.window_started) >= self.interval {
-            entry.window_started = now;
-            entry.requests_used = 0;
-            entry.bytes_used = 0;
-        }
-        if entry.bytes_used.saturating_add(cost) > limit {
-            return false;
-        }
-        entry.bytes_used = entry.bytes_used.saturating_add(cost);
-        true
+        self.try_take_with_context(ctx, cost, limit, |entry| &mut entry.bytes_used)
+            .is_none()
     }
 }

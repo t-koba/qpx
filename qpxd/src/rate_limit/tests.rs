@@ -461,6 +461,46 @@ fn reserve_bytes_enforces_quota() {
     assert_eq!(limits.reserve_bytes(&ctx, 5), Err(()));
 }
 
+#[tokio::test(start_paused = true)]
+async fn quota_request_and_byte_limits_share_fixed_window_rollover() {
+    let interval = Duration::from_secs(60);
+    let limiter = QuotaLimiter::new(KeyKind::User, interval, Some(2), Some(8));
+    let ctx = RateLimitContext {
+        user: Some("alice".to_string()),
+        ..Default::default()
+    };
+
+    assert_eq!(limiter.try_take_requests_with_context(&ctx, 2), None);
+    assert_eq!(
+        limiter.try_take_requests_with_context(&ctx, 1),
+        Some(interval)
+    );
+    assert_eq!(
+        limiter.try_take_requests_with_context(&ctx, u64::MAX),
+        Some(interval)
+    );
+    assert_eq!(limiter.try_take_requests_with_context(&ctx, 0), None);
+
+    assert!(limiter.try_take_bytes_with_context(&ctx, 8));
+    assert!(!limiter.try_take_bytes_with_context(&ctx, 1));
+    assert!(!limiter.try_take_bytes_with_context(&ctx, u64::MAX));
+    assert!(limiter.try_take_bytes_with_context(&ctx, 0));
+
+    tokio::time::advance(interval / 2).await;
+    assert_eq!(
+        limiter.try_take_requests_with_context(&ctx, 1),
+        Some(interval / 2)
+    );
+    tokio::time::advance(interval / 2).await;
+    assert_eq!(limiter.try_take_requests_with_context(&ctx, 2), None);
+    assert!(limiter.try_take_bytes_with_context(&ctx, 8));
+    assert!(!limiter.try_take_bytes_with_context(&ctx, 1));
+
+    tokio::time::advance(interval).await;
+    assert!(limiter.try_take_bytes_with_context(&ctx, 8));
+    assert_eq!(limiter.try_take_requests_with_context(&ctx, 2), None);
+}
+
 #[test]
 fn quota_state_prunes_expired_and_caps_cardinality() {
     let now = Instant::now();
