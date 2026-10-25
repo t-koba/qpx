@@ -7,7 +7,6 @@ pub(crate) struct H3SseResponseObserver {
     metrics: Option<SseMetricHandles>,
     _active: Option<SseActiveGuard>,
     started: Instant,
-    first_event_seen: bool,
     last_event_at: Option<Instant>,
 }
 
@@ -28,7 +27,6 @@ impl H3SseResponseObserver {
             _active: metrics.as_ref().map(SseMetricHandles::active_guard),
             metrics,
             started: Instant::now(),
-            first_event_seen: false,
             last_event_at: None,
         }
     }
@@ -56,9 +54,8 @@ impl H3SseResponseObserver {
             return;
         };
         let now = Instant::now();
-        if !self.first_event_seen {
+        if self.last_event_at.is_none() {
             metrics.record_first_event_latency(now.duration_since(self.started));
-            self.first_event_seen = true;
         }
         if let Some(previous) = self.last_event_at {
             metrics.record_inter_event_latency(now.duration_since(previous));
