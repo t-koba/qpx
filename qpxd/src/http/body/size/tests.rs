@@ -232,6 +232,7 @@ async fn buffer_request_body_spools_large_observed_body() {
         ObservedBodyStorage::Memory(_) => panic!("large observed body should spool"),
     };
     assert!(path.exists());
+    let reader = observed_request_body_reader(&req).expect("observed reader");
     assert_eq!(
         observed_request_bytes(&req)
             .expect("observed bytes")
@@ -243,6 +244,8 @@ async fn buffer_request_body_spools_large_observed_body() {
         .await
         .expect("replayed body");
     assert_eq!(replayed.as_ref(), payload.as_slice());
+    assert!(path.exists());
+    drop(reader);
     assert!(!path.exists());
 }
 

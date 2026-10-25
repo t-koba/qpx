@@ -8,7 +8,7 @@ use http::HeaderMap;
 use qpx_http::body::spool::SpoolFile;
 #[cfg(test)]
 use std::io::Read;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncReadExt;
@@ -30,26 +30,8 @@ pub(crate) struct ObservedBodyReader {
 #[derive(Clone, Debug)]
 pub(super) enum ObservedBodyStorage {
     Memory(Arc<[Bytes]>),
-    File(Arc<ObservedBodyFile>),
-}
-
-/// The observed body of a spooled payload.
-///
-/// It keeps the spool guard, so the spool file is removed when the last
-/// reference to the observed body is released.
-#[derive(Debug)]
-pub(super) struct ObservedBodyFile {
-    spool: SpoolFile<TokioFile>,
-}
-
-impl ObservedBodyFile {
-    pub(super) fn new(spool: SpoolFile<TokioFile>) -> Self {
-        Self { spool }
-    }
-
-    pub(super) fn path(&self) -> &Path {
-        self.spool.path()
-    }
+    /// Retain the spool guard until every observed-body reader and replay task is released.
+    File(Arc<SpoolFile<TokioFile>>),
 }
 
 #[derive(Clone, Debug)]
@@ -104,7 +86,7 @@ impl ObservedBodyBytes {
             ObservedBodyStorage::Memory(chunks) => {
                 Body::replay_chunks(chunks.iter().cloned().collect(), trailers)
             }
-            ObservedBodyStorage::File(file) => file.body(trailers),
+            ObservedBodyStorage::File(file) => replay_spooled_body(file, trailers),
         }
     }
 }
@@ -222,36 +204,34 @@ impl std::io::Read for ObservedMemoryReader {
     }
 }
 
-impl ObservedBodyFile {
-    fn body(self: &Arc<Self>, trailers: Option<HeaderMap>) -> Body {
-        let (mut sender, body) = Body::channel_with_capacity(16);
-        let file_ref = self.clone();
-        tokio::spawn(async move {
-            let result = async {
-                let mut file = TokioFile::open(file_ref.path()).await?;
-                let mut buf = BytesMut::with_capacity(OBSERVED_BODY_FILE_CHUNK_BYTES);
-                loop {
-                    buf.clear();
-                    buf.reserve(OBSERVED_BODY_FILE_CHUNK_BYTES);
-                    let read = file.read_buf(&mut buf).await?;
-                    if read == 0 {
-                        if let Some(trailers) = trailers {
-                            sender.send_trailers(trailers).await?;
-                        }
-                        return Ok::<_, anyhow::Error>(());
+fn replay_spooled_body(spool: &Arc<SpoolFile<TokioFile>>, trailers: Option<HeaderMap>) -> Body {
+    let (mut sender, body) = Body::channel_with_capacity(16);
+    let file_ref = spool.clone();
+    tokio::spawn(async move {
+        let result = async {
+            let mut file = TokioFile::open(file_ref.path()).await?;
+            let mut buf = BytesMut::with_capacity(OBSERVED_BODY_FILE_CHUNK_BYTES);
+            loop {
+                buf.clear();
+                buf.reserve(OBSERVED_BODY_FILE_CHUNK_BYTES);
+                let read = file.read_buf(&mut buf).await?;
+                if read == 0 {
+                    if let Some(trailers) = trailers {
+                        sender.send_trailers(trailers).await?;
                     }
-                    if sender.send_data(buf.split().freeze()).await.is_err() {
-                        return Ok(());
-                    }
+                    return Ok::<_, anyhow::Error>(());
+                }
+                if sender.send_data(buf.split().freeze()).await.is_err() {
+                    return Ok(());
                 }
             }
-            .await;
-            if result.is_err() {
-                sender.abort();
-            }
-        });
-        body
-    }
+        }
+        .await;
+        if result.is_err() {
+            sender.abort();
+        }
+    });
+    body
 }
 
 #[cfg(test)]

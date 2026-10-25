@@ -20,9 +20,8 @@ mod storage;
 use self::io::{declared_size_hint, read_body_data, read_body_trailers};
 pub(crate) use self::storage::ObservedBodyReader;
 use self::storage::{
-    ObservedBodyBytes, ObservedBodyFile, ObservedBodySize, ObservedBodyStorage,
-    ObservedBodyTrailers, feed_rpc_summary_observer, finish_rpc_summary_observer,
-    should_precompute_rpc_summary,
+    ObservedBodyBytes, ObservedBodySize, ObservedBodyStorage, ObservedBodyTrailers,
+    feed_rpc_summary_observer, finish_rpc_summary_observer, should_precompute_rpc_summary,
 };
 
 const OBSERVED_BODY_MEMORY_BYTES: usize = 64 * 1024;
@@ -507,7 +506,7 @@ async fn collect_observed_body(
         flush_observed_body_spool(spool.handle_mut(), direction, reason).await?;
         spool.close();
         spooled = size;
-        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(spool)))
+        ObservedBodyStorage::File(Arc::new(spool))
     } else {
         ObservedBodyStorage::Memory(Arc::from(chunks))
     };
@@ -568,7 +567,7 @@ async fn collect_observed_body_for_size(
         flush_observed_body_spool(spool.handle_mut(), direction, reason).await?;
         spool.close();
         spooled = size;
-        ObservedBodyStorage::File(Arc::new(ObservedBodyFile::new(spool)))
+        ObservedBodyStorage::File(Arc::new(spool))
     } else {
         ObservedBodyStorage::Memory(Arc::from(chunks))
     };
