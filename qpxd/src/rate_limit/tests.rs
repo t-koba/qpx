@@ -464,35 +464,28 @@ fn reserve_bytes_enforces_quota() {
 #[test]
 fn quota_state_prunes_expired_and_caps_cardinality() {
     let now = Instant::now();
+    let interval = Duration::from_secs(60);
     let mut state = QuotaState::new(2);
     for user in ["alice", "bob"] {
-        let entry = state.entry(
-            LimiterKey::Text(Arc::from(user)),
-            now,
-            Duration::from_secs(60),
-        );
+        let entry = state.entry(LimiterKey::Text(Arc::from(user)), now, interval);
         entry.requests_used = 1;
     }
     assert_eq!(state.entries.len(), 2);
 
-    let _ = state.entry(
-        LimiterKey::Text(Arc::from("carol")),
-        now,
-        Duration::from_secs(60),
-    );
+    let _ = state.entry(LimiterKey::Text(Arc::from("alice")), now, interval);
+    let _ = state.entry(LimiterKey::Text(Arc::from("carol")), now, interval);
     assert_eq!(state.entries.len(), 2);
+    assert!(!state.entries.contains(&LimiterKey::Text(Arc::from("bob"))));
     assert!(
-        !state
+        state
             .entries
             .contains(&LimiterKey::Text(Arc::from("alice")))
     );
 
-    let later = now + Duration::from_secs(61);
-    let _ = state.entry(
-        LimiterKey::Text(Arc::from("dave")),
-        later,
-        Duration::from_secs(60),
-    );
+    let later = now + interval;
+    let _ = state.entry(LimiterKey::Text(Arc::from("alice")), later, interval);
+    assert_eq!(state.entries.len(), 2);
+    let _ = state.entry(LimiterKey::Text(Arc::from("dave")), later, interval);
     assert_eq!(state.entries.len(), 1);
     assert!(state.entries.contains(&LimiterKey::Text(Arc::from("dave"))));
     assert_eq!(state.entries.len(), 1);

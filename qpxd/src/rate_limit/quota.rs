@@ -44,27 +44,20 @@ impl QuotaState {
         now: Instant,
         interval: Duration,
     ) -> &mut QuotaEntry {
-        if self.entries.contains(&key) {
-            let Some(entry) = self.entries.get_mut(&key) else {
-                unreachable!("quota key disappeared between contains and get_mut");
-            };
-            return entry;
-        }
-        self.prune(now, interval);
-        self.entries.put(
-            key.clone(),
-            QuotaEntry {
-                window_started: now,
-                requests_used: 0,
-                bytes_used: 0,
-            },
-        );
-        let Some(entry) = self.entries.get_mut(&key) else {
-            unreachable!(
-                "quota entry was inserted into the same LRU map immediately before lookup"
+        if !self.entries.contains(&key) {
+            self.prune(now, interval);
+            self.entries.put(
+                key.clone(),
+                QuotaEntry {
+                    window_started: now,
+                    requests_used: 0,
+                    bytes_used: 0,
+                },
             );
-        };
-        entry
+        }
+        self.entries
+            .get_mut(&key)
+            .unwrap_or_else(|| unreachable!("quota entry missing after lookup or insertion"))
     }
 }
 
