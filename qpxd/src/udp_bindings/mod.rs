@@ -84,20 +84,7 @@ impl UdpBindings {
                     .listen
                     .clone()
                     .unwrap_or_else(|| listener.listen.clone());
-                let addr: SocketAddr = listen.parse().with_context(|| {
-                    format!("listener {} http3.listen is invalid", listener.name)
-                })?;
-                let socket = match listener.mode {
-                    IngressEdgeMode::Forward => {
-                        crate::tcp_bindings::net::bind_udp_std_socket(addr, &config.runtime)?
-                    }
-                    IngressEdgeMode::Transparent => {
-                        crate::transparent::udp_socket::bind_udp_std_listener(
-                            addr,
-                            config.runtime.reuse_port,
-                        )?
-                    }
-                };
+                let socket = bind_udp_for_listener(listener, config, listen.as_str())?;
                 listener_udp.insert(listener.name.clone(), socket);
             }
 
@@ -109,10 +96,7 @@ impl UdpBindings {
                     .listen
                     .clone()
                     .unwrap_or_else(|| reverse_edge.listen.clone());
-                let addr: SocketAddr = listen.parse().with_context(|| {
-                    format!("reverse_edge {} http3.listen is invalid", reverse_edge.name)
-                })?;
-                let socket = crate::tcp_bindings::net::bind_udp_std_socket(addr, &config.runtime)?;
+                let socket = bind_udp_for_reverse(reverse_edge, config, listen.as_str())?;
                 reverse_udp.insert(reverse_edge.name.clone(), socket);
             }
 
