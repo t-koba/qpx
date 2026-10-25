@@ -582,7 +582,7 @@ fn determine_request_body_kind(headers: &HeaderMap, version: Version) -> Result<
         ));
     }
     let has_chunked = has_only_chunked_transfer_encoding(headers)?;
-    let declared_length = parse_declared_content_length(headers)?;
+    let declared_length = super::h2::parse_declared_content_length(headers)?;
     if has_chunked && declared_length.is_some() {
         return Err(anyhow!(
             "both transfer-encoding and content-length are present"
@@ -599,10 +599,6 @@ fn determine_request_body_kind(headers: &HeaderMap, version: Version) -> Result<
         });
     }
     Ok(RequestBodyKind::Empty)
-}
-
-fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
-    qpx_core::http_content_length::declared_content_length(headers).map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]

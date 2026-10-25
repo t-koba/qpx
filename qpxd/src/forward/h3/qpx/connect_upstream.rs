@@ -39,7 +39,7 @@ pub(super) fn validate_qpx_connect_head(
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     qpx_http::protocol::semantics::validate_expect_header(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
-    crate::http3::codec::parse_content_length_fields(headers)
+    crate::http::codec::h2::parse_declared_content_length(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     let protocol = match protocol {
         Some(qpx_h3::Protocol::ConnectUdp) => H3ConnectProtocol::ConnectUdp,

@@ -1,8 +1,9 @@
+use super::RESPONSE_WRITE_TIMEOUT;
 use super::write::{chunk_size_header, write_vectored_all};
 use super::zero_copy::ZeroCopySocket;
-use super::{RESPONSE_WRITE_TIMEOUT, parse_declared_content_length};
 use crate::http::body::{poll_body_data_now, poll_body_trailers_now};
 use crate::http::codec::h1_common::{has_only_chunked_transfer_encoding, serialize_headers};
+use crate::http::codec::h2::parse_declared_content_length;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::{
     InterimResponseHead, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1BodyFraming,

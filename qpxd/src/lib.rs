@@ -421,7 +421,7 @@ pub mod fuzz_support {
                 headers.append(http::header::CONTENT_LENGTH, value);
             }
         }
-        let _ = crate::http3::codec::parse_content_length_fields(&headers);
+        let _ = crate::http::codec::h2::parse_declared_content_length(&headers);
     }
 
     #[cfg(feature = "http3")]

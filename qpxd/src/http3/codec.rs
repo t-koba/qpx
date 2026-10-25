@@ -111,7 +111,7 @@ pub(crate) fn prepare_h3_response_head(
     let content_length = if no_body {
         if *request_method == http::Method::HEAD {
             qpx_http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
-            match parse_content_length_fields(&headers) {
+            match crate::http::codec::h2::parse_declared_content_length(&headers) {
                 Ok(Some(length)) => {
                     headers.insert(
                         http::header::CONTENT_LENGTH,
@@ -126,9 +126,11 @@ pub(crate) fn prepare_h3_response_head(
         } else {
             qpx_http::protocol::semantics::strip_message_body_headers(&mut headers);
         }
-        parse_content_length_fields(&headers).ok().flatten()
+        crate::http::codec::h2::parse_declared_content_length(&headers)
+            .ok()
+            .flatten()
     } else {
-        match parse_content_length_fields(&headers) {
+        match crate::http::codec::h2::parse_declared_content_length(&headers) {
             Ok(Some(length)) => {
                 headers.insert(
                     http::header::CONTENT_LENGTH,
@@ -151,10 +153,6 @@ pub(crate) fn prepare_h3_response_head(
         body_allowed: !no_body,
         content_length,
     })
-}
-
-pub(crate) fn parse_content_length_fields(headers: &http::HeaderMap) -> Result<Option<u64>> {
-    qpx_core::http_content_length::declared_content_length(headers).map_err(anyhow::Error::new)
 }
 
 #[cfg(test)]

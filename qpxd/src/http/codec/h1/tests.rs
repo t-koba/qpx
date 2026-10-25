@@ -985,7 +985,7 @@ fn invalid_content_length_diagnostic_does_not_echo_userinfo() {
         http::header::CONTENT_LENGTH,
         http::HeaderValue::from_static("http://synthetic-user:synthetic-pass@host/"),
     );
-    let error = parse_declared_content_length(&headers).unwrap_err();
+    let error = determine_request_body_kind(&headers, http::Version::HTTP_11).unwrap_err();
     assert_eq!(error.to_string(), "invalid content-length value");
     assert!(!format!("{error:?}").contains("synthetic-"));
 }

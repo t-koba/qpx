@@ -172,7 +172,7 @@ impl ReverseQpxHandler {
         });
         let request_method = request.head.method().clone();
         let declared_content_length =
-            crate::http3::codec::parse_content_length_fields(request.head.headers())?;
+            crate::http::codec::h2::parse_declared_content_length(request.head.headers())?;
         if let Some(content_length) = declared_content_length
             && content_length > request_streaming.max_request_body_bytes as u64
         {
