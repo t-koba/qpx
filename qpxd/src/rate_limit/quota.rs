@@ -102,10 +102,6 @@ impl QuotaLimiter {
         }
     }
 
-    fn make_key(&self, ctx: &RateLimitContext) -> LimiterKey {
-        make_limiter_key(self.key_kind, ctx)
-    }
-
     pub(crate) fn try_take_requests_with_context(
         &self,
         ctx: &RateLimitContext,
@@ -113,7 +109,7 @@ impl QuotaLimiter {
     ) -> Option<Duration> {
         let limit = self.request_limit?;
         let now = Instant::now();
-        let key = self.make_key(ctx);
+        let key = make_limiter_key(self.key_kind, ctx);
         let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()
@@ -139,7 +135,7 @@ impl QuotaLimiter {
             return true;
         };
         let now = Instant::now();
-        let key = self.make_key(ctx);
+        let key = make_limiter_key(self.key_kind, ctx);
         let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()

@@ -57,15 +57,11 @@ impl ConcurrencyLimiter {
         }
     }
 
-    fn make_key(&self, ctx: &RateLimitContext) -> LimiterKey {
-        make_limiter_key(self.key_kind, ctx)
-    }
-
     pub(crate) fn try_acquire_with_context(
         &self,
         ctx: &RateLimitContext,
     ) -> Option<ConcurrencyPermit> {
-        let key = self.make_key(ctx);
+        let key = make_limiter_key(self.key_kind, ctx);
         let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         let mut inner = self.shards[shard]
             .lock()

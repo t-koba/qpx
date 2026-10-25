@@ -263,10 +263,6 @@ impl RateLimiter {
         }
     }
 
-    fn make_key(&self, ctx: &RateLimitContext) -> LimiterKey {
-        make_limiter_key(self.key_kind, ctx)
-    }
-
     fn with_bucket<R>(
         &self,
         key: LimiterKey,
@@ -309,7 +305,7 @@ impl RateLimiter {
             .duration_since(self.epoch)
             .as_nanos()
             .min(u64::MAX as u128) as u64;
-        let key = self.make_key(ctx);
+        let key = make_limiter_key(self.key_kind, ctx);
         self.with_bucket(key, now, now_nanos, |bucket| {
             bucket.try_take(now, now_nanos, cost)
         })
@@ -321,7 +317,7 @@ impl RateLimiter {
             .duration_since(self.epoch)
             .as_nanos()
             .min(u64::MAX as u128) as u64;
-        let key = self.make_key(ctx);
+        let key = make_limiter_key(self.key_kind, ctx);
         self.with_bucket(key, now, now_nanos, |bucket| {
             bucket.reserve_delay(now, now_nanos, cost)
         })
@@ -329,7 +325,7 @@ impl RateLimiter {
 
     #[cfg(test)]
     pub(super) fn test_entry_count_for_context(&self, ctx: &RateLimitContext) -> usize {
-        let key = self.make_key(ctx);
+        let key = make_limiter_key(self.key_kind, ctx);
         let shard = qpx_http::sharding::masked(&key, self.shard_mask);
         self.shards[shard].lock().buckets.len()
     }
