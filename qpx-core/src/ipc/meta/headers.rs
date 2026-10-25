@@ -1,5 +1,5 @@
 use crate::execution::RequestHeaders;
-use crate::http_content_length::{ContentLengthError, declared_content_length_in_named_values};
+use crate::http_content_length::ContentLengthError;
 use http::{Uri, response::Builder};
 use std::fmt;
 
@@ -78,7 +78,7 @@ impl IpcRequestHeaders {
 
     /// Validate every Content-Length using the HTTP declared-length owner.
     pub fn declared_content_length(&self) -> Result<Option<u64>, ContentLengthError> {
-        declared_content_length_in_named_values(
+        crate::http_content_length::declared_content_length_in_named_values(
             self.0.iter().map(|(k, v)| (k.as_str(), v.as_str())),
         )
     }

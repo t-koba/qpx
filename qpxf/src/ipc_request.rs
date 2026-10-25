@@ -39,7 +39,7 @@ pub(crate) fn plaintext_meta(status: u16) -> IpcResponseMeta {
     }
 }
 
-pub(crate) fn declared_content_length(headers: &IpcRequestHeaders) -> Result<Option<usize>> {
+pub(crate) fn declared_stdin_bytes(headers: &IpcRequestHeaders) -> Result<Option<usize>> {
     let declared = headers.declared_content_length().map_err(|err| match err {
         ContentLengthError::Conflicting => anyhow!("conflicting Content-Length values"),
         ContentLengthError::InvalidValue | ContentLengthError::InvalidHeader => {
@@ -89,7 +89,7 @@ pub(crate) fn plan_ipc_request(
 
     let (server_name, server_port) = meta.headers.server_name_and_port(&uri);
 
-    let declared_stdin_bytes = match declared_content_length(&meta.headers) {
+    let declared_stdin_bytes = match declared_stdin_bytes(&meta.headers) {
         Ok(value) => value,
         Err(_) => return Ok(Err(IpcPlainResponse::new(400, b"invalid content-length"))),
     };
@@ -225,7 +225,7 @@ fn normalize_script_name(prefix: &str, fallback: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{declared_content_length, split_script_name_path_info, verified_context_env};
+    use super::{declared_stdin_bytes, split_script_name_path_info, verified_context_env};
     use crate::config::VerifiedContextMode;
     use qpx_core::ipc::meta::VerifiedIdentityContext;
 
@@ -310,7 +310,7 @@ mod tests {
             ("content-length".to_string(), "5, 5".to_string()),
         ];
         assert_eq!(
-            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+            declared_stdin_bytes(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
                 .expect("length"),
             Some(5)
         );
@@ -323,7 +323,7 @@ mod tests {
             ("content-length".to_string(), "6".to_string()),
         ];
         assert!(
-            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+            declared_stdin_bytes(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
                 .is_err()
         );
     }
@@ -332,7 +332,7 @@ mod tests {
     fn declared_content_length_rejects_invalid_values() {
         let headers = vec![("Content-Length".to_string(), "nope".to_string())];
         assert!(
-            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+            declared_stdin_bytes(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
                 .is_err()
         );
     }
@@ -343,7 +343,7 @@ mod tests {
         // length and the request is refused.
         let headers = vec![("Content-Length".to_string(), "+5".to_string())];
         assert!(
-            declared_content_length(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
+            declared_stdin_bytes(&qpx_core::ipc::meta::IpcRequestHeaders::from_pairs(headers))
                 .is_err()
         );
     }
