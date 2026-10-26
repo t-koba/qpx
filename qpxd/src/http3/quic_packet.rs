@@ -189,9 +189,10 @@ pub(crate) fn is_quic_long_header(packet: &[u8]) -> bool {
 
 /// The bit that marks a connection-id length in the set of known lengths.
 pub(crate) fn connection_id_len_bit(len: u8) -> Option<u32> {
-    (1..=MAX_CONNECTION_ID_LEN)
-        .contains(&len)
-        .then_some(1u32 << len)
+    if !(1..=MAX_CONNECTION_ID_LEN).contains(&len) {
+        return None;
+    }
+    Some(1u32 << len)
 }
 
 pub(crate) fn encode_cid_len(value: Option<u8>) -> u8 {
@@ -454,6 +455,18 @@ mod tests {
             || Some(2),
             |_| panic!("CID ownership is not read for a malformed short header"),
         ));
+    }
+
+    #[test]
+    fn connection_id_len_bits_cover_every_u8_value() {
+        for len in u8::MIN..=u8::MAX {
+            let expected = if (1..=MAX_CONNECTION_ID_LEN).contains(&len) {
+                Some(1u32 << len)
+            } else {
+                None
+            };
+            assert_eq!(connection_id_len_bit(len), expected, "CID length {len}");
+        }
     }
 
     #[test]
