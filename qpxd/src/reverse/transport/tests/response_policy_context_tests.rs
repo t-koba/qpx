@@ -60,6 +60,76 @@ async fn response_rule_can_bypass_cache_without_replacing_response() {
 }
 
 #[tokio::test]
+async fn response_rule_matches_response_headers_not_request_headers() {
+    let router = build_router(vec![HttpResponseRuleConfig {
+        name: "response-header".to_string(),
+        r#match: Some(MatchConfig {
+            headers: vec![qpx_core::config::HeaderMatch {
+                name: "x-response-mode".to_string(),
+                value: Some("response".to_string()),
+                regex: None,
+            }],
+            ..Default::default()
+        }),
+        effects: HttpResponseEffectsConfig {
+            local_response: Some(LocalResponseConfig {
+                status: 418,
+                body: "matched response header".to_string(),
+                content_type: Some("text/plain".to_string()),
+                headers: HashMap::new(),
+                rpc: None,
+            }),
+            ..Default::default()
+        },
+    }]);
+    let route = router.route_at(0).expect("route");
+    let conn = ReverseConnInfo::plain(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999), 80);
+    let identity = crate::policy_context::ResolvedIdentity::default();
+    let destination = DestinationMetadata::default();
+    let request = Request::builder()
+        .method("GET")
+        .uri("https://headers.example/asset")
+        .header("x-response-mode", "request")
+        .body(())
+        .expect("request");
+    let base = crate::http::protocol::base_fields::extract_base_request_fields(
+        &request,
+        crate::http::protocol::base_fields::BaseRequestContext::default(),
+    );
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header("x-response-mode", "response")
+        .body(Body::empty())
+        .unwrap();
+
+    let decision = apply_response_rules(ResponseRuleInput {
+        route,
+        base: &base,
+        conn: &conn,
+        destination: &destination,
+        upstream_cert: None,
+        identity: &identity,
+        request_rpc: None,
+        route_headers: None,
+        response,
+        max_observed_response_body_bytes: usize::MAX,
+        response_body_read_timeout: std::time::Duration::from_secs(1),
+        force_response_body_observation: false,
+    })
+    .await
+    .expect("apply");
+
+    match decision {
+        ListenerResponsePolicyDecision::LocalResponse { response, .. } => {
+            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+        }
+        ListenerResponsePolicyDecision::Continue { .. } => {
+            panic!("expected response-header rule to match")
+        }
+    }
+}
+
+#[tokio::test]
 async fn response_rule_matches_actual_chunked_response_size() {
     let router = build_router(vec![HttpResponseRuleConfig {
         name: "resp-sized".to_string(),

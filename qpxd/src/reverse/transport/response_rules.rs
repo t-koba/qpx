@@ -75,6 +75,7 @@ fn response_policy_parts<'a>(
     destination: &'a DestinationMetadata,
     upstream_cert: Option<&'a UpstreamCertificateInfo>,
     identity: &'a ResolvedIdentity,
+    response_headers: &'a http::HeaderMap,
     response_status: u16,
 ) -> ResponsePolicyParts<'a> {
     let engine = route.response_rules.as_deref();
@@ -92,7 +93,7 @@ fn response_policy_parts<'a>(
         .unwrap_or_default();
     let rule_context = build_response_rule_match_context(ResponseRuleContextInput {
         base,
-        headers: None,
+        headers: Some(response_headers),
         destination,
         identity,
         response_status,
@@ -137,6 +138,7 @@ pub(super) async fn apply_response_rules(
         });
     }
     let response_status = response.status().as_u16();
+    let response_headers = response.headers().clone();
     let ResponsePolicyParts {
         engine,
         candidates,
@@ -148,6 +150,7 @@ pub(super) async fn apply_response_rules(
         destination,
         upstream_cert,
         identity,
+        &response_headers,
         response_status,
     );
     let decision = apply_listener_response_policy(
@@ -204,6 +207,7 @@ pub(super) async fn apply_dispatch_response_rules(
         });
     }
     let response_status = response.status().as_u16();
+    let response_headers = response.headers().clone();
     let ResponsePolicyParts {
         engine,
         candidates,
@@ -215,6 +219,7 @@ pub(super) async fn apply_dispatch_response_rules(
         destination,
         upstream_cert,
         identity,
+        &response_headers,
         response_status,
     );
     apply_dispatch_response_policy(DispatchResponsePolicyInput {
