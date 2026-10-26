@@ -27,6 +27,8 @@ pub mod exporter;
 /// The HTTP token vocabulary: the RFC 9110 token grammar and the
 /// comma-separated header token search.
 pub mod http_content_length;
+/// Opaque headers and body-generic owned HTTP messages.
+pub mod http_message;
 pub mod http_token;
 /// IPC framing and shared metadata protocol definitions.
 #[cfg(feature = "ipc-support")]

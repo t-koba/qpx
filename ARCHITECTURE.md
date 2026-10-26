@@ -18,6 +18,31 @@
 - `qpxc`: capture/control CLI.
 - `xtask`: repository structure and budget gates.
 
+## Owned HTTP Message Boundary
+
+`qpx-core::http_message` provides opaque `Headers` and body-generic
+`Request<B>` / `Response<B>` carriers. Ordinary fields require a validated name
+that excludes Content-Length; the declaration has typed read/set/remove
+operations. There is no raw-map, raw-Parts, `Deref`, or `AsRef` escape. Closed
+policy diagnostics and literal Vary selection use the existing core header view.
+
+At decoded codec/library ingress, `from_http` moves a standard message into the
+owner. Body stages use `map_body` or `into_head_and_body` and retain the owned
+head. Only an actual serializer boundary should use `into_http_for_codec`, which
+rejects invalid/conflicting declarations and canonicalizes valid ones. Upstream
+preparation facades are internal stages, not serializer boundaries. The carrier
+does not infer body sizes, choose transfer coding, apply HEAD/no-body status
+rules, or poll bodies/trailers; those remain protocol responsibilities.
+
+**Migration status:** these primitives and their cross-crate contract tests are
+available, but the shared live-message spine still uses standard HTTP messages.
+`CompiledHeaderControl`, qpx-http normalization, qpxd preparation/policy/modules,
+cache live-message APIs, capture/logging, and finalization must be migrated
+coherently with their forward, reverse, transparent, MITM, CONNECT and WebSocket
+consumers. No temporary raw/owned dual facades have been introduced. The distinct
+raw-H1 and interim owners and cache persistence format are unchanged. This does
+not establish global structural ownership or justify reducing the source gate.
+
 ## qpxd Runtime Shape
 
 Configuration is parsed in `qpx-core`, compiled into a `RuntimePlan` in `qpxd`, and then consumed by listener-specific dispatch paths. Request handling is intentionally split by ingress type:
