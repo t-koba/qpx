@@ -1,6 +1,41 @@
 use super::*;
 use qpx_core::config::CaptureRedactionConfig;
 
+#[tokio::test]
+async fn request_preview_is_byte_exact_and_omits_custom_secret_headers() {
+    let mut request = Request::builder()
+        .method("POST")
+        .uri("/path?x=1")
+        .version(http::Version::HTTP_11)
+        .body(Body::from("abc"))
+        .expect("valid request");
+    request.headers_mut().append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static(" 003 "),
+    );
+    request.headers_mut().append(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("3"),
+    );
+    request.headers_mut().append(
+        http::header::HeaderName::from_static("x-api-key"),
+        http::HeaderValue::from_static("synthetic-secret"),
+    );
+
+    let request = crate::http::body::size::buffer_request_body_with_reason(
+        request,
+        16,
+        std::time::Duration::from_secs(1),
+        "request.body",
+    )
+    .await
+    .expect("observe the body prefix before preview serialization");
+    assert_eq!(
+        serialize_request_preview_async(&request).await,
+        b"POST /path?x=1 HTTP/1.1\r\ncontent-length:  003 \r\ncontent-length: 3\r\n\r\nabc",
+    );
+}
+
 #[test]
 fn redacts_plaintext_headers_and_query_keys() {
     let redaction = CaptureRedaction::from_config(&CaptureRedactionConfig {
