@@ -1470,7 +1470,7 @@ fn content_length_listed_sites(owner: &str) -> Vec<String> {
 }
 
 /// The methods that read a header's value.
-const CONTENT_LENGTH_READ_METHODS: [&str; 3] = ["get", "get_all", "contains_key"];
+const CONTENT_LENGTH_READ_METHODS: [&str; 2] = ["get", "get_all"];
 
 /// The methods that copy a header entry's name into a name of their own.
 ///
@@ -1532,8 +1532,8 @@ const CONTENT_LENGTH_OWNER_ENTRIES: [&str; 2] = [
 /// reads the declaration itself, and must reach the owner alone.
 ///
 /// The rule is what it says and no more. It sees a read of the field
-/// through `get`, `get_all` and `contains_key`, a read of the field
-/// through an index, and it sees a comparison of a header name with the
+/// through `get` and `get_all` (not the presence-only `contains_key`), a
+/// read of the field through an index, and it sees a comparison of a header name with the
 /// field's name. It sees the field named through a reference, through the
 /// constant's text, through a name built from the text, through a copy
 /// the site made of the text, through a name the site builds at
@@ -2329,11 +2329,11 @@ struct ContentLengthReaderFacts {
     /// compares that name with the field's name compares the entry's
     /// name, so the binding stands for the entry the name came from.
     entry_name_aliases: Vec<(String, String)>,
-    /// The names a loop binds a header entry's name to.
+    /// The entry or entry-name bindings in the current iteration scope.
     ///
-    /// A loop that walks a list of header entries binds the entry's name
-    /// to a name of its own, so a binding of that name stands for the
-    /// entry's name as well.
+    /// Loops and iterator closures introduce an entry, or destructure its
+    /// name/value pair. Only a name originating in such a binding can
+    /// select an entry; a configured destination is not an entry name.
     entry_names: Vec<String>,
 }
 
@@ -2567,9 +2567,7 @@ impl Visit<'_> for ContentLengthReaderFacts {
             .args
             .iter()
             .any(|argument| names_content_length_field_or_alias(argument, &self.field_names));
-        if (CONTENT_LENGTH_READ_METHODS.contains(&method.as_str()) || method.starts_with("eq"))
-            && names_field
-        {
+        if CONTENT_LENGTH_READ_METHODS.contains(&method.as_str()) && names_field {
             self.reads_field = true;
         }
         // A comparison of a header's name with the field's name finds the
@@ -2650,7 +2648,6 @@ impl Visit<'_> for ContentLengthReaderFacts {
             && (names_content_length_field_or_alias(&node.left, &self.field_names)
                 || names_content_length_field_or_alias(&node.right, &self.field_names))
         {
-            self.reads_field = true;
             // The name of the entry the site found is the other side of
             // the comparison.
             let compared = if names_content_length_field_or_alias(&node.left, &self.field_names) {
@@ -2722,14 +2719,23 @@ impl Visit<'_> for ContentLengthReaderFacts {
             // and does not skip the entry.
             self.bound_value_names.push(value);
         }
-        syn::visit::visit_expr_for_loop(self, node);
+        self.visit_expr(&node.expr);
+        let saved = self.entry_names.len();
+        self.entry_names.extend(entry_pattern_names(&node.pat));
+        self.visit_block(&node.body);
+        self.entry_names.truncate(saved);
     }
 
     fn visit_expr_closure(&mut self, node: &syn::ExprClosure) {
         if closure_takes_entry_value(node) {
             self.takes_entry_value = true;
         }
+        let saved = self.entry_names.len();
+        for input in &node.inputs {
+            self.entry_names.extend(entry_pattern_names(input));
+        }
         syn::visit::visit_expr_closure(self, node);
+        self.entry_names.truncate(saved);
     }
 
     fn visit_expr_field(&mut self, node: &syn::ExprField) {
@@ -2861,11 +2867,21 @@ impl ContentLengthReaderFacts {
     /// way round: an equal comparison excludes the entry, and a
     /// comparison that is not equal selects it.
     fn record_selection(&mut self, is_equal: bool, compared: &syn::Expr) {
+        // Only an iterated entry (or a copy of its name) can select an
+        // entry. A configured destination name compared with the constant
+        // says nothing about where the configured value came from.
+        let Some(base) = compared_entry_base(compared) else {
+            return;
+        };
+        let base = self.resolve_entry_alias(&base);
+        let origin = resolve_alias_chain(&base, &self.entry_copies);
+        if !self.entry_names.contains(&origin) {
+            return;
+        }
+        self.reads_field = true;
         if self.compound_condition || is_equal != self.skipping_condition {
             self.selects_field = true;
-            if let Some(base) = compared_entry_base(compared) {
-                self.selected_bases.push(self.resolve_entry_alias(&base));
-            }
+            self.selected_bases.push(base);
             // The name of the entry the comparison found is held under a
             // member of its own, so the member tells which member of the
             // entry is the name and which members are the value.
@@ -2992,10 +3008,25 @@ fn search_entry_name(expr: &syn::Expr, names: &FieldNames) -> Option<String> {
     let name = closure_param_name(Some(argument))?;
     let mut scope = ContentLengthReaderFacts {
         field_names: names.clone(),
+        entry_names: vec![name.clone()],
         ..ContentLengthReaderFacts::default()
     };
     scope.visit_expr(&closure.body);
     scope.selects_field.then_some(name)
+}
+
+/// The entry or entry-name bindings introduced by iteration. In a pair,
+/// only the first element is a name; the second is the value.
+fn entry_pattern_names(pat: &syn::Pat) -> Vec<String> {
+    match pat {
+        syn::Pat::Tuple(tuple) => tuple
+            .elems
+            .first()
+            .map(pattern_binding_names)
+            .unwrap_or_default(),
+        syn::Pat::Reference(reference) => entry_pattern_names(&reference.pat),
+        _ => pattern_binding_names(pat),
+    }
 }
 
 /// The names a pattern binds.
@@ -3495,7 +3526,13 @@ fn entry_name_alias_target(
 ) -> Option<String> {
     match expr {
         syn::Expr::Field(field) => match &field.member {
-            syn::Member::Named(ident) if ident == "name" => expression_base_name(&field.base),
+            syn::Member::Named(ident) => {
+                let base = expression_base_name(&field.base)?;
+                // Preserve the name's origin through a copied entry. The
+                // selection site checks that this origin is an iteration
+                // binding, so a configured object's `name` is not enough.
+                (ident == "name" || entry_names.contains(&base)).then_some(base)
+            }
             _ => None,
         },
         syn::Expr::Path(path) => {
@@ -3535,11 +3572,18 @@ fn entry_name_alias_target(
 /// entry it found, and the site may hold that name in a copy of its own,
 /// so the entry is found through the copy as well.
 fn compared_entry_base(expr: &syn::Expr) -> Option<String> {
-    match expr {
+    match unwrapped_expr(expr) {
         syn::Expr::MethodCall(call)
             if CONTENT_LENGTH_NAME_COPY_METHODS.contains(&call.method.to_string().as_str()) =>
         {
             compared_entry_base(&call.receiver)
+        }
+        syn::Expr::MethodCall(call) if call.method == "as_str" => {
+            compared_entry_base(&call.receiver)
+        }
+        syn::Expr::Reference(reference) => compared_entry_base(&reference.expr),
+        syn::Expr::Unary(unary) if matches!(unary.op, syn::UnOp::Deref(_)) => {
+            compared_entry_base(&unary.expr)
         }
         _ => expression_base_name(expr),
     }
@@ -7483,6 +7527,170 @@ mod tests {
                 "stream capacity must be capped by open queue capacity",
             ]
         );
+    }
+
+    #[test]
+    fn the_content_length_gate_allows_literal_presence_without_a_value_read() {
+        let source = r#"
+impl Headers {
+    pub fn contains_content_length(&self) -> bool {
+        self.inner.contains_key(CONTENT_LENGTH)
+    }
+}
+fn presence_alias(headers: &HeaderMap, port: &str) -> bool {
+    let field = http::header::CONTENT_LENGTH;
+    let _ = port.parse::<u16>();
+    headers.contains_key(&field) || headers.contains_key("content-length")
+}
+"#;
+        let path = "qpx-core/src/presence_fixture.rs";
+        assert!(
+            content_length_inline_reader_violations(path, source)
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            content_length_production_value_reader_violations(path, source, &[])
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn the_content_length_gate_allows_configured_destinations_and_owned_writes() {
+        // The first fixture reproduces HeaderTransferPatch::apply. Changing
+        // the comparison's spelling must not change its provenance.
+        for comparison in [
+            "self.destination == CONTENT_LENGTH",
+            "CONTENT_LENGTH == self.destination",
+            "self.destination.eq(&CONTENT_LENGTH)",
+            "CONTENT_LENGTH.eq(&self.destination)",
+            "self.destination.as_str().eq_ignore_ascii_case(\"content-length\")",
+            "(&self.destination).clone() == &CONTENT_LENGTH",
+            "destination == field",
+        ] {
+            let source = format!(
+                r#"
+impl HeaderTransferPatch {{
+    pub fn apply(self, headers: &mut Headers, mode: HeaderTransferMode) {{
+        let Some(value) = self.value else {{ return; }};
+        let destination = self.destination.clone();
+        let field = CONTENT_LENGTH;
+        match ({comparison}, mode) {{
+            (true, HeaderTransferMode::Append) => headers.append_content_length_value(value),
+            (true, HeaderTransferMode::Replace) => headers.set_content_length_value(value),
+            (false, HeaderTransferMode::Append) => {{
+                headers.append(OrdinaryHeaderName(self.destination), value);
+            }}
+            (false, HeaderTransferMode::Replace) => {{
+                headers.insert(OrdinaryHeaderName(self.destination), value);
+            }}
+        }}
+    }}
+}}
+// An unrelated numeric parse does not turn a configured name into a read.
+fn configured_write(patch: Patch, headers: &mut Headers, port: &str) {{
+    let _ = port.parse::<u16>();
+    if patch.destination != CONTENT_LENGTH {{ return; }}
+    headers.set_content_length_value(patch.value);
+}}
+"#
+            );
+            let path = "qpx-core/src/transfer_fixture.rs";
+            assert!(
+                content_length_inline_reader_violations(path, &source)
+                    .unwrap()
+                    .is_empty(),
+                "{comparison}"
+            );
+            assert!(
+                content_length_production_value_reader_violations(path, &source, &[])
+                    .unwrap()
+                    .is_empty(),
+                "{comparison}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_content_length_gate_keeps_real_reads_alongside_safe_operations() {
+        let cases = [
+            // Raw value returns and escapes are not presence checks.
+            ("headers.get(CONTENT_LENGTH)", false, false),
+            ("headers.get_all(\"content-length\")", false, false),
+            ("escape(&headers[CONTENT_LENGTH]);", false, false),
+            // Selection and renaming must not launder a raw value into an
+            // ordinary, readable header, even through an entry-name copy.
+            (
+                r#"for header in entries {
+                let entry = header;
+                let name = entry.name;
+                if name == CONTENT_LENGTH {
+                    headers.insert(OrdinaryHeaderName::new("x-size"), entry.value);
+                }
+            }"#,
+                false,
+                false,
+            ),
+            (
+                r#"entries.iter()
+                .filter(|(name, _)| CONTENT_LENGTH.as_str().eq(name))
+                .map(|(_, value)| ("x-size", value))"#,
+                false,
+                false,
+            ),
+            // Local interpretation and a parallel owner call stay violations.
+            (
+                "headers.get(CONTENT_LENGTH)?.to_str().ok()?.parse::<u64>().ok()",
+                true,
+                false,
+            ),
+            (
+                r#"let _ = qpx_core::http_content_length::declared_content_length(headers);
+                headers.get(CONTENT_LENGTH)"#,
+                false,
+                true,
+            ),
+            // An owner-mediated write cannot exempt a raw entry read.
+            (
+                r#"headers.set_content_length_value(value);
+                entries.iter().find(|h| h.name == CONTENT_LENGTH).map(|h| h.value)"#,
+                false,
+                false,
+            ),
+        ];
+        let path = "qpx-core/src/read_fixture.rs";
+        for (body, parses, owner) in cases {
+            let source = format!(
+                r#"
+fn example(headers: &HeaderMap) {{
+    let _ = headers.contains_key(CONTENT_LENGTH);
+    {body}
+}}
+"#
+            );
+            let violations =
+                content_length_production_value_reader_violations(path, &source, &[]).unwrap();
+            let detail = if owner {
+                "as well as calling the owner; it must read the declaration through the owner alone"
+            } else {
+                "itself; it must call the owner"
+            };
+            assert_eq!(
+                violations,
+                [format!(
+                    "{path}: the function example reads the declared Content-Length's value {detail}"
+                )],
+                "{body}"
+            );
+            assert_eq!(
+                !content_length_inline_reader_violations(path, &source)
+                    .unwrap()
+                    .is_empty(),
+                parses,
+                "{body}"
+            );
+        }
     }
 
     #[test]
