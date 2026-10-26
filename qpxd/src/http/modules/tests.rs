@@ -726,7 +726,7 @@ fn event_facade_header_mutations_preserve_obs_text_bytes() {
         .collect();
     assert_eq!(values, vec![first.as_slice(), second.as_slice()]);
 
-    let mut response = HttpModuleResponse::new(StatusCode::OK, Body::empty());
+    let mut response = HttpModuleResponse::new(StatusCode::OK, super::Body::empty());
     response.set_header(
         name.clone(),
         HeaderValue::from_bytes(first).expect("valid obs-text"),
@@ -749,26 +749,27 @@ fn event_facade_header_mutations_preserve_obs_text_bytes() {
 async fn event_facade_body_move_round_trip() {
     use super::{HttpModuleRequest, HttpModuleResponse};
 
-    let mut response = HttpModuleResponse::new(StatusCode::OK, Body::from("downstream"));
+    let mut response = HttpModuleResponse::new(StatusCode::OK, super::Body::from("downstream"));
     let body = response.take_body();
     assert_eq!(
-        qpx_http::body::to_bytes(body)
-            .await
-            .expect("bytes")
-            .as_ref(),
+        body.to_bytes().await.expect("bytes").as_ref(),
         b"downstream"
     );
     // take_body leaves an empty body behind.
     assert_eq!(
-        qpx_http::body::to_bytes(response.take_body())
+        response
+            .take_body()
+            .to_bytes()
             .await
             .expect("bytes")
             .as_ref(),
         b""
     );
-    response.set_body(Body::from("again"));
+    response.set_body(super::Body::from("again"));
     assert_eq!(
-        qpx_http::body::to_bytes(response.take_body())
+        response
+            .take_body()
+            .to_bytes()
             .await
             .expect("bytes")
             .as_ref(),
@@ -790,38 +791,84 @@ async fn event_facade_body_move_round_trip() {
     );
     assert!(facade.has_header(&HeaderName::from_static("x-event")));
     let body = facade.take_body();
+    assert_eq!(body.to_bytes().await.expect("bytes").as_ref(), b"upstream");
+    facade.set_body(super::Body::from("replaced"));
     assert_eq!(
-        qpx_http::body::to_bytes(body)
-            .await
-            .expect("bytes")
-            .as_ref(),
-        b"upstream"
-    );
-    facade.set_body(Body::from("replaced"));
-    assert_eq!(
-        qpx_http::body::to_bytes(facade.take_body())
-            .await
-            .expect("bytes")
-            .as_ref(),
+        facade.take_body().to_bytes().await.expect("bytes").as_ref(),
         b"replaced"
     );
+}
+
+#[tokio::test]
+async fn module_body_reentry_preserves_an_observed_stream_error() {
+    use super::HttpModuleResponse;
+
+    let (mut sender, body) = super::Body::channel_with_capacity(2);
+    sender
+        .send_data(Bytes::from_static(b"partial"))
+        .await
+        .expect("queue partial data");
+    sender.abort();
+
+    let mut response = HttpModuleResponse::new(StatusCode::OK, body);
+    let mut body = response.take_body();
+    assert!(matches!(
+        body.next_frame().await,
+        Some(Ok(super::BodyFrame::Data(data))) if data.as_ref() == b"partial"
+    ));
+    let observed = body
+        .next_frame()
+        .await
+        .expect("stream error")
+        .expect_err("aborted stream");
+    assert_eq!(observed.to_string(), "body aborted");
+
+    response.set_body(body);
+    let mut response = response.into_inner();
+    crate::http::protocol::l7::finalize_response_in_place(
+        &Method::GET,
+        http::Version::HTTP_11,
+        "qpx",
+        &mut response,
+        false,
+    );
+    let preserved = response
+        .body_mut()
+        .data()
+        .await
+        .expect("finalized stream error")
+        .expect_err("error must not become successful EOF");
+    assert_eq!(preserved.to_string(), observed.to_string());
+    assert!(response.body_mut().data().await.is_none());
+}
+
+#[tokio::test]
+async fn collecting_after_an_observed_stream_error_does_not_succeed_empty() {
+    let (mut sender, mut body) = super::Body::channel_with_capacity(1);
+    sender.abort();
+    let error = body
+        .next_frame()
+        .await
+        .expect("stream error")
+        .expect_err("aborted stream");
+    assert_eq!(body.to_bytes().await.expect_err("preserve failure"), error);
 }
 
 #[tokio::test]
 async fn event_facade_moves_a_live_channel_body() {
     use super::HttpModuleResponse;
 
-    let (mut sender, body) = Body::channel_with_capacity(1);
-    let mut response = HttpModuleResponse::new(StatusCode::OK, Body::empty());
+    let (mut sender, body) = super::Body::channel_with_capacity(1);
+    let mut response = HttpModuleResponse::new(StatusCode::OK, super::Body::empty());
     response.set_body(body);
     let body = response.take_body();
 
     let producer = tokio::spawn(async move {
         sender.send_data(Bytes::from_static(b"first")).await?;
         sender.send_data(Bytes::from_static(b"second")).await?;
-        Ok::<(), qpx_http::body::BodyError>(())
+        Ok::<(), super::BodyError>(())
     });
-    let bytes = qpx_http::body::to_bytes(body).await.expect("stream bytes");
+    let bytes = body.to_bytes().await.expect("stream bytes");
     producer.await.expect("producer task").expect("send chunks");
     assert_eq!(bytes.as_ref(), b"firstsecond");
 }
@@ -1217,4 +1264,522 @@ fn cache_request_key_no_policy_returns_none_and_missing_default_scheme_errors() 
         .cache_request_key(&frozen)
         .expect_err("frozen missing default scheme must fail");
     assert!(frozen_err.to_string().contains("missing default scheme"));
+}
+
+fn module_test_trailers() -> super::Trailers {
+    let mut trailers = super::Trailers::new();
+    trailers.insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("999"),
+    );
+    trailers.insert(
+        http::header::HOST,
+        http::HeaderValue::from_static("forbidden.example"),
+    );
+    trailers.insert(
+        http::HeaderName::from_static("grpc-status"),
+        http::HeaderValue::from_static("0"),
+    );
+    trailers.append(
+        http::HeaderName::from_static("x-allowed"),
+        http::HeaderValue::from_static("first"),
+    );
+    trailers.append(
+        http::HeaderName::from_static("x-allowed"),
+        http::HeaderValue::from_static("second"),
+    );
+    trailers
+}
+
+async fn assert_module_finalized_trailers(response: super::HttpModuleResponse) {
+    let mut response = response.into_inner();
+    assert!(
+        !response.body().trailers_are_sanitized(),
+        "module re-entry must clear trust"
+    );
+    crate::http::protocol::l7::finalize_response_in_place(
+        &Method::GET,
+        http::Version::HTTP_11,
+        "qpx",
+        &mut response,
+        false,
+    );
+    let body = response.body_mut();
+    assert_eq!(body.data().await.unwrap().unwrap(), "first-data");
+    assert_eq!(body.data().await.unwrap().unwrap(), "second-data");
+    assert!(body.data().await.is_none());
+    let trailers = body.trailers().await.unwrap().expect("trailers");
+    assert!(!trailers.contains_key(http::header::CONTENT_LENGTH));
+    assert!(!trailers.contains_key(http::header::HOST));
+    assert_eq!(trailers["grpc-status"], "0");
+    let allowed = trailers.get_all("x-allowed").iter().collect::<Vec<_>>();
+    assert_eq!(allowed, ["first", "second"]);
+    assert!(body.data().await.is_none());
+}
+
+#[tokio::test]
+async fn module_explicit_and_frame_forwarded_trailers_are_sanitized_by_finalization() {
+    use super::{Body as ModuleBody, HttpModuleResponse};
+    let body = ModuleBody::replay_chunks(
+        vec![
+            Bytes::from_static(b"first-data"),
+            Bytes::from_static(b"second-data"),
+        ],
+        Some(module_test_trailers()),
+    );
+    assert_module_finalized_trailers(HttpModuleResponse::new(StatusCode::OK, body)).await;
+
+    let mut input = ModuleBody::replay_chunks(
+        vec![
+            Bytes::from_static(b"first-data"),
+            Bytes::from_static(b"second-data"),
+        ],
+        Some(module_test_trailers()),
+    );
+    let (mut sender, out) = ModuleBody::channel_with_capacity(3);
+    while let Some(frame) = input.next_frame().await {
+        sender.send_frame(frame.unwrap()).await.unwrap();
+    }
+    drop(sender);
+    let mut response = HttpModuleResponse::new(StatusCode::OK, ModuleBody::empty());
+    response.set_body(out);
+    assert_module_finalized_trailers(response).await;
+}
+
+#[tokio::test]
+async fn module_forwarded_transport_sanitized_assertion_is_not_trusted() {
+    use super::{HttpModuleRequest, HttpModuleResponse};
+    // Model a transport body whose producer incorrectly asserted trust. Module
+    // request/response body moves must not launder that assertion into finalization.
+    for via_request in [false, true] {
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static("999"),
+        );
+        trailers.insert(
+            http::header::HOST,
+            http::HeaderValue::from_static("forbidden.example"),
+        );
+        trailers.insert("grpc-status", http::HeaderValue::from_static("0"));
+        trailers.append("x-allowed", http::HeaderValue::from_static("first"));
+        trailers.append("x-allowed", http::HeaderValue::from_static("second"));
+        let raw = Body::replay_chunks(
+            vec![
+                Bytes::from_static(b"first-data"),
+                Bytes::from_static(b"second-data"),
+            ],
+            Some(trailers),
+        )
+        .mark_trailers_sanitized();
+        let body = if via_request {
+            let mut request = Request::new(raw);
+            let mut request = HttpModuleRequest::new(&mut request);
+            let body = request.take_body();
+            request.set_body(body);
+            assert!(!request.as_raw().body().trailers_are_sanitized());
+            request.take_body()
+        } else {
+            let mut response = HttpModuleResponse::from_inner(hyper::Response::new(raw));
+            let body = response.take_body();
+            response.set_body(body);
+            assert!(!response.as_inner_mut().body().trailers_are_sanitized());
+            response.take_body()
+        };
+        assert_module_finalized_trailers(HttpModuleResponse::new(StatusCode::OK, body)).await;
+    }
+}
+
+#[test]
+fn module_untouched_internal_response_preserves_transport_trust_and_timeout() {
+    let raw = Body::from("trusted")
+        .mark_trailers_sanitized()
+        .mark_read_timeout_enforced();
+    let mut response = super::HttpModuleResponse::from_inner(hyper::Response::new(raw));
+    response.set_status(StatusCode::CREATED);
+    let response = response.into_inner();
+    assert!(response.body().trailers_are_sanitized());
+    assert!(response.body().read_timeout_is_enforced());
+
+    let mut response = super::HttpModuleResponse::from_inner(response);
+    let body = response.take_body();
+    response.set_body(body);
+    let response = response.into_inner();
+    assert!(!response.body().trailers_are_sanitized());
+    assert!(response.body().read_timeout_is_enforced());
+}
+
+#[tokio::test(start_paused = true)]
+async fn module_body_finalization_preserves_idle_timeout_and_abort() {
+    use super::{Body as ModuleBody, HttpModuleResponse};
+    use std::future::Future as _;
+    use std::task::{Context, Poll, Waker};
+
+    let (mut sender, body) = ModuleBody::channel_with_capacity(1);
+    let mut response = HttpModuleResponse::new(StatusCode::OK, body).into_inner();
+    crate::http::protocol::l7::finalize_response_in_place(
+        &Method::GET,
+        http::Version::HTTP_11,
+        "qpx",
+        &mut response,
+        false,
+    );
+    let mut read = Box::pin(response.body_mut().data());
+    let mut cx = Context::from_waker(Waker::noop());
+    assert!(read.as_mut().poll(&mut cx).is_pending());
+    tokio::time::advance(std::time::Duration::from_secs(31)).await;
+    assert!(matches!(
+        read.as_mut().poll(&mut cx),
+        Poll::Ready(Some(Err(_)))
+    ));
+    drop(read);
+    drop(response);
+    assert!(sender.is_closed());
+    assert!(sender.send_data(Bytes::new()).await.is_err());
+
+    let (mut sender, body) = ModuleBody::channel();
+    sender.abort();
+    let mut response = HttpModuleResponse::new(StatusCode::OK, body).into_inner();
+    crate::http::protocol::l7::finalize_response_in_place(
+        &Method::GET,
+        http::Version::HTTP_11,
+        "qpx",
+        &mut response,
+        false,
+    );
+    assert_eq!(
+        response
+            .body_mut()
+            .data()
+            .await
+            .unwrap()
+            .unwrap_err()
+            .to_string(),
+        "body aborted"
+    );
+}
+
+#[test]
+fn module_body_bridge_retains_transport_resources_until_drop() {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    struct Resource(Arc<AtomicUsize>);
+    impl Drop for Resource {
+        fn drop(&mut self) {
+            self.0.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+    let drops = Arc::new(AtomicUsize::new(0));
+    let mut body = Body::from("resource");
+    body.retain_resource(Resource(drops.clone()));
+    let mut response = super::HttpModuleResponse::from_inner(hyper::Response::new(body));
+    let body = response.take_body();
+    response.set_body(body);
+    let response = response.into_inner();
+    assert_eq!(drops.load(Ordering::SeqCst), 0);
+    drop(response);
+    assert_eq!(drops.load(Ordering::SeqCst), 1);
+}
+
+struct ReplacingBodyFactory;
+
+impl HttpModuleFactory for ReplacingBodyFactory {
+    fn build(&self, _spec: &HttpModuleConfig) -> anyhow::Result<Arc<dyn HttpModule>> {
+        Ok(Arc::new(ReplacingBodyModule))
+    }
+}
+
+struct ReplacingBodyModule;
+
+#[async_trait::async_trait]
+impl HttpModule for ReplacingBodyModule {
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        HttpModuleCapabilities {
+            stages: ModuleStages::UPSTREAM_REQUEST,
+            body_access: BodyAccess::Streaming,
+            ..HttpModuleCapabilities::default()
+        }
+    }
+
+    async fn call<'a>(
+        &self,
+        stage: HttpModuleStage,
+        _context: &mut HttpModuleContext,
+        event: HttpModuleEvent<'a>,
+    ) -> anyhow::Result<HttpModuleEvent<'a>> {
+        match (stage, event) {
+            (HttpModuleStage::UpstreamRequest, HttpModuleEvent::UpstreamRequest(mut request)) => {
+                let mut trailers = super::Trailers::new();
+                trailers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("99"));
+                request.set_body(super::Body::replay_chunks(
+                    vec![Bytes::from_static(b"module payload")],
+                    Some(trailers),
+                ));
+                Ok(HttpModuleEvent::Complete)
+            }
+            (_, event) => Ok(event),
+        }
+    }
+}
+
+#[tokio::test]
+async fn upstream_module_stage_validates_replaced_http11_body_trailers() {
+    use http_body_util::BodyExt as _;
+
+    let configs: Vec<HttpModuleConfig> =
+        serde_yaml::from_str("- type: replacing_body").expect("module config");
+    let mut registry = HttpModuleRegistryBuilder::new();
+    registry
+        .register_factory("replacing_body", ReplacingBodyFactory)
+        .expect("register module");
+    let chain = compile_http_modules(&configs, &registry.build()).expect("module chain");
+    let runtime = module_test_runtime();
+    let state = runtime.state();
+    let mut request = Request::builder()
+        .version(http::Version::HTTP_11)
+        .body(Body::from("original"))
+        .expect("request");
+    let mut execution = chain.start_for_request(&state, &request, || HttpModuleSessionInit {
+        proxy_kind: crate::http::dispatch::ProxyKind::Forward,
+        proxy_name: "test-proxy",
+        scope_name: "test-scope",
+        route_name: Some("test-route"),
+        remote_ip: "127.0.0.1".parse::<IpAddr>().expect("ip"),
+        sni: None,
+        identity_user: None,
+        cache_policy: None,
+        cache_default_scheme: Some("http"),
+    });
+
+    execution
+        .on_upstream_request(&mut request)
+        .await
+        .expect("upstream request module");
+    let mut body = request.into_body();
+    assert_eq!(
+        body.frame()
+            .await
+            .expect("data frame")
+            .expect("data frame result")
+            .into_data()
+            .expect("data"),
+        Bytes::from_static(b"module payload")
+    );
+    assert_eq!(
+        body.frame()
+            .await
+            .expect("trailer validation error")
+            .expect_err("forbidden Content-Length trailer")
+            .to_string(),
+        "body aborted"
+    );
+    assert!(body.frame().await.is_none());
+}
+
+#[tokio::test]
+async fn module_replaced_request_trailers_are_validated_after_mitm_preparation() {
+    use crate::http::protocol::l7::{
+        prepare_module_request_body_in_place, prepare_request_with_headers_in_place,
+    };
+    use http_body_util::BodyExt as _;
+
+    for version in [http::Version::HTTP_2, http::Version::HTTP_11] {
+        for declared in [false, true] {
+            for forbidden in [false, true] {
+                let mut request = Request::builder()
+                    .version(version)
+                    .uri("https://example.test/upload")
+                    .body(Body::from("original"))
+                    .unwrap();
+                if declared {
+                    request
+                        .headers_mut()
+                        .insert(http::header::TRAILER, HeaderValue::from_static("x-allowed"));
+                }
+                // The actual MITM order: prepare, normalize, module events,
+                // then prepare only a replaced body before upstream consumption.
+                prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
+                *request.version_mut() = http::Version::HTTP_11;
+                assert!(!request.headers().contains_key(http::header::TRAILER));
+                let mut trailers = super::Trailers::new();
+                trailers.append(
+                    HeaderName::from_static("x-allowed"),
+                    HeaderValue::from_static("first"),
+                );
+                trailers.append(
+                    HeaderName::from_static("x-allowed"),
+                    HeaderValue::from_static("second"),
+                );
+                if forbidden {
+                    trailers.insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("99"));
+                }
+                super::HttpModuleRequest::new(&mut request).set_body(super::Body::replay_chunks(
+                    vec![Bytes::from_static(b"one"), Bytes::from_static(b"two")],
+                    Some(trailers),
+                ));
+                prepare_module_request_body_in_place(&mut request);
+                // This is the prepared body's upstream-sender boundary: forbidden
+                // trailers become an error, never a frame the sender could emit.
+                let mut body = request.into_body();
+                for expected in ["one", "two"] {
+                    assert_eq!(
+                        body.frame().await.unwrap().unwrap().into_data().unwrap(),
+                        expected
+                    );
+                }
+                let frame = body.frame().await.unwrap();
+                if forbidden {
+                    assert_eq!(frame.unwrap_err().to_string(), "body aborted");
+                } else {
+                    let trailers = frame.unwrap().into_trailers().unwrap();
+                    let values = trailers.get_all("x-allowed").iter().collect::<Vec<_>>();
+                    assert_eq!(values, ["first", "second"]);
+                }
+                assert!(body.frame().await.is_none());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn module_request_preparation_leaves_untouched_bodies_and_consumes_replacement_once() {
+    use crate::http::protocol::l7::{
+        prepare_module_request_body_in_place, prepare_request_with_headers_in_place,
+    };
+    for preparation in ["untouched", "backend", "mitm"] {
+        let mut request = Request::builder()
+            .version(http::Version::HTTP_2)
+            .body(Body::from("original"))
+            .unwrap();
+        prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
+        if preparation != "untouched" {
+            *request.version_mut() = http::Version::HTTP_11;
+            super::HttpModuleRequest::new(&mut request).set_body(super::Body::from("replacement"));
+            if preparation == "backend" {
+                prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
+            } else {
+                prepare_module_request_body_in_place(&mut request);
+            }
+        }
+        // A transport marker is observable only inside the owner. Reboxing would
+        // clear it, so it detects unnecessary validation passes without exposing
+        // the raw body publicly. No replacement, or an already consumed marker,
+        // must not add another wrapper to the prepared body.
+        let body = std::mem::replace(request.body_mut(), Body::empty());
+        *request.body_mut() = body.mark_read_timeout_enforced();
+        prepare_module_request_body_in_place(&mut request);
+        assert!(request.body().read_timeout_is_enforced());
+    }
+}
+
+#[tokio::test]
+async fn module_wrapped_transport_trust_is_reset_and_response_finalized() {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert(
+        http::header::CONTENT_LENGTH,
+        HeaderValue::from_static("999"),
+    );
+    trailers.insert(
+        http::header::HOST,
+        HeaderValue::from_static("forbidden.example"),
+    );
+    trailers.insert("grpc-status", HeaderValue::from_static("0"));
+    trailers.append("x-allowed", HeaderValue::from_static("first"));
+    trailers.append("x-allowed", HeaderValue::from_static("second"));
+    let body = super::Body::wrap(
+        Body::replay_chunks(
+            vec![
+                Bytes::from_static(b"first-data"),
+                Bytes::from_static(b"second-data"),
+            ],
+            Some(trailers),
+        )
+        .mark_trailers_sanitized(),
+    );
+    assert_module_finalized_trailers(super::HttpModuleResponse::new(StatusCode::OK, body)).await;
+}
+
+#[tokio::test]
+async fn module_context_absolute_dispatch_keeps_backend_request_trailer_validation() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpListener;
+
+    // Exercise both public helpers, not just the body conversion. Module-owned
+    // bodies are validated at backend preparation even when HTTP/1.1 omitted a
+    // Trailer declaration.
+    for pinned in [false, true] {
+        for version in [http::Version::HTTP_2, http::Version::HTTP_11] {
+            for forbidden in [false, true] {
+                for declared in [false, true] {
+                    if version == http::Version::HTTP_2 && !declared {
+                        continue;
+                    }
+                    if version == http::Version::HTTP_11 && !forbidden && !declared {
+                        continue;
+                    }
+                    tokio::time::timeout(Duration::from_secs(5), async {
+                    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let addr = listener.local_addr().unwrap();
+                    let server = async {
+                        let (mut socket, _) = listener.accept().await.unwrap();
+                        let mut received = Vec::new();
+                        loop {
+                            let mut buffer = [0; 1024];
+                            let count = socket.read(&mut buffer).await.unwrap();
+                            if count == 0 {
+                                break;
+                            }
+                            received.extend_from_slice(&buffer[..count]);
+                            assert!(received.len() <= 16 * 1024);
+                            if received.windows(5).any(|w| w == b"\r\n0\r\n")
+                                && received.ends_with(b"\r\n\r\n")
+                            {
+                                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+                                break;
+                            }
+                        }
+                        received
+                    };
+                    let context = module_test_context();
+                    // Channel bodies have unknown size so the sender must poll
+                    // the trailer frame rather than stopping at a byte count.
+                    let (mut sender, body) = super::Body::channel_with_capacity(2);
+                    sender.try_send_data(Bytes::from_static(b"payload")).unwrap();
+                    let mut trailers = super::Trailers::new();
+                    trailers.insert(
+                        if forbidden { http::header::CONTENT_LENGTH } else { HeaderName::from_static("x-allowed") },
+                        HeaderValue::from_static("99"),
+                    );
+                    sender.try_send_trailers(trailers).unwrap();
+                    drop(sender);
+                    let mut request = Request::builder()
+                        .method(Method::POST)
+                        .version(version)
+                        .uri(format!("http://{addr}/upload"))
+                        .body(body)
+                        .unwrap();
+                    if version == http::Version::HTTP_11 && declared {
+                        request.headers_mut().insert(http::header::TRAILER, HeaderValue::from_static("x-allowed"));
+                    }
+                    let client = async {
+                        if pinned {
+                            context.send_absolute_request_to_addr(request, addr).await
+                        } else {
+                            context.send_absolute_request(request).await
+                        }
+                    };
+                    let (result, received) = tokio::join!(client, server);
+                    if forbidden {
+                        assert!(result.is_err(), "backend must reject the body, not silently drop forbidden trailers");
+                        assert!(!received.windows(b"content-length: 99".len()).any(|w| w.eq_ignore_ascii_case(b"content-length: 99")));
+                    } else {
+                        assert_eq!(result.unwrap().status(), StatusCode::OK);
+                    }
+                    }).await.expect("bounded local context dispatch");
+                }
+            }
+        }
+    }
 }

@@ -1,7 +1,7 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::HeaderMap;
+use http::{HeaderMap, HeaderName};
 use percent_encoding::percent_decode_str;
 
 use crate::http::media_type::raw_media_type;
@@ -233,6 +233,61 @@ pub(super) fn normalize_connect_code(raw: &str) -> String {
         | "unauthenticated" => raw.to_string(),
         _ => "invalid".to_string(),
     }
+}
+
+/// Owner-side partition of RPC protocol-owned trailer names.
+///
+/// These fields carry parsed protocol status, never application metadata.
+/// The generic module trailer view hides them even when a caller supplied them;
+/// their values are available only through the parsed semantic adapters below.
+pub(crate) fn is_reserved_rpc_trailer_name(name: &HeaderName) -> bool {
+    matches!(
+        name.as_str(),
+        "grpc-status"
+            | "grpc-message"
+            | "grpc-status-details-bin"
+            | "connect-code"
+            | "connect-message"
+    )
+}
+
+/// Parsed gRPC status from trailers, using the existing owner parsing.
+pub(crate) fn grpc_status_from_trailers(trailers: &HeaderMap) -> Option<String> {
+    extract_grpc_status_and_message(trailers, None).0
+}
+
+/// Parsed gRPC message from trailers, using the existing owner parsing.
+pub(crate) fn grpc_message_from_trailers(trailers: &HeaderMap) -> Option<String> {
+    extract_grpc_status_and_message(trailers, None).1
+}
+
+/// Decodes each gRPC binary status-detail value in original field order.
+/// Both padded and unpadded standard base64 encodings are accepted.
+pub(crate) fn grpc_status_details_from_trailers(
+    trailers: &HeaderMap,
+) -> impl Iterator<Item = Result<Bytes, base64::DecodeError>> + '_ {
+    use base64::Engine as _;
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD};
+
+    trailers
+        .get_all("grpc-status-details-bin")
+        .iter()
+        .map(|value| {
+            STANDARD
+                .decode(value.as_bytes())
+                .or_else(|_| STANDARD_NO_PAD.decode(value.as_bytes()))
+                .map(Bytes::from)
+        })
+}
+
+/// Parsed Connect code from trailers, using the existing owner parsing.
+pub(crate) fn connect_status_from_trailers(trailers: &HeaderMap) -> Option<String> {
+    extract_connect_stream_status_and_message(Some(trailers)).0
+}
+
+/// Parsed Connect message from trailers, using the existing owner parsing.
+pub(crate) fn connect_message_from_trailers(trailers: &HeaderMap) -> Option<String> {
+    extract_connect_stream_status_and_message(Some(trailers)).1
 }
 
 pub(super) fn infer_request_streaming(

@@ -431,10 +431,7 @@ pub fn validate_request_trailers(trailers: &HeaderMap) -> Result<(), RequestVali
     // RFC 9110 Section 6.5.1: only fields explicitly defined as safe-in-trailers are allowed.
     // As an intermediary, we at least reject known-framing/routing/auth/content-format fields.
     // (Header values are already validated by HeaderMap construction.)
-    if trailers
-        .keys()
-        .any(|name| is_prohibited_trailer_field(name.as_str()))
-    {
+    if trailers.keys().any(is_prohibited_trailer_name) {
         return Err(RequestValidationError::InvalidTrailerField);
     }
     Ok(())
@@ -443,7 +440,7 @@ pub fn validate_request_trailers(trailers: &HeaderMap) -> Result<(), RequestVali
 pub fn sanitize_response_trailers(trailers: &mut HeaderMap) -> usize {
     let mut removed = Vec::new();
     for name in trailers.keys() {
-        if is_prohibited_trailer_field(name.as_str()) {
+        if is_prohibited_trailer_name(name) {
             removed.push(name.clone());
         }
     }
@@ -451,6 +448,14 @@ pub fn sanitize_response_trailers(trailers: &mut HeaderMap) -> usize {
         trailers.remove(name);
     }
     removed.len()
+}
+
+/// Whether a trailer field name is prohibited by the shared HTTP trailer policy.
+///
+/// The `HeaderName` input is already lowercase, so this is the narrow owner-side
+/// predicate reused by request validation and response sanitization.
+pub fn is_prohibited_trailer_name(name: &HeaderName) -> bool {
+    is_prohibited_trailer_field(name.as_str())
 }
 
 fn is_prohibited_trailer_field(name: &str) -> bool {

@@ -78,6 +78,27 @@ fn append_via_appends_values() {
 }
 
 #[test]
+fn prohibited_trailer_name_query_matches_the_shared_policy() {
+    for name in [
+        "content-length",
+        "host",
+        "authorization",
+        "connection",
+        "content-type",
+    ] {
+        let name = HeaderName::from_static(name);
+        assert!(is_prohibited_trailer_name(&name), "{name}");
+        let mut trailers = HeaderMap::new();
+        trailers.insert(name, HeaderValue::from_static("value"));
+        assert_eq!(sanitize_response_trailers(&mut trailers), 1);
+        assert!(trailers.is_empty());
+    }
+    assert!(!is_prohibited_trailer_name(&HeaderName::from_static(
+        "x-app-metadata"
+    )));
+}
+
+#[test]
 fn validate_rejects_multiple_host_headers() {
     let mut req = http::Request::builder()
         .uri("http://example.com/")

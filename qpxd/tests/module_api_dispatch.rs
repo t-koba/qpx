@@ -60,23 +60,21 @@ fn dispatch_helpers_return_opaque_response_usable_via_facade() {
 async fn dispatch_opaque_response_body_moves_without_raw_access() {
     let mut response = HttpModuleResponse::new(StatusCode::OK, Body::from("dispatch"));
     let body = response.take_body();
-    assert_eq!(
-        qpx_http::body::to_bytes(body)
-            .await
-            .expect("bytes")
-            .as_ref(),
-        b"dispatch"
-    );
+    assert_eq!(body.to_bytes().await.expect("bytes").as_ref(), b"dispatch");
     // take_body leaves an empty body behind; set_body restores streaming.
     assert!(
-        qpx_http::body::to_bytes(response.take_body())
+        response
+            .take_body()
+            .to_bytes()
             .await
             .expect("bytes")
             .is_empty()
     );
     response.set_body(Body::from("again"));
     assert_eq!(
-        qpx_http::body::to_bytes(response.take_body())
+        response
+            .take_body()
+            .to_bytes()
             .await
             .expect("bytes")
             .as_ref(),

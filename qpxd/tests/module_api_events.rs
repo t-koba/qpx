@@ -160,11 +160,11 @@ fn external_short_circuit_builds_response_without_raw_builder() {
 async fn external_response_body_move_round_trip() {
     let mut response = HttpModuleResponse::new(StatusCode::OK, Body::from("stream me"));
     let body = response.take_body();
-    let bytes = qpx_http::body::to_bytes(body).await.expect("bytes");
+    let bytes = body.to_bytes().await.expect("bytes");
     assert_eq!(bytes.as_ref(), b"stream me");
     response.set_body(Body::from("stream me"));
     let body = response.take_body();
-    let bytes = qpx_http::body::to_bytes(body).await.expect("bytes");
+    let bytes = body.to_bytes().await.expect("bytes");
     assert_eq!(bytes.as_ref(), b"stream me");
 }
 

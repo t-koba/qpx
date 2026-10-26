@@ -63,12 +63,12 @@ mod xdp;
 
 pub mod module_api {
     pub use crate::http::modules::{
-        BodyAccess, CacheLookupStatus, HttpModule, HttpModuleCapabilities, HttpModuleContext,
-        HttpModuleEvent, HttpModuleFactory, HttpModuleRegistry, HttpModuleRegistryBuilder,
-        HttpModuleRequest, HttpModuleRequestView, HttpModuleResponse, HttpModuleResponseView,
-        HttpModuleStage, ModuleStages, RequestHeadersOutcome, RetryEvent,
+        Body, BodyAccess, BodyError, BodyFrame, CacheLookupStatus, HttpModule,
+        HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent, HttpModuleFactory,
+        HttpModuleRegistry, HttpModuleRegistryBuilder, HttpModuleRequest, HttpModuleRequestView,
+        HttpModuleResponse, HttpModuleResponseView, HttpModuleStage, ModuleStages,
+        RequestHeadersOutcome, RetryEvent, Sender, TrailerMetadata, Trailers,
     };
-    pub use qpx_http::body::{Body, BodyError, Sender};
 
     /// Incremental observer for an RPC response stream selected from its HTTP fields.
     #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]

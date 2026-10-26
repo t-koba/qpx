@@ -19,6 +19,10 @@ pub(crate) use frame::{
 };
 pub(crate) use inspect::{inspect_request, inspect_response};
 pub(crate) use local_response::build_rpc_local_response;
+pub(crate) use protocol::{
+    connect_message_from_trailers, connect_status_from_trailers, grpc_message_from_trailers,
+    grpc_status_details_from_trailers, grpc_status_from_trailers, is_reserved_rpc_trailer_name,
+};
 
 #[cfg(feature = "http3-backend-qpx")]
 pub(crate) use deadline::RpcDeadlineReply;

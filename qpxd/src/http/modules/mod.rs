@@ -1,3 +1,4 @@
+mod body;
 mod cache_purge;
 mod chain;
 mod execution;
@@ -8,6 +9,8 @@ mod traits;
 
 #[cfg(test)]
 mod tests;
+
+pub use body::{Body, BodyError, BodyFrame, Sender, TrailerMetadata, Trailers};
 
 pub(crate) use chain::{CompiledHttpModuleChain, compile_http_modules};
 pub use execution::{

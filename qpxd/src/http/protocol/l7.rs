@@ -295,6 +295,32 @@ pub(crate) fn consume_request_hop_headers(request: &mut Request<Body>) {
     }
 }
 
+// A module can supply trailers without a declaration, even after request
+// preparation stripped Trailer or normalized HTTP/2 to HTTP/1.1. Validate only
+// replaced bodies on re-entry, independent of the now-normalized request head.
+#[derive(Clone)]
+struct ModuleRequestBodyReplaced;
+
+pub(crate) fn mark_module_request_body_replaced(request: &mut Request<Body>) {
+    request.extensions_mut().insert(ModuleRequestBodyReplaced);
+}
+
+pub(crate) fn replace_module_request_body(request: &mut Request<Body>, body: Body) {
+    *request.body_mut() = body;
+    mark_module_request_body_replaced(request);
+}
+
+pub(crate) fn prepare_module_request_body_in_place(request: &mut Request<Body>) {
+    if request
+        .extensions_mut()
+        .remove::<ModuleRequestBodyReplaced>()
+        .is_some()
+        && !http_body::Body::is_end_stream(request.body())
+    {
+        wrap_body_validating_request_trailers(request);
+    }
+}
+
 pub(crate) fn prepare_request_with_headers_in_place(
     request: &mut Request<Body>,
     proxy_name: &str,
@@ -319,7 +345,12 @@ fn prepare_request_headers_in_place(
     sync_target_authority: bool,
 ) {
     let request_version = request.version();
-    let validate_trailers = request_version == http::Version::HTTP_2
+    let module_body_replaced = request
+        .extensions_mut()
+        .remove::<ModuleRequestBodyReplaced>()
+        .is_some();
+    let validate_trailers = module_body_replaced
+        || request_version == http::Version::HTTP_2
         || request.headers().contains_key(http::header::TRAILER);
     sanitize_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
     apply_request_headers(request.headers_mut(), header_control);

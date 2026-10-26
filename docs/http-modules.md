@@ -71,6 +71,61 @@ iterators, callbacks, `Deref`, parts and transport conversions are not
 exposed. Short-circuits build responses via
 `HttpModuleResponse::new(status, Body)`.
 
+### Module bodies and the transport boundary
+
+`module_api::{Body, BodyError, BodyFrame, Sender, Trailers}` are qpxd-owned
+facades, not aliases for qpx-http types. Request/response `take_body`, `set_body`
+and response construction use this `Body`; the context's absolute-request
+helpers accept caller-owned `http::Request<module_api::Body>`. Request views
+borrow only the request head and are independent of its body type. Built-in
+transport integrations remain private to qpxd.
+
+Use `Body::from`, `empty`, `replay` or `replay_chunks` for materialized data,
+`Body::wrap(standard_body)` to accept any compatible standard streaming body
+(including `hyper::body::Incoming`), or `Body::channel_with_capacity(n)` for
+bounded streaming (`channel()` defaults to 16 frames). `Sender::send_data`, `send_trailers` and `send_frame` wait for
+capacity; `try_send_data`/`try_send_trailers` fail immediately when full or
+closed. Dropping the sender ends the stream; `abort` delivers a stream error;
+dropping the body wakes blocked senders and `closed()` waiters. Canceling a
+blocked send does not enqueue that frame. Body limits and existing transport
+read timeouts survive body moves; a stream error is terminal.
+
+Read `next_frame()` for ordered `BodyFrame::Data(Bytes)` and
+`BodyFrame::Trailers(Trailers)` frames. Alternatively read `data()` until it
+returns `None`, then `trailers()`; requesting trailers early drains unread
+data. A taken body can be forwarded directly, or each frame can be passed to
+`Sender::send_frame`. `to_bytes()` collects data and discards trailers; use
+`limit_bytes(n)` before collection when a bound is needed.
+
+`Trailers` can be created, cloned, forwarded, or mutated with caller-supplied
+`HeaderName`/`HeaderValue` inputs via `insert`, `append` and `remove` (mutations
+never return displaced values). `metadata()` returns a filtered borrowed view:
+`get`, `get_all` and `iter` expose exact `HeaderValue` bytes and per-name
+duplicate order only for application metadata. The shared HTTP trailer policy
+and qpxd's RPC owner reserve framing/content and status/message/status-detail
+fields;
+reserved values are unavailable through this generic view and are available
+only through parsed protocol-semantic accessors. The view has no raw
+`HeaderMap`/conversion, unrestricted callback or `Deref`, and debug formatting
+does not disclose values. The facade
+does **not** implement standard `http_body::Body` and has no public
+`mark_trailers_sanitized` trust assertion. At the private bridge, module-produced
+and taken/replaced bodies are untrusted: normal response finalization sanitizes
+their trailers, even if an underlying transport body had been marked sanitized.
+Module-supplied and module-replaced request bodies pass through the existing
+request-trailer validator before outgoing consumption, including absolute requests
+and MITM requests already normalized to HTTP/1.1; no trailer declaration is
+required to validate them. Untouched requests keep their existing
+protocol-specific preparation policy. Internal trusted bodies
+left untouched by modules retain their trust marker.
+
+This boundary is intentionally limited to qpxd's module body API. qpx-http's
+public transport `Body`/`Sender` and standard `http_body::Body`/`Frame` trailer
+interoperability are unchanged. `RpcStreamObserver`/`RpcStreamSummary` remain unchanged in this Body slice;
+the separate RPC-summary work will use the same filtered application-metadata
+view and parsed RPC status, message, and binary status-detail results. This is
+not a workspace-wide header-ownership claim.
+
 Modules declare capabilities so `qpxd` compiles stage-indexed chains and only
 calls modules for the stages they need. Built-in compression runs only on
 downstream responses, request-phase subrequests run only on request headers, and

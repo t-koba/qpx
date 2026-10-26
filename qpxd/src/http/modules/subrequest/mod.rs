@@ -233,15 +233,14 @@ impl SubrequestModule {
         };
         let future = async {
             match pinned_addr {
-                Some(addr) => ctx.send_absolute_request_to_addr(req, addr).await,
-                None => ctx.send_absolute_request(req).await,
+                Some(addr) => ctx.send_absolute_request_to_addr_inner(req, addr).await,
+                None => ctx.send_absolute_request_inner(req).await,
             }
         };
         let response = timeout(timeout_dur, future)
             .await
             .with_context(|| format!("subrequest {} timed out", self.name))?
-            .with_context(|| format!("subrequest {} failed", self.name))?
-            .into_inner();
+            .with_context(|| format!("subrequest {} failed", self.name))?;
         if self.deny_redirects && response.status().is_redirection() {
             return Err(anyhow!("subrequest {} received a redirect", self.name));
         }

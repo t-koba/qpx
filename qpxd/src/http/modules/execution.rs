@@ -3,6 +3,7 @@ pub(super) mod subrequest;
 #[path = "template.rs"]
 pub(super) mod template;
 
+use super::Body as ModuleBody;
 use super::{
     CacheLookupStatus, CompiledHttpModuleChain, HttpModuleEvent, HttpModuleStage,
     RequestHeadersOutcome, RetryEvent,
@@ -52,22 +53,6 @@ impl FrozenRequestSnapshot {
         }
     }
 
-    fn authority(&self) -> Option<&str> {
-        self.uri.authority().map(|value| value.as_str())
-    }
-
-    fn scheme(&self) -> Option<&str> {
-        self.uri.scheme_str()
-    }
-
-    fn path(&self) -> &str {
-        self.uri.path()
-    }
-
-    fn query(&self) -> Option<&str> {
-        self.uri.query()
-    }
-
     fn matches_request(&self, req: &Request<Body>) -> bool {
         self.method == *req.method()
             && self.version == req.version()
@@ -85,112 +70,67 @@ impl FrozenRequestSnapshot {
 /// }
 /// ```
 pub struct HttpModuleRequestView<'a> {
-    inner: RequestViewInner<'a>,
-}
-
-enum RequestViewInner<'a> {
-    Live(&'a Request<Body>),
-    Frozen(&'a FrozenRequestSnapshot),
+    method: &'a Method,
+    version: Version,
+    uri: &'a http::Uri,
+    headers: &'a HeaderMap,
 }
 
 impl<'a> HttpModuleRequestView<'a> {
-    pub fn from_request(request: &'a Request<Body>) -> Self {
+    /// Borrows only the head of a caller-owned request, independent of its body type.
+    pub fn from_request<B>(request: &'a Request<B>) -> Self {
         Self {
-            inner: RequestViewInner::Live(request),
+            method: request.method(),
+            version: request.version(),
+            uri: request.uri(),
+            headers: request.headers(),
         }
     }
 
     fn from_frozen(request: &'a FrozenRequestSnapshot) -> Self {
         Self {
-            inner: RequestViewInner::Frozen(request),
+            method: &request.method,
+            version: request.version,
+            uri: &request.uri,
+            headers: &request.headers,
         }
     }
 
     pub fn method(&self) -> &Method {
-        match self.inner {
-            RequestViewInner::Live(request) => request.method(),
-            RequestViewInner::Frozen(request) => &request.method,
-        }
+        self.method
     }
-
     pub fn version(&self) -> Version {
-        match self.inner {
-            RequestViewInner::Live(request) => request.version(),
-            RequestViewInner::Frozen(request) => request.version,
-        }
+        self.version
     }
-
     pub fn scheme(&self) -> Option<&str> {
-        match self.inner {
-            RequestViewInner::Live(request) => request.uri().scheme_str(),
-            RequestViewInner::Frozen(request) => request.scheme(),
-        }
+        self.uri.scheme_str()
     }
-
     pub fn host(&self) -> Option<&str> {
-        match self.inner {
-            RequestViewInner::Live(request) => request.uri().host().or_else(|| {
-                request
-                    .headers()
-                    .get(HOST)
-                    .and_then(|value| value.to_str().ok())
-            }),
-            RequestViewInner::Frozen(request) => request.uri.host().or_else(|| {
-                request
-                    .headers
-                    .get(HOST)
-                    .and_then(|value| value.to_str().ok())
-            }),
-        }
+        self.uri
+            .host()
+            .or_else(|| self.headers.get(HOST).and_then(|value| value.to_str().ok()))
     }
-
     pub fn path(&self) -> &str {
-        match self.inner {
-            RequestViewInner::Live(request) => request.uri().path(),
-            RequestViewInner::Frozen(request) => request.path(),
-        }
+        self.uri.path()
     }
-
     pub fn query(&self) -> Option<&str> {
-        match self.inner {
-            RequestViewInner::Live(request) => request.uri().query(),
-            RequestViewInner::Frozen(request) => request.query(),
-        }
+        self.uri.query()
     }
-
     pub fn authority(&self) -> Option<&str> {
-        match self.inner {
-            RequestViewInner::Live(request) => {
-                request.uri().authority().map(|value| value.as_str())
-            }
-            RequestViewInner::Frozen(request) => request.authority(),
-        }
+        self.uri.authority().map(|value| value.as_str())
     }
-
     fn headers(&self) -> &HeaderMap {
-        match self.inner {
-            RequestViewInner::Live(request) => request.headers(),
-            RequestViewInner::Frozen(request) => &request.headers,
-        }
+        self.headers
     }
-
     /// Returns whether this request contains the named header.
     pub fn has_header(&self, name: &HeaderName) -> bool {
-        self.headers().contains_key(name)
+        self.headers.contains_key(name)
     }
-
     pub fn uri(&self) -> &http::Uri {
-        match self.inner {
-            RequestViewInner::Live(request) => request.uri(),
-            RequestViewInner::Frozen(request) => &request.uri,
-        }
+        self.uri
     }
-
     pub fn uri_string(&self) -> Cow<'_, str> {
-        match self.inner {
-            RequestViewInner::Live(request) => Cow::Owned(request.uri().to_string()),
-            RequestViewInner::Frozen(request) => Cow::Owned(request.uri.to_string()),
-        }
+        Cow::Owned(self.uri.to_string())
     }
 }
 
@@ -364,13 +304,13 @@ impl<'a> HttpModuleRequest<'a> {
     }
 
     /// Takes the request body, leaving an empty body behind.
-    pub fn take_body(&mut self) -> Body {
-        std::mem::replace(self.inner.body_mut(), Body::empty())
+    pub fn take_body(&mut self) -> ModuleBody {
+        ModuleBody::from_transport(std::mem::replace(self.inner.body_mut(), Body::empty()))
     }
 
     /// Replaces the request body.
-    pub fn set_body(&mut self, body: Body) {
-        *self.inner.body_mut() = body;
+    pub fn set_body(&mut self, body: ModuleBody) {
+        crate::http::protocol::l7::replace_module_request_body(self.inner, body.into_transport());
     }
 
     pub(super) fn as_raw(&self) -> &Request<Body> {
@@ -419,8 +359,8 @@ pub struct HttpModuleResponse {
 
 impl HttpModuleResponse {
     /// Builds a short-circuit response from a status and a body.
-    pub fn new(status: StatusCode, body: Body) -> Self {
-        let mut inner = Response::new(body);
+    pub fn new(status: StatusCode, body: ModuleBody) -> Self {
+        let mut inner = Response::new(body.into_transport());
         *inner.status_mut() = status;
         Self { inner }
     }
@@ -475,13 +415,13 @@ impl HttpModuleResponse {
     }
 
     /// Takes the response body, leaving an empty body behind.
-    pub fn take_body(&mut self) -> Body {
-        std::mem::replace(self.inner.body_mut(), Body::empty())
+    pub fn take_body(&mut self) -> ModuleBody {
+        ModuleBody::from_transport(std::mem::replace(self.inner.body_mut(), Body::empty()))
     }
 
     /// Replaces the response body.
-    pub fn set_body(&mut self, body: Body) {
-        *self.inner.body_mut() = body;
+    pub fn set_body(&mut self, body: ModuleBody) {
+        *self.inner.body_mut() = body.into_transport();
     }
 
     pub(super) fn from_inner(inner: Response<Body>) -> Self {
@@ -660,7 +600,25 @@ impl HttpModuleContext {
     ///     let _ = response.headers();
     /// }
     /// ```
-    pub async fn send_absolute_request(&self, req: Request<Body>) -> Result<HttpModuleResponse> {
+    /// ```compile_fail
+    /// use http::Request;
+    /// use qpxd::module_api::HttpModuleContext;
+    /// async fn no_transport_body(ctx: &HttpModuleContext) {
+    ///     let _ = ctx.send_absolute_request(Request::new(qpx_http::body::Body::empty())).await;
+    /// }
+    /// ```
+    pub async fn send_absolute_request(
+        &self,
+        req: Request<ModuleBody>,
+    ) -> Result<HttpModuleResponse> {
+        let mut req = req.map(ModuleBody::into_transport);
+        crate::http::protocol::l7::mark_module_request_body_replaced(&mut req);
+        self.send_absolute_request_inner(req)
+            .await
+            .map(HttpModuleResponse::from_inner)
+    }
+
+    async fn send_absolute_request_inner(&self, req: Request<Body>) -> Result<Response<Body>> {
         let url = req.uri().to_string();
         let origin = OriginEndpoint::direct(url.as_str());
         let inner = proxy_http(
@@ -671,7 +629,7 @@ impl HttpModuleContext {
             None,
         )
         .await?;
-        Ok(HttpModuleResponse::from_inner(inner))
+        Ok(inner)
     }
 
     /// Sends a caller-owned absolute-form request to a pinned address.
@@ -681,9 +639,21 @@ impl HttpModuleContext {
     /// without reading, buffering or cloning its body.
     pub async fn send_absolute_request_to_addr(
         &self,
-        req: Request<Body>,
+        req: Request<ModuleBody>,
         connect_addr: SocketAddr,
     ) -> Result<HttpModuleResponse> {
+        let mut req = req.map(ModuleBody::into_transport);
+        crate::http::protocol::l7::mark_module_request_body_replaced(&mut req);
+        self.send_absolute_request_to_addr_inner(req, connect_addr)
+            .await
+            .map(HttpModuleResponse::from_inner)
+    }
+
+    async fn send_absolute_request_to_addr_inner(
+        &self,
+        req: Request<Body>,
+        connect_addr: SocketAddr,
+    ) -> Result<Response<Body>> {
         let uri = req.uri();
         let scheme = uri
             .scheme_str()
@@ -713,7 +683,7 @@ impl HttpModuleContext {
             None,
         )
         .await?;
-        Ok(HttpModuleResponse::from_inner(inner))
+        Ok(inner)
     }
 
     /// Builds the cache key for a module request view.
@@ -734,19 +704,16 @@ impl HttpModuleContext {
             .cache_default_scheme
             .as_deref()
             .ok_or_else(|| anyhow!("cache purge missing default scheme"))?;
-        match &request.inner {
-            RequestViewInner::Live(req) => CacheRequestKey::for_target(req, default_scheme),
-            RequestViewInner::Frozen(snapshot) => {
-                let mut builder = Request::builder()
-                    .method(snapshot.method.clone())
-                    .uri(snapshot.uri.clone());
-                if let Some(host) = snapshot.headers.get(HOST).cloned() {
-                    builder = builder.header(HOST, host);
-                }
-                let minimal = builder.body(Body::empty())?;
-                CacheRequestKey::for_target(&minimal, default_scheme)
-            }
+        // The cache owner needs only method, target and the first Host value.
+        // Adapt borrowed head fields without exposing transport body storage.
+        let mut builder = Request::builder()
+            .method(request.method().clone())
+            .uri(request.uri().clone());
+        if let Some(host) = request.headers().get(HOST).cloned() {
+            builder = builder.header(HOST, host);
         }
+        let minimal = builder.body(Body::empty())?;
+        CacheRequestKey::for_target(&minimal, default_scheme)
     }
 
     pub async fn purge_cache_key(&self, key: &CacheRequestKey) -> Result<bool> {
@@ -878,6 +845,7 @@ impl HttpModuleExecution {
                 .with_context(|| format!("http module {label} upstream_request failed"))?
                 .into_complete(label, HttpModuleStage::UpstreamRequest)?;
         }
+        crate::http::protocol::l7::prepare_module_request_body_in_place(req);
         if chain.aggregate.needs_frozen_request {
             context.sync_frozen_request(req);
         }
