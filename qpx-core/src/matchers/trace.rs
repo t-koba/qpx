@@ -103,7 +103,7 @@ impl CompiledMatch {
             append_text_reasons(&mut reasons, TraceTextKind::Path, path, ctx.path);
         }
         for matcher in &self.headers_fast {
-            let (configured, actual, result) = trace_fast_header(matcher, ctx.headers);
+            let (configured, actual, result) = trace_fast_header(matcher, ctx.header_view());
             reasons.push(MatchReason::Header {
                 name: matcher.name.to_string(),
                 configured,
@@ -112,7 +112,7 @@ impl CompiledMatch {
             });
         }
         for matcher in &self.headers_regex {
-            let (actual, result) = trace_regex_header(matcher, ctx.headers);
+            let (actual, result) = trace_regex_header(matcher, ctx.header_view());
             reasons.push(MatchReason::Header {
                 name: matcher.name.to_string(),
                 configured: format!("regex:{}", matcher.regex.as_str()),

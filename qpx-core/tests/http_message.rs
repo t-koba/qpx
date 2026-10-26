@@ -559,3 +559,80 @@ fn owner_literal_conflicts_and_invalid_values_still_fail_export() {
         }
     }
 }
+
+#[test]
+fn literal_presence_does_not_resolve_or_hide_invalid_declarations() {
+    let mut headers = Headers::new();
+    let ordinary = name("x-bin");
+    assert!(!headers.contains_content_length());
+    assert!(!headers.contains_key(&ordinary));
+    assert_eq!(headers.declared_content_length(), Ok(None));
+    for value in ["", "bad", "5, 6"] {
+        headers.set_content_length_value(HeaderValue::from_str(value).unwrap());
+        assert!(headers.contains_content_length());
+        assert!(headers.declared_content_length().is_err());
+    }
+    headers.set_content_length(0);
+    assert!(headers.contains_content_length());
+    assert_eq!(headers.declared_content_length(), Ok(Some(0)));
+    headers.append_content_length_value(HeaderValue::from_static("1"));
+    assert!(headers.contains_content_length());
+    assert_eq!(
+        headers.declared_content_length(),
+        Err(ContentLengthError::Conflicting)
+    );
+    headers.remove_content_length();
+    assert!(!headers.contains_content_length());
+    headers.insert(ordinary.clone(), HeaderValue::from_bytes(b"\xff").unwrap());
+    assert!(headers.contains_key(&ordinary));
+}
+
+#[test]
+fn frozen_equality_is_literal_ordered_and_sensitivity_aware_for_every_field() {
+    let mut headers = Headers::new();
+    headers.set_content_length_value(HeaderValue::from_static(" 5 "));
+    headers.append_content_length_value(HeaderValue::from_static("5"));
+    headers.insert(name("x-bin"), HeaderValue::from_bytes(b"\xff").unwrap());
+    headers.append(name("x-bin"), HeaderValue::from_static("second"));
+    let frozen = headers.clone();
+    assert_eq!(headers, frozen);
+
+    let mut changed = headers.clone();
+    changed.set_content_length(5);
+    assert_eq!(
+        changed.declared_content_length(),
+        frozen.declared_content_length()
+    );
+    assert_ne!(changed, frozen); // not just the parsed length or ordinary fields
+    changed.append_content_length_value(HeaderValue::from_static(" 5 "));
+    assert_ne!(changed, frozen); // same number/count but reversed occurrence order
+    changed.set_content_length_value(HeaderValue::from_static(" 5 "));
+    changed.append_content_length_value(HeaderValue::from_static("5"));
+    assert_eq!(changed, frozen);
+    let mut sensitive = HeaderValue::from_static("5");
+    sensitive.set_sensitive(true);
+    changed.set_content_length_value(HeaderValue::from_static(" 5 "));
+    changed.append_content_length_value(sensitive);
+    assert_ne!(changed, frozen); // sensitivity of a non-first CL occurrence
+    let mut changed = headers.clone();
+    let mut sensitive = HeaderValue::from_static("second");
+    sensitive.set_sensitive(true);
+    changed.insert(name("x-bin"), HeaderValue::from_bytes(b"\xff").unwrap());
+    changed.append(name("x-bin"), sensitive);
+    assert_ne!(changed, frozen); // ordinary sensitivity too
+    changed.remove(&name("x-bin"));
+    changed.insert(name("x-bin"), HeaderValue::from_static("second"));
+    changed.append(name("x-bin"), HeaderValue::from_bytes(b"\xff").unwrap());
+    assert_ne!(changed, frozen);
+    assert_eq!(headers, frozen); // a frozen clone is independent of later edits
+
+    let mut left = Headers::new();
+    left.insert(name("x-a"), HeaderValue::from_static("a"));
+    left.set_content_length_value(HeaderValue::from_static("bad"));
+    let mut right = Headers::new();
+    right.set_content_length_value(HeaderValue::from_static("bad"));
+    right.insert(name("x-a"), HeaderValue::from_static("a"));
+    assert_eq!(left, right); // distinct-name insertion order is not meaningful
+    right.set_content_length_value(HeaderValue::from_static("worse"));
+    assert_ne!(left, right); // even two malformed declarations differ literally
+}

@@ -45,9 +45,9 @@ check_crate() {
   fi
 }
 
-# qpx-core now exposes opaque VarySelector selection and closes generic
-# Content-Length text projection; keep the fingerprint gate strict.
-check_crate qpx-core 8158c5fbb28cfb5e86886ea9ea90612239e50c8fdba672ec3dbccac6e24d2bbb
+# qpx-core exposes opaque owner-backed headers, policy operations and Vary selection;
+# Content-Length text projection remains closed, so keep the fingerprint gate strict.
+check_crate qpx-core 5c414d638742acc00d6ef0b37f38e9ffc4478ec1aed2c9e95029d1dab0044e00
 check_crate qpx-auth c17be9a9eb26c0587c0425b1d2088ebe1ad09d5c7f43a00dc8677938ecf842c5
 check_crate qpx-h3 410b9670db15527f87dd91afd6629a76bf7dfcd3b404fe859c8bf2d42ac3062d
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a

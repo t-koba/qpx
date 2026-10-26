@@ -1,6 +1,6 @@
 //! Owned HTTP messages for in-domain processing.
 //!
-//! [`Headers`] keeps Content-Length behind its typed declaration API. Ordinary
+//! [`Headers`](crate::http_message::Headers) keeps Content-Length behind its typed declaration API. Ordinary
 //! fields retain `http`'s bytes, sensitivity and per-name occurrence order; they
 //! can only be accessed with a name that cannot denote Content-Length.
 //!
@@ -150,8 +150,12 @@ impl<'a> OwnedHeaderView<'a> {
 
 /// A header set whose raw map and Content-Length values never escape in-domain.
 ///
-/// Clone is available for intentional message forks, not required to move a
-/// message between stages. Debug hides values, including framing declarations.
+/// Clone is available for intentional message forks and frozen snapshots, not
+/// required to move a message between stages. Equality compares every literal
+/// field occurrence (including Content-Length), its bytes and sensitivity, in
+/// per-name order. Ordering of distinct names is not significant, matching
+/// `http::HeaderMap` semantics. No values are returned by comparison; Debug also
+/// hides values, including framing declarations.
 ///
 /// These examples compile as external consumers of qpx-core. A consumer cannot
 /// reach the raw storage or forge an ordinary name:
@@ -189,6 +193,13 @@ impl<'a> OwnedHeaderView<'a> {
 /// use qpx_core::http_message::Headers;
 /// let _ = Headers::new().into_codec_headers();
 /// ```
+/// Policy regex mutation is deliberately not an external value-access API:
+/// ```compile_fail,E0624
+/// use qpx_core::http_message::Headers;
+/// let mut headers = Headers::new();
+/// headers.replace_header_regex(&http::header::CONTENT_LENGTH,
+///     &regex::Regex::new(".*").unwrap(), "0");
+/// ```
 #[derive(Clone, Default)]
 pub struct Headers {
     inner: HeaderMap,
@@ -200,7 +211,50 @@ impl fmt::Debug for Headers {
     }
 }
 
+impl PartialEq for Headers {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner.len() == other.inner.len()
+            && self.inner.keys().all(|name| {
+                let left = self.inner.get_all(name);
+                let right = other.inner.get_all(name);
+                left.iter().count() == right.iter().count()
+                    && left
+                        .iter()
+                        .zip(right.iter())
+                        .all(|(a, b)| a == b && a.is_sensitive() == b.is_sensitive())
+            })
+    }
+}
+
+impl Eq for Headers {}
+
 impl Headers {
+    /// Literal presence, even when the declaration is malformed or conflicting.
+    /// This does not parse or return the stored declaration.
+    pub fn contains_content_length(&self) -> bool {
+        self.inner.contains_key(CONTENT_LENGTH)
+    }
+
+    /// Literal presence of an ordinary field, including nontextual values.
+    pub fn contains_key(&self, name: &OrdinaryHeaderName) -> bool {
+        self.inner.contains_key(&name.0)
+    }
+
+    pub(crate) fn reserve(&mut self, additional: usize) {
+        self.inner.reserve(additional);
+    }
+
+    // Only the compiled policy engine may request a textual replacement. No
+    // callback, selected text or previous value leaves the owner.
+    pub(crate) fn replace_header_regex(
+        &mut self,
+        name: &HeaderName,
+        pattern: &regex::Regex,
+        replacement: &str,
+    ) -> bool {
+        replace_header_regex(&mut self.inner, name, pattern, replacement)
+    }
+
     /// An empty header set, with an absent Content-Length declaration.
     pub fn new() -> Self {
         Self::default()
@@ -299,6 +353,27 @@ impl Headers {
             self.set_content_length(length);
         }
         Ok(self.inner)
+    }
+}
+
+// Transitional raw-map callers and Headers share the same replacement operation.
+// true means invalid replacement; absent/nontextual first values are skipped.
+pub(crate) fn replace_header_regex(
+    headers: &mut HeaderMap,
+    name: &HeaderName,
+    pattern: &regex::Regex,
+    replacement: &str,
+) -> bool {
+    let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let replaced = pattern.replace_all(value, replacement);
+    match HeaderValue::from_str(replaced.as_ref()) {
+        Ok(value) => {
+            headers.insert(name.clone(), value);
+            false
+        }
+        Err(_) => true,
     }
 }
 

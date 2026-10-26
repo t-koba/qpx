@@ -1,6 +1,7 @@
 use crate::config::HeaderMatch;
-use crate::http_content_length::{HeaderPredicate, HeaderView};
+use crate::http_content_length::HeaderPredicate;
 use crate::prefilter::StringInterner;
+use crate::rules::PolicyHeaderView;
 use anyhow::anyhow;
 use regex::Regex;
 use std::sync::Arc;
@@ -56,7 +57,7 @@ pub(super) fn build_header_matchers(
 
 pub(super) fn fast_headers_match(
     matchers: &[HeaderMatcherFast],
-    headers: Option<HeaderView<'_>>,
+    headers: Option<PolicyHeaderView<'_>>,
 ) -> bool {
     if matchers.is_empty() {
         return true;
@@ -75,7 +76,7 @@ pub(super) fn fast_headers_match(
 
 pub(super) fn regex_headers_match(
     matchers: &[HeaderMatcherRegex],
-    headers: Option<HeaderView<'_>>,
+    headers: Option<PolicyHeaderView<'_>>,
 ) -> bool {
     if matchers.is_empty() {
         return true;
@@ -93,7 +94,7 @@ pub(super) fn regex_headers_match(
 
 pub(super) fn trace_fast_header(
     matcher: &HeaderMatcherFast,
-    headers: Option<HeaderView<'_>>,
+    headers: Option<PolicyHeaderView<'_>>,
 ) -> (String, Option<String>, bool) {
     let configured = match &matcher.mode {
         HeaderFastMode::Present => "<present>".to_string(),
@@ -117,7 +118,7 @@ pub(super) fn trace_fast_header(
 
 pub(super) fn trace_regex_header(
     matcher: &HeaderMatcherRegex,
-    headers: Option<HeaderView<'_>>,
+    headers: Option<PolicyHeaderView<'_>>,
 ) -> (Option<String>, bool) {
     let diagnostic = match headers {
         Some(view) => view.trace(

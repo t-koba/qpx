@@ -54,8 +54,8 @@ impl CompiledRpcMatch {
             && match_optional_text(&self.status, ctx.rpc_status)
             && match_optional_numeric(&self.message_size, ctx.rpc_message_size)
             && match_optional_text(&self.message, ctx.rpc_message)
-            && fast_headers_match(&self.trailers_fast, ctx.rpc_trailers)
-            && regex_headers_match(&self.trailers_regex, ctx.rpc_trailers)
+            && fast_headers_match(&self.trailers_fast, ctx.trailer_view())
+            && regex_headers_match(&self.trailers_regex, ctx.trailer_view())
     }
 
     pub(super) fn matches_without_request_body_observation(

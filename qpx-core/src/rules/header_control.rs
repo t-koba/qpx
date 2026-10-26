@@ -1,4 +1,5 @@
 use crate::config::HeaderControl;
+use crate::http_message::{Headers, OrdinaryHeaderName};
 
 use super::Result;
 
@@ -69,7 +70,8 @@ impl CompiledHeaderControl {
         merged
     }
 
-    /// Applies request mutations to `headers`.
+    /// Applies request mutations to a transitional raw map.
+    /// Prefer [`Self::apply_request_owned`] for in-domain messages.
     ///
     /// Returns the header names whose regex replacement produced an invalid
     /// value, in execution order with repetitions preserved. Callers report
@@ -84,12 +86,40 @@ impl CompiledHeaderControl {
         )
     }
 
-    /// Applies response mutations to `headers`.
+    /// Applies response mutations to a transitional raw map.
+    /// Prefer [`Self::apply_response_owned`] for in-domain messages.
     ///
     /// Returns the header names whose regex replacement produced an invalid
     /// value, in execution order with repetitions preserved. Callers report
     /// one diagnostic per entry.
     pub fn apply_response(&self, headers: &mut http::HeaderMap) -> Vec<http::header::HeaderName> {
+        apply_mutations(
+            headers,
+            &self.response_set,
+            &self.response_add,
+            &self.response_remove,
+            &self.response_regex_replace,
+        )
+    }
+
+    /// Applies request policy to owned headers without exposing stored values.
+    ///
+    /// Like [`Self::apply_request`], returns invalid replacement names in
+    /// execution order, including repetitions. Literal Content-Length set/add
+    /// values are preserved; framing validation remains the owner's job.
+    pub fn apply_request_owned(&self, headers: &mut Headers) -> Vec<http::header::HeaderName> {
+        apply_mutations(
+            headers,
+            &self.request_set,
+            &self.request_add,
+            &self.request_remove,
+            &self.request_regex_replace,
+        )
+    }
+
+    /// Applies response policy to owned headers, with the same diagnostics and
+    /// literal-value semantics as [`Self::apply_request_owned`].
+    pub fn apply_response_owned(&self, headers: &mut Headers) -> Vec<http::header::HeaderName> {
         apply_mutations(
             headers,
             &self.response_set,
@@ -115,8 +145,71 @@ impl CompiledHeaderControl {
     }
 }
 
+// Private capability boundary: implementations accept configured literals but
+// never return stored field values, even to the shared mutation engine.
+trait MutationTarget {
+    fn reserve(&mut self, additional: usize);
+    fn set(&mut self, name: http::header::HeaderName, value: http::HeaderValue);
+    fn add(&mut self, name: http::header::HeaderName, value: http::HeaderValue);
+    fn remove(&mut self, name: &http::header::HeaderName);
+    fn replace(&mut self, operation: &CompiledRegexReplace) -> bool;
+}
+
+impl MutationTarget for http::HeaderMap {
+    fn reserve(&mut self, additional: usize) {
+        self.reserve(additional);
+    }
+    fn set(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+        self.insert(name, value);
+    }
+    fn add(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+        self.append(name, value);
+    }
+    fn remove(&mut self, name: &http::header::HeaderName) {
+        self.remove(name);
+    }
+    fn replace(&mut self, operation: &CompiledRegexReplace) -> bool {
+        crate::http_message::replace_header_regex(
+            self,
+            &operation.header,
+            &operation.pattern,
+            &operation.replace,
+        )
+    }
+}
+
+impl MutationTarget for Headers {
+    fn reserve(&mut self, additional: usize) {
+        self.reserve(additional);
+    }
+    fn set(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+        if let Ok(name) = OrdinaryHeaderName::try_from(name) {
+            self.insert(name, value);
+        } else {
+            self.set_content_length_value(value);
+        }
+    }
+    fn add(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
+        if let Ok(name) = OrdinaryHeaderName::try_from(name) {
+            self.append(name, value);
+        } else {
+            self.append_content_length_value(value);
+        }
+    }
+    fn remove(&mut self, name: &http::header::HeaderName) {
+        if let Ok(name) = OrdinaryHeaderName::try_from(name.clone()) {
+            self.remove(&name);
+        } else {
+            self.remove_content_length();
+        }
+    }
+    fn replace(&mut self, operation: &CompiledRegexReplace) -> bool {
+        self.replace_header_regex(&operation.header, &operation.pattern, &operation.replace)
+    }
+}
+
 fn apply_mutations(
-    headers: &mut http::HeaderMap,
+    headers: &mut impl MutationTarget,
     set: &[(http::header::HeaderName, http::HeaderValue)],
     add: &[(http::header::HeaderName, http::HeaderValue)],
     remove: &[http::header::HeaderName],
@@ -124,23 +217,17 @@ fn apply_mutations(
 ) -> Vec<http::header::HeaderName> {
     headers.reserve(set.len().saturating_add(add.len()));
     for (name, value) in set {
-        headers.insert(name.clone(), value.clone());
+        headers.set(name.clone(), value.clone());
     }
     for (name, value) in add {
-        headers.append(name.clone(), value.clone());
+        headers.add(name.clone(), value.clone());
     }
     for name in remove {
         headers.remove(name);
     }
     let mut invalid = Vec::new();
     for replace in regex_replace {
-        let Some(value) = headers.get(&replace.header).and_then(|v| v.to_str().ok()) else {
-            continue;
-        };
-        let replaced = replace.pattern.replace_all(value, replace.replace.as_str());
-        if let Ok(new_value) = http::HeaderValue::from_str(replaced.as_ref()) {
-            headers.insert(replace.header.clone(), new_value);
-        } else {
+        if headers.replace(replace) {
             invalid.push(replace.header.clone());
         }
     }

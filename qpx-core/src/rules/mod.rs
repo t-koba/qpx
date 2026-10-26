@@ -11,6 +11,7 @@ mod context;
 mod header_control;
 mod observation;
 
+pub(crate) use context::PolicyHeaderView;
 pub use context::RuleMatchContext;
 pub use header_control::CompiledHeaderControl;
 pub use observation::CandidateRequestObservationRequirements;

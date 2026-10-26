@@ -143,8 +143,8 @@ impl CompiledMatch {
         }
 
         if !observation.ignores_headers()
-            && (!fast_headers_match(&self.headers_fast, ctx.headers)
-                || !regex_headers_match(&self.headers_regex, ctx.headers))
+            && (!fast_headers_match(&self.headers_fast, ctx.header_view())
+                || !regex_headers_match(&self.headers_regex, ctx.header_view()))
         {
             return false;
         }
