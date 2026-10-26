@@ -669,19 +669,11 @@ struct H2HeaderCountTooLarge;
 pub(crate) struct InflightCounterGuard(Option<Arc<AtomicUsize>>);
 
 impl InflightCounterGuard {
-    pub(crate) fn from_existing(counter: Option<Arc<AtomicUsize>>) -> Self {
-        Self(counter)
-    }
-
     pub(crate) fn reserve(counter: Option<Arc<AtomicUsize>>) -> Self {
         if let Some(counter) = &counter {
             counter.fetch_add(1, Ordering::Relaxed);
         }
         Self(counter)
-    }
-
-    pub(crate) fn into_counter(mut self) -> Option<Arc<AtomicUsize>> {
-        self.0.take()
     }
 }
 
@@ -694,15 +686,15 @@ impl Drop for InflightCounterGuard {
 }
 
 pub(crate) fn h2_response_body(body: RecvStream) -> Body {
-    h2_response_body_with_inflight(body, None)
+    h2_response_body_with_inflight(body, InflightCounterGuard::reserve(None))
 }
 
 pub(crate) fn h2_response_body_with_inflight(
     body: RecvStream,
-    inflight: Option<Arc<AtomicUsize>>,
+    inflight: InflightCounterGuard,
 ) -> Body {
     if body.is_end_stream() {
-        drop(InflightCounterGuard::from_existing(inflight));
+        drop(inflight);
         return Body::empty();
     }
     Body::wrap(H2RecvBody::response(body, inflight))
@@ -721,7 +713,7 @@ pub(crate) fn h2_response_to_hyper(
 
 pub(crate) fn h2_response_to_hyper_with_inflight(
     response: ::http::Response<RecvStream>,
-    inflight: Option<Arc<AtomicUsize>>,
+    inflight: InflightCounterGuard,
 ) -> Result<Response<Body>> {
     let (mut parts, body) = response.into_parts();
     parts.status =
@@ -769,11 +761,11 @@ impl H2RecvBody {
         }
     }
 
-    fn response(body: RecvStream, inflight: Option<Arc<AtomicUsize>>) -> Self {
+    fn response(body: RecvStream, inflight: InflightCounterGuard) -> Self {
         Self {
             body: Some(body),
             kind: H2RecvBodyKind::Response {
-                _inflight: InflightCounterGuard::from_existing(inflight),
+                _inflight: inflight,
             },
             state: H2RecvBodyState::Data,
             read_timer: None,

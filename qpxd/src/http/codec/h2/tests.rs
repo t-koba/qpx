@@ -450,9 +450,9 @@ fn inflight_counter_guard_releases_on_drop_and_transfers_once() {
     let reservation = InflightCounterGuard::reserve(Some(counter.clone()));
     assert_eq!(counter.load(Ordering::Relaxed), 1);
 
-    let transferred = reservation.into_counter().expect("reserved counter");
+    let transferred = reservation;
     assert_eq!(counter.load(Ordering::Relaxed), 1);
-    drop(InflightCounterGuard::from_existing(Some(transferred)));
+    drop(transferred);
     assert_eq!(counter.load(Ordering::Relaxed), 0);
 
     {
@@ -462,8 +462,10 @@ fn inflight_counter_guard_releases_on_drop_and_transfers_once() {
     assert_eq!(counter.load(Ordering::Relaxed), 0);
 }
 
-#[tokio::test]
-async fn empty_h2_response_releases_inflight_immediately() {
+async fn receive_h2_test_response(
+    status: u16,
+    data: Option<Bytes>,
+) -> ::http::Response<RecvStream> {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr = listener.local_addr().expect("addr");
     tokio::spawn(async move {
@@ -476,12 +478,15 @@ async fn empty_h2_response_releases_inflight_immediately() {
             .expect("request");
         drop(request);
         let response = ::http::Response::builder()
-            .status(::http::StatusCode::NO_CONTENT)
+            .status(status)
             .body(())
             .expect("response");
-        respond
-            .send_response(response, true)
+        let mut stream = respond
+            .send_response(response, data.is_none())
             .expect("send response");
+        if let Some(data) = data {
+            stream.send_data(data, true).expect("send data");
+        }
         poll_fn(|cx| connection.poll_closed(cx))
             .await
             .expect("connection close");
@@ -495,18 +500,69 @@ async fn empty_h2_response_releases_inflight_immediately() {
     client = client.ready().await.expect("ready");
     let request = ::http::Request::builder()
         .method("GET")
-        .uri("https://reverse_edges.test/empty")
+        .uri("https://reverse_edges.test/inflight")
         .body(())
         .expect("request");
     let (response, _) = client.send_request(request, true).expect("send request");
-    let response = response.await.expect("response");
-    let inflight = Arc::new(AtomicUsize::new(1));
+    response.await.expect("response")
+}
 
-    let converted = h2_response_to_hyper_with_inflight(response, Some(inflight.clone()))
-        .expect("convert response");
+#[tokio::test]
+async fn invalid_h2_response_releases_inflight_on_conversion_error() {
+    // h2 accepts this final status on the wire, but qpx rejects its status class.
+    let response = receive_h2_test_response(600, Some(Bytes::from_static(b"body"))).await;
+    assert_eq!(response.status().as_u16(), 600);
+    let inflight = Arc::new(AtomicUsize::new(3));
+    let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
+    assert_eq!(inflight.load(Ordering::Relaxed), 4);
+
+    let result = h2_response_to_hyper_with_inflight(response, reservation);
+
+    assert!(result.is_err(), "invalid final status must be rejected");
+    assert_eq!(inflight.load(Ordering::Relaxed), 3);
+}
+
+#[tokio::test]
+async fn empty_h2_response_releases_inflight_immediately() {
+    let response = receive_h2_test_response(204, None).await;
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
+
+    let converted =
+        h2_response_to_hyper_with_inflight(response, reservation).expect("convert response");
 
     assert!(converted.body().is_end_stream());
-    assert_eq!(inflight.load(Ordering::SeqCst), 0);
+    assert_eq!(inflight.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn nonempty_h2_response_retains_inflight_until_body_drop() {
+    let response = receive_h2_test_response(200, Some(Bytes::from_static(b"body"))).await;
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
+
+    let converted =
+        h2_response_to_hyper_with_inflight(response, reservation).expect("convert response");
+
+    assert!(!converted.body().is_end_stream());
+    assert_eq!(inflight.load(Ordering::Relaxed), 1);
+    drop(converted);
+    assert_eq!(inflight.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn nonempty_h2_response_releases_inflight_after_body_consumption() {
+    let response = receive_h2_test_response(200, Some(Bytes::from_static(b"body"))).await;
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
+
+    let converted =
+        h2_response_to_hyper_with_inflight(response, reservation).expect("convert response");
+
+    assert_eq!(inflight.load(Ordering::Relaxed), 1);
+    let bytes = to_bytes(converted.into_body()).await.expect("read body");
+    assert_eq!(bytes.as_ref(), b"body");
+    assert_eq!(inflight.load(Ordering::Relaxed), 0);
 }
 
 #[tokio::test]

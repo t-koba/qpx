@@ -93,7 +93,7 @@ pub(super) async fn send_h2_request_with_sender(
     let (mut response, mut send_stream) = sender.send_request(request, false)?;
     stream_request_body_to_h2(&mut body, &mut send_stream, declared_length).await?;
     let (interim, response) = recv_h2_response_with_interim(&mut response).await?;
-    let response = h2_response_to_hyper_with_inflight(response, inflight.into_counter())?;
+    let response = h2_response_to_hyper_with_inflight(response, inflight)?;
     Ok(Http1ResponseWithInterim {
         interim,
         response,
