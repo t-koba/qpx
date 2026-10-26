@@ -49,6 +49,7 @@ impl Trailers {
         Self::default()
     }
 
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
     pub(crate) fn from_header_map(inner: HeaderMap) -> Self {
         Self { inner }
     }
