@@ -111,6 +111,102 @@ async fn unsafe_method_invalidates_cached_target() {
 }
 
 #[tokio::test]
+async fn ipv6_content_location_invalidates_only_same_authority_targets() {
+    let backends = backend_map();
+    let mut cached_request = Request::builder()
+        .method(Method::GET)
+        .uri("/target")
+        .header(HOST, "[2001:db8::1]:443")
+        .body(Body::empty())
+        .unwrap();
+    let cached_key = CacheRequestKey::for_lookup(&cached_request, "https")
+        .unwrap()
+        .unwrap();
+    store_and_drain(
+        cached_request.method(),
+        cached_request.headers(),
+        &cached_key,
+        &policy(),
+        make_response(StatusCode::OK, "public, max-age=60", "cached"),
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .unwrap();
+
+    let mutation_request = Request::builder()
+        .method(Method::POST)
+        .uri("/mutate")
+        .header(HOST, "[2001:db8::1]:443")
+        .body(Body::empty())
+        .unwrap();
+    let mutation_key = CacheRequestKey::for_target(&mutation_request, "https")
+        .unwrap()
+        .unwrap();
+    let mut response_headers = http::HeaderMap::new();
+    response_headers.insert(
+        CONTENT_LOCATION,
+        http::HeaderValue::from_static("https://other.example/target"),
+    );
+    maybe_invalidate(
+        mutation_request.method(),
+        StatusCode::OK,
+        &response_headers,
+        Some(&mutation_key),
+        &policy(),
+        &backends,
+    )
+    .await
+    .unwrap();
+
+    cached_request.headers_mut().insert(
+        CACHE_CONTROL,
+        http::HeaderValue::from_static("only-if-cached"),
+    );
+    let cached_key = CacheRequestKey::for_lookup(&cached_request, "https")
+        .unwrap()
+        .unwrap();
+    let outcome = lookup(
+        cached_request.method(),
+        cached_request.headers(),
+        &cached_key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, LookupOutcome::Hit(_)));
+
+    response_headers.insert(CONTENT_LOCATION, http::HeaderValue::from_static("/target"));
+    maybe_invalidate(
+        mutation_request.method(),
+        StatusCode::OK,
+        &response_headers,
+        Some(&mutation_key),
+        &policy(),
+        &backends,
+    )
+    .await
+    .unwrap();
+    let outcome = lookup(
+        cached_request.method(),
+        cached_request.headers(),
+        &cached_key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(outcome, LookupOutcome::OnlyIfCachedMiss));
+}
+
+#[tokio::test]
 async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
     let req = make_get_request("/idle-cache-body");
     let key = CacheRequestKey::for_lookup(&req, "http")

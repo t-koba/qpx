@@ -263,12 +263,7 @@ pub fn normalize_authority(raw: &str, scheme: &str) -> Option<String> {
         .build()
         .ok()?;
     let authority = uri.authority()?;
-    let host = authority.host().to_ascii_lowercase();
-    let host = if host.contains(':') {
-        format!("[{}]", host)
-    } else {
-        host
-    };
+    let host = normalize_host(authority.host());
 
     if let Some(port) = authority.port_u16() {
         let default_port = match normalized_scheme {
@@ -283,13 +278,19 @@ pub fn normalize_authority(raw: &str, scheme: &str) -> Option<String> {
     Some(host)
 }
 
-pub fn normalize_url_authority(url: &Url) -> Option<String> {
-    let host = url.host_str()?.to_ascii_lowercase();
-    let host = if host.contains(':') {
+fn normalize_host(host: &str) -> String {
+    let host = host.to_ascii_lowercase();
+    if host.starts_with('[') && host.ends_with(']') {
+        host
+    } else if host.contains(':') {
         format!("[{}]", host)
     } else {
         host
-    };
+    }
+}
+
+pub fn normalize_url_authority(url: &Url) -> Option<String> {
+    let host = normalize_host(url.host_str()?);
     let default_port = match url.scheme() {
         "https" => 443,
         "http" => 80,
@@ -374,5 +375,66 @@ mod tests {
             .unwrap();
         assert_eq!(other.authority.as_ref(), "other.example");
         assert_ne!(first.authority, other.authority);
+    }
+
+    #[test]
+    fn ipv6_authority_normalization_preserves_uri_and_host_semantics() {
+        let absolute_request = Request::builder()
+            .method(Method::GET)
+            .uri("https://[2001:db8::1]:443/absolute?q=1")
+            .header(HOST, "other.example")
+            .body(Body::empty())
+            .unwrap();
+        let absolute = CacheRequestKey::for_target(&absolute_request, "http")
+            .unwrap()
+            .unwrap();
+        assert_eq!(absolute.scheme.as_ref(), "https");
+        assert_eq!(absolute.authority.as_ref(), "[2001:db8::1]");
+        assert_eq!(absolute.path_and_query.as_ref(), "/absolute?q=1");
+        let absolute_url = absolute.absolute_url().unwrap();
+        assert_eq!(absolute_url.as_str(), "https://[2001:db8::1]/absolute?q=1");
+        assert_eq!(absolute_url.port(), None);
+        assert_eq!(
+            normalize_url_authority(&absolute_url).as_deref(),
+            Some("[2001:db8::1]")
+        );
+        assert_eq!(absolute_url.path(), "/absolute");
+        assert_eq!(absolute_url.query(), Some("q=1"));
+
+        let mut host_fallback_request = Request::builder()
+            .method(Method::GET)
+            .uri("/host-fallback")
+            .header(HOST, "[2001:db8::1]:443")
+            .body(Body::empty())
+            .unwrap();
+        host_fallback_request
+            .headers_mut()
+            .append(HOST, http::HeaderValue::from_static("other.example"));
+        let host_fallback = CacheRequestKey::for_target(&host_fallback_request, "https")
+            .unwrap()
+            .unwrap();
+        assert_eq!(host_fallback.authority.as_ref(), "[2001:db8::1]");
+        assert_eq!(host_fallback.path_and_query.as_ref(), "/host-fallback");
+        assert_eq!(
+            host_fallback.absolute_url().unwrap().as_str(),
+            "https://[2001:db8::1]/host-fallback"
+        );
+
+        assert_eq!(
+            normalize_authority("[2001:db8::1]:8443", "https").as_deref(),
+            Some("[2001:db8::1]:8443")
+        );
+        assert_eq!(
+            normalize_url_authority(&Url::parse("https://[2001:db8::1]:8443/").unwrap()).as_deref(),
+            Some("[2001:db8::1]:8443")
+        );
+        assert_eq!(
+            normalize_authority("Example.COM:80", "http").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(
+            normalize_authority("192.0.2.1:8080", "http").as_deref(),
+            Some("192.0.2.1:8080")
+        );
     }
 }
