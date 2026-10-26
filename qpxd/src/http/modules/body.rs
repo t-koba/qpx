@@ -80,7 +80,7 @@ impl Trailers {
     }
 
     /// Returns the normalized gRPC status when present (`"invalid"` for an
-    /// unparseable status value), without exposing the encoded field value.
+    /// unparsable status value), without exposing the encoded field value.
     pub fn grpc_status(&self) -> Option<String> {
         crate::http::rpc::grpc_status_from_trailers(&self.inner)
     }
@@ -323,16 +323,23 @@ impl Body {
             return None;
         }
         let result = self.inner.frame().await?;
-        Some(self.record_result(result).map(|frame| {
-            match frame.into_data() {
-                Ok(data) => BodyFrame::Data(data),
-                Err(frame) => BodyFrame::Trailers(Trailers {
-                    inner: frame
-                        .into_trailers()
-                        .expect("transport data or trailer frame"),
-                }),
-            }
-        }))
+        let frame = match self.record_result(result) {
+            Ok(frame) => match frame.into_data() {
+                Ok(data) => Ok(BodyFrame::Data(data)),
+                Err(frame) => match frame.into_trailers() {
+                    Ok(inner) => Ok(BodyFrame::Trailers(Trailers { inner })),
+                    Err(_) => {
+                        let error = BodyError::new(
+                            "transport body emitted a frame without data or trailers",
+                        );
+                        self.failure = Some(error.clone());
+                        Err(error)
+                    }
+                },
+            },
+            Err(error) => Err(error),
+        };
+        Some(frame)
     }
 
     fn record_result<T>(
