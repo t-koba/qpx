@@ -106,7 +106,7 @@ async fn send_http1_request_with_interim_parses_early_hints() {
     );
     assert_eq!(
         response.interim[0]
-            .headers
+            .headers_for_egress()
             .get("link")
             .and_then(|value| value.to_str().ok()),
         Some("</app.css>; rel=preload; as=style")

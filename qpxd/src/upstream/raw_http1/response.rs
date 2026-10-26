@@ -104,7 +104,7 @@ pub(super) async fn read_response_head_with_interim(
         let (consumed, version, status, headers, body_kind) = parsed;
         buf.advance(consumed);
         if status.is_informational() && status != StatusCode::SWITCHING_PROTOCOLS {
-            interim.push(InterimResponseHead { status, headers });
+            interim.push(InterimResponseHead::new(status, headers));
             continue;
         }
         return Ok((
@@ -203,7 +203,7 @@ async fn read_finalized_raw_response_head_with_interim_inner(
         if status.is_informational() && status != StatusCode::SWITCHING_PROTOCOLS {
             let headers = headers
                 .ok_or_else(|| anyhow!("informational raw response is missing parsed headers"))?;
-            interim.push(InterimResponseHead { status, headers });
+            interim.push(InterimResponseHead::new(status, headers));
             continue;
         }
         let mut raw =

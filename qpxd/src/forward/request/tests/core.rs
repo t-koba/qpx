@@ -224,7 +224,7 @@ async fn forward_request_preserves_upstream_early_hints() {
     );
     assert_eq!(
         interim[0]
-            .headers
+            .headers_for_egress()
             .get(http::header::LINK)
             .and_then(|value| value.to_str().ok()),
         Some("</style.css>; rel=preload; as=style")

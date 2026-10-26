@@ -441,15 +441,13 @@ async fn send_reverse_qpx_interim_response(
     head: crate::upstream::raw_http1::InterimResponseHead,
     streaming: ResolvedStreamingLimits,
 ) -> Result<()> {
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
+    qpx_http::protocol::semantics::validate_http_status_class(
         head.status,
         "QPX HTTP/3 interim response",
     )?;
-    let mut interim = http::Response::builder().status(status).body(())?;
-    *interim.headers_mut() = head.headers;
     crate::http3::qpx_stream::send_qpx_interim_response_to_send(
         response_stream,
-        interim,
+        head,
         Duration::from_millis(streaming.body_send_timeout_ms),
     )
     .await

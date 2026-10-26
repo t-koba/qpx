@@ -18,7 +18,7 @@ pub(crate) use self::request_body::{
 
 pub(crate) async fn send_qpx_interim_response_to_send(
     req_stream: &mut qpx_h3::RequestSendStream,
-    interim: http::Response<()>,
+    interim: crate::upstream::raw_http1::InterimResponseHead,
     send_timeout: Duration,
 ) -> Result<()> {
     send_qpx_interim_response_inner(QpxResponseWriter::Send(req_stream), interim, send_timeout)
@@ -75,7 +75,7 @@ impl QpxResponseWriter<'_> {
 
 async fn send_qpx_interim_response_inner(
     mut req_stream: QpxResponseWriter<'_>,
-    interim: http::Response<()>,
+    interim: crate::upstream::raw_http1::InterimResponseHead,
     send_timeout: Duration,
 ) -> Result<()> {
     let interim = sanitize_interim_response_for_h3(interim)?;

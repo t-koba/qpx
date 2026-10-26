@@ -290,10 +290,10 @@ edges:
                 if case != "ipc" {
                     let mut headers = http::HeaderMap::new();
                     headers.insert("link", "</asset>; rel=preload".parse()?);
-                    interim.push(crate::upstream::raw_http1::InterimResponseHead {
-                        status: StatusCode::EARLY_HINTS,
+                    interim.push(crate::upstream::raw_http1::InterimResponseHead::new(
+                        StatusCode::EARLY_HINTS,
                         headers,
-                    });
+                    ));
                 }
                 let is_error = !matches!(case, "http" | "ipc");
                 let outcome = handle_reverse_success(ReverseSuccessInput {
@@ -346,7 +346,10 @@ edges:
                         assert_eq!(interim.len(), usize::from(case == "http"), "{case}");
                         if case == "http" {
                             assert_eq!(interim[0].status, StatusCode::EARLY_HINTS);
-                            assert_eq!(interim[0].headers["link"], "</asset>; rel=preload");
+                            assert_eq!(
+                                interim[0].headers_for_egress()["link"],
+                                "</asset>; rel=preload"
+                            );
                         }
                         assert_eq!(
                             response.status().as_u16(),

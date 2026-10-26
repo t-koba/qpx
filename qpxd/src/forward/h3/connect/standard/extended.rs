@@ -7,6 +7,7 @@ use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::h3_buf_to_bytes;
 use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
+use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::Response;
@@ -18,7 +19,7 @@ use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(super) struct UpstreamExtendedConnectStream {
-    pub(super) interim: Vec<::http::Response<()>>,
+    pub(super) interim: Vec<InterimResponseHead>,
     pub(super) response: ::http::Response<()>,
     pub(super) req_stream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     pub(super) datagrams: Option<H3StreamDatagrams>,
@@ -77,7 +78,7 @@ pub(in crate::forward) async fn recv_upstream_h3_response_with_interim(
     req_stream: &mut ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
     timeout_dur: Duration,
     context: &str,
-) -> Result<(Vec<::http::Response<()>>, ::http::Response<()>)> {
+) -> Result<(Vec<InterimResponseHead>, ::http::Response<()>)> {
     let mut interim = Vec::new();
     loop {
         let response = match timeout(timeout_dur, req_stream.recv_response()).await {
@@ -89,7 +90,8 @@ pub(in crate::forward) async fn recv_upstream_h3_response_with_interim(
             if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
                 return Err(anyhow!("{context} received forbidden 101 response"));
             }
-            interim.push(response);
+            let (parts, ()) = response.into_parts();
+            interim.push(InterimResponseHead::new(parts.status, parts.headers));
             continue;
         }
         return Ok((interim, response));

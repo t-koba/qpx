@@ -144,9 +144,9 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
     type Error = Infallible;
 
     async fn call(&self, _req: Request<Body>) -> Result<Response<Body>, Infallible> {
-        let interim = vec![InterimResponseHead {
-            status: StatusCode::from_u16(103).expect("103"),
-            headers: {
+        let interim = vec![InterimResponseHead::new(
+            StatusCode::from_u16(103).expect("103"),
+            {
                 let mut headers = HeaderMap::new();
                 headers.insert(
                     hyper::header::LINK,
@@ -160,7 +160,7 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
                 );
                 headers
             },
-        }];
+        )];
         let mut response = Response::builder()
             .status(StatusCode::OK)
             .header(CONTENT_LENGTH, "2")
@@ -587,6 +587,15 @@ async fn finalized_raw_response_head_uses_direct_http1_serialization() {
 
 #[tokio::test]
 async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
+    check_raw_relay_with_interim(false).await;
+}
+
+#[tokio::test]
+async fn interim_precedes_unchanged_raw_final_http1_relay() {
+    check_raw_relay_with_interim(true).await;
+}
+
+async fn check_raw_relay_with_interim(with_interim: bool) {
     let upstream_listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind upstream");
@@ -599,10 +608,24 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
         .await
         .expect("connect upstream");
 
-    let parsed = [httparse::Header {
-        name: "Content-Length",
-        value: b"4",
-    }];
+    let parsed = [
+        httparse::Header {
+            name: "Content-Length",
+            value: b"4",
+        },
+        httparse::Header {
+            name: "x-Mixed",
+            value: b"kept-\xff",
+        },
+        httparse::Header {
+            name: "Set-Cookie",
+            value: b"raw=1",
+        },
+        httparse::Header {
+            name: "Set-Cookie",
+            value: b"raw=2",
+        },
+    ];
     let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
         &parsed,
         &Method::GET,
@@ -611,10 +634,16 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
     )
     .expect("raw response head");
     raw_head.finalize("qpx");
+    let mut expected_final = raw_head.serialized_http11_head().to_vec();
+    expected_final.extend_from_slice(b"BODY");
 
     let (recycled_tx, mut recycled_rx) = tokio::sync::mpsc::unbounded_channel();
     let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
-        interim: Vec::new(),
+        interim: if with_interim {
+            ordered_interim_heads()
+        } else {
+            Vec::new()
+        },
         version: Version::HTTP_11,
         status: StatusCode::OK,
         raw: Arc::new(raw_head),
@@ -667,6 +696,14 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
         .expect("read downstream");
     downstream_server.await.expect("downstream task");
     upstream_server.await.expect("upstream task");
+    if with_interim {
+        assert_ordered_interim_wire(&encoded);
+    }
+    let final_offset = encoded
+        .windows(b"HTTP/1.1 200 OK".len())
+        .position(|w| w == b"HTTP/1.1 200 OK")
+        .unwrap();
+    assert_eq!(&encoded[final_offset..], expected_final);
     assert!(encoded.ends_with(b"\r\n\r\nBODY"));
 
     let (mut recycled, read_buf) = tokio::time::timeout(Duration::from_secs(1), recycled_rx.recv())
@@ -1153,5 +1190,122 @@ async fn http11_chunked_and_http10_plain_controls_reach_service() {
             1,
             "control {request:?} must reach the service"
         );
+    }
+}
+
+fn ordered_interim_heads() -> Vec<InterimResponseHead> {
+    let mut headers = HeaderMap::new();
+    for value in ["</one>; rel=preload", "</two>; rel=preload"] {
+        headers.append("link", HeaderValue::from_static(value));
+    }
+    for value in ["a=1", "b=2"] {
+        headers.append("set-cookie", HeaderValue::from_static(value));
+    }
+    headers.insert("x-opaque", HeaderValue::from_bytes(b"opaque-\xff").unwrap());
+    headers.insert(CONNECTION, HeaderValue::from_static("x-private"));
+    headers.insert("x-private", HeaderValue::from_static("remove-me"));
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("invalid"));
+    headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+    headers.insert("trailer", HeaderValue::from_static("x-trailer"));
+    vec![
+        InterimResponseHead::new(StatusCode::CONTINUE, HeaderMap::new()),
+        InterimResponseHead::new(StatusCode::EARLY_HINTS, headers.clone()),
+        InterimResponseHead::new(StatusCode::EARLY_HINTS, headers),
+    ]
+}
+
+fn assert_ordered_interim_wire(raw: &[u8]) {
+    let expected = b"HTTP/1.1 100 Continue\r\n\r\n";
+    assert!(raw.starts_with(expected));
+    let mut remaining = &raw[expected.len()..];
+    for _ in 0..2 {
+        assert!(remaining.starts_with(b"HTTP/1.1 103 Early Hints\r\n"));
+        let end = remaining.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let head = &remaining[..end];
+        for field in [
+            b"link: </one>; rel=preload\r\nlink: </two>; rel=preload\r\n".as_slice(),
+            b"set-cookie: a=1\r\nset-cookie: b=2\r\n",
+            b"x-opaque: opaque-\xff\r\n",
+        ] {
+            assert!(
+                head.windows(field.len()).any(|w| w == field),
+                "missing {field:?} in {head:?}"
+            );
+        }
+        for removed in [
+            "Connection:",
+            "X-Private:",
+            "Content-Length:",
+            "Transfer-Encoding:",
+            "Trailer:",
+        ] {
+            assert!(
+                !head
+                    .windows(removed.len())
+                    .any(|w| w.eq_ignore_ascii_case(removed.as_bytes()))
+            );
+        }
+        remaining = &remaining[end..];
+    }
+    assert!(remaining.starts_with(b"HTTP/1.1 200 OK\r\n"));
+}
+
+#[tokio::test]
+async fn interim_heads_keep_order_and_bytes_at_http1_egress() {
+    for version in [Version::HTTP_11, Version::HTTP_10] {
+        let (mut client, mut server) = tokio::io::duplex(8192);
+        let response = Response::builder()
+            .header(CONTENT_LENGTH, "2")
+            .body(Body::from("OK"))
+            .unwrap();
+        send_http1_response_with_interim(
+            &mut server,
+            version,
+            &Method::GET,
+            response,
+            &ordered_interim_heads(),
+            false,
+            Duration::from_secs(1),
+            &mut BytesMut::new(),
+        )
+        .await
+        .unwrap();
+        drop(server);
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).await.unwrap();
+        if version == Version::HTTP_11 {
+            assert_ordered_interim_wire(&wire);
+        } else {
+            assert!(wire.starts_with(b"HTTP/1.0 200 OK\r\n"));
+            assert!(!wire.windows(3).any(|w| w == b"103"));
+            assert!(!wire.windows(3).any(|w| w == b"100"));
+        }
+        assert!(wire.ends_with(b"\r\n\r\nOK"));
+    }
+}
+
+#[tokio::test]
+async fn interim_egress_rejects_101_and_final_status_before_writing() {
+    for status in [StatusCode::SWITCHING_PROTOCOLS, StatusCode::OK] {
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let interim = [InterimResponseHead::new(status, HeaderMap::new())];
+        assert!(
+            send_http1_response_with_interim(
+                &mut server,
+                Version::HTTP_11,
+                &Method::GET,
+                Response::new(Body::empty()),
+                &interim,
+                false,
+                Duration::from_secs(1),
+                &mut BytesMut::new(),
+            )
+            .await
+            .is_err()
+        );
+        drop(server);
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).await.unwrap();
+        assert!(wire.is_empty());
     }
 }

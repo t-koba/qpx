@@ -197,8 +197,7 @@ where
             if head.status == StatusCode::SWITCHING_PROTOCOLS {
                 return Err(anyhow!("HTTP/1 interim responses must not use 101"));
             }
-            let mut headers = head.headers.clone();
-            qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
+            let headers = head.headers_for_egress();
             write_status_and_headers(
                 writer,
                 head_buf,
@@ -452,8 +451,7 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
             if head.status == StatusCode::SWITCHING_PROTOCOLS {
                 return Err(anyhow!("HTTP/1 interim responses must not use 101"));
             }
-            let mut headers = head.headers.clone();
-            qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
+            let headers = head.headers_for_egress();
             write_status_and_headers(
                 writer,
                 head_buf,

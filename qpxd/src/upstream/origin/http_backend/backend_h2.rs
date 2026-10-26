@@ -1,6 +1,6 @@
 use crate::http::codec::h2::{
-    InflightCounterGuard, h1_headers_to_http, h2_response_to_hyper_with_inflight,
-    http_headers_to_h1, http_uri_to_http1_uri, parse_declared_content_length,
+    InflightCounterGuard, h2_response_to_hyper_with_inflight, http_headers_to_h1,
+    http_uri_to_http1_uri, parse_declared_content_length,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::upstream::raw_http1::Http1ResponseWithInterim;
@@ -180,10 +180,11 @@ async fn recv_h2_response_with_interim(
                 if status == http::StatusCode::SWITCHING_PROTOCOLS {
                     return Err(anyhow!("HTTP/2 upstream must not send 101"));
                 }
-                interim.push(crate::upstream::raw_http1::InterimResponseHead {
+                let (parts, ()) = response.into_parts();
+                interim.push(crate::upstream::raw_http1::InterimResponseHead::new(
                     status,
-                    headers: h1_headers_to_http(response.headers())?,
-                });
+                    parts.headers,
+                ));
             }
             H2ResponseEvent::Final(response) => return Ok((interim, response)),
         }

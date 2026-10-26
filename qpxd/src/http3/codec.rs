@@ -41,18 +41,19 @@ pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::Header
 }
 
 pub(crate) fn sanitize_interim_response_for_h3(
-    mut response: Http1Response<()>,
+    head: crate::upstream::raw_http1::InterimResponseHead,
 ) -> Result<Http1Response<()>> {
-    if !response.status().is_informational() {
+    if !head.status.is_informational() {
         return Err(anyhow!(
             "non-informational interim status for HTTP/3: {}",
-            response.status()
+            head.status
         ));
     }
-    if response.status() == http::StatusCode::SWITCHING_PROTOCOLS {
+    if head.status == http::StatusCode::SWITCHING_PROTOCOLS {
         return Err(anyhow!("HTTP/3 interim responses must not use 101"));
     }
-    qpx_http::protocol::semantics::sanitize_interim_response_headers(response.headers_mut());
+    let mut response = Http1Response::builder().status(head.status).body(())?;
+    *response.headers_mut() = head.headers_for_egress();
     Ok(response)
 }
 
@@ -379,6 +380,9 @@ mod tests {
             .body(())
             .expect("interim");
 
+        let (parts, ()) = interim.into_parts();
+        let interim =
+            crate::upstream::raw_http1::InterimResponseHead::new(parts.status, parts.headers);
         let interim = sanitize_interim_response_for_h3(interim).expect("sanitize");
         assert_eq!(interim.status(), ::http::StatusCode::EARLY_HINTS);
         assert!(interim.headers().contains_key(::http::header::LINK));
@@ -428,11 +432,80 @@ mod tests {
     }
 
     #[test]
+    fn h3_interim_response_keeps_order_duplicates_and_sensitive_bytes() {
+        use crate::upstream::raw_http1::InterimResponseHead;
+        let mut headers = http::HeaderMap::new();
+        for value in ["</one>", "</two>"] {
+            headers.append("link", http::HeaderValue::from_static(value));
+        }
+        for value in ["a=1", "b=2"] {
+            let mut value = http::HeaderValue::from_static(value);
+            value.set_sensitive(true);
+            headers.append("set-cookie", value);
+        }
+        let mut value = http::HeaderValue::from_bytes(b"opaque-\xff").unwrap();
+        value.set_sensitive(true);
+        headers.insert("x-opaque", value);
+        headers.insert("connection", "x-private".parse().unwrap());
+        headers.insert("x-private", "remove-me".parse().unwrap());
+        headers.insert("content-length", "invalid".parse().unwrap());
+        headers.insert("transfer-encoding", "chunked".parse().unwrap());
+        headers.insert("trailer", "x-trailer".parse().unwrap());
+        let heads = [
+            InterimResponseHead::new(http::StatusCode::CONTINUE, http::HeaderMap::new()),
+            InterimResponseHead::new(http::StatusCode::EARLY_HINTS, headers.clone()),
+            InterimResponseHead::new(http::StatusCode::EARLY_HINTS, headers.clone()),
+        ];
+        let sent: Vec<_> = heads
+            .into_iter()
+            .map(|head| sanitize_interim_response_for_h3(head).unwrap())
+            .collect();
+        assert_eq!(
+            sent.iter()
+                .map(|head| head.status().as_u16())
+                .collect::<Vec<_>>(),
+            [100, 103, 103]
+        );
+        for head in &sent[1..] {
+            assert_eq!(head.headers().get_all("link"), headers.get_all("link"));
+            assert_eq!(
+                head.headers().get_all("set-cookie"),
+                headers.get_all("set-cookie")
+            );
+            assert!(
+                head.headers()
+                    .get_all("set-cookie")
+                    .iter()
+                    .all(http::HeaderValue::is_sensitive)
+            );
+            assert_eq!(head.headers()["x-opaque"].as_bytes(), b"opaque-\xff");
+            assert!(head.headers()["x-opaque"].is_sensitive());
+            for removed in [
+                "connection",
+                "x-private",
+                "content-length",
+                "transfer-encoding",
+                "trailer",
+            ] {
+                assert!(!head.headers().contains_key(removed));
+            }
+        }
+        let switching = InterimResponseHead::new(
+            http::StatusCode::SWITCHING_PROTOCOLS,
+            http::HeaderMap::new(),
+        );
+        assert!(sanitize_interim_response_for_h3(switching).is_err());
+    }
+
+    #[test]
     fn h3_interim_response_sanitizer_rejects_final_status() {
         let interim = ::http::Response::builder()
             .status(::http::StatusCode::OK)
             .body(())
             .expect("interim");
+        let (parts, ()) = interim.into_parts();
+        let interim =
+            crate::upstream::raw_http1::InterimResponseHead::new(parts.status, parts.headers);
         assert!(sanitize_interim_response_for_h3(interim).is_err());
     }
 }

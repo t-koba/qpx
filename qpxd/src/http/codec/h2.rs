@@ -166,11 +166,10 @@ pub(crate) async fn send_h2_response_with_interim(
         if status == ::http::StatusCode::SWITCHING_PROTOCOLS {
             return Err(anyhow!("HTTP/2 interim responses must not use 101"));
         }
-        let mut headers = head.headers.clone();
-        qpx_http::protocol::semantics::sanitize_interim_response_headers(&mut headers);
+        let headers = head.headers_for_egress();
         let mut informational = Http1Response::new(());
         *informational.status_mut() = status;
-        *informational.headers_mut() = http_headers_to_h1(&headers)?;
+        *informational.headers_mut() = headers;
         respond.send_informational(informational)?;
     }
 

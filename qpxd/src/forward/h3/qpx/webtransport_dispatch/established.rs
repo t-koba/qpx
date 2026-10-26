@@ -86,6 +86,9 @@ pub(super) async fn relay_established_webtransport(
     } = upstream;
 
     for interim in interim {
+        let (parts, ()) = interim.into_parts();
+        let interim =
+            crate::upstream::raw_http1::InterimResponseHead::new(parts.status, parts.headers);
         let interim = sanitize_interim_response_for_h3(interim)?;
         timeout(
             h3_body_read_timeout(&handler.runtime),

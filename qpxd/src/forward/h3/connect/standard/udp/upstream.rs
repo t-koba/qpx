@@ -2,6 +2,7 @@ use super::{normalize_h3_upstream_connect_headers, recv_upstream_h3_response_wit
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
+use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_http::protocol::semantics::capsule_protocol_enabled;
@@ -10,7 +11,7 @@ use tokio::net::lookup_host;
 use tokio::time::{Duration, timeout};
 
 pub(super) struct UpstreamConnectUdpStream {
-    pub(super) interim: Vec<::http::Response<()>>,
+    pub(super) interim: Vec<InterimResponseHead>,
     pub(super) _endpoint: quinn::Endpoint,
     pub(super) driver: tokio::task::JoinHandle<()>,
     pub(super) datagram_task: tokio::task::JoinHandle<()>,

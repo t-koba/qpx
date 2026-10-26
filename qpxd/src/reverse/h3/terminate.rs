@@ -3,7 +3,6 @@ use super::super::ReloadableReverse;
 use super::super::{record_reverse_connection_filter_block, reverse_quic_connection_filter_match};
 pub(crate) use super::terminate_socket::prepare_reverse_terminate_socket;
 pub(crate) use super::terminate_tls::build_reverse_tls_config;
-use crate::http3::codec::http_headers_to_h1;
 use crate::http3::listener::{
     H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
 };
@@ -227,16 +226,12 @@ impl H3RequestHandler for ReverseH3Handler {
             Ok((interim, response)) => H3HttpResponse {
                 interim: interim
                     .into_iter()
-                    .filter_map(|head| {
-                        let status = qpx_http::protocol::semantics::validate_http_status_class(
+                    .filter(|head| {
+                        qpx_http::protocol::semantics::validate_http_status_class(
                             head.status,
                             "HTTP/3 interim response",
                         )
-                        .ok()?;
-                        let mut response =
-                            ::http::Response::builder().status(status).body(()).ok()?;
-                        *response.headers_mut() = http_headers_to_h1(&head.headers).ok()?;
-                        Some(response)
+                        .is_ok()
                     })
                     .collect(),
                 response,

@@ -14,6 +14,7 @@ use tokio::io::{AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::sync::OwnedSemaphorePermit;
 
 mod body;
+mod interim;
 mod io;
 mod raw_head;
 mod request;
@@ -46,11 +47,7 @@ impl std::error::Error for UpstreamConnectionClosed {}
 
 pub(crate) use raw_head::{RawHttp1BodyFraming, RawHttp1ResponseHead};
 
-#[derive(Debug, Clone)]
-pub(crate) struct InterimResponseHead {
-    pub(crate) status: StatusCode,
-    pub(crate) headers: HeaderMap,
-}
+pub(crate) use interim::InterimResponseHead;
 
 pub(crate) struct Http1ResponseWithInterim {
     pub(crate) interim: Vec<InterimResponseHead>,

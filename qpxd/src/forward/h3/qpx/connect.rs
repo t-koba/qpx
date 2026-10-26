@@ -605,6 +605,9 @@ async fn finish_qpx_extended_connect_stream(
     }
     let h3_timeout = Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1));
     for interim in interim {
+        let (parts, ()) = interim.into_parts();
+        let interim =
+            crate::upstream::raw_http1::InterimResponseHead::new(parts.status, parts.headers);
         let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim)?;
         timeout(h3_timeout, req_stream.send_response_head(&interim))
             .await

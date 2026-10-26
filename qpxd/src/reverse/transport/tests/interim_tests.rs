@@ -128,7 +128,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
     assert_eq!(interim[0].status, StatusCode::from_u16(103).unwrap());
     assert_eq!(
         interim[0]
-            .headers
+            .headers_for_egress()
             .get("link")
             .and_then(|value| value.to_str().ok()),
         Some("</style.css>; rel=preload; as=style")
@@ -268,7 +268,7 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
     assert_eq!(interim[0].status, StatusCode::from_u16(103).unwrap());
     assert_eq!(
         interim[0]
-            .headers
+            .headers_for_egress()
             .get("link")
             .and_then(|value| value.to_str().ok()),
         Some("</style.css>; rel=preload; as=style")

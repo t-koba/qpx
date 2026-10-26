@@ -44,20 +44,34 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
     type Error = std::convert::Infallible;
 
     async fn call(&self, _req: Request<Body>) -> Result<Response<Body>, std::convert::Infallible> {
-        let interim = vec![InterimResponseHead {
-            status: StatusCode::from_u16(103).expect("103"),
-            headers: {
-                let mut headers = http::HeaderMap::new();
-                headers.insert(
-                    http::header::LINK,
-                    http::HeaderValue::from_static("</app.css>; rel=preload; as=style"),
-                );
-                headers.insert(http::header::CONTENT_LENGTH, "99".parse().unwrap());
-                headers.insert(http::header::TRAILER, "x-trailer".parse().unwrap());
-                headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
-                headers
-            },
-        }];
+        let hints = InterimResponseHead::new(StatusCode::from_u16(103).expect("103"), {
+            let mut headers = http::HeaderMap::new();
+            headers.insert(
+                http::header::LINK,
+                http::HeaderValue::from_static("</app.css>; rel=preload; as=style"),
+            );
+            headers.insert(http::header::CONTENT_LENGTH, "99".parse().unwrap());
+            headers.insert(http::header::TRAILER, "x-trailer".parse().unwrap());
+            headers.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+            headers.append("link", "</second>; rel=preload".parse().unwrap());
+            for value in ["a=1", "b=2"] {
+                let mut value = http::HeaderValue::from_static(value);
+                value.set_sensitive(true);
+                headers.append("set-cookie", value);
+            }
+            headers.insert(
+                "x-opaque",
+                http::HeaderValue::from_bytes(b"opaque-\xff").unwrap(),
+            );
+            headers.insert("connection", "x-private".parse().unwrap());
+            headers.insert("x-private", "remove-me".parse().unwrap());
+            headers
+        });
+        let interim = vec![
+            InterimResponseHead::new(StatusCode::CONTINUE, http::HeaderMap::new()),
+            hints.clone(),
+            hints,
+        ];
         let mut response = Response::builder()
             .status(StatusCode::OK)
             .body(Body::from("OK"))
@@ -120,30 +134,61 @@ async fn send_h2_response_with_interim_emits_early_hints() {
         .expect("request");
     let (mut response_future, _) = client.send_request(request, true).expect("send");
 
-    let interim = poll_fn(|cx| response_future.poll_informational(cx)).await;
-    let interim = interim
-        .expect("informational state")
-        .expect("informational ok");
-    assert_eq!(interim.status(), ::http::StatusCode::EARLY_HINTS);
-    assert_eq!(
-        interim
-            .headers()
-            .get(::http::header::LINK)
-            .and_then(|value: &::http::HeaderValue| value.to_str().ok()),
-        Some("</app.css>; rel=preload; as=style")
-    );
-    assert!(
-        !interim
-            .headers()
-            .contains_key(::http::header::CONTENT_LENGTH)
-    );
-    assert!(!interim.headers().contains_key(::http::header::TRAILER));
-    assert!(
-        !interim
-            .headers()
-            .contains_key(::http::header::TRANSFER_ENCODING)
-    );
+    let first = poll_fn(|cx| response_future.poll_informational(cx))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.status(), ::http::StatusCode::CONTINUE);
+    for _ in 0..2 {
+        let interim = poll_fn(|cx| response_future.poll_informational(cx)).await;
+        let interim = interim
+            .expect("informational state")
+            .expect("informational ok");
+        assert_eq!(interim.status(), ::http::StatusCode::EARLY_HINTS);
+        assert_eq!(
+            interim
+                .headers()
+                .get(::http::header::LINK)
+                .and_then(|value: &::http::HeaderValue| value.to_str().ok()),
+            Some("</app.css>; rel=preload; as=style")
+        );
+        assert!(
+            !interim
+                .headers()
+                .contains_key(::http::header::CONTENT_LENGTH)
+        );
+        assert!(!interim.headers().contains_key(::http::header::TRAILER));
+        assert!(
+            !interim
+                .headers()
+                .contains_key(::http::header::TRANSFER_ENCODING)
+        );
 
+        assert_eq!(
+            interim
+                .headers()
+                .get_all("link")
+                .iter()
+                .map(|v| v.as_bytes())
+                .collect::<Vec<_>>(),
+            [
+                b"</app.css>; rel=preload; as=style".as_slice(),
+                b"</second>; rel=preload"
+            ]
+        );
+        assert_eq!(
+            interim
+                .headers()
+                .get_all("set-cookie")
+                .iter()
+                .map(|v| v.as_bytes())
+                .collect::<Vec<_>>(),
+            [b"a=1".as_slice(), b"b=2"]
+        );
+        assert_eq!(interim.headers()["x-opaque"].as_bytes(), b"opaque-\xff");
+        assert!(!interim.headers().contains_key("connection"));
+        assert!(!interim.headers().contains_key("x-private"));
+    }
     let response = response_future.await.expect("final response");
     assert_eq!(response.status(), ::http::StatusCode::OK);
 }

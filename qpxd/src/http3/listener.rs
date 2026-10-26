@@ -59,7 +59,7 @@ fn classify_h3_connect_kind(protocol: Option<::h3::ext::Protocol>) -> H3ConnectK
 }
 
 pub(crate) struct H3HttpResponse {
-    pub(crate) interim: Vec<::http::Response<()>>,
+    pub(crate) interim: Vec<crate::upstream::raw_http1::InterimResponseHead>,
     pub(crate) response: Response<Body>,
 }
 

@@ -221,7 +221,10 @@ async fn relay_opened_chained_connect_udp(
     request_limits: AppliedRateLimits,
 ) -> Result<()> {
     for interim in &upstream_chain.interim {
-        let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim.clone())?;
+        let (parts, ()) = interim.clone().into_parts();
+        let interim =
+            crate::upstream::raw_http1::InterimResponseHead::new(parts.status, parts.headers);
+        let interim = crate::http3::codec::sanitize_interim_response_for_h3(interim)?;
         timeout(
             success_context.send_timeouts.0,
             req_stream.send_response_head(&interim),

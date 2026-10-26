@@ -70,10 +70,11 @@ pub(super) async fn recv_upstream_h2_response_with_interim(
                 if status == StatusCode::SWITCHING_PROTOCOLS {
                     return Err(anyhow!("HTTP/2 interim responses must not use 101"));
                 }
-                interim.push(crate::upstream::raw_http1::InterimResponseHead {
+                let (parts, ()) = response.into_parts();
+                interim.push(crate::upstream::raw_http1::InterimResponseHead::new(
                     status,
-                    headers: h1_headers_to_http(response.headers())?,
-                })
+                    parts.headers,
+                ))
             }
             H2ResponseEvent::Final(response) => return Ok((interim, response)),
         }

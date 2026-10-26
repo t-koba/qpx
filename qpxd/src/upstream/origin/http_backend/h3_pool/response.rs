@@ -2,6 +2,7 @@ use super::{H3ClientRecvStream, H3PooledConnection, H3RequestRelayJoin};
 use crate::http::codec::h2::parse_declared_content_length;
 use crate::http3::codec::h1_headers_to_http;
 use crate::http3::h3_buf_to_bytes;
+use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http_body::Frame;
@@ -19,7 +20,7 @@ use tracing::warn;
 pub(super) async fn recv_h3_response_with_interim(
     req_stream: &mut H3ClientRecvStream,
     timeout_dur: Duration,
-) -> Result<(Vec<::http::Response<()>>, ::http::Response<()>)> {
+) -> Result<(Vec<InterimResponseHead>, ::http::Response<()>)> {
     let mut interim = Vec::new();
     loop {
         let response = timeout(timeout_dur, req_stream.recv_response())
@@ -29,7 +30,8 @@ pub(super) async fn recv_h3_response_with_interim(
             if response.status() == StatusCode::SWITCHING_PROTOCOLS {
                 return Err(anyhow!("HTTP/3 upstream must not send 101"));
             }
-            interim.push(response);
+            let (parts, ()) = response.into_parts();
+            interim.push(InterimResponseHead::new(parts.status, parts.headers));
             continue;
         }
         return Ok((interim, response));
