@@ -12,6 +12,10 @@
 //!
 //! This is the ownership primitive, not a claim that all workspace HTTP paths
 //! have migrated. Existing raw-H1 and interim head owners remain independent.
+//! [`HeaderTransferPatch`](crate::http_message::HeaderTransferPatch) and
+//! [`HeaderExpansionPlan`](crate::http_message::HeaderExpansionPlan) provide closed configured
+//! effects for future callers; they do not migrate the live pipeline or serialize
+//! request previews.
 
 use crate::http_content_length::{
     ContentLengthError, HeaderDiagnostic, HeaderPredicate, HeaderTextSelection, HeaderView,
@@ -354,6 +358,319 @@ impl Headers {
         }
         Ok(self.inner)
     }
+}
+
+/// How a captured field is applied to its destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderTransferMode {
+    /// Keep existing occurrences, adding the captured first value last.
+    Append,
+    /// Replace every existing occurrence with the captured first value.
+    Replace,
+}
+
+/// An opaque selected-field copy for configured header pass/copy operations.
+///
+/// Capture uses only the first occurrence, even if it is nontextual or an
+/// invalid Content-Length. Apply preserves its exact bytes and sensitivity;
+/// an absent source is a no-op, including in replace mode. No numeric length
+/// is read and no selected value is returned. Debug hides both names and values.
+///
+/// An owner-backed source can only be copied under the same field name, so
+/// Content-Length cannot be renamed to an ordinary readable field:
+/// ```compile_fail,E0061
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::{CONTENT_LENGTH, HeaderName};
+/// let source = Headers::new();
+/// let other = HeaderName::from_static("x-readable");
+/// let _ = HeaderTransferPatch::from_headers(&source, CONTENT_LENGTH, other);
+/// ```
+/// A standard response source supports the configured response-to-request copy
+/// operation, including an explicit rename; it does not expose its value:
+/// ```
+/// use qpx_core::http_message::{HeaderTransferPatch, HeaderTransferMode, Headers};
+/// use http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
+/// let mut source = http::Response::new(());
+/// source.headers_mut().insert(CONTENT_LENGTH, HeaderValue::from_static(" 007 "));
+/// let destination_name = HeaderName::from_static("content-length");
+/// let patch = HeaderTransferPatch::from_response(&source, CONTENT_LENGTH, destination_name);
+/// let mut destination = Headers::new();
+/// patch.apply(&mut destination, HeaderTransferMode::Replace);
+/// assert_eq!(destination, qpx_core::http_message::Request::from_http({
+///     let mut request = http::Request::new(());
+///     request.headers_mut().insert(CONTENT_LENGTH, HeaderValue::from_static(" 007 "));
+///     request
+/// }).headers().clone());
+/// ```
+/// This capability does not expose maps or values:
+/// ```compile_fail,E0616
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::CONTENT_LENGTH;
+/// let patch = HeaderTransferPatch::from_headers(&Headers::new(), CONTENT_LENGTH);
+/// let _ = patch.value;
+/// ```
+/// ```compile_fail,E0599
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::CONTENT_LENGTH;
+/// let patch = HeaderTransferPatch::from_headers(&Headers::new(), CONTENT_LENGTH);
+/// let _ = patch.get();
+/// ```
+/// ```compile_fail,E0599
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::CONTENT_LENGTH;
+/// let patch = HeaderTransferPatch::from_headers(&Headers::new(), CONTENT_LENGTH);
+/// let _ = patch.iter();
+/// ```
+/// ```compile_fail,E0599
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::CONTENT_LENGTH;
+/// let patch = HeaderTransferPatch::from_headers(&Headers::new(), CONTENT_LENGTH);
+/// let _ = patch.into_header_map();
+/// ```
+/// ```compile_fail,E0277
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::CONTENT_LENGTH;
+/// fn raw<T: AsRef<http::HeaderMap>>(_: &T) {}
+/// raw(&HeaderTransferPatch::from_headers(&Headers::new(), CONTENT_LENGTH));
+/// ```
+/// ```compile_fail,E0277
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::CONTENT_LENGTH;
+/// fn raw<T: std::ops::Deref<Target = http::HeaderMap>>(_: &T) {}
+/// raw(&HeaderTransferPatch::from_headers(&Headers::new(), CONTENT_LENGTH));
+/// ```
+/// ```compile_fail,E0277
+/// use qpx_core::http_message::{HeaderTransferPatch, Headers};
+/// use http::header::CONTENT_LENGTH;
+/// let patch = HeaderTransferPatch::from_headers(&Headers::new(), CONTENT_LENGTH);
+/// let _ = serde_json::to_string(&patch);
+/// ```
+/// Standard response transfer accepts a message, not a raw header map:
+/// ```compile_fail,E0308
+/// use qpx_core::http_message::HeaderTransferPatch;
+/// use http::header::CONTENT_LENGTH;
+/// use http::HeaderMap;
+/// let _ = HeaderTransferPatch::from_response(&HeaderMap::new(), CONTENT_LENGTH, CONTENT_LENGTH);
+/// ```
+pub struct HeaderTransferPatch {
+    destination: HeaderName,
+    value: Option<HeaderValue>,
+}
+
+impl fmt::Debug for HeaderTransferPatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeaderTransferPatch")
+            .finish_non_exhaustive()
+    }
+}
+
+impl HeaderTransferPatch {
+    /// Capture the first occurrence from an owned head without exposing it.
+    pub fn from_headers(source: &Headers, name: HeaderName) -> Self {
+        Self {
+            value: source.inner.get(&name).cloned(),
+            destination: name,
+        }
+    }
+
+    /// Capture the first occurrence from a standard response, with the
+    /// destination name supplied by the configured capture action.
+    pub fn from_response<B>(
+        source: &http::Response<B>,
+        name: HeaderName,
+        destination: HeaderName,
+    ) -> Self {
+        Self {
+            value: source.headers().get(&name).cloned(),
+            destination,
+        }
+    }
+
+    /// Apply the captured value once. Absence never removes a destination field.
+    pub fn apply(self, headers: &mut Headers, mode: HeaderTransferMode) {
+        let Some(value) = self.value else {
+            return;
+        };
+        match (self.destination == CONTENT_LENGTH, mode) {
+            (true, HeaderTransferMode::Append) => headers.append_content_length_value(value),
+            (true, HeaderTransferMode::Replace) => headers.set_content_length_value(value),
+            (false, HeaderTransferMode::Append) => {
+                headers.append(OrdinaryHeaderName(self.destination), value);
+            }
+            (false, HeaderTransferMode::Replace) => {
+                headers.insert(OrdinaryHeaderName(self.destination), value);
+            }
+        }
+    }
+}
+
+/// The finite encodings supported by configured selected-field expansion.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HeaderExpansionEncoding {
+    /// Percent encode every non-alphanumeric byte (not form-urlencoding).
+    UrlQuery,
+    /// Like UrlQuery, including encoding slashes and punctuation.
+    PathSegment,
+    /// Reject ASCII controls and validate as a HeaderValue, preserving text.
+    Header,
+    /// Accept an IP address or the existing ASCII hostname grammar.
+    Host,
+}
+
+/// Declarative input only: literals or named fields with a finite encoding.
+///
+/// There is no placeholder parser, request context, callback or raw modifier.
+/// The caller retains responsibility for its configured template grammar.
+#[derive(Clone)]
+pub enum HeaderExpansionSegment {
+    /// Caller-provided template text, copied verbatim.
+    Literal(String),
+    /// Select the first occurrence and apply the chosen encoding inside the owner.
+    Field {
+        /// Selected field, including a literal Content-Length name.
+        name: HeaderName,
+        /// Encoding and validation to apply to the selected text.
+        encoding: HeaderExpansionEncoding,
+    },
+}
+
+impl fmt::Debug for HeaderExpansionSegment {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeaderExpansionSegment")
+            .finish_non_exhaustive()
+    }
+}
+
+/// A configured expansion executed inside the header owner.
+///
+/// Only the complete output string escapes. Selection uses HeaderMap's first
+/// occurrence: absent or nontextual first values substitute empty text, without
+/// seeking later duplicates. This also applies to literal Content-Length text,
+/// including padded, invalid and conflicting declarations; it never resolves a
+/// numeric length. Empty substitutions still undergo the selected validation
+/// (so Host rejects them). Literals are copied verbatim, not encoded/validated.
+/// Debug and errors never include selected values or contextual literals.
+///
+/// This is a configured effect, not a general Content-Length text accessor:
+/// ```compile_fail,E0308
+/// use qpx_core::http_message::Headers;
+/// let _ = Headers::new().get(&http::header::CONTENT_LENGTH);
+/// ```
+/// ```compile_fail,E0599
+/// use qpx_core::http_message::Headers;
+/// let _ = Headers::new().content_length_text();
+/// ```
+/// ```compile_fail,E0616
+/// use qpx_core::http_message::HeaderExpansionPlan;
+/// let plan = HeaderExpansionPlan::new([]);
+/// let _ = plan.segments;
+/// ```
+#[derive(Clone)]
+pub struct HeaderExpansionPlan {
+    segments: Vec<HeaderExpansionSegment>,
+}
+
+impl fmt::Debug for HeaderExpansionPlan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("HeaderExpansionPlan")
+            .finish_non_exhaustive()
+    }
+}
+
+/// Static expansion diagnostics, with no selected field names or values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum HeaderExpansionError {
+    /// The selected text contained an ASCII control character.
+    #[error("template header value contains a control character")]
+    HeaderControlCharacter,
+    /// HeaderValue validation rejected the selected text.
+    #[error("invalid template header value")]
+    InvalidHeaderValue,
+    /// Host expansion selected empty text, including absent/nontextual fields.
+    #[error("template host value must not be empty")]
+    EmptyHost,
+    /// A non-IP host contained controls or authority/path delimiters.
+    #[error("template host value contains invalid characters")]
+    InvalidHostCharacters,
+    /// A non-IP host failed the ASCII hostname label grammar.
+    #[error("template host value is not a valid host name")]
+    InvalidHostName,
+}
+
+impl HeaderExpansionPlan {
+    /// Build a configured effect from literals and selected-field encodings.
+    pub fn new(segments: impl IntoIterator<Item = HeaderExpansionSegment>) -> Self {
+        Self {
+            segments: segments.into_iter().collect(),
+        }
+    }
+
+    /// Render the whole plan, or return a value-free validation error.
+    pub fn render(&self, headers: &Headers) -> Result<String, HeaderExpansionError> {
+        use HeaderExpansionEncoding as Encoding;
+        use HeaderExpansionError as Error;
+        use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
+        let mut out = String::new();
+        for segment in &self.segments {
+            let (name, encoding) = match segment {
+                HeaderExpansionSegment::Literal(literal) => {
+                    out.push_str(literal);
+                    continue;
+                }
+                HeaderExpansionSegment::Field { name, encoding } => (name, encoding),
+            };
+            let value = headers
+                .inner
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            match encoding {
+                Encoding::UrlQuery | Encoding::PathSegment => {
+                    out.extend(utf8_percent_encode(value, NON_ALPHANUMERIC));
+                }
+                Encoding::Header => {
+                    if value.bytes().any(|byte| byte.is_ascii_control()) {
+                        return Err(Error::HeaderControlCharacter);
+                    }
+                    HeaderValue::from_str(value).map_err(|_| Error::InvalidHeaderValue)?;
+                    out.push_str(value);
+                }
+                Encoding::Host => {
+                    validate_expansion_host(value)?;
+                    out.push_str(value);
+                }
+            }
+        }
+        Ok(out)
+    }
+}
+
+fn validate_expansion_host(value: &str) -> Result<(), HeaderExpansionError> {
+    use HeaderExpansionError as Error;
+    if value.is_empty() {
+        return Err(Error::EmptyHost);
+    }
+    if value.parse::<std::net::IpAddr>().is_ok() {
+        return Ok(());
+    }
+    if value.bytes().any(|byte| byte.is_ascii_control())
+        || value.contains(['/', '?', '#', '@', ':'])
+    {
+        return Err(Error::InvalidHostCharacters);
+    }
+    for label in value.split('.') {
+        if label.is_empty()
+            || label.starts_with('-')
+            || label.ends_with('-')
+            || !label
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(Error::InvalidHostName);
+        }
+    }
+    Ok(())
 }
 
 // Transitional raw-map callers and Headers share the same replacement operation.
