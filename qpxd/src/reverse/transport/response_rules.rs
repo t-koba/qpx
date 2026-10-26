@@ -68,11 +68,6 @@ struct ResponsePolicyParts<'a> {
     rule_context: RuleMatchContext<'a>,
 }
 
-struct ResponsePolicyHead<'a> {
-    headers: &'a http::HeaderMap,
-    status: u16,
-}
-
 fn response_policy_parts<'a>(
     route: &'a crate::reverse::router::HttpRoute,
     base: &'a BaseRequestFields,
@@ -80,7 +75,7 @@ fn response_policy_parts<'a>(
     destination: &'a DestinationMetadata,
     upstream_cert: Option<&'a UpstreamCertificateInfo>,
     identity: &'a ResolvedIdentity,
-    response: ResponsePolicyHead<'a>,
+    response_status: u16,
 ) -> ResponsePolicyParts<'a> {
     let engine = route.response_rules.as_deref();
     let candidates = engine
@@ -97,10 +92,10 @@ fn response_policy_parts<'a>(
         .unwrap_or_default();
     let rule_context = build_response_rule_match_context(ResponseRuleContextInput {
         base,
-        headers: Some(response.headers),
+        headers: None,
         destination,
         identity,
-        response_status: response.status,
+        response_status,
         response_size: None,
         rpc: None,
         client_cert: conn.peer_certificate_info.as_deref(),
@@ -142,7 +137,6 @@ pub(super) async fn apply_response_rules(
         });
     }
     let response_status = response.status().as_u16();
-    let response_headers = response.headers().clone();
     let ResponsePolicyParts {
         engine,
         candidates,
@@ -154,10 +148,7 @@ pub(super) async fn apply_response_rules(
         destination,
         upstream_cert,
         identity,
-        ResponsePolicyHead {
-            headers: &response_headers,
-            status: response_status,
-        },
+        response_status,
     );
     let decision = apply_listener_response_policy(
         engine,
@@ -213,7 +204,6 @@ pub(super) async fn apply_dispatch_response_rules(
         });
     }
     let response_status = response.status().as_u16();
-    let response_headers = response.headers().clone();
     let ResponsePolicyParts {
         engine,
         candidates,
@@ -225,10 +215,7 @@ pub(super) async fn apply_dispatch_response_rules(
         destination,
         upstream_cert,
         identity,
-        ResponsePolicyHead {
-            headers: &response_headers,
-            status: response_status,
-        },
+        response_status,
     );
     apply_dispatch_response_policy(DispatchResponsePolicyInput {
         response,
