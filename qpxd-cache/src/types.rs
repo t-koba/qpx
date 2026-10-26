@@ -3,6 +3,7 @@ use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use bytes::Bytes;
 use hyper::{Method, Response, StatusCode};
+use qpx_core::http_content_length::VarySelector;
 use qpx_http::body::Body;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -354,7 +355,7 @@ pub struct CachedResponseEnvelope {
     pub response_delay_secs: u64,
     pub freshness_lifetime_secs: u64,
     pub vary_headers: Vec<String>,
-    pub vary_values: Vec<(String, String)>,
+    pub vary_values: Vec<(String, VarySelector)>,
     /// Lazily-hydrated `HeaderMap` view of `headers`. Derived (not serialized);
     /// built once on first access so lookup-path freshness/directive parsing does
     /// not rebuild a `HeaderMap` from the stored `Vec` on every call. Boxed to keep
@@ -471,7 +472,7 @@ struct CachedResponseMetadata {
     response_delay_secs: u64,
     freshness_lifetime_secs: u64,
     vary_headers: Vec<String>,
-    vary_values: Vec<(String, String)>,
+    vary_values: Vec<(String, VarySelector)>,
 }
 
 const CACHE_METADATA_MAGIC: &[u8] = b"QPX-CACHE-META\0\x01";

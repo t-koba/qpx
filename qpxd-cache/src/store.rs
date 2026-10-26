@@ -20,6 +20,7 @@ use http::header::{AUTHORIZATION, CONTENT_LOCATION, EXPIRES, SET_COOKIE};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_content_length::HeaderView;
+use qpx_core::http_content_length::VarySelector;
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -204,7 +205,7 @@ struct CacheWriteback {
     response_delay_secs: u64,
     freshness_lifetime_secs: u64,
     vary_headers: Vec<String>,
-    vary_values: Vec<(String, String)>,
+    vary_values: Vec<(String, VarySelector)>,
     ttl: u64,
     max_cacheable_body_bytes: usize,
     body_read_timeout: Duration,
@@ -554,10 +555,10 @@ fn cache_vary_values(
     request_headers: HeaderView<'_>,
     vary_headers: &[String],
     content_digest: Option<&str>,
-) -> Option<Vec<(String, String)>> {
+) -> Option<Vec<(String, VarySelector)>> {
     let mut values = vary_values_from_request_headers(request_headers, vary_headers)?;
     if let Some(digest) = content_digest {
-        values.push(("@query-content".to_string(), digest.to_string()));
+        values.push(("@query-content".to_string(), digest.to_string().into()));
     }
     Some(values)
 }
@@ -565,16 +566,17 @@ fn cache_vary_values(
 fn refreshed_vary_values(
     request_headers: HeaderView<'_>,
     vary_headers: &[String],
-    previous: &[(String, String)],
-) -> Vec<(String, String)> {
-    let content_digest = previous
-        .iter()
-        .find(|(name, _)| name == "@query-content")
-        .map(|(_, value)| value.as_str());
+    previous: &[(String, VarySelector)],
+) -> Vec<(String, VarySelector)> {
     // Keep the previous variant on unrepresentable selectors rather than
     // poisoning the entry with a collapsed value.
-    cache_vary_values(request_headers, vary_headers, content_digest)
-        .unwrap_or_else(|| previous.to_vec())
+    let Some(mut values) = vary_values_from_request_headers(request_headers, vary_headers) else {
+        return previous.to_vec();
+    };
+    if let Some(query_content) = previous.iter().find(|(name, _)| name == "@query-content") {
+        values.push(query_content.clone());
+    }
+    values
 }
 
 fn content_location_matches_target(

@@ -181,3 +181,31 @@ async fn length_checked_body_validates_terminal_frames_and_preserves_source_erro
         "source errors must not become EOF"
     );
 }
+
+#[test]
+fn refreshed_selectors_preserve_query_digest_and_fail_closed_on_obs_text() {
+    let fields = vec!["content-length".to_owned()];
+    let mut headers = http::HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("05"));
+    let previous = cache_vary_values(HeaderView::new(&headers), &fields, Some("digest-a")).unwrap();
+    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("5"));
+    let refreshed = refreshed_vary_values(HeaderView::new(&headers), &fields, &previous);
+    assert_eq!(
+        refreshed,
+        cache_vary_values(HeaderView::new(&headers), &fields, Some("digest-a")).unwrap()
+    );
+    assert_ne!(refreshed, previous);
+    headers.append(
+        CONTENT_LENGTH,
+        http::HeaderValue::from_bytes(&[0x80]).unwrap(),
+    );
+    assert_eq!(
+        refreshed_vary_values(HeaderView::new(&headers), &fields, &previous),
+        previous
+    );
+    headers.clear();
+    assert_eq!(
+        refreshed_vary_values(HeaderView::new(&headers), &[], &previous),
+        vec![previous[1].clone()]
+    );
+}

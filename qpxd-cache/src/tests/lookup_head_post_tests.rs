@@ -39,11 +39,11 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
     // (absence `\x00` vs present `\x01` + joined values).
     let en_variant = variant_storage_key(
         primary.as_str(),
-        &[("accept-language".to_string(), "\u{1}en".to_string())],
+        &[("accept-language".to_string(), "\u{1}en".to_string().into())],
     );
     let ja_variant = variant_storage_key(
         primary.as_str(),
-        &[("accept-language".to_string(), "\u{1}ja".to_string())],
+        &[("accept-language".to_string(), "\u{1}ja".to_string().into())],
     );
     let backend = Arc::new(MockBackend::new());
     let index = VariantIndex {
@@ -78,7 +78,7 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
             response_delay_secs: 0,
             freshness_lifetime_secs: 60,
             vary_headers: vec!["accept-language".to_string()],
-            vary_values: vec![("accept-language".to_string(), format!("\u{1}{lang}"))],
+            vary_values: vec![("accept-language".to_string(), format!("\u{1}{lang}").into())],
             header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),

@@ -1,4 +1,4 @@
-use qpx_core::http_content_length::{HeaderTextSelection, HeaderView};
+use qpx_core::http_content_length::{HeaderView, VarySelector};
 
 use super::types::{CachedResponseEnvelope, VarySpec};
 
@@ -33,7 +33,7 @@ pub fn parse_vary(headers: &http::HeaderMap) -> VarySpec {
 pub fn vary_values_from_request_headers(
     request_headers: HeaderView<'_>,
     vary_headers: &[String],
-) -> Option<Vec<(String, String)>> {
+) -> Option<Vec<(String, VarySelector)>> {
     let mut out = Vec::with_capacity(vary_headers.len());
     for name in vary_headers {
         let value = request_header_values(request_headers, name.as_str())?;
@@ -54,12 +54,8 @@ pub fn vary_values_from_request_headers(
 /// comma-joined trimmed values. `\x00`/`\x01` never appear in `to_str`
 /// output (visible ASCII only), so the sentinel cannot collide with a real
 /// value, nor with legacy `""` entries (which now safely miss).
-pub fn request_header_values(headers: HeaderView<'_>, name: &str) -> Option<String> {
-    match headers.joined_text(name) {
-        HeaderTextSelection::Unrepresentable => None,
-        HeaderTextSelection::Absent => Some("\x00".to_string()),
-        HeaderTextSelection::Present(value) => Some(format!("\x01{value}")),
-    }
+pub fn request_header_values(headers: HeaderView<'_>, name: &str) -> Option<VarySelector> {
+    headers.vary_selector(name)
 }
 
 pub fn matches_vary(
@@ -69,7 +65,8 @@ pub fn matches_vary(
 ) -> bool {
     envelope.vary_values.iter().all(|(name, value)| {
         if name == "@query-content" {
-            return content_digest == Some(value.as_str());
+            return content_digest
+                .is_some_and(|digest| VarySelector::from(digest.to_owned()) == *value);
         }
         match request_header_values(request_headers, name.as_str()) {
             Some(current) => current == *value,
@@ -78,18 +75,11 @@ pub fn matches_vary(
     })
 }
 
-pub fn variant_storage_key(primary: &str, vary_values: &[(String, String)]) -> String {
+pub fn variant_storage_key(primary: &str, vary_values: &[(String, VarySelector)]) -> String {
     if vary_values.is_empty() {
         return format!("obj:{}:default", primary);
     }
-    let mut raw = String::new();
-    for (name, value) in vary_values {
-        raw.push_str(name);
-        raw.push('=');
-        raw.push_str(value);
-        raw.push('|');
-    }
-    let hash = super::hash::sha256_hex(raw.as_bytes());
+    let hash = super::hash::hex_lower(&VarySelector::variant_digest(vary_values));
     format!("obj:{}:{}", primary, hash)
 }
 
@@ -114,7 +104,7 @@ mod tests {
         map
     }
 
-    fn envelope_with(vary_values: Vec<(String, String)>) -> CachedResponseEnvelope {
+    fn envelope_with(vary_values: Vec<(String, VarySelector)>) -> CachedResponseEnvelope {
         CachedResponseEnvelope {
             status: 200,
             headers: Vec::new(),
@@ -208,7 +198,7 @@ mod tests {
         for name in ["", "bad name", "x-tenant:"] {
             assert_eq!(request_header_values(view, name), None);
             assert!(vary_values_from_request_headers(view, &[name.to_string()]).is_none());
-            let envelope = envelope_with(vec![(name.to_string(), "\x00".to_string())]);
+            let envelope = envelope_with(vec![(name.to_string(), "\x00".to_string().into())]);
             assert!(!matches_vary(view, None, &envelope));
         }
     }
@@ -226,18 +216,18 @@ mod tests {
         )]);
         let view = HeaderView::new(&headers);
         assert_eq!(
-            request_header_values(view, "X-Tenant").as_deref(),
-            Some("\x01second,,first,a, b")
+            request_header_values(view, "X-Tenant"),
+            Some("\x01second,,first,a, b".to_owned().into())
         );
         let empty = header_map(&[("x-tenant", vec![b"".to_vec()])]);
         let absent = http::HeaderMap::new();
         assert_eq!(
-            request_header_values(HeaderView::new(&empty), "x-tenant").as_deref(),
-            Some("\x01")
+            request_header_values(HeaderView::new(&empty), "x-tenant"),
+            Some("\x01".to_owned().into())
         );
         assert_eq!(
-            request_header_values(HeaderView::new(&absent), "x-tenant").as_deref(),
-            Some("\x00")
+            request_header_values(HeaderView::new(&absent), "x-tenant"),
+            Some("\x00".to_owned().into())
         );
     }
 
@@ -271,12 +261,14 @@ mod tests {
         // Neither numerically equal declarations nor conflicting duplicates
         // collapse: Vary selection does not interpret message framing.
         let cases = [
-            (vec!["05"], "05"),
-            (vec!["5"], "5"),
-            (vec!["42, 42"], "42, 42"),
-            (vec!["42"], "42"),
-            (vec!["42", "43"], "42,43"),
-            (vec!["43", "42"], "43,42"),
+            (vec![], None),
+            (vec![""], Some("")),
+            (vec!["05"], Some("05")),
+            (vec!["5"], Some("5")),
+            (vec!["42, 42"], Some("42, 42")),
+            (vec!["42"], Some("42")),
+            (vec!["42", "43"], Some("42,43")),
+            (vec!["43", "42"], Some("43,42")),
         ];
         let mut variants = Vec::new();
         for (values, expected) in cases {
@@ -286,9 +278,10 @@ mod tests {
             )]);
             let selectors =
                 vary_values_from_request_headers(HeaderView::new(&headers), &fields).unwrap();
+            let encoded = expected.map_or_else(|| "\x00".to_owned(), |text| format!("\x01{text}"));
             assert_eq!(
                 selectors,
-                vec![("content-length".to_string(), format!("\x01{expected}"))]
+                vec![("content-length".to_string(), encoded.into())]
             );
             let key = variant_storage_key("primary", &selectors);
             variants.push((headers, envelope_with(selectors), key));
@@ -305,12 +298,144 @@ mod tests {
     }
 
     #[test]
+    fn joined_occurrences_have_the_same_literal_selector_and_variant_key() {
+        for name in ["content-length", "x-tenant"] {
+            let single = header_map(&[(name, vec![b"a,b".to_vec()])]);
+            let duplicate = header_map(&[(name, vec![b" a ".to_vec(), b" b ".to_vec()])]);
+            let fields = [name.to_string()];
+            let single_values =
+                vary_values_from_request_headers(HeaderView::new(&single), &fields).unwrap();
+            let duplicate_values =
+                vary_values_from_request_headers(HeaderView::new(&duplicate), &fields).unwrap();
+            assert_eq!(single_values, duplicate_values);
+            assert_eq!(
+                variant_storage_key("primary", &single_values),
+                variant_storage_key("primary", &duplicate_values)
+            );
+            assert!(matches_vary(
+                HeaderView::new(&single),
+                None,
+                &envelope_with(duplicate_values)
+            ));
+            assert!(matches_vary(
+                HeaderView::new(&duplicate),
+                None,
+                &envelope_with(single_values)
+            ));
+        }
+    }
+
+    #[test]
+    fn content_length_obs_text_in_any_occurrence_refuses_store_and_hit() {
+        let fields = ["CoNtEnT-LeNgTh".to_owned()];
+        let clean = header_map(&[("content-length", vec![b"42".to_vec()])]);
+        let envelope = envelope_with(
+            vary_values_from_request_headers(HeaderView::new(&clean), &fields).unwrap(),
+        );
+        for values in [
+            vec![vec![0x80]],
+            vec![b"42".to_vec(), vec![0x80]],
+            vec![vec![0x80], b"42".to_vec()],
+        ] {
+            let headers = header_map(&[("content-length", values)]);
+            let view = HeaderView::new(&headers);
+            assert!(vary_values_from_request_headers(view, &fields).is_none());
+            assert!(!matches_vary(view, None, &envelope));
+        }
+    }
+
+    #[test]
+    fn persisted_selectors_keep_wire_format_keys_and_matching_after_restart() {
+        use crate::types::{decode_cached_response_metadata, encode_cached_response_metadata};
+        use sha2::Digest as _;
+        for values in [
+            vec![],
+            vec![""],
+            vec!["05"],
+            vec!["42, 42"],
+            vec![" 43 ", "42"],
+        ] {
+            let headers = header_map(&[
+                (
+                    "content-length",
+                    values.iter().map(|v| v.as_bytes().to_vec()).collect(),
+                ),
+                ("x-tenant", vec![b" a=b|c ".to_vec()]),
+            ]);
+            let fields = vec!["content-length".to_owned(), "x-tenant".to_owned()];
+            let mut selectors =
+                vary_values_from_request_headers(HeaderView::new(&headers), &fields).unwrap();
+            selectors.push(("@query-content".to_owned(), "digest-a".to_owned().into()));
+            let mut envelope = envelope_with(selectors.clone());
+            envelope.vary_headers = fields;
+            let encoded = if values.is_empty() {
+                "\x00".to_owned()
+            } else {
+                format!(
+                    "\x01{}",
+                    values
+                        .iter()
+                        .map(|v| v.trim())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            // Historical storage is a list of pairs of plain strings, not a tagged token.
+            let legacy = vec![
+                ("content-length".to_owned(), encoded),
+                ("x-tenant".to_owned(), "\x01a=b|c".to_owned()),
+                ("@query-content".to_owned(), "digest-a".to_owned()),
+            ];
+            assert_eq!(
+                serde_json::to_vec(&selectors).unwrap(),
+                serde_json::to_vec(&legacy).unwrap()
+            );
+            let raw = legacy
+                .iter()
+                .map(|(name, value)| format!("{name}={value}|"))
+                .collect::<String>();
+            let legacy_key = format!(
+                "obj:primary:{}",
+                crate::hash::hex_lower(&sha2::Sha256::digest(raw.as_bytes()))
+            );
+            assert_eq!(variant_storage_key("primary", &selectors), legacy_key);
+            let wire = encode_cached_response_metadata(&envelope).unwrap();
+            let restarted = decode_cached_response_metadata(wire.clone().into()).unwrap();
+            assert_eq!(restarted.vary_values, selectors);
+            assert_eq!(encode_cached_response_metadata(&restarted).unwrap(), wire);
+            assert_eq!(
+                variant_storage_key("primary", &restarted.vary_values),
+                legacy_key
+            );
+            assert!(matches_vary(
+                HeaderView::new(&headers),
+                Some("digest-a"),
+                &restarted
+            ));
+            assert!(!matches_vary(
+                HeaderView::new(&headers),
+                Some("digest-b"),
+                &restarted
+            ));
+            assert!(!matches_vary(HeaderView::new(&headers), None, &restarted));
+        }
+        assert_eq!(variant_storage_key("primary", &[]), "obj:primary:default");
+        // Historical unsentinelled empty selectors must still miss, not mean absence.
+        let legacy_empty = envelope_with(vec![("content-length".to_owned(), String::new().into())]);
+        assert!(!matches_vary(
+            HeaderView::new(&http::HeaderMap::new()),
+            None,
+            &legacy_empty
+        ));
+    }
+
+    #[test]
     fn query_content_selector_still_matches_digest_not_a_header() {
         let headers = header_map(&[("x-tenant", vec![b"a".to_vec()])]);
         let view = HeaderView::new(&headers);
         let mut selectors =
             vary_values_from_request_headers(view, &["x-tenant".to_string()]).unwrap();
-        selectors.push(("@query-content".to_string(), "digest-a".to_string()));
+        selectors.push(("@query-content".to_string(), "digest-a".to_string().into()));
         let envelope = envelope_with(selectors);
         assert!(matches_vary(view, Some("digest-a"), &envelope));
         assert!(!matches_vary(view, Some("digest-b"), &envelope));

@@ -589,12 +589,83 @@ pub struct HeaderDiagnostic {
 /// Closed result of selecting a field's ordered textual values.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HeaderTextSelection {
-    /// The name is invalid or at least one value is not representable as text.
+    /// The name is invalid or unavailable here, or a value is not representable as text.
     Unrepresentable,
     /// No field value exists for the validated name.
     Absent,
     /// All values, individually trimmed and comma-joined in encounter order.
     Present(String),
+}
+
+/// An opaque, literal `Vary` selector, including for Content-Length.
+///
+/// Equality uses the existing cache encoding: absence is `\x00`, presence is
+/// `\x01` followed by individually trimmed, comma-joined occurrences. This is
+/// deliberately not the numeric framing interpretation (`05` differs from `5`).
+/// All fields use this type so deserializing a persisted Content-Length selector
+/// cannot accidentally restore it as an ordinary, publicly readable string.
+///
+/// Serde is the explicit persistence boundary and retains the historical string
+/// wire format. Ordinary consumers can clone, compare and derive a variant digest,
+/// but cannot read the text. Debug is redacted, and there is deliberately no Hash
+/// implementation: a caller-supplied hasher could observe the input bytes.
+/// This only encapsulates Vary selection, not other HeaderView policy APIs.
+///
+/// External consumers (including the cache crate) cannot access the field:
+/// ```compile_fail,E0616
+/// use qpx_core::http_content_length::VarySelector;
+/// let selector = VarySelector::from(String::from("\x0105"));
+/// let raw = selector.0;
+/// ```
+/// Nor can they obtain text or bytes through an accessor:
+/// ```compile_fail,E0599
+/// use qpx_core::http_content_length::VarySelector;
+/// let selector = VarySelector::from(String::from("\x0105"));
+/// let raw = selector.as_str();
+/// ```
+/// ```compile_fail,E0599
+/// use qpx_core::http_content_length::VarySelector;
+/// let selector = VarySelector::from(String::from("\x0105"));
+/// let raw = selector.as_bytes();
+/// ```
+/// ```compile_fail,E0277
+/// use qpx_core::http_content_length::VarySelector;
+/// fn requires_hash<T: std::hash::Hash>() {}
+/// requires_hash::<VarySelector>();
+/// ```
+#[derive(Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct VarySelector(String);
+
+impl std::fmt::Debug for VarySelector {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VarySelector([redacted])")
+    }
+}
+
+/// Accept caller-owned text (for example a synthetic selector or a persistence
+/// fixture) without providing the reverse conversion.
+impl From<String> for VarySelector {
+    fn from(value: String) -> Self {
+        Self(value)
+    }
+}
+
+impl VarySelector {
+    /// Hash the historical `name=value|` stream with a fixed SHA-256 algorithm.
+    /// The digest, not a caller-supplied hasher, crosses the ownership boundary.
+    /// Keeping the original stream preserves existing variant storage keys.
+    pub fn variant_digest(values: &[(String, Self)]) -> [u8; 32] {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        for (name, value) in values {
+            hasher.update(name.as_bytes());
+            hasher.update(b"=");
+            hasher.update(value.0.as_bytes());
+            hasher.update(b"|");
+        }
+        hasher.finalize().into()
+    }
 }
 
 impl<'a> HeaderView<'a> {
@@ -606,10 +677,28 @@ impl<'a> HeaderView<'a> {
     /// Selects a validated, case-insensitive name as trimmed, comma-joined text.
     ///
     /// Unlike policy predicates, any non-textual duplicate fails the selection.
-    /// This deliberate Vary escape preserves literal field text, including
-    /// Content-Length spelling; it does not parse or canonicalize a declaration.
-    /// Cache policy and absent/present sentinel encoding belong to the caller.
+    /// Content-Length is unavailable through this generic text API (even when
+    /// absent); use the opaque [`Self::vary_selector`] instead.
     pub fn joined_text(&self, name: &str) -> HeaderTextSelection {
+        if name.eq_ignore_ascii_case("content-length") {
+            return HeaderTextSelection::Unrepresentable;
+        }
+        self.joined_text_inner(name)
+    }
+
+    /// Select literal Vary equivalence without exposing Content-Length text.
+    /// Invalid names and any non-textual occurrence fail closed. Absence and
+    /// present-empty remain distinct; occurrence boundaries are comma-joined,
+    /// so one `a,b` value equals two values `a` and `b`.
+    pub fn vary_selector(&self, name: &str) -> Option<VarySelector> {
+        match self.joined_text_inner(name) {
+            HeaderTextSelection::Unrepresentable => None,
+            HeaderTextSelection::Absent => Some(VarySelector("\x00".to_owned())),
+            HeaderTextSelection::Present(value) => Some(VarySelector(format!("\x01{value}"))),
+        }
+    }
+
+    fn joined_text_inner(&self, name: &str) -> HeaderTextSelection {
         let Ok(name) = http::HeaderName::from_bytes(name.as_bytes()) else {
             return HeaderTextSelection::Unrepresentable;
         };
@@ -672,6 +761,47 @@ impl<'a> HeaderView<'a> {
 mod tests {
     use super::*;
     use http::HeaderValue;
+
+    #[test]
+    fn content_length_vary_selection_is_opaque_and_generic_text_is_closed() {
+        for values in [vec![], vec![""], vec!["05"], vec![" 42 ", "43"]] {
+            let mut headers = HeaderMap::new();
+            for value in &values {
+                headers.append(CONTENT_LENGTH, HeaderValue::from_str(value).unwrap());
+            }
+            let view = HeaderView::new(&headers);
+            let expected = if values.is_empty() {
+                "\x00".to_owned()
+            } else {
+                format!(
+                    "\x01{}",
+                    values
+                        .iter()
+                        .map(|v| v.trim())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                )
+            };
+            for name in ["content-length", "Content-Length", "CoNtEnT-LeNgTh"] {
+                assert_eq!(view.joined_text(name), HeaderTextSelection::Unrepresentable);
+                let selector = view.vary_selector(name).unwrap();
+                assert_eq!(selector.0, expected);
+                assert_eq!(format!("{selector:?}"), "VarySelector([redacted])");
+                // Serde is intentionally the persistence escape, not a text accessor.
+                assert_eq!(
+                    serde_json::to_string(&selector).unwrap(),
+                    serde_json::to_string(&expected).unwrap()
+                );
+                assert_eq!(
+                    serde_json::from_str::<VarySelector>(
+                        &serde_json::to_string(&expected).unwrap()
+                    )
+                    .unwrap(),
+                    selector
+                );
+            }
+        }
+    }
 
     #[test]
     fn header_view_joined_text_validates_names_and_distinguishes_absent_from_empty() {

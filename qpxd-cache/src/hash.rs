@@ -1,10 +1,5 @@
 use sha2::Digest as _;
 
-pub fn sha256_hex(input: &[u8]) -> String {
-    let digest = sha2::Sha256::digest(input);
-    hex_lower(digest.as_slice())
-}
-
 pub(crate) fn sha256_hex_parts(parts: &[&[u8]]) -> String {
     let mut hasher = sha2::Sha256::new();
     for part in parts {
