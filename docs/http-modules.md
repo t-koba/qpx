@@ -121,9 +121,11 @@ left untouched by modules retain their trust marker.
 
 This boundary is intentionally limited to qpxd's module body API. qpx-http's
 public transport `Body`/`Sender` and standard `http_body::Body`/`Frame` trailer
-interoperability are unchanged. `RpcStreamObserver`/`RpcStreamSummary` remain unchanged in this Body slice;
-the separate RPC-summary work will use the same filtered application-metadata
-view and parsed RPC status, message, and binary status-detail results. This is
+interoperability are unchanged. `RpcStreamObserver`/`RpcStreamSummary` use the
+same facade: `RpcStreamSummary::trailers()` returns an opaque `&Trailers` with
+the shared filtered application-metadata view and parsed RPC status, message,
+and binary status-detail results; no raw `HeaderMap` or all-field getter
+escapes. This is
 not a workspace-wide header-ownership claim.
 
 Modules declare capabilities so `qpxd` compiles stage-indexed chains and only

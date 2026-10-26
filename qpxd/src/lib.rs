@@ -77,11 +77,31 @@ pub mod module_api {
     }
 
     /// Final counts and trailers extracted from an RPC response stream.
+    ///
+    /// Trailers are opaque: `trailers()` returns the shared filtered
+    /// application-metadata view with parsed gRPC/Connect semantics. The raw
+    /// trailer map never escapes this summary.
+    ///
+    /// ```compile_fail
+    /// use qpxd::module_api::RpcStreamSummary;
+    /// fn raw(summary: &RpcStreamSummary) -> &Option<http::HeaderMap> {
+    ///     &summary.trailers
+    /// }
+    /// ```
     #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
     pub struct RpcStreamSummary {
         pub message_count: usize,
         pub message_bytes: u64,
-        pub trailers: Option<http::HeaderMap>,
+        trailers: Option<Trailers>,
+    }
+
+    #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+    impl RpcStreamSummary {
+        /// Returns the opaque RPC trailers when the stream carried a
+        /// trailer or end-stream envelope.
+        pub fn trailers(&self) -> Option<&Trailers> {
+            self.trailers.as_ref()
+        }
     }
 
     #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
@@ -119,7 +139,7 @@ pub mod module_api {
             Ok(RpcStreamSummary {
                 message_count,
                 message_bytes,
-                trailers,
+                trailers: trailers.map(crate::http::modules::Trailers::from_header_map),
             })
         }
     }
@@ -205,7 +225,7 @@ pub mod module_api {
             let summary = observer.finish().expect("gRPC summary");
             assert_eq!(summary.message_count, 1);
             assert_eq!(summary.message_bytes, 3);
-            assert!(summary.trailers.is_none());
+            assert!(summary.trailers().is_none());
         }
     }
 }

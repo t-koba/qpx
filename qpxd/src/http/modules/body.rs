@@ -49,6 +49,10 @@ impl Trailers {
         Self::default()
     }
 
+    pub(crate) fn from_header_map(inner: HeaderMap) -> Self {
+        Self { inner }
+    }
+
     /// Replaces all values for this name without returning the displaced values.
     pub fn insert(&mut self, name: HeaderName, value: HeaderValue) {
         self.inner.insert(name, value);
