@@ -197,7 +197,7 @@ async fn load_variant_index_rejects_corrupted_payload() {
 fn decode_cached_response_metadata_rejects_non_http_status_class() {
     let envelope = CachedResponseEnvelope {
         status: 700,
-        headers: Vec::new(),
+        headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -206,7 +206,6 @@ fn decode_cached_response_metadata_rejects_non_http_status_class() {
         freshness_lifetime_secs: 30,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
@@ -222,7 +221,7 @@ fn vary_matching_works() {
     req_headers.insert("accept-language", http::HeaderValue::from_static("ja"));
     let envelope = CachedResponseEnvelope {
         status: 200,
-        headers: Vec::new(),
+        headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -235,7 +234,6 @@ fn vary_matching_works() {
             &["accept-language".to_string()],
         )
         .expect("encodable vary selector"),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };

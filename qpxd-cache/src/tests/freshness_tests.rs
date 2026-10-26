@@ -8,7 +8,10 @@ fn stale_can_be_served_with_max_stale() {
     };
     let envelope = CachedResponseEnvelope {
         status: 200,
-        headers: vec![("cache-control".to_string(), "max-age=10".to_string())],
+        headers: crate::types::CachedHeaders::from_pairs(vec![(
+            "cache-control".to_string(),
+            "max-age=10".to_string(),
+        )]),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -17,7 +20,6 @@ fn stale_can_be_served_with_max_stale() {
         freshness_lifetime_secs: 10,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
@@ -33,10 +35,10 @@ fn immutable_fresh_response_ignores_request_no_cache() {
     };
     let envelope = CachedResponseEnvelope {
         status: 200,
-        headers: vec![(
+        headers: crate::types::CachedHeaders::from_pairs(vec![(
             "cache-control".to_string(),
             "max-age=60, immutable".to_string(),
-        )],
+        )]),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -45,7 +47,6 @@ fn immutable_fresh_response_ignores_request_no_cache() {
         freshness_lifetime_secs: 60,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
@@ -59,10 +60,10 @@ fn stale_while_revalidate_allows_serving_stale_without_max_stale() {
     let req = RequestDirectives::default();
     let envelope = CachedResponseEnvelope {
         status: 200,
-        headers: vec![(
+        headers: crate::types::CachedHeaders::from_pairs(vec![(
             "cache-control".to_string(),
             "max-age=10, stale-while-revalidate=60".to_string(),
-        )],
+        )]),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -71,7 +72,6 @@ fn stale_while_revalidate_allows_serving_stale_without_max_stale() {
         freshness_lifetime_secs: 10,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
@@ -87,10 +87,10 @@ fn must_revalidate_blocks_stale_while_revalidate() {
     let req = RequestDirectives::default();
     let envelope = CachedResponseEnvelope {
         status: 200,
-        headers: vec![(
+        headers: crate::types::CachedHeaders::from_pairs(vec![(
             "cache-control".to_string(),
             "max-age=10, must-revalidate, stale-while-revalidate=60".to_string(),
-        )],
+        )]),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -99,7 +99,6 @@ fn must_revalidate_blocks_stale_while_revalidate() {
         freshness_lifetime_secs: 10,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
@@ -118,10 +117,10 @@ fn only_if_cached_swr_does_not_trigger_background_revalidation() {
     };
     let envelope = CachedResponseEnvelope {
         status: 200,
-        headers: vec![(
+        headers: crate::types::CachedHeaders::from_pairs(vec![(
             "cache-control".to_string(),
             "max-age=10, stale-while-revalidate=60".to_string(),
-        )],
+        )]),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -130,7 +129,6 @@ fn only_if_cached_swr_does_not_trigger_background_revalidation() {
         freshness_lifetime_secs: 10,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
@@ -160,7 +158,10 @@ async fn stale_if_error_fallback_omits_obsolete_warning_headers() {
         stale_if_error_secs: Some(60),
         envelope: CachedResponseEnvelope {
             status: 200,
-            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            headers: crate::types::CachedHeaders::from_pairs(vec![(
+                "content-type".to_string(),
+                "text/plain".to_string(),
+            )]),
             body: CachedBody::default(),
             body_len: 5,
             stored_at_ms: now.saturating_sub(40_000),
@@ -169,7 +170,6 @@ async fn stale_if_error_fallback_omits_obsolete_warning_headers() {
             freshness_lifetime_secs: 10,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         },
@@ -193,10 +193,10 @@ async fn must_revalidate_blocks_stale_if_error_fallback() {
         stale_if_error_secs: Some(60),
         envelope: CachedResponseEnvelope {
             status: 200,
-            headers: vec![(
+            headers: crate::types::CachedHeaders::from_pairs(vec![(
                 "cache-control".to_string(),
                 "must-revalidate, stale-if-error=60".to_string(),
-            )],
+            )]),
             body: CachedBody::from_bytes(bytes::Bytes::from_static(b"hello")),
             body_len: 5,
             stored_at_ms: now.saturating_sub(40_000),
@@ -205,7 +205,6 @@ async fn must_revalidate_blocks_stale_if_error_fallback() {
             freshness_lifetime_secs: 10,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         },
@@ -217,7 +216,10 @@ async fn must_revalidate_blocks_stale_if_error_fallback() {
 fn s_maxage_envelope(cache_control: &str, freshness_lifetime_secs: u64) -> CachedResponseEnvelope {
     CachedResponseEnvelope {
         status: 200,
-        headers: vec![("cache-control".to_string(), cache_control.to_string())],
+        headers: crate::types::CachedHeaders::from_pairs(vec![(
+            "cache-control".to_string(),
+            cache_control.to_string(),
+        )]),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -226,7 +228,6 @@ fn s_maxage_envelope(cache_control: &str, freshness_lifetime_secs: u64) -> Cache
         freshness_lifetime_secs,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     }
@@ -291,10 +292,10 @@ async fn s_maxage_blocks_stale_if_error_fallback() {
         stale_if_error_secs: Some(60),
         envelope: CachedResponseEnvelope {
             status: 200,
-            headers: vec![(
+            headers: crate::types::CachedHeaders::from_pairs(vec![(
                 "cache-control".to_string(),
                 "public, s-maxage=10, stale-if-error=60".to_string(),
-            )],
+            )]),
             body: CachedBody::from_bytes(bytes::Bytes::from_static(b"hello")),
             body_len: 5,
             stored_at_ms: now.saturating_sub(40_000),
@@ -303,7 +304,6 @@ async fn s_maxage_blocks_stale_if_error_fallback() {
             freshness_lifetime_secs: 10,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         },
@@ -704,9 +704,9 @@ fn fixed_envelope_accessors_preserve_first_value_and_invalid_text_behavior() {
 }
 
 fn envelope_with_hydrated_headers(headers: http::HeaderMap) -> CachedResponseEnvelope {
-    let envelope = CachedResponseEnvelope {
+    CachedResponseEnvelope {
         status: 200,
-        headers: Vec::new(),
+        headers: crate::types::CachedHeaders::from_hydrated_for_test(headers),
         body: CachedBody::default(),
         body_len: 0,
         stored_at_ms: 0,
@@ -715,13 +715,7 @@ fn envelope_with_hydrated_headers(headers: http::HeaderMap) -> CachedResponseEnv
         freshness_lifetime_secs: 0,
         vary_headers: Vec::new(),
         vary_values: Vec::new(),
-        header_map: Default::default(),
         response_directives: Default::default(),
         response_header_values: Default::default(),
-    };
-    envelope
-        .header_map
-        .set(Box::new(headers))
-        .expect("fresh lock");
-    envelope
+    }
 }

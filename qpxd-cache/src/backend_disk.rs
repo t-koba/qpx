@@ -2027,7 +2027,10 @@ mod tests {
 
         let envelope = CachedResponseEnvelope {
             status: 200,
-            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            headers: crate::types::CachedHeaders::from_pairs(vec![(
+                "content-type".to_string(),
+                "text/plain".to_string(),
+            )]),
             body: CachedBody::default(),
             body_len: 7,
             stored_at_ms: 1,
@@ -2036,7 +2039,6 @@ mod tests {
             freshness_lifetime_secs: 60,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         };
@@ -2077,7 +2079,10 @@ mod tests {
         let body_key = cache_body_storage_key(variant_key);
         let mut envelope = CachedResponseEnvelope {
             status: 200,
-            headers: vec![("content-type".to_string(), "text/plain".to_string())],
+            headers: crate::types::CachedHeaders::from_pairs(vec![(
+                "content-type".to_string(),
+                "text/plain".to_string(),
+            )]),
             body: CachedBody::default(),
             body_len: 7,
             stored_at_ms: 1,
@@ -2086,7 +2091,6 @@ mod tests {
             freshness_lifetime_secs: 60,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         };

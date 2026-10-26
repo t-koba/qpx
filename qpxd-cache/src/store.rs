@@ -1,10 +1,10 @@
 use super::directives::{parse_request_directives, parse_response_directives};
-use super::entry::{header_map_from_vec, merge_headers_after_304, primary_from_variant_key};
+use super::entry::primary_from_variant_key;
 use super::freshness::{freshness_lifetime_secs, initial_age_secs};
 use super::invalidate::invalidate_primary;
 use super::types::{
     BodyStreamWriteOptions, CACHE_HEADER, CacheBackend, CacheRequestKey, CacheWritebackAdmission,
-    CacheWritebackPermit, CachedBody, CachedResponseEnvelope, INDEX_TTL_SECS,
+    CacheWritebackPermit, CachedBody, CachedHeaders, CachedResponseEnvelope, INDEX_TTL_SECS,
     MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives, RevalidationState, VarySpec,
     cache_body_storage_key, cache_status_header, encode_cached_response_metadata,
 };
@@ -152,7 +152,10 @@ pub async fn maybe_store(
         storage_primary,
         variant_key,
         status: response.status().as_u16(),
-        headers: sanitize_cached_headers_for_storage(response.headers(), &resp_directives),
+        headers: CachedHeaders::from_pairs(sanitize_cached_headers_for_storage(
+            response.headers(),
+            &resp_directives,
+        )),
         stored_at_ms: now,
         initial_age_secs,
         response_delay_secs: context.timing.response_delay_secs,
@@ -199,7 +202,7 @@ struct CacheWriteback {
     storage_primary: Arc<str>,
     variant_key: String,
     status: u16,
-    headers: Vec<(String, String)>,
+    headers: CachedHeaders,
     stored_at_ms: u64,
     initial_age_secs: u64,
     response_delay_secs: u64,
@@ -249,7 +252,6 @@ impl CacheWriteback {
                     freshness_lifetime_secs,
                     vary_headers,
                     vary_values,
-                    header_map: std::sync::OnceLock::new(),
                     response_directives: std::sync::OnceLock::new(),
                     response_header_values: std::sync::OnceLock::new(),
                 };
@@ -346,28 +348,28 @@ pub async fn revalidate_not_modified(
     };
 
     let now = now_millis();
-    let merged_headers = merge_headers_after_304(&state.envelope.headers, not_modified.headers());
-    let merged_header_map = header_map_from_vec(&merged_headers);
-    let directives = parse_response_directives(&merged_header_map);
-    let freshness = freshness_lifetime_secs(&merged_header_map, policy, now, &directives)
+    let merged_headers = state
+        .envelope
+        .headers
+        .merge_after_304(not_modified.headers());
+    let directives = merged_headers.directives();
+    let freshness = merged_headers
+        .freshness_lifetime_secs(policy, now, &directives)
         .unwrap_or_else(|| policy.default_ttl_secs.unwrap_or(1));
     let vary_headers = state.envelope.vary_headers.clone();
-    let initial_age_secs = initial_age_secs(&merged_header_map, now, response_delay_secs);
-    let mut storable_response = Response::new(Body::empty());
-    *storable_response.status_mut() = qpx_http::protocol::semantics::validate_http_status_class(
+    let initial_age_secs = merged_headers.initial_age_secs(now, response_delay_secs);
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
         StatusCode::from_u16(state.envelope.status)
             .map_err(|err| anyhow::anyhow!("invalid cached response status: {err}"))?,
         "cached response revalidation",
     )?;
-    *storable_response.headers_mut() = merged_header_map.clone();
 
-    if !is_response_storable(
+    if !merged_headers.is_revalidation_storable(
+        status,
         request_headers,
         request_method,
-        None,
-        &storable_response,
         policy,
-        Some(freshness),
+        freshness,
         &directives,
     ) {
         // The representation is no longer storable (e.g. new no-store/private). Purge it.
@@ -393,7 +395,6 @@ pub async fn revalidate_not_modified(
                 &vary_headers,
                 &state.envelope.vary_values,
             ),
-            header_map: std::sync::OnceLock::new(),
             response_directives: std::sync::OnceLock::new(),
             response_header_values: std::sync::OnceLock::new(),
         };
@@ -406,7 +407,7 @@ pub async fn revalidate_not_modified(
         );
     }
 
-    let sanitized = sanitize_cached_headers_for_storage(&merged_header_map, &directives);
+    let sanitized = merged_headers.sanitized(&directives);
     let updated = CachedResponseEnvelope {
         status: state.envelope.status,
         headers: sanitized,
@@ -422,7 +423,6 @@ pub async fn revalidate_not_modified(
             &vary_headers,
             &state.envelope.vary_values,
         ),
-        header_map: std::sync::OnceLock::new(),
         response_directives: std::sync::OnceLock::new(),
         response_header_values: std::sync::OnceLock::new(),
     };
@@ -455,7 +455,7 @@ fn object_retention_ttl_secs(freshness_lifetime_secs: u64, directives: &Response
     freshness_lifetime_secs.saturating_add(extra).max(1)
 }
 
-fn is_response_storable(
+pub(super) fn is_response_storable(
     request_headers: &http::HeaderMap,
     request_method: &Method,
     key: Option<&CacheRequestKey>,

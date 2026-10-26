@@ -64,13 +64,13 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
     ] {
         let envelope = CachedResponseEnvelope {
             status: 200,
-            headers: vec![
+            headers: crate::types::CachedHeaders::from_pairs(vec![
                 (
                     "cache-control".to_string(),
                     "public, max-age=60".to_string(),
                 ),
                 ("content-length".to_string(), body.len().to_string()),
-            ],
+            ]),
             body: CachedBody::from_bytes(bytes::Bytes::from(body.to_vec())),
             body_len: body.len() as u64,
             stored_at_ms: super::util::now_millis(),
@@ -79,7 +79,6 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
             freshness_lifetime_secs: 60,
             vary_headers: vec!["accept-language".to_string()],
             vary_values: vec![("accept-language".to_string(), format!("\u{1}{lang}").into())],
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         };

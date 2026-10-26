@@ -493,7 +493,7 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
         stale_if_error_secs: None,
         envelope: CachedResponseEnvelope {
             status: 200,
-            headers: vec![
+            headers: crate::types::CachedHeaders::from_pairs(vec![
                 (
                     "cache-control".to_string(),
                     "public, max-age=10".to_string(),
@@ -506,7 +506,7 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
                 ),
                 ("x-origin-policy".to_string(), "old".to_string()),
                 ("content-length".to_string(), "5".to_string()),
-            ],
+            ]),
             body: CachedBody::from_bytes(bytes::Bytes::from_static(b"hello")),
             body_len: 5,
             stored_at_ms: now.saturating_sub(40_000),
@@ -515,7 +515,6 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
             freshness_lifetime_secs: 10,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         },

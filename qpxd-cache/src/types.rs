@@ -308,6 +308,22 @@ pub enum LookupOutcome {
 ///     let _ = state.envelope.header_map();
 /// }
 /// ```
+///
+/// Neither the historical wire pairs nor a hydrated raw map are an API:
+///
+/// ```compile_fail,E0616
+/// use qpxd_cache::RevalidationState;
+/// fn read_wire_pairs(state: &RevalidationState) {
+///     let _ = &state.envelope.headers.pairs;
+/// }
+/// ```
+///
+/// ```compile_fail,E0616
+/// use qpxd_cache::RevalidationState;
+/// fn read_raw_map(state: &RevalidationState) {
+///     let _ = &state.envelope.headers.map;
+/// }
+/// ```
 #[derive(Clone)]
 pub struct RevalidationState {
     pub backend: Arc<dyn CacheBackend>,
@@ -347,7 +363,9 @@ impl std::fmt::Debug for RevalidationState {
 #[derive(Debug, Clone)]
 pub struct CachedResponseEnvelope {
     pub status: u16,
-    pub(crate) headers: Vec<(String, String)>,
+    // Only the private metadata codec can project stored pairs. Cached consumers
+    // use typed declarations, non-length lookup or final-response egress.
+    pub(crate) headers: CachedHeaders,
     pub body: CachedBody,
     pub body_len: u64,
     pub stored_at_ms: u64,
@@ -356,13 +374,7 @@ pub struct CachedResponseEnvelope {
     pub freshness_lifetime_secs: u64,
     pub vary_headers: Vec<String>,
     pub vary_values: Vec<(String, VarySelector)>,
-    /// Lazily-hydrated `HeaderMap` view of `headers`. Derived (not serialized);
-    /// built once on first access so lookup-path freshness/directive parsing does
-    /// not rebuild a `HeaderMap` from the stored `Vec` on every call. Boxed to keep
-    /// `CachedResponseEnvelope` small (it is embedded by value in several enums).
-    /// Access via [`CachedResponseEnvelope::header_map`] and the fixed validator/date accessors.
-    pub(crate) header_map: OnceLock<Box<http::HeaderMap>>,
-    /// Parsed response cache directives derived from `header_map`. They are immutable
+    /// Parsed response cache directives derived from the owned headers. They are immutable
     /// for the lifetime of an envelope, so repeated hot-cache lookups reuse one parse.
     pub response_directives: OnceLock<ResponseDirectives>,
     /// Last rendered age-dependent response fields. Cache age advances in whole
@@ -380,46 +392,30 @@ pub(crate) struct CachedResponseHeaderValues {
 }
 
 impl CachedResponseEnvelope {
-    /// Returns the hydrated `HeaderMap` for this envelope, building it once from
-    /// the stored `headers` on first access.
-    pub(crate) fn header_map(&self) -> &http::HeaderMap {
-        self.header_map
-            .get_or_init(|| Box::new(super::entry::header_map_from_vec(&self.headers)))
-    }
-
-    /// Returns the stored response's declared length using qpx-core's shared
-    /// Content-Length grammar and duplicate-conflict handling.
-    pub(crate) fn declared_content_length(&self) -> Option<u64> {
-        let named = self.headers.iter().map(|(name, value)| (name, value));
-        qpx_core::http_content_length::declared_content_length_in_named_values(named)
-            .ok()
-            .flatten()
-    }
-
     /// First case-insensitive ETag value from the hydrated headers.
     pub fn etag(&self) -> Option<&str> {
-        self.header_map()
+        self.headers
             .get(http::header::ETAG)
             .and_then(|value| value.to_str().ok())
     }
 
     /// First case-insensitive Last-Modified value from the hydrated headers.
     pub fn last_modified(&self) -> Option<&str> {
-        self.header_map()
+        self.headers
             .get(http::header::LAST_MODIFIED)
             .and_then(|value| value.to_str().ok())
     }
 
     /// First case-insensitive Date value from the hydrated headers.
     pub fn date(&self) -> Option<&str> {
-        self.header_map()
+        self.headers
             .get(http::header::DATE)
             .and_then(|value| value.to_str().ok())
     }
 
     pub fn response_directives(&self) -> &ResponseDirectives {
         self.response_directives
-            .get_or_init(|| super::directives::parse_response_directives(self.header_map()))
+            .get_or_init(|| self.headers.directives())
     }
 
     pub(crate) fn response_header_values(
@@ -461,21 +457,9 @@ pub(crate) use self::body::bounded_cache_body_stream;
 pub(crate) use self::body::spool_registry::created as created_spool_paths;
 pub use self::body::{CachedBody, CachedBodyStream};
 
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedResponseMetadata {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body_len: u64,
-    stored_at_ms: u64,
-    initial_age_secs: u64,
-    #[serde(default)]
-    response_delay_secs: u64,
-    freshness_lifetime_secs: u64,
-    vary_headers: Vec<String>,
-    vary_values: Vec<(String, VarySelector)>,
-}
-
-const CACHE_METADATA_MAGIC: &[u8] = b"QPX-CACHE-META\0\x01";
+mod cached_headers;
+pub(crate) use cached_headers::CachedHeaders;
+pub use cached_headers::{decode_cached_response_metadata, encode_cached_response_metadata};
 
 pub fn cache_body_storage_key(variant_key: &str) -> String {
     format!("{variant_key}:body")
@@ -484,53 +468,6 @@ pub fn cache_body_storage_key(variant_key: &str) -> String {
 pub(crate) fn is_cache_body_storage_key(key: &str) -> bool {
     key.strip_suffix(":body")
         .is_some_and(|variant| !variant.is_empty())
-}
-
-pub fn encode_cached_response_metadata(envelope: &CachedResponseEnvelope) -> Result<Vec<u8>> {
-    let metadata = CachedResponseMetadata {
-        status: envelope.status,
-        headers: envelope.headers.clone(),
-        body_len: envelope.body_len,
-        stored_at_ms: envelope.stored_at_ms,
-        initial_age_secs: envelope.initial_age_secs,
-        response_delay_secs: envelope.response_delay_secs,
-        freshness_lifetime_secs: envelope.freshness_lifetime_secs,
-        vary_headers: envelope.vary_headers.clone(),
-        vary_values: envelope.vary_values.clone(),
-    };
-    let metadata = serde_json::to_vec(&metadata)?;
-    let mut out = Vec::with_capacity(CACHE_METADATA_MAGIC.len() + metadata.len());
-    out.extend_from_slice(CACHE_METADATA_MAGIC);
-    out.extend_from_slice(&metadata);
-    Ok(out)
-}
-
-pub fn decode_cached_response_metadata(raw: Bytes) -> Result<CachedResponseEnvelope> {
-    if !raw.starts_with(CACHE_METADATA_MAGIC) {
-        return Err(anyhow!("invalid cache metadata format"));
-    }
-    let metadata: CachedResponseMetadata =
-        serde_json::from_slice(&raw[CACHE_METADATA_MAGIC.len()..])?;
-    qpx_http::protocol::semantics::validate_http_status_class(
-        StatusCode::from_u16(metadata.status)
-            .map_err(|err| anyhow!("invalid cached response status: {err}"))?,
-        "cached response",
-    )?;
-    Ok(CachedResponseEnvelope {
-        status: metadata.status,
-        headers: metadata.headers,
-        body: CachedBody::default(),
-        body_len: metadata.body_len,
-        stored_at_ms: metadata.stored_at_ms,
-        initial_age_secs: metadata.initial_age_secs,
-        response_delay_secs: metadata.response_delay_secs,
-        freshness_lifetime_secs: metadata.freshness_lifetime_secs,
-        vary_headers: metadata.vary_headers,
-        vary_values: metadata.vary_values,
-        header_map: OnceLock::new(),
-        response_directives: OnceLock::new(),
-        response_header_values: OnceLock::new(),
-    })
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -753,7 +690,7 @@ mod cache_status_tests {
     fn age_dependent_response_fields_are_shared_only_for_an_exact_value_set() {
         let envelope = CachedResponseEnvelope {
             status: 200,
-            headers: Vec::new(),
+            headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
             body: CachedBody::default(),
             body_len: 0,
             stored_at_ms: 0,
@@ -762,7 +699,6 @@ mod cache_status_tests {
             freshness_lifetime_secs: 60,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: OnceLock::new(),
             response_directives: OnceLock::new(),
             response_header_values: OnceLock::new(),
         };

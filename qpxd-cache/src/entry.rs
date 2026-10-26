@@ -4,24 +4,9 @@ use super::types::{
     ByteRangeSpec, CACHE_HEADER, CachedResponseEnvelope, RequestDirectives, cache_status_header,
 };
 use anyhow::Result;
-use http::header::{ACCEPT_RANGES, AGE, CONTENT_LENGTH, CONTENT_RANGE};
+use http::header::{ACCEPT_RANGES, CONTENT_RANGE};
 use hyper::{Method, Response, StatusCode};
 use qpx_http::body::Body;
-use std::collections::HashSet;
-
-pub fn header_map_from_vec(headers: &[(String, String)]) -> http::HeaderMap {
-    let mut out = http::HeaderMap::new();
-    for (name, value) in headers {
-        let Ok(name) = http::HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = http::HeaderValue::from_str(value.as_str()) else {
-            continue;
-        };
-        out.append(name, value);
-    }
-    out
-}
 
 pub fn primary_from_variant_key(variant_key: &str) -> Option<&str> {
     let rest = variant_key.strip_prefix("obj:")?;
@@ -58,8 +43,12 @@ pub fn response_from_envelope_for_request(
         .then(|| active_range(req, envelope))
         .flatten();
     let Some(range) = range else {
-        let content_length =
-            head_response.then(|| envelope.declared_content_length().unwrap_or(full_len));
+        let content_length = head_response.then(|| {
+            envelope
+                .headers
+                .declared_content_length()
+                .unwrap_or(full_len)
+        });
         return build_response(BuildResponseParams {
             envelope,
             now_ms,
@@ -163,104 +152,6 @@ pub fn not_modified_from_envelope(
     Ok(response)
 }
 
-pub fn merge_headers_after_304(
-    cached_headers: &[(String, String)],
-    not_modified_headers: &http::HeaderMap,
-) -> Vec<(String, String)> {
-    // RFC 9111 §3.2: update the stored headers with each field provided in the
-    // 304, replacing existing values, except fields that must not be persisted
-    // for the stored representation (unchanged body bytes).
-    let connection_nominated = connection_nominated_headers(not_modified_headers);
-    let mut nm = std::collections::HashMap::<String, Vec<String>>::new();
-    for (name, value) in not_modified_headers {
-        let lower = name.as_str().to_ascii_lowercase();
-        if is_304_excluded_header(lower.as_str(), &connection_nominated) {
-            continue;
-        }
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        nm.entry(lower).or_default().push(value.to_string());
-    }
-
-    let mut out = Vec::new();
-    let mut replaced = HashSet::new();
-    let mut saw = HashSet::new();
-
-    for (name, value) in cached_headers {
-        let lower = name.to_ascii_lowercase();
-        if qpx_http::protocol::semantics::is_hop_by_hop_header_name(lower.as_str()) {
-            continue;
-        }
-        saw.insert(lower.clone());
-
-        // Excluded 304 fields never reach `nm`, so stored framing labels and
-        // other kept fields always survive here unchanged.
-        if let Some(values) = nm.get(lower.as_str()) {
-            if replaced.insert(lower.clone()) {
-                for v in values {
-                    out.push((name.clone(), v.clone()));
-                }
-            }
-            continue;
-        }
-        out.push((name.clone(), value.clone()));
-    }
-
-    for (name, values) in nm {
-        if saw.contains(name.as_str()) {
-            continue;
-        }
-        for v in values {
-            out.push((name.clone(), v));
-        }
-    }
-
-    out
-}
-
-/// Header fields that a 304 response must not merge into the stored entry.
-///
-/// RFC 9111 §3.2 requires updating stored fields except narrowly justified
-/// exclusions: hop-by-hop fields (including `Connection`-nominated ones, which
-/// describe only the 304 transport), and the framing labels of the unchanged
-/// stored body (`content-length`, `content-encoding`, `content-range`).
-/// Everything else — freshness metadata, validators, `Content-Type`, security
-/// policy and extension fields — is replaced or added. Policy gates such as
-/// `no-store`/`private` or cookie storage remain enforced afterwards by the
-/// revalidation-time storability check, not by this merge.
-fn is_304_excluded_header(lower_name: &str, connection_nominated: &HashSet<String>) -> bool {
-    if connection_nominated.contains(lower_name) {
-        return true;
-    }
-    if qpx_http::protocol::semantics::is_hop_by_hop_header_name(lower_name) {
-        return true;
-    }
-    matches!(
-        lower_name,
-        "content-length" | "content-encoding" | "content-range"
-    )
-}
-
-fn connection_nominated_headers(not_modified_headers: &http::HeaderMap) -> HashSet<String> {
-    let mut out = HashSet::new();
-    for value in not_modified_headers
-        .get_all(http::header::CONNECTION)
-        .iter()
-    {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        for token in value.split(',') {
-            let token = token.trim().to_ascii_lowercase();
-            if !token.is_empty() {
-                out.insert(token);
-            }
-        }
-    }
-    out
-}
-
 struct BuildResponseParams<'a> {
     envelope: &'a CachedResponseEnvelope,
     now_ms: u64,
@@ -281,16 +172,6 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
             "cached response",
         )?,
     };
-    let mut response = Response::new(params.body);
-    *response.status_mut() = status;
-    const CACHE_RESPONSE_ADDITIONAL_HEADERS: usize = 5;
-    *response.headers_mut() = qpx_http::header_pool::clone_map_with_additional_capacity(
-        params.envelope.header_map(),
-        CACHE_RESPONSE_ADDITIONAL_HEADERS,
-    );
-    response.headers_mut().remove(AGE);
-    response.headers_mut().remove(CONTENT_LENGTH);
-    response.headers_mut().remove(CONTENT_RANGE);
     let current_age = current_age_secs(params.envelope, params.now_ms);
     let ttl = (params.cache_state == "HIT").then(|| {
         params
@@ -302,12 +183,14 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
         params
             .envelope
             .response_header_values(params.cache_state, current_age, ttl)?;
-    response.headers_mut().insert(AGE, age);
-    response.headers_mut().insert(CACHE_HEADER, cache_status);
     let content_length = params.content_length_override.unwrap_or(params.body_len);
-    response
-        .headers_mut()
-        .insert(CONTENT_LENGTH, http::HeaderValue::from(content_length));
+    let mut response = params.envelope.headers.build_response(
+        status,
+        params.body,
+        content_length,
+        age,
+        cache_status,
+    );
     if let Some(content_range) = params.content_range {
         response
             .headers_mut()
@@ -350,7 +233,7 @@ mod tests {
     fn envelope_with_headers(headers: Vec<(String, String)>) -> CachedResponseEnvelope {
         CachedResponseEnvelope {
             status: 200,
-            headers,
+            headers: crate::types::CachedHeaders::from_pairs(headers),
             body: CachedBody::default(),
             body_len: 0,
             stored_at_ms: 0,
@@ -359,7 +242,6 @@ mod tests {
             freshness_lifetime_secs: 60,
             vary_headers: Vec::new(),
             vary_values: Vec::new(),
-            header_map: Default::default(),
             response_directives: Default::default(),
             response_header_values: Default::default(),
         }
@@ -372,11 +254,15 @@ mod tests {
     #[test]
     fn the_stored_length_is_the_owners_reading() {
         assert_eq!(
-            envelope_with_content_length("42").declared_content_length(),
+            envelope_with_content_length("42")
+                .headers
+                .declared_content_length(),
             Some(42)
         );
         assert_eq!(
-            envelope_with_content_length("42, 42").declared_content_length(),
+            envelope_with_content_length("42, 42")
+                .headers
+                .declared_content_length(),
             Some(42)
         );
         assert_eq!(
@@ -384,6 +270,7 @@ mod tests {
                 ("content-length".to_string(), "42".to_string()),
                 ("Content-Length".to_string(), "42".to_string()),
             ])
+            .headers
             .declared_content_length(),
             Some(42)
         );
@@ -392,7 +279,9 @@ mod tests {
     #[test]
     fn the_stored_length_refuses_a_signed_member() {
         assert_eq!(
-            envelope_with_content_length("+42").declared_content_length(),
+            envelope_with_content_length("+42")
+                .headers
+                .declared_content_length(),
             None
         );
     }
@@ -400,7 +289,9 @@ mod tests {
     #[test]
     fn the_stored_length_refuses_conflicting_members() {
         assert_eq!(
-            envelope_with_content_length("42, 43").declared_content_length(),
+            envelope_with_content_length("42, 43")
+                .headers
+                .declared_content_length(),
             None
         );
     }
@@ -408,7 +299,9 @@ mod tests {
     #[test]
     fn the_stored_length_of_an_empty_value_is_absent() {
         assert_eq!(
-            envelope_with_content_length("").declared_content_length(),
+            envelope_with_content_length("")
+                .headers
+                .declared_content_length(),
             None
         );
     }
@@ -416,7 +309,9 @@ mod tests {
     #[test]
     fn a_response_without_the_field_declares_no_length() {
         assert_eq!(
-            envelope_with_headers(Vec::new()).declared_content_length(),
+            envelope_with_headers(Vec::new())
+                .headers
+                .declared_content_length(),
             None
         );
     }

@@ -107,7 +107,7 @@ mod tests {
     fn envelope_with(vary_values: Vec<(String, VarySelector)>) -> CachedResponseEnvelope {
         CachedResponseEnvelope {
             status: 200,
-            headers: Vec::new(),
+            headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
             body: crate::types::CachedBody::default(),
             body_len: 0,
             stored_at_ms: 0,
@@ -116,7 +116,6 @@ mod tests {
             freshness_lifetime_secs: 60,
             vary_headers: vec!["x-tenant".to_string()],
             vary_values,
-            header_map: std::sync::OnceLock::new(),
             response_directives: std::sync::OnceLock::new(),
             response_header_values: std::sync::OnceLock::new(),
         }
