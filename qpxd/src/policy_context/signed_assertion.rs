@@ -6,8 +6,8 @@ use super::util::{
 };
 use anyhow::{Result, anyhow};
 use http::header::HeaderName;
-use hyper::HeaderMap;
 use qpx_core::config::{AssertionClaimsMapConfig, SignedAssertionConfig};
+use qpx_core::http_message::Headers;
 use serde::Deserialize;
 use serde_json::Value as JsonValue;
 use std::sync::Arc;
@@ -78,7 +78,7 @@ impl CompiledSignedAssertion {
         })
     }
 
-    pub(super) fn extract(&self, headers: &HeaderMap) -> Result<ResolvedIdentity> {
+    pub(super) fn extract(&self, headers: &Headers) -> Result<ResolvedIdentity> {
         let Some(token) = extract_assertion_token(headers, &self.header, self.prefix.as_deref())
         else {
             return Ok(ResolvedIdentity::default());

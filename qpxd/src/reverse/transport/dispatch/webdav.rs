@@ -1,11 +1,12 @@
 use crate::reverse::router::HttpRoute;
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) fn prepare_direct_webdav_resource(
-    req: &mut Request<Body>,
+    req: &mut OwnerRequest<Body>,
     route: &HttpRoute,
     service: &crate::reverse::router::WebDavOriginService,
 ) -> Result<qpx_webdav::ResourceId> {
@@ -31,7 +32,7 @@ pub(super) fn prepare_direct_webdav_resource(
 }
 
 pub(super) struct ReverseWebDavDispatch<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) service: Arc<crate::reverse::router::WebDavOriginService>,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
     pub(super) request_method: &'a http::Method,
@@ -80,7 +81,7 @@ pub(super) async fn dispatch_reverse_webdav(
 }
 
 pub(super) async fn execute_webdav_service(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     service: Arc<crate::reverse::router::WebDavOriginService>,
     identity: &crate::policy_context::ResolvedIdentity,
     max_request_body_bytes: usize,
@@ -91,23 +92,7 @@ pub(super) async fn execute_webdav_service(
         Some(resource) => resource,
         None => service.resource_for_path(req.uri().path())?,
     };
-    let (parts, mut body) = req.into_parts();
-    let mut collected = Vec::new();
-    while let Some(chunk) = body.data().await {
-        let chunk = chunk?;
-        let next = collected
-            .len()
-            .checked_add(chunk.len())
-            .ok_or_else(|| anyhow!("WebDAV request body length overflow"))?;
-        if next > max_request_body_bytes {
-            return Err(anyhow!(
-                "WebDAV request body exceeds route limit of {} bytes",
-                max_request_body_bytes
-            ));
-        }
-        collected.extend_from_slice(&chunk);
-    }
-    let request = Request::from_parts(parts, collected);
+    let request = collect_webdav_request(req, max_request_body_bytes).await?;
     let context = qpx_webdav::WebDavRequestContext {
         subject: identity.user.clone(),
         tenant: identity.tenant.clone(),
@@ -134,6 +119,29 @@ pub(super) async fn execute_webdav_service(
         return Ok(Response::from_parts(parts, body));
     }
     Ok(Response::from_parts(parts, body))
+}
+
+async fn collect_webdav_request(
+    req: OwnerRequest<Body>,
+    max_request_body_bytes: usize,
+) -> Result<OwnerRequest<Vec<u8>>> {
+    let (head, mut body) = req.into_head_and_body();
+    let mut collected = Vec::new();
+    while let Some(chunk) = body.data().await {
+        let chunk = chunk?;
+        let next = collected
+            .len()
+            .checked_add(chunk.len())
+            .ok_or_else(|| anyhow!("WebDAV request body length overflow"))?;
+        if next > max_request_body_bytes {
+            return Err(anyhow!(
+                "WebDAV request body exceeds route limit of {} bytes",
+                max_request_body_bytes
+            ));
+        }
+        collected.extend_from_slice(&chunk);
+    }
+    Ok(head.map_body(|()| collected))
 }
 
 pub(crate) fn apply_webdav_file_region(
@@ -201,4 +209,51 @@ fn materialize_webdav_file_region(
         filled += read;
     }
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qpx_core::http_message::OrdinaryHeaderName;
+
+    #[tokio::test]
+    async fn request_collection_enforces_limit_and_preserves_owned_head() {
+        let request = OwnerRequest::from_http(
+            http::Request::builder()
+                .method("PUT")
+                .uri("/resource")
+                .header("x-test", "first")
+                .header("x-test", "second")
+                .body(Body::from("abc"))
+                .unwrap(),
+        );
+        let request = collect_webdav_request(request, 3).await.unwrap();
+        assert_eq!(request.method(), http::Method::PUT);
+        assert_eq!(request.uri().path(), "/resource");
+        assert_eq!(request.body(), b"abc");
+        let name = OrdinaryHeaderName::try_from("x-test").unwrap();
+        let values: Vec<_> = request
+            .headers()
+            .get_all(&name)
+            .map(|v| v.as_bytes())
+            .collect();
+        assert_eq!(values, [b"first".as_slice(), b"second".as_slice()]);
+
+        let request = OwnerRequest::new(Body::from("abcd"));
+        let error = collect_webdav_request(request, 3).await.unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "WebDAV request body exceeds route limit of 3 bytes"
+        );
+        assert!(
+            collect_webdav_request(OwnerRequest::new(Body::from("")), 0)
+                .await
+                .is_ok()
+        );
+        assert!(
+            collect_webdav_request(OwnerRequest::new(Body::from("a")), 0)
+                .await
+                .is_err()
+        );
+    }
 }

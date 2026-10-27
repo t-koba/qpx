@@ -6,17 +6,17 @@ use super::{InlineCache, PreparedReverseRequest, ReversePreparedContext, Reverse
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::ReverseConnInfo;
 use anyhow::{Result, anyhow};
-use hyper::Request;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) fn prepare_single_plain_reverse_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &crate::runtime::RuntimeState,
     compiled: &crate::reverse::CompiledReverse,
-) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
+) -> Result<ReverseEarlyResult<Option<OwnerRequest<Body>>>> {
     let Some(route) = compiled.router.single_plain_http_route() else {
         return Ok(Ok(None));
     };
@@ -24,12 +24,12 @@ pub(super) fn prepare_single_plain_reverse_request(
 }
 
 pub(super) fn prepare_single_webdav_reverse_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &crate::runtime::RuntimeState,
     compiled: &crate::reverse::CompiledReverse,
-) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
+) -> Result<ReverseEarlyResult<Option<OwnerRequest<Body>>>> {
     let Some(route) = compiled.router.single_direct_webdav_route() else {
         return Ok(Ok(None));
     };
@@ -37,12 +37,12 @@ pub(super) fn prepare_single_webdav_reverse_request(
 }
 
 pub(super) fn prepare_single_local_response_reverse_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &crate::runtime::RuntimeState,
     compiled: &crate::reverse::CompiledReverse,
-) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
+) -> Result<ReverseEarlyResult<Option<OwnerRequest<Body>>>> {
     let Some(route) = compiled.router.single_direct_local_response_route() else {
         return Ok(Ok(None));
     };
@@ -50,13 +50,13 @@ pub(super) fn prepare_single_local_response_reverse_request(
 }
 
 fn prepare_single_reverse_route_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &crate::runtime::RuntimeState,
     compiled: &crate::reverse::CompiledReverse,
     route: &crate::reverse::router::HttpRoute,
-) -> Result<ReverseEarlyResult<Option<Request<Body>>>> {
+) -> Result<ReverseEarlyResult<Option<OwnerRequest<Body>>>> {
     if let Some(response) = reverse_security_rejection(&req, conn, state, compiled)? {
         return Ok(Err(response));
     }
@@ -91,12 +91,12 @@ fn prepare_single_reverse_route_request(
 }
 
 pub(super) enum SingleHttpPrepare {
-    Miss(Box<Request<Body>>),
+    Miss(Box<OwnerRequest<Body>>),
     Hit(Box<ReverseEarlyResult<PreparedReverseRequest>>),
 }
 
 pub(super) fn try_prepare_single_http_reverse_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,

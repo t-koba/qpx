@@ -1,14 +1,15 @@
 use anyhow::Result;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use qpxd_cache::{self as cache, CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-pub(crate) fn clone_request_head_for_revalidation(req: &Request<Body>) -> Request<Body> {
-    let mut out = Request::new(Body::empty());
+pub(crate) fn clone_request_head_for_revalidation<B>(req: &OwnerRequest<B>) -> OwnerRequest<()> {
+    let mut out = OwnerRequest::new(());
     *out.method_mut() = req.method().clone();
     *out.uri_mut() = req.uri().clone();
     *out.version_mut() = req.version();
@@ -26,16 +27,15 @@ pub enum CacheLookupDecision {
 pub(crate) struct DeferredSnapshotCacheLookup {
     pub(crate) decision: CacheLookupDecision,
     pub(crate) revalidation_state: Option<RevalidationState>,
-    pub(crate) request_headers_snapshot: Option<http::HeaderMap>,
+    pub(crate) request_head_snapshot: Option<OwnerRequest<()>>,
 }
 
 pub struct CacheWritebackContext<'a> {
-    pub request_method: &'a Method,
+    pub request_snapshot: &'a OwnerRequest<()>,
     pub response_delay_secs: u64,
     pub cache_target_key: Option<&'a CacheRequestKey>,
     pub cache_lookup_key: Option<&'a CacheRequestKey>,
     pub cache_policy: Option<&'a CachePolicyConfig>,
-    pub request_headers_snapshot: &'a http::HeaderMap,
     pub revalidation_state: Option<RevalidationState>,
     pub request_collapse_guard: Option<cache::RequestCollapseGuard>,
     pub body_read_timeout: Duration,
@@ -44,8 +44,8 @@ pub struct CacheWritebackContext<'a> {
 }
 
 pub(crate) async fn lookup_with_revalidation(
-    req: &mut Request<Body>,
-    request_headers_snapshot: &http::HeaderMap,
+    req: &mut OwnerRequest<Body>,
+    request_snapshot: &OwnerRequest<()>,
     cache_lookup_key: Option<&CacheRequestKey>,
     cache_policy: Option<&CachePolicyConfig>,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
@@ -60,8 +60,7 @@ pub(crate) async fn lookup_with_revalidation(
     };
 
     match cache::lookup(
-        req.method(),
-        request_headers_snapshot,
+        request_snapshot,
         key,
         policy,
         backends,
@@ -92,7 +91,7 @@ pub(crate) async fn lookup_with_revalidation(
 }
 
 pub(crate) async fn lookup_with_deferred_snapshot(
-    req: &mut Request<Body>,
+    req: &mut OwnerRequest<Body>,
     cache_lookup_key: Option<&CacheRequestKey>,
     cache_policy: Option<&CachePolicyConfig>,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
@@ -103,48 +102,43 @@ pub(crate) async fn lookup_with_deferred_snapshot(
         return Ok(DeferredSnapshotCacheLookup {
             decision: CacheLookupDecision::Miss,
             revalidation_state: None,
-            request_headers_snapshot: None,
+            request_head_snapshot: None,
         });
     };
     let Some(key) = cache_lookup_key else {
         return Ok(DeferredSnapshotCacheLookup {
             decision: CacheLookupDecision::Miss,
             revalidation_state: None,
-            request_headers_snapshot: None,
+            request_head_snapshot: None,
         });
     };
 
-    let outcome = cache::lookup(
-        req.method(),
-        req.headers(),
-        key,
-        policy,
-        backends,
-        background_revalidations,
-    )
-    .await?;
+    // Send-safe snapshot: `Request<Body>` is not `Sync`, so the shared lookup
+    // sees only the owned `()` head while the live body stays with `req`.
+    let snapshot = clone_request_head_for_revalidation(req);
+    let outcome = cache::lookup(&snapshot, key, policy, backends, background_revalidations).await?;
     Ok(match outcome {
         LookupOutcome::Hit(hit) => DeferredSnapshotCacheLookup {
             decision: CacheLookupDecision::Hit(hit),
             revalidation_state: None,
-            request_headers_snapshot: None,
+            request_head_snapshot: None,
         },
         LookupOutcome::StaleWhileRevalidate(hit, state) => {
-            let request_headers_snapshot = req.headers().clone();
+            let request_head_snapshot = clone_request_head_for_revalidation(req);
             cache::attach_revalidation_headers(req.headers_mut(), &state);
             DeferredSnapshotCacheLookup {
                 decision: CacheLookupDecision::StaleWhileRevalidate(hit, Box::new(state)),
                 revalidation_state: None,
-                request_headers_snapshot: Some(request_headers_snapshot),
+                request_head_snapshot: Some(request_head_snapshot),
             }
         }
         LookupOutcome::Revalidate(state) => {
-            let request_headers_snapshot = req.headers().clone();
+            let request_head_snapshot = clone_request_head_for_revalidation(req);
             cache::attach_revalidation_headers(req.headers_mut(), &state);
             DeferredSnapshotCacheLookup {
                 decision: CacheLookupDecision::Miss,
                 revalidation_state: Some(state),
-                request_headers_snapshot: Some(request_headers_snapshot),
+                request_head_snapshot: Some(request_head_snapshot),
             }
         }
         LookupOutcome::OnlyIfCachedMiss => DeferredSnapshotCacheLookup {
@@ -152,12 +146,12 @@ pub(crate) async fn lookup_with_deferred_snapshot(
                 cache::build_only_if_cached_miss_response(cache_miss_message),
             ),
             revalidation_state: None,
-            request_headers_snapshot: None,
+            request_head_snapshot: None,
         },
         LookupOutcome::Miss => DeferredSnapshotCacheLookup {
             decision: CacheLookupDecision::Miss,
             revalidation_state: None,
-            request_headers_snapshot: Some(req.headers().clone()),
+            request_head_snapshot: Some(clone_request_head_for_revalidation(req)),
         },
     })
 }
@@ -167,12 +161,11 @@ pub(crate) async fn process_upstream_response_for_cache(
     ctx: CacheWritebackContext<'_>,
 ) -> Result<Response<Body>> {
     let CacheWritebackContext {
-        request_method,
+        request_snapshot,
         response_delay_secs,
         cache_target_key,
         cache_lookup_key,
         cache_policy,
-        request_headers_snapshot,
         revalidation_state,
         mut request_collapse_guard,
         body_read_timeout,
@@ -181,7 +174,7 @@ pub(crate) async fn process_upstream_response_for_cache(
     } = ctx;
     if let Some(policy) = cache_policy {
         cache::maybe_invalidate(
-            request_method,
+            request_snapshot.method(),
             response.status(),
             response.headers(),
             cache_target_key,
@@ -196,8 +189,7 @@ pub(crate) async fn process_upstream_response_for_cache(
         && response.status() == StatusCode::NOT_MODIFIED
     {
         response = cache::revalidate_not_modified(
-            request_method,
-            request_headers_snapshot,
+            request_snapshot,
             policy,
             response,
             revalidation,
@@ -211,8 +203,7 @@ pub(crate) async fn process_upstream_response_for_cache(
         && response.status() != StatusCode::NOT_MODIFIED
     {
         response = cache::maybe_store(
-            request_method,
-            request_headers_snapshot,
+            request_snapshot,
             key,
             policy,
             response,

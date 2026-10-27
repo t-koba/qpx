@@ -3,7 +3,8 @@
 //! Raw transport access (`headers()`, `headers_mut()`, parts, conversions)
 //! is intentionally absent; these tests exercise only the public facade
 //! operations plus compile-time signature checks for both dispatch helpers.
-use http::{HeaderName, HeaderValue, Request, StatusCode};
+use http::{HeaderName, HeaderValue, StatusCode};
+use qpx_core::http_message::Request;
 use qpxd::module_api::{Body, HttpModuleContext, HttpModuleRequestView, HttpModuleResponse};
 use std::net::SocketAddr;
 

@@ -12,14 +12,12 @@ use crate::purge_cache_key;
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
+use http::header::CONTENT_RANGE;
 use http::header::{CACHE_CONTROL, CONTENT_LOCATION, DATE, VARY};
-use http::header::{
-    CONTENT_LENGTH, ETAG, HOST, IF_MATCH, IF_NONE_MATCH, IF_RANGE, IF_UNMODIFIED_SINCE,
-    LAST_MODIFIED, SET_COOKIE, TRANSFER_ENCODING,
-};
-use http::header::{CONTENT_RANGE, RANGE};
-use hyper::{Method, Request, Response, StatusCode};
+use http::header::{CONTENT_LENGTH, ETAG, HOST, LAST_MODIFIED, SET_COOKIE, TRANSFER_ENCODING};
+use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::io::Write;
@@ -231,22 +229,30 @@ fn backend_map() -> HashMap<String, Arc<dyn CacheBackend>> {
     map
 }
 
-fn make_get_request(path: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::GET)
-        .uri(format!("http://example.com{}", path))
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request")
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
 }
 
-fn make_head_request(path: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::HEAD)
-        .uri(format!("http://example.com{}", path))
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request")
+fn make_get_request(path: &str) -> OwnerRequest<()> {
+    OwnerRequest::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://example.com{}", path))
+            .header(HOST, "example.com")
+            .body(())
+            .expect("request"),
+    )
+}
+
+fn make_head_request(path: &str) -> OwnerRequest<()> {
+    OwnerRequest::from_http(
+        http::Request::builder()
+            .method(Method::HEAD)
+            .uri(format!("http://example.com{}", path))
+            .header(HOST, "example.com")
+            .body(())
+            .expect("request"),
+    )
 }
 
 fn make_response(status: StatusCode, cache_control: &str, body: &str) -> Response<Body> {
@@ -259,8 +265,7 @@ fn make_response(status: StatusCode, cache_control: &str, body: &str) -> Respons
 }
 
 async fn store_and_drain(
-    request_method: &Method,
-    request_headers: &http::HeaderMap,
+    request: &OwnerRequest<()>,
     key: &CacheRequestKey,
     policy: &CachePolicyConfig,
     response: Response<Body>,
@@ -269,8 +274,7 @@ async fn store_and_drain(
 ) -> Result<Response<Body>> {
     let writeback_admission = test_writeback_admission();
     let response = super::maybe_store(
-        request_method,
-        request_headers,
+        request,
         key,
         policy,
         response,

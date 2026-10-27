@@ -9,10 +9,7 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::forward::request::resolve_upstream_url;
-use crate::http::codec::h2::{
-    h1_headers_to_http, h2_response_to_hyper,
-    parse_declared_content_length as parse_h2_content_length,
-};
+use crate::http::codec::h2::{h1_headers_to_http, h2_response_to_hyper};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
 #[cfg(feature = "auth-basic")]
@@ -32,10 +29,11 @@ use crate::policy_context::{
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
-use ::http::{Method, Request, Response, StatusCode};
+use ::http::{Method, Response, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
+use qpx_core::http_message::Request;
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
@@ -149,9 +147,7 @@ pub(super) async fn handle_h2_extended_connect(
         scheme: Some(scheme.as_str()),
         http_version: Some(http_version_label(req_version)),
         alpn: Some("h2"),
-        headers: Some(qpx_core::http_content_length::HeaderView::new(
-            &sanitized_headers,
-        )),
+        owned_headers: Some(sanitized_headers.request_policy_view(req_version)),
         ..Default::default()
     };
     crate::http::policy::rule_context::apply_identity(&mut ctx, &identity);
@@ -369,7 +365,7 @@ pub(super) async fn handle_h2_extended_connect(
     });
     let tunnel_idle_timeout =
         Duration::from_millis(state.plan.limits.timeouts.tunnel_idle_timeout_ms.max(1));
-    let declared_request_length = parse_h2_content_length(req.headers())?;
+    let declared_request_length = req.headers().declared_content_length()?;
     let upstream = match open_upstream_h2_extended_connect_stream(
         req.uri(),
         &sanitized_headers,
@@ -400,7 +396,7 @@ pub(super) async fn handle_h2_extended_connect(
             offered,
         )?;
     }
-    let downstream_body = req.into_body();
+    let (_, downstream_body) = req.into_head_and_body();
     if !response.status().is_success() {
         let mut response = finalize_response_with_headers(
             &Method::CONNECT,

@@ -9,7 +9,6 @@ use crate::reverse::transport::request_template::{
     request_is_retryable, request_may_have_body,
 };
 use anyhow::Result;
-use hyper::Request;
 use std::sync::Arc;
 use tokio::time::Duration;
 
@@ -92,8 +91,8 @@ pub(super) async fn prepare_reverse_retry_dispatch(
             .iter()
             .map(|mirror| mirror.max_mirror_body_bytes)
             .collect::<Vec<_>>();
-        let (parts, body) = req.into_parts();
-        let template = ReverseRequestHeadTemplate::from_parts(&parts);
+        let (head, body) = req.into_head_and_body();
+        let template = ReverseRequestHeadTemplate::from_head(&head);
         let (primary_body, mirror_bodies) = qpx_http::body::tee::tee_body_lossy_with_metrics(
             body,
             mirror_limits,
@@ -111,7 +110,7 @@ pub(super) async fn prepare_reverse_retry_dispatch(
             upstream_trust: route.upstream_trust.clone(),
             proxy_name,
         });
-        Request::from_parts(parts, primary_body)
+        head.map_body(|()| primary_body)
     };
     let need_template = attempts > 1 || !mirror_upstreams.is_empty();
     let (first_request, template, replay_recorder) =

@@ -3,8 +3,8 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::runtime::Runtime;
 use crate::tls::TlsClientHelloInfo;
 use anyhow::{Result, anyhow};
-use http::HeaderMap;
 use qpx_core::config::{ActionConfig, ActionKind};
+use qpx_core::http_message::Headers;
 use qpx_core::rules::RuleMatchContext;
 #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 use qpx_core::tls::CompiledUpstreamTlsTrust;
@@ -18,7 +18,8 @@ pub(in crate::forward) struct ConnectPolicyInput<'a> {
     pub host: &'a str,
     pub port: u16,
     pub authority: &'a str,
-    pub sanitized_headers: &'a HeaderMap,
+    pub request_version: http::Version,
+    pub sanitized_headers: &'a Headers,
     pub identity: &'a crate::policy_context::ResolvedIdentity,
     pub client_hello: &'a TlsClientHelloInfo,
     pub upstream_cert: Option<&'a UpstreamCertificateInfo>,
@@ -80,9 +81,11 @@ pub(in crate::forward) async fn decide_connect_action_from_tls_metadata(
         tls_version: input.client_hello.tls_version.as_deref(),
         ja3: input.client_hello.ja3.as_deref(),
         ja4: input.client_hello.ja4.as_deref(),
-        headers: Some(qpx_core::http_content_length::HeaderView::new(
-            input.sanitized_headers,
-        )),
+        owned_headers: Some(
+            input
+                .sanitized_headers
+                .request_policy_view(input.request_version),
+        ),
         upstream_cert_present: input.upstream_cert.map(|cert| cert.present),
         upstream_cert_subject: input.upstream_cert.and_then(|cert| cert.subject.as_deref()),
         upstream_cert_issuer: input.upstream_cert.and_then(|cert| cert.issuer.as_deref()),

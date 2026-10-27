@@ -11,8 +11,9 @@ use crate::policy_context::{
 };
 use crate::runtime::RuntimeState;
 use anyhow::Result;
-use hyper::{HeaderMap, Method, Response};
+use hyper::{Method, Response};
 use qpx_core::config::ActionConfig;
+use qpx_core::http_message::Headers;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
@@ -43,7 +44,7 @@ pub(crate) struct HttpAccessInput<'a> {
     pub(crate) matched_rule: Option<&'a str>,
     pub(crate) matched_route: Option<&'a str>,
     pub(crate) action: Option<&'a ActionConfig>,
-    pub(crate) sanitized_headers: &'a HeaderMap,
+    pub(crate) sanitized_headers: &'a Headers,
     pub(crate) identity: &'a ResolvedIdentity,
     pub(crate) destination: &'a DestinationMetadata,
     pub(crate) base_headers: Option<Arc<CompiledHeaderControl>>,

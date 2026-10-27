@@ -16,6 +16,7 @@ use qpx_core::dpop::{
     DpopSignatureError, DpopSignatureVerifier, DpopValidationContext, access_token_jkt,
     validate_dpop,
 };
+use qpx_core::http_message::{Headers, IdentityAuthorizationError, OrdinaryHeaderName};
 use qpx_http::body::Body;
 use qpx_http::problem::{PROBLEM_JSON, ProblemDetails};
 use ring::signature;
@@ -242,7 +243,7 @@ impl DpopRuntime {
 
     fn validate(
         &self,
-        headers: &HeaderMap,
+        headers: &Headers,
         access_token: &str,
         payload: &Value,
         request: &IdentityRequestContext,
@@ -504,7 +505,7 @@ impl CompiledBearerIdentity {
     pub(super) async fn extract(
         &self,
         state: &RuntimeState,
-        headers: &HeaderMap,
+        headers: &Headers,
         request: Option<&IdentityRequestContext>,
     ) -> Result<ResolvedIdentity> {
         let authorization = match authorization_token(headers, &self.header, self.dpop.is_some()) {
@@ -525,7 +526,7 @@ impl CompiledBearerIdentity {
         };
         let Some((token, dpop_scheme)) = authorization else {
             if let Some(dpop) = self.dpop.as_ref()
-                && (dpop.required || headers.contains_key("dpop"))
+                && (dpop.required || headers.contains_key(&dpop_header_name()))
             {
                 return Err(BearerAuthenticationError::dpop_invalid_token(
                     "DPoP authorization is required",
@@ -574,13 +575,13 @@ impl CompiledBearerIdentity {
                     )
                 })?;
                 let already_validated = headers
-                    .get("dpop")
+                    .get(&dpop_header_name())
                     .map(|proof| request.dpop_was_validated(&self.name, proof.as_bytes()))
                     .transpose()?
                     .unwrap_or(false);
                 if !already_validated {
                     dpop.validate(headers, token, &payload, request)?;
-                    if let Some(proof) = headers.get("dpop") {
+                    if let Some(proof) = headers.get(&dpop_header_name()) {
                         request.mark_dpop_validated(&self.name, proof.as_bytes())?;
                     }
                 }
@@ -590,7 +591,7 @@ impl CompiledBearerIdentity {
                     dpop.nonce.as_deref(),
                 )
                 .into());
-            } else if headers.contains_key("dpop") {
+            } else if headers.contains_key(&dpop_header_name()) {
                 return Err(BearerAuthenticationError::new(
                     "DPoP proof requires the DPoP authorization scheme",
                     dpop.nonce.as_deref(),
@@ -757,38 +758,27 @@ impl IntrospectionSource {
     }
 }
 
+fn dpop_header_name() -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from("dpop").expect("DPoP is ordinary")
+}
+
 fn authorization_token<'a>(
-    headers: &'a HeaderMap,
+    headers: &'a Headers,
     header: &HeaderName,
     dpop_enabled: bool,
 ) -> Result<Option<(&'a str, bool)>> {
-    let mut values = headers.get_all(header).iter();
-    let Some(value) = values.next() else {
-        return Ok(None);
-    };
-    if values.next().is_some() {
-        return Err(anyhow!("authorization field must occur exactly once"));
-    }
-    let value = value
-        .to_str()
-        .map_err(|_| anyhow!("bearer field is not ASCII"))?;
-    let Some((scheme, token)) = value.trim().split_once(' ') else {
-        return Err(anyhow!("bearer field is malformed"));
-    };
-    let dpop_scheme = if scheme.eq_ignore_ascii_case("dpop") {
-        if !dpop_enabled {
-            return Err(anyhow!("DPoP authorization scheme is not enabled"));
-        }
-        true
-    } else if scheme.eq_ignore_ascii_case("bearer") {
-        false
-    } else {
-        return Err(anyhow!("authorization field is malformed"));
-    };
-    if token.is_empty() || token.contains(char::is_whitespace) {
-        return Err(anyhow!("bearer field is malformed"));
-    }
-    Ok(Some((token, dpop_scheme)))
+    headers
+        .identity_authorization(header, dpop_enabled)
+        .map_err(|error| {
+            use IdentityAuthorizationError::*;
+            anyhow!(match error {
+                Duplicate => "authorization field must occur exactly once",
+                NonTextual => "bearer field is not ASCII",
+                MalformedBearer => "bearer field is malformed",
+                MalformedAuthorization => "authorization field is malformed",
+                DpopDisabled => "DPoP authorization scheme is not enabled",
+            })
+        })
 }
 
 async fn fetch_jwks(state: &RuntimeState, url: &Url) -> Result<CachedJwks> {
@@ -869,7 +859,7 @@ async fn authority_request(
             "https" => {
                 crate::upstream::origin::shared_reverse_https_request_with_trust(
                     &state.pools,
-                    request,
+                    qpx_core::http_message::Request::from_http(request),
                     None,
                 )
                 .await
@@ -1616,13 +1606,60 @@ mod tests {
         sign_bearer_es256(fixture.private_key_der.as_slice(), payload)
     }
 
-    fn bearer_headers(token: &str) -> HeaderMap {
-        let mut headers = HeaderMap::new();
+    #[test]
+    fn authorization_selection_keeps_existing_diagnostics() {
+        for field in [http::header::AUTHORIZATION, http::header::CONTENT_LENGTH] {
+            for (values, expected) in [
+                (vec![&b""[..]], "bearer field is malformed"),
+                (vec![&b"\xff"[..]], "bearer field is not ASCII"),
+                (
+                    vec![&b""[..], b"Bearer valid"],
+                    "authorization field must occur exactly once",
+                ),
+                (
+                    vec![&b"Bearer same"[..], b"Bearer same"],
+                    "authorization field must occur exactly once",
+                ),
+                (
+                    vec![&b"Bearer  two-spaces"[..]],
+                    "bearer field is malformed",
+                ),
+                (
+                    vec![&b"Basic token"[..]],
+                    "authorization field is malformed",
+                ),
+                (
+                    vec![&b"DPoP token"[..]],
+                    "DPoP authorization scheme is not enabled",
+                ),
+            ] {
+                let mut ingress = Request::new(());
+                for value in values {
+                    ingress
+                        .headers_mut()
+                        .append(&field, http::HeaderValue::from_bytes(value).unwrap());
+                }
+                let request = qpx_core::http_message::Request::from_http(ingress);
+                assert_eq!(
+                    authorization_token(request.headers(), &field, false)
+                        .unwrap_err()
+                        .to_string(),
+                    expected
+                );
+            }
+        }
+    }
+
+    fn bearer_headers(token: &str) -> Headers {
+        let mut request = Request::new(());
+        let headers = request.headers_mut();
         headers.insert(
             http::header::AUTHORIZATION,
             http::HeaderValue::from_str(&format!("Bearer {token}")).expect("auth value"),
         );
-        headers
+        qpx_core::http_message::Request::from_http(request)
+            .headers()
+            .clone()
     }
 
     fn remove_bearer_env(fixture: &OptionalDpopFixture) {

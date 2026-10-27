@@ -6,7 +6,8 @@ use crate::http::capture::cache_flow::{
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use anyhow::{Result, anyhow};
 use http::header::{CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE};
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -52,11 +53,11 @@ pub(crate) fn dispatch_cache_collapse_response(
 /// bounded by the selected route streaming `body_read_timeout`, matching the
 /// observation pipeline; an over-limit body or a stalled read fails closed.
 pub(crate) async fn buffer_query_for_cache_key(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     max_body_bytes: usize,
     body_read_timeout: Duration,
-) -> Result<(Request<Body>, String)> {
-    let (parts, mut body) = req.into_parts();
+) -> Result<(OwnerRequest<Body>, String)> {
+    let (head, mut body) = req.into_head_and_body();
     let mut content = Vec::new();
     while let Some(chunk) = read_body_data(&mut body, body_read_timeout).await? {
         let chunk = chunk?;
@@ -81,7 +82,9 @@ pub(crate) async fn buffer_query_for_cache_key(
     for name in [CONTENT_TYPE, CONTENT_ENCODING, CONTENT_LANGUAGE] {
         hasher.update(name.as_str().as_bytes());
         hasher.update([0]);
-        for value in parts.headers.get_all(&name) {
+        let ordinary = OrdinaryHeaderName::try_from(name.as_str())
+            .expect("cache-key representation header is ordinary");
+        for value in head.headers().get_all(&ordinary) {
             hasher.update((value.as_bytes().len() as u64).to_be_bytes());
             hasher.update(value.as_bytes());
         }
@@ -91,7 +94,7 @@ pub(crate) async fn buffer_query_for_cache_key(
     hasher.update(&content);
     let digest = format!("sha-256:{:x}", hasher.finalize());
     Ok((
-        Request::from_parts(parts, Body::replay(content.into(), trailers)),
+        head.map_body(|()| Body::replay(content.into(), trailers)),
         digest,
     ))
 }
@@ -101,13 +104,13 @@ pub(crate) async fn buffer_query_for_cache_key(
 /// body fails closed via the helper error. Shared by forward and reverse
 /// dispatch so both bind QUERY entries to request content, not the URI alone.
 pub(crate) async fn prepare_query_aware_cache_key_pair(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
     cache_default_scheme: &str,
     max_body_bytes: usize,
     body_read_timeout: Duration,
 ) -> Result<(
-    Request<Body>,
+    OwnerRequest<Body>,
     Option<CacheRequestKey>,
     Option<CacheRequestKey>,
 )> {
@@ -129,14 +132,20 @@ pub(crate) async fn prepare_query_aware_cache_key_pair(
 }
 
 fn prepare_dispatch_cache_key_pair(
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
     cache_policy: Option<&qpx_core::config::CachePolicyConfig>,
     cache_default_scheme: &str,
 ) -> Result<(Option<CacheRequestKey>, Option<CacheRequestKey>)> {
     if cache_policy.is_none() {
         return Ok((None, None));
     }
-    let key = CacheRequestKey::for_lookup(req, cache_default_scheme)?;
+    // Owner snapshot for the Send-safe cache key; body stays with the live request.
+    let mut snapshot = OwnerRequest::new(());
+    *snapshot.method_mut() = req.method().clone();
+    *snapshot.uri_mut() = req.uri().clone();
+    *snapshot.version_mut() = req.version();
+    *snapshot.headers_mut() = req.headers().clone();
+    let key = CacheRequestKey::for_lookup(&snapshot, cache_default_scheme)?;
     Ok((key.clone(), key))
 }
 
@@ -144,7 +153,7 @@ pub(crate) struct DispatchCacheWriteInput<'a> {
     pub(crate) response: Response<Body>,
     pub(crate) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(crate) response_cache_bypass: bool,
-    pub(crate) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(crate) request_headers_snapshot: Option<&'a OwnerRequest<()>>,
     pub(crate) cache_target_key: Option<&'a CacheRequestKey>,
     pub(crate) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(crate) revalidation_state: Option<qpxd_cache::RevalidationState>,
@@ -262,12 +271,11 @@ pub(crate) async fn write_dispatch_cache_result(
         return process_upstream_response_for_cache(
             input.response,
             CacheWritebackContext {
-                request_method: input.request_method,
+                request_snapshot: snapshot,
                 response_delay_secs: input.response_delay_secs,
                 cache_target_key: input.cache_target_key,
                 cache_lookup_key: input.cache_lookup_key,
                 cache_policy: Some(policy),
-                request_headers_snapshot: snapshot,
                 revalidation_state: input.revalidation_state,
                 request_collapse_guard: input.request_collapse_guard,
                 body_read_timeout: input

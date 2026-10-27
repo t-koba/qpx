@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use percent_encoding::percent_decode_str;
 use qpx_core::uri_template::UriTemplate;
 #[cfg(feature = "http3")]
-use qpx_http::protocol::semantics::capsule_protocol_enabled;
+use qpx_http::protocol::semantics::request_capsule_protocol_enabled;
 
 #[cfg(feature = "http3")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,8 +18,8 @@ pub(in crate::forward) enum H3ConnectProtocol {
     not(feature = "http3-backend-qpx")
 ))]
 pub(super) fn validate_h3_connect_head(
-    req_head: &::http::Request<()>,
-    headers: &http::HeaderMap,
+    req_head: &qpx_core::http_message::Request<()>,
+    headers: &qpx_core::http_message::Headers,
     authority_host: &str,
     authority_port: u16,
     allow_extended_connect: bool,
@@ -42,8 +42,8 @@ pub(super) fn validate_h3_connect_head(
 
 #[cfg(feature = "http3")]
 pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
-    req_head: &::http::Request<()>,
-    headers: &http::HeaderMap,
+    req_head: &qpx_core::http_message::Request<()>,
+    headers: &qpx_core::http_message::Headers,
     authority_host: &str,
     authority_port: u16,
     protocol: H3ConnectProtocol,
@@ -58,7 +58,7 @@ pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
             // template and MUST be present (non-empty). Unlike CONNECT, :authority is the
             // proxy authority.
             validate_extended_connect_target(req_head, "CONNECT-UDP")?;
-            if !capsule_protocol_enabled(headers) {
+            if !request_capsule_protocol_enabled(headers) {
                 return Err(anyhow!("CONNECT-UDP requires Capsule-Protocol: ?1"));
             }
         }
@@ -74,7 +74,8 @@ pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
         }
     }
 
-    let host_values: Vec<_> = headers.get_all(http::header::HOST).iter().collect();
+    let host = qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::HOST)?;
+    let host_values: Vec<_> = headers.get_all(&host).collect();
     if host_values.len() > 1 {
         return Err(anyhow!("multiple Host headers are not allowed"));
     }
@@ -98,7 +99,7 @@ pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
 
 #[cfg(feature = "http3")]
 fn validate_extended_connect_target(
-    req_head: &::http::Request<()>,
+    req_head: &qpx_core::http_message::Request<()>,
     label: &'static str,
 ) -> Result<()> {
     let scheme = req_head
@@ -437,12 +438,14 @@ mod tests {
     #[cfg(feature = "http3")]
     #[test]
     fn connect_udp_head_accepts_capsule_parameters_but_rejects_repeated_fields() {
-        let req = ::http::Request::builder()
-            .method(::http::Method::CONNECT)
-            .uri("https://proxy.example/.well-known/masque/udp/example.com/443/")
-            .header("capsule-protocol", "?1;foo=bar")
-            .body(())
-            .expect("request");
+        let req = qpx_core::http_message::Request::from_http(
+            ::http::Request::builder()
+                .method(::http::Method::CONNECT)
+                .uri("https://proxy.example/.well-known/masque/udp/example.com/443/")
+                .header("capsule-protocol", "?1;foo=bar")
+                .body(())
+                .expect("request"),
+        );
         validate_h3_connect_pseudo_headers(
             &req,
             req.headers(),
@@ -453,7 +456,11 @@ mod tests {
         .expect("Boolean true with unknown parameter");
 
         let mut headers = req.headers().clone();
-        headers.append("capsule-protocol", ::http::HeaderValue::from_static("?1"));
+        headers.append(
+            qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol")
+                .expect("ordinary field"),
+            ::http::HeaderValue::from_static("?1"),
+        );
         assert!(
             validate_h3_connect_pseudo_headers(
                 &req,

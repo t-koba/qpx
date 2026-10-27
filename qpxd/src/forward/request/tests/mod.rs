@@ -11,6 +11,7 @@ use qpx_core::config::{
     LocalResponseConfig, MatchConfig, MessagesConfig, PolicyContextConfig, RpcMatchConfig,
     RuleConfig, RuntimeConfig, StreamingRequirement, SystemLogConfig, UnknownLengthExactSizePolicy,
 };
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::to_bytes;
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};

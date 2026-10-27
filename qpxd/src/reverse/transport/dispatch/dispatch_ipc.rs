@@ -122,11 +122,14 @@ pub(super) async fn dispatch_reverse_ipc_route(
             true,
         )
         .await;
+        let hyper_req_for_upstream = req_for_upstream
+            .into_http_for_codec()
+            .map_err(|err| anyhow!("{err}"))?;
         let response = timeout(
             timeout_dur,
             proxy_ipc_upstream(
                 &state.pools,
-                req_for_upstream,
+                hyper_req_for_upstream,
                 ipc,
                 proxy_name,
                 IpcUpstreamRequestContext {

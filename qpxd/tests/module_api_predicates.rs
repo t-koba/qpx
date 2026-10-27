@@ -1,6 +1,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
-use http::{HeaderName, Method, Request};
+use http::{HeaderName, HeaderValue, Method};
+use qpx_core::http_message::{OrdinaryHeaderName, Request};
 use qpxd::module_api::{
     Body, HttpModule, HttpModuleCapabilities, HttpModuleContext, HttpModuleEvent,
     HttpModuleRequestView, HttpModuleResponseView, HttpModuleStage, ModuleStages,
@@ -44,12 +45,13 @@ impl HttpModule for ExternalPredicateModule {
 #[test]
 fn external_module_implements_semantic_predicate_hooks() {
     let module = ExternalPredicateModule;
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/resource")
-        .header("x-predicate", "present")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = Request::new(Body::empty());
+    *request.method_mut() = Method::GET;
+    *request.uri_mut() = "https://example.com/resource".parse().expect("uri");
+    request.headers_mut().insert(
+        OrdinaryHeaderName::try_from(HeaderName::from_static("x-predicate")).unwrap(),
+        HeaderValue::from_static("present"),
+    );
     let request_view = HttpModuleRequestView::from_request(&request);
 
     assert!(module.applies_to_request_headers(&request_view));

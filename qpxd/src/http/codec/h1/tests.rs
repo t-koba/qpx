@@ -917,8 +917,18 @@ async fn unsupported_expect_with_100_continue_does_not_send_interim_continue() {
         .expect("parse")
         .expect("head");
     assert!(!parsed.send_continue);
+    let owner = {
+        let mut snapshot = http::Request::builder()
+            .method(parsed.method.clone())
+            .uri(parsed.uri.clone())
+            .version(parsed.version)
+            .body(())
+            .expect("codec snapshot request");
+        *snapshot.headers_mut() = parsed.headers.clone();
+        qpx_core::http_message::Request::from_http(snapshot)
+    };
     assert!(
-        qpx_http::protocol::semantics::validate_expect_header(&parsed.headers).is_err(),
+        qpx_http::protocol::semantics::validate_expect_header(owner.headers()).is_err(),
         "preflight must still reject the unsupported Expect token"
     );
 }

@@ -2,7 +2,8 @@ use super::super::HostPort;
 use crate::http::dispatch::DispatchAuditContext;
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
-use hyper::{Method, Request};
+use hyper::Method;
+use qpx_core::http_message::{Headers, Request};
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
 use std::sync::Arc;
@@ -37,7 +38,7 @@ pub(super) type ForwardDispatchPrepareOutcome =
 pub(super) struct ForwardDispatchReady {
     pub(super) req: Request<Body>,
     pub(super) http_modules: crate::http::modules::HttpModuleExecution,
-    pub(super) request_headers_snapshot: Option<http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<Request<()>>,
     pub(super) cache_lookup_key: Option<CacheRequestKey>,
     pub(super) cache_target_key: Option<CacheRequestKey>,
     pub(super) upstream: Option<crate::upstream::pool::ResolvedUpstreamProxy>,
@@ -51,7 +52,7 @@ pub(super) struct ForwardPolicyOutcomeInput<'a> {
     pub(super) runtime: &'a Runtime,
     pub(super) listener_name: &'a str,
     pub(super) ctx: qpx_core::rules::RuleMatchContext<'a>,
-    pub(super) sanitized_headers: &'a http::HeaderMap,
+    pub(super) sanitized_headers: &'a Headers,
     pub(super) response: ForwardPolicyResponseInput<'a>,
     pub(super) auth_method: &'a str,
     pub(super) auth_uri: &'a str,

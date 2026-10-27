@@ -16,8 +16,7 @@ async fn lookup_serves_single_range_from_cache() {
     );
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -34,20 +33,13 @@ async fn lookup_serves_single_range_from_cache() {
     let mut ranged = make_get_request("/range-hit");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=6-10"));
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=6-10"));
     ranged
         .headers_mut()
-        .insert(IF_RANGE, http::HeaderValue::from_static("\"v1\""));
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+        .insert(ord("if-range"), http::HeaderValue::from_static("\"v1\""));
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -75,8 +67,7 @@ async fn lookup_ignores_range_for_head_requests() {
     let response = make_response(StatusCode::OK, "public, max-age=60", "hello world");
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -93,17 +84,10 @@ async fn lookup_ignores_range_for_head_requests() {
     let mut ranged = make_head_request("/head-range");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=6-10"));
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=6-10"));
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -128,8 +112,7 @@ async fn lookup_returns_412_for_if_match_miss() {
         .insert(ETAG, http::HeaderValue::from_static("\"v1\""));
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -146,10 +129,9 @@ async fn lookup_returns_412_for_if_match_miss() {
     let mut conditional = make_get_request("/if-match");
     conditional
         .headers_mut()
-        .insert(IF_MATCH, http::HeaderValue::from_static("\"v2\""));
+        .insert(ord("if-match"), http::HeaderValue::from_static("\"v2\""));
     let out = lookup(
-        conditional.method(),
-        conditional.headers(),
+        &conditional,
         &key,
         &policy(),
         &backends,
@@ -173,8 +155,7 @@ async fn lookup_returns_416_for_unsatisfiable_range() {
     let response = make_response(StatusCode::OK, "public, max-age=60", "hello");
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -191,17 +172,10 @@ async fn lookup_returns_416_for_unsatisfiable_range() {
     let mut ranged = make_get_request("/range-miss");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=99-120"));
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=99-120"));
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -229,8 +203,7 @@ async fn if_range_mismatch_falls_back_to_full_response() {
     );
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -247,25 +220,18 @@ async fn if_range_mismatch_falls_back_to_full_response() {
     let mut ranged = make_get_request("/if-range-date");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=0-1"));
     ranged.headers_mut().insert(
-        IF_RANGE,
+        ord("if-range"),
         http::HeaderValue::from_static("Mon, 01 Jan 2024 00:00:00 GMT"),
     );
     ranged.headers_mut().insert(
-        IF_UNMODIFIED_SINCE,
+        ord("if-unmodified-since"),
         http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
     );
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -292,8 +258,7 @@ async fn if_range_later_date_falls_back_to_full_response() {
     );
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -310,25 +275,18 @@ async fn if_range_later_date_falls_back_to_full_response() {
     let mut ranged = make_get_request("/if-range-later-date");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=0-1"));
     ranged.headers_mut().insert(
-        IF_RANGE,
+        ord("if-range"),
         http::HeaderValue::from_static("Wed, 03 Jan 2024 00:00:00 GMT"),
     );
     ranged.headers_mut().insert(
-        IF_UNMODIFIED_SINCE,
+        ord("if-unmodified-since"),
         http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
     );
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -361,8 +319,7 @@ async fn if_range_equal_date_serves_partial_response() {
     );
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -379,21 +336,14 @@ async fn if_range_equal_date_serves_partial_response() {
     let mut ranged = make_get_request("/if-range-equal-date");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=0-1"));
     ranged.headers_mut().insert(
-        IF_RANGE,
+        ord("if-range"),
         http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
     );
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -420,8 +370,7 @@ async fn if_range_equal_date_without_date_falls_back_to_full_response() {
     );
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -438,21 +387,14 @@ async fn if_range_equal_date_without_date_falls_back_to_full_response() {
     let mut ranged = make_get_request("/if-range-no-date");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=0-1"));
     ranged.headers_mut().insert(
-        IF_RANGE,
+        ord("if-range"),
         http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
     );
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -483,8 +425,7 @@ async fn if_range_equal_date_with_same_date_falls_back_to_full_response() {
     );
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -501,21 +442,14 @@ async fn if_range_equal_date_with_same_date_falls_back_to_full_response() {
     let mut ranged = make_get_request("/if-range-same-date");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=0-1"));
     ranged.headers_mut().insert(
-        IF_RANGE,
+        ord("if-range"),
         http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
     );
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -546,8 +480,7 @@ async fn if_range_equal_date_with_earlier_date_falls_back_to_full_response() {
     );
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -564,21 +497,14 @@ async fn if_range_equal_date_with_earlier_date_falls_back_to_full_response() {
     let mut ranged = make_get_request("/if-range-earlier-date");
     ranged
         .headers_mut()
-        .insert(RANGE, http::HeaderValue::from_static("bytes=0-1"));
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=0-1"));
     ranged.headers_mut().insert(
-        IF_RANGE,
+        ord("if-range"),
         http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
     );
-    let out = lookup(
-        ranged.method(),
-        ranged.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),

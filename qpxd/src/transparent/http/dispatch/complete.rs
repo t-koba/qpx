@@ -23,7 +23,7 @@ use crate::policy_context::strip_untrusted_identity_headers;
 use crate::rate_limit::RateLimitContext;
 use crate::upstream::http1::proxy_http1_request_with_interim;
 use anyhow::Result;
-use hyper::Request;
+use qpx_core::http_message::Request;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;

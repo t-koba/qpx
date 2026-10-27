@@ -64,7 +64,7 @@ impl RequestHandler for ExtendedEchoHandler {
 
     async fn handle_connect_stream(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         protocol: Protocol,
@@ -120,7 +120,7 @@ impl RequestHandler for ConnectUdpEchoHandler {
 
     async fn handle_connect_stream(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         protocol: Protocol,
@@ -177,7 +177,7 @@ impl RequestHandler for WebTransportEchoHandler {
 
     async fn handle_webtransport_connect(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         session: WebTransportSession,
@@ -280,7 +280,7 @@ impl RequestHandler for WebTransportZeroSessionHandler {
 
     async fn handle_webtransport_connect(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         _req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,
@@ -312,7 +312,7 @@ impl RequestHandler for WebTransportRejectHandler {
 
     async fn handle_webtransport_connect(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,
@@ -348,7 +348,10 @@ impl RequestHandler for DynamicHeaderHandler {
         let value = request
             .head
             .headers()
-            .get("x-dynamic")
+            .get(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from("x-dynamic")
+                    .expect("ordinary"),
+            )
             .and_then(|value| value.to_str().ok())
             .ok_or_else(|| anyhow!("missing x-dynamic header"))?
             .to_string();
@@ -450,7 +453,7 @@ impl RequestHandler for ExtendedConnectDisabledHandler {
 
     async fn handle_connect_stream(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         _req_stream: RequestStream,
         _conn: ConnectionInfo,
         _protocol: Protocol,

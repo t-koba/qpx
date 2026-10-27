@@ -15,7 +15,6 @@ use crate::http::protocol::common::forbidden_response as forbidden;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::l7::finalize_response_with_headers;
-use crate::http3::codec::h1_headers_to_http;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
 use crate::policy_context::{
@@ -28,7 +27,7 @@ use qpx_core::config::{ActionKind, ConnectUdpConfig};
 use tracing::warn;
 
 pub(crate) async fn prepare_h3_connect_request(
-    req_head: &::http::Request<()>,
+    req_head: &qpx_core::http_message::Request<()>,
     req_stream: &mut H3ServerRequestStream,
     handler: &ForwardH3Handler,
     conn: &H3ConnInfo,
@@ -75,18 +74,7 @@ pub(crate) async fn prepare_h3_connect_request(
         };
     }
 
-    let headers = match h1_headers_to_http(req_head.headers()) {
-        Ok(headers) => headers,
-        Err(_) => {
-            let message = if is_connect_udp {
-                b"invalid CONNECT-UDP headers".as_slice()
-            } else {
-                b"invalid CONNECT headers".as_slice()
-            };
-            reject_bad_request!(message).await?;
-            return Ok(None);
-        }
-    };
+    let headers = req_head.headers().clone();
 
     if let Err(err) = validate_h3_connect_head(
         req_head,

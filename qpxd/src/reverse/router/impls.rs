@@ -20,12 +20,12 @@ use crate::reverse::health::{
 use crate::upstream::origin::OriginEndpoint;
 use anyhow::Result;
 use arc_swap::ArcSwap;
-use hyper::Request;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::config::ReverseTlsPassthroughRouteConfig;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::config::UpstreamConfig;
 use qpx_core::config::{PathRewriteConfig, ReverseRouteConfig};
+use qpx_core::http_message::Request as OwnerRequest;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::prefilter::StringInterner;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
@@ -134,7 +134,7 @@ impl ReverseAffinityRuntime {
         &self,
         conn: &crate::reverse::transport::ReverseConnInfo,
         host: &str,
-        req: &Request<Body>,
+        req: &OwnerRequest<Body>,
         identity: &crate::policy_context::ResolvedIdentity,
     ) -> u64 {
         let mut hash = fnv_offset();

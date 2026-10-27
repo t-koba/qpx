@@ -7,7 +7,8 @@ use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use anyhow::Result;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -24,14 +25,14 @@ pub(super) fn attach_streaming_limits(
 }
 
 pub(super) async fn buffer_reverse_guarded_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     route_http_guard: Option<&crate::http::policy::guard::CompiledHttpGuardProfile>,
     max_observed_request_body_bytes: usize,
     read_timeout: Duration,
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-) -> Result<std::result::Result<Request<Body>, Response<Body>>> {
+) -> Result<std::result::Result<OwnerRequest<Body>, Response<Body>>> {
     let limit_response = || -> Result<Response<Body>> {
         request_body_too_large_response(request_method, request_version, proxy_name, None)
     };
@@ -70,7 +71,7 @@ pub(super) async fn buffer_reverse_guarded_request(
 }
 
 pub(super) async fn prepare_reverse_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,

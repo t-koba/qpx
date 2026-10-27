@@ -4,7 +4,8 @@ use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::Result;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Response, StatusCode};
+use qpx_core::http_message::Request;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 

@@ -21,7 +21,7 @@ pub(super) struct ReverseFinalizeResponseInput<'a> {
     pub(super) request_method: &'a Method,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) response_cache_bypass: bool,
-    pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<&'a qpx_core::http_message::Request<()>>,
     pub(super) cache_target_key: Option<&'a CacheRequestKey>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) revalidation_state: &'a mut Option<qpxd_cache::RevalidationState>,

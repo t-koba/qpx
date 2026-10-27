@@ -1,17 +1,19 @@
 use super::freshness::{parse_http_date_secs, parse_if_none_match};
 use super::types::{ByteRangeSpec, IfRangeCondition, RequestDirectives, ResponseDirectives};
 use http::HeaderName;
-use http::header::{
-    CACHE_CONTROL, IF_MATCH, IF_MODIFIED_SINCE, IF_NONE_MATCH, IF_RANGE, IF_UNMODIFIED_SINCE,
-    PRAGMA, RANGE,
-};
+use http::header::CACHE_CONTROL;
+use qpx_core::http_message::{Headers as OwnedHeaders, OrdinaryHeaderName};
 use qpx_http::structured_fields::{BareItem, ListEntry, parse_dictionary_fields};
+
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}
 
 const QPX_CACHE_CONTROL: HeaderName = HeaderName::from_static("qpx-cache-control");
 const CDN_CACHE_CONTROL: HeaderName = HeaderName::from_static("cdn-cache-control");
 
-pub fn parse_request_directives(headers: &http::HeaderMap) -> RequestDirectives {
-    if !headers.keys().any(|name| {
+pub fn parse_request_directives(headers: &OwnedHeaders) -> RequestDirectives {
+    if !headers.iter().any(|(name, _)| {
         matches!(
             name.as_str(),
             "cache-control"
@@ -29,28 +31,28 @@ pub fn parse_request_directives(headers: &http::HeaderMap) -> RequestDirectives 
     let range = parse_single_range_header(headers);
     let if_range = parse_if_range_header(headers);
     let mut directives = RequestDirectives {
-        has_conditional: headers.contains_key(IF_NONE_MATCH)
-            || headers.contains_key(IF_MODIFIED_SINCE),
+        has_conditional: headers.contains_key(&ord("if-none-match"))
+            || headers.contains_key(&ord("if-modified-since")),
         if_match: parse_if_match(headers),
         if_none_match: parse_if_none_match(headers),
         if_modified_since: headers
-            .get(IF_MODIFIED_SINCE)
+            .get(&ord("if-modified-since"))
             .and_then(|v| v.to_str().ok())
             .and_then(parse_http_date_secs),
         if_unmodified_since: headers
-            .get(IF_UNMODIFIED_SINCE)
+            .get(&ord("if-unmodified-since"))
             .and_then(|v| v.to_str().ok())
             .and_then(parse_http_date_secs),
         if_range,
         range,
-        has_unsupported_conditionals: headers.contains_key(RANGE)
+        has_unsupported_conditionals: headers.contains_key(&ord("range"))
             && directives_range_invalid(headers)
-            || headers.contains_key(IF_RANGE) && directives_if_range_invalid(headers),
+            || headers.contains_key(&ord("if-range")) && directives_if_range_invalid(headers),
         ..RequestDirectives::default()
     };
 
     let mut saw_cache_control = false;
-    for value in headers.get_all(CACHE_CONTROL) {
+    for value in headers.get_all(&ord("cache-control")) {
         let Ok(value) = value.to_str() else {
             continue;
         };
@@ -87,7 +89,7 @@ pub fn parse_request_directives(headers: &http::HeaderMap) -> RequestDirectives 
     }
 
     if !saw_cache_control {
-        for value in headers.get_all(PRAGMA) {
+        for value in headers.get_all(&ord("pragma")) {
             if let Ok(v) = value.to_str()
                 && v.to_ascii_lowercase().contains("no-cache")
             {
@@ -98,9 +100,9 @@ pub fn parse_request_directives(headers: &http::HeaderMap) -> RequestDirectives 
     directives
 }
 
-pub fn parse_if_match(headers: &http::HeaderMap) -> Vec<String> {
+pub fn parse_if_match(headers: &OwnedHeaders) -> Vec<String> {
     let mut out = Vec::new();
-    for value in headers.get_all(IF_MATCH).iter() {
+    for value in headers.get_all(&ord("if-match")) {
         let Ok(raw) = value.to_str() else {
             continue;
         };
@@ -371,8 +373,8 @@ fn parse_cache_field_name_list(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn parse_single_range_header(headers: &http::HeaderMap) -> Option<ByteRangeSpec> {
-    let raw = headers.get(RANGE)?.to_str().ok()?;
+fn parse_single_range_header(headers: &OwnedHeaders) -> Option<ByteRangeSpec> {
+    let raw = headers.get(&ord("range"))?.to_str().ok()?;
     parse_range_header(raw)
 }
 
@@ -400,8 +402,8 @@ fn parse_range_header(raw: &str) -> Option<ByteRangeSpec> {
     })
 }
 
-fn parse_if_range_header(headers: &http::HeaderMap) -> Option<IfRangeCondition> {
-    let raw = headers.get(IF_RANGE)?.to_str().ok()?.trim();
+fn parse_if_range_header(headers: &OwnedHeaders) -> Option<IfRangeCondition> {
+    let raw = headers.get(&ord("if-range"))?.to_str().ok()?.trim();
     if raw.is_empty() {
         return None;
     }
@@ -411,12 +413,12 @@ fn parse_if_range_header(headers: &http::HeaderMap) -> Option<IfRangeCondition> 
     parse_http_date_secs(raw).map(IfRangeCondition::Date)
 }
 
-fn directives_range_invalid(headers: &http::HeaderMap) -> bool {
-    headers.contains_key(RANGE) && parse_single_range_header(headers).is_none()
+fn directives_range_invalid(headers: &OwnedHeaders) -> bool {
+    headers.contains_key(&ord("range")) && parse_single_range_header(headers).is_none()
 }
 
-fn directives_if_range_invalid(headers: &http::HeaderMap) -> bool {
-    headers.contains_key(IF_RANGE) && parse_if_range_header(headers).is_none()
+fn directives_if_range_invalid(headers: &OwnedHeaders) -> bool {
+    headers.contains_key(&ord("if-range")) && parse_if_range_header(headers).is_none()
 }
 
 #[cfg(test)]

@@ -7,8 +7,9 @@ use crate::http::protocol::l7::{
     handle_max_forwards_in_place,
 };
 use anyhow::Result;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
 use qpx_core::config::LocalResponseConfig;
+use qpx_core::http_message::Request;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::time::Duration;

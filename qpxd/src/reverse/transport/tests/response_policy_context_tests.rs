@@ -86,12 +86,14 @@ async fn response_rule_matches_response_headers_not_request_headers() {
     let conn = ReverseConnInfo::plain(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9999), 80);
     let identity = crate::policy_context::ResolvedIdentity::default();
     let destination = DestinationMetadata::default();
-    let request = Request::builder()
-        .method("GET")
-        .uri("https://headers.example/asset")
-        .header("x-response-mode", "request")
-        .body(())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method("GET")
+            .uri("https://headers.example/asset")
+            .header("x-response-mode", "request")
+            .body(())
+            .expect("request"),
+    );
     let base = crate::http::protocol::base_fields::extract_base_request_fields(
         &request,
         crate::http::protocol::base_fields::BaseRequestContext::default(),

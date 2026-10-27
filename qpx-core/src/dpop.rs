@@ -6,9 +6,9 @@
 //! behind explicit interfaces prevents an unavailable security dependency or
 //! replay database from becoming an accidental allow path.
 
+use crate::http_message::{Headers, OrdinaryHeaderName};
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use http::HeaderMap;
 use serde::de::{DeserializeSeed, Deserializer, Error as DeError, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value};
 use sha2::{Digest, Sha256};
@@ -435,7 +435,7 @@ pub enum DpopError {
 /// success. The caller must obtain `expected_jkt` from a separately verified
 /// access token `cnf.jkt` claim; this function does not trust an unverified JWT.
 pub fn validate_dpop(
-    headers: &HeaderMap,
+    headers: &Headers,
     context: &DpopValidationContext<'_>,
     policy: DpopPolicy,
     verifier: &dyn DpopSignatureVerifier,
@@ -481,8 +481,9 @@ pub fn access_token_hash(access_token: &str) -> Result<String, DpopError> {
     Ok(encode_base64url(&sha256(access_token.as_bytes())))
 }
 
-fn extract_dpop_header(headers: &HeaderMap) -> Result<&str, DpopError> {
-    let mut values = headers.get_all(DPOP_HEADER).iter();
+fn extract_dpop_header(headers: &Headers) -> Result<&str, DpopError> {
+    let name = OrdinaryHeaderName::try_from(DPOP_HEADER).expect("DPoP is ordinary");
+    let mut values = headers.get_all(&name);
     let Some(value) = values.next() else {
         return Err(DpopError::MissingHeader);
     };
@@ -1122,12 +1123,67 @@ mod tests {
 
     #[test]
     fn duplicate_dpop_headers_are_rejected_before_parsing() {
-        let mut headers = HeaderMap::new();
+        let mut request = http::Request::new(());
+        let headers = request.headers_mut();
         headers.append("dpop", http::HeaderValue::from_static("a.b.c"));
         headers.append("dpop", http::HeaderValue::from_static("d.e.f"));
         assert_eq!(
-            extract_dpop_header(&headers),
+            extract_dpop_header(crate::http_message::Request::from_http(request).headers()),
             Err(DpopError::DuplicateHeader)
+        );
+    }
+
+    #[test]
+    fn dpop_header_preserves_cardinality_and_opaque_bytes() {
+        type Case<'a> = (&'a [&'a [u8]], Result<&'a str, DpopError>);
+        let cases: &[Case<'_>] = &[
+            (&[], Err(DpopError::MissingHeader)),
+            (&[b"", b"a.b.c"], Err(DpopError::DuplicateHeader)),
+            (&[b"\xff", b"a.b.c"], Err(DpopError::DuplicateHeader)),
+            (
+                &[b"\xff"],
+                Err(DpopError::MalformedProof("header is not ASCII")),
+            ),
+            (
+                &[b""],
+                Err(DpopError::MalformedProof("header contains whitespace")),
+            ),
+            (
+                &[b" a.b.c"],
+                Err(DpopError::MalformedProof("header contains whitespace")),
+            ),
+            (
+                &[b"a.b.c "],
+                Err(DpopError::MalformedProof("header contains whitespace")),
+            ),
+            (
+                &[b"a.b.\tc"],
+                Err(DpopError::MalformedProof("header contains whitespace")),
+            ),
+            // No trimming, splitting or joining of proof bytes.
+            (&[b"a.b.c,d.e.f"], Ok("a.b.c,d.e.f")),
+            (&[b"a.b.c"], Ok("a.b.c")),
+        ];
+        for (values, expected) in cases {
+            let mut request = http::Request::new(());
+            for value in *values {
+                request
+                    .headers_mut()
+                    .append(DPOP_HEADER, http::HeaderValue::from_bytes(value).unwrap());
+            }
+            let request = crate::http_message::Request::from_http(request);
+            assert_eq!(extract_dpop_header(request.headers()), *expected);
+        }
+        let mut request = http::Request::new(());
+        request.headers_mut().insert(
+            DPOP_HEADER,
+            http::HeaderValue::from_str(&"a".repeat(MAX_PROOF_BYTES + 1)).unwrap(),
+        );
+        let request = crate::http_message::Request::from_http(request);
+        let token = extract_dpop_header(request.headers()).unwrap();
+        assert_eq!(
+            parse_proof(token, &valid_context(), DpopPolicy::default()),
+            Err(DpopError::ProofTooLarge)
         );
     }
 

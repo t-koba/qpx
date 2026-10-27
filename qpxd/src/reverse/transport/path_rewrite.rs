@@ -1,10 +1,10 @@
-use hyper::Request;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use tracing::warn;
 
 use crate::reverse::router::CompiledPathRewrite;
 
-pub(super) fn apply_path_rewrite(req: &mut Request<Body>, rewrite: &CompiledPathRewrite) {
+pub(super) fn apply_path_rewrite(req: &mut OwnerRequest<Body>, rewrite: &CompiledPathRewrite) {
     let pq = req.uri().path_and_query();
     let path = pq.map(|pq| pq.path()).unwrap_or("/");
     let query = pq.and_then(|pq| pq.query());

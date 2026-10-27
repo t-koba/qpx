@@ -15,7 +15,8 @@ use crate::reverse::transport::{
     InterimList, ReverseConnInfo, ReverseRouter, empty_interim_response,
 };
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -83,8 +84,8 @@ pub(super) fn reverse_prefilter_context<'a>(
 )]
 pub(super) async fn scan_reverse_routes(
     router: &ReverseRouter,
-    request_headers: &http::HeaderMap,
-    sanitized_headers: &http::HeaderMap,
+    request_headers: &qpx_core::http_message::Headers,
+    sanitized_headers: &qpx_core::http_message::Headers,
     base: &BaseRequestFields,
     state: &Arc<crate::runtime::RuntimeState>,
     conn: &ReverseConnInfo,
@@ -256,10 +257,10 @@ pub(super) async fn scan_reverse_routes(
 }
 
 pub(super) fn sanitized_headers_for_route_scan<'a>(
-    headers: &'a http::HeaderMap,
+    headers: &'a qpx_core::http_message::Headers,
     state: &crate::runtime::RuntimeState,
     conn: &ReverseConnInfo,
-) -> Result<std::borrow::Cow<'a, http::HeaderMap>> {
+) -> Result<std::borrow::Cow<'a, qpx_core::http_message::Headers>> {
     if state.security.identity_sources.sources.is_empty() {
         return Ok(std::borrow::Cow::Borrowed(headers));
     }
@@ -282,7 +283,7 @@ fn policy_context_cache_key(policy: &EffectivePolicyContext) -> usize {
     reason = "observed-body rescan carries explicit immutable match facts for the second scan"
 )]
 pub(super) async fn observe_body_and_rescan_reverse_routes(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,
@@ -291,10 +292,13 @@ pub(super) async fn observe_body_and_rescan_reverse_routes(
     prefilter_ctx: MatchPrefilterContext<'_>,
     identity_request: Option<&IdentityRequestContext>,
     selection: &mut ReverseRouteSelection,
-    owned_sanitized_headers: &Option<http::HeaderMap>,
+    owned_sanitized_headers: &Option<qpx_core::http_message::Headers>,
 ) -> Result<
     std::result::Result<
-        (Request<Body>, Option<crate::http::rpc::RpcMatchContext>),
+        (
+            OwnerRequest<Body>,
+            Option<crate::http::rpc::RpcMatchContext>,
+        ),
         (InterimList, Response<Body>),
     >,
 > {
@@ -399,11 +403,13 @@ mod tests {
 
     #[test]
     fn reverse_prefilter_context_uses_caller_method_host_and_connection_facts() {
-        let request = Request::builder()
-            .method(http::Method::OPTIONS)
-            .uri("https://base.example/items/42?view=full")
-            .body(())
-            .unwrap();
+        let request = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::OPTIONS)
+                .uri("https://base.example/items/42?view=full")
+                .body(())
+                .unwrap(),
+        );
         let base = extract_base_request_fields(
             &request,
             BaseRequestContext {

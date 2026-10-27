@@ -51,10 +51,18 @@ pub fn method_semantics(method: &Method) -> MethodSemantics {
 }
 
 /// Returns whether a route-level RFC 6585 precondition policy must reject the request.
-pub fn precondition_is_missing(method: &Method, headers: &http::HeaderMap) -> bool {
+pub fn precondition_is_missing(method: &Method, headers: &qpx_core::http_message::Headers) -> bool {
     !method_semantics(method).safe
-        && !headers.contains_key(http::header::IF_MATCH)
-        && !headers.contains_key(http::header::IF_UNMODIFIED_SINCE)
+        && !headers.contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_MATCH)
+                .expect("ordinary header"),
+        )
+        && !headers.contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(
+                http::header::IF_UNMODIFIED_SINCE,
+            )
+            .expect("ordinary header"),
+        )
 }
 
 #[cfg(test)]
@@ -91,17 +99,21 @@ mod tests {
 
     #[test]
     fn unsafe_request_precondition_policy_accepts_either_validator() {
-        let mut headers = http::HeaderMap::new();
+        let mut headers = qpx_core::http_message::Headers::new();
         assert!(precondition_is_missing(&Method::PUT, &headers));
-        headers.insert(http::header::IF_MATCH, "\"v1\"".parse().unwrap());
-        assert!(!precondition_is_missing(&Method::PUT, &headers));
-        headers.clear();
         headers.insert(
-            http::header::IF_UNMODIFIED_SINCE,
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_MATCH).unwrap(),
+            "\"v1\"".parse().unwrap(),
+        );
+        assert!(!precondition_is_missing(&Method::PUT, &headers));
+        headers = qpx_core::http_message::Headers::new();
+        headers.insert(
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_UNMODIFIED_SINCE)
+                .unwrap(),
             "Sat, 11 Jul 2026 00:00:00 GMT".parse().unwrap(),
         );
         assert!(!precondition_is_missing(&Method::DELETE, &headers));
-        headers.clear();
+        headers = qpx_core::http_message::Headers::new();
         assert!(!precondition_is_missing(&Method::GET, &headers));
     }
 }

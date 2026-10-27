@@ -34,7 +34,7 @@ mod request_head;
 
 pub(super) async fn handle_qpx_webtransport_connect(
     handler: &ForwardQpxHandler,
-    req_head: http::Request<()>,
+    req_head: qpx_core::http_message::Request<()>,
     mut req_stream: qpx_h3::RequestStream,
     conn: qpx_h3::ConnectionInfo,
     session: qpx_h3::WebTransportSession,

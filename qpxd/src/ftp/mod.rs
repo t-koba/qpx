@@ -1,6 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
 use qpx_core::config::FtpConfig;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -70,7 +71,7 @@ impl std::fmt::Debug for FtpCredentials {
 
 /// Only forward ingress calls this, before generic validation or observation.
 /// Other schemes remain untouched so the generic userinfo rejection still applies.
-pub(crate) fn extract_forward_credentials<B>(req: &mut Request<B>) -> Result<FtpCredentials> {
+pub(crate) fn extract_forward_credentials<B>(req: &mut OwnerRequest<B>) -> Result<FtpCredentials> {
     let mut credentials = FtpCredentials::default();
     if !req
         .uri()
@@ -128,7 +129,7 @@ pub(crate) fn extract_forward_credentials<B>(req: &mut Request<B>) -> Result<Ftp
 }
 
 pub(crate) async fn handle_ftp(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     credentials: FtpCredentials,
     limits: FtpConfig,
     unsupported_method_message: Arc<str>,
@@ -137,7 +138,7 @@ pub(crate) async fn handle_ftp(
     let method = req.method().clone();
     let uri = req.uri().to_string();
     let timeout_dur = StdDuration::from_millis(limits.timeout_ms.max(1));
-    let request_body = req.into_body();
+    let (_, request_body) = req.into_head_and_body();
     let url = match Url::parse(uri.as_str()).context("invalid ftp url") {
         Ok(url) => url,
         Err(err) => return Ok(ftp_error(err)),

@@ -151,13 +151,15 @@ async fn route_match_uses_actual_chunked_request_size() {
             .await
             .expect("send second chunk");
     });
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri("/upload")
-        .header("host", "reverse.test")
-        .version(http::Version::HTTP_11)
-        .body(body)
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("/upload")
+            .header("host", "reverse.test")
+            .version(http::Version::HTTP_11)
+            .body(body)
+            .expect("request"),
+    );
 
     let (_, response) = handle_request_with_interim(
         request,
@@ -272,14 +274,16 @@ async fn selected_body_dependent_route_enforces_route_request_limit_after_observ
         StdArc::<str>::from("reverse_upstreams_unhealthy"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri("/upload")
-        .header("host", "reverse.test")
-        .header(CONTENT_LENGTH, "4")
-        .version(http::Version::HTTP_11)
-        .body(Body::from("data"))
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("/upload")
+            .header("host", "reverse.test")
+            .header(CONTENT_LENGTH, "4")
+            .version(http::Version::HTTP_11)
+            .body(Body::from("data"))
+            .expect("request"),
+    );
 
     let (_, response) = handle_request_with_interim(
         request,
@@ -435,13 +439,15 @@ async fn route_match_uses_destination_category() {
         StdArc::<str>::from("reverse_destination_category"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("/")
-        .header("host", "api.openai.com")
-        .version(http::Version::HTTP_11)
-        .body(Body::empty())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .header("host", "api.openai.com")
+            .version(http::Version::HTTP_11)
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     let (_, response) = handle_request_with_interim(
         request,

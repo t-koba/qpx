@@ -16,12 +16,19 @@ use super::vary::{
     index_storage_key, parse_vary, variant_storage_key, vary_values_from_request_headers,
 };
 use anyhow::Result;
-use http::header::{AUTHORIZATION, CONTENT_LOCATION, EXPIRES, SET_COOKIE};
+use http::header::{CONTENT_LOCATION, EXPIRES, SET_COOKIE};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
-use qpx_core::http_content_length::HeaderView;
 use qpx_core::http_content_length::VarySelector;
+use qpx_core::http_message::OwnedHeaderView;
+use qpx_core::http_message::{
+    Headers as OwnedHeaders, OrdinaryHeaderName, Request as OwnerRequest,
+};
 use qpx_http::body::Body;
+
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -45,8 +52,7 @@ pub struct CacheStoreContext<'a> {
 }
 
 pub async fn maybe_store(
-    request_method: &Method,
-    request_headers: &http::HeaderMap,
+    request: &OwnerRequest<()>,
     key: &CacheRequestKey,
     policy: &CachePolicyConfig,
     mut response: Response<Body>,
@@ -55,7 +61,8 @@ pub async fn maybe_store(
     if !policy.enabled {
         return Ok(response);
     }
-
+    let request_method = request.method();
+    let request_headers = request.headers();
     let req = parse_request_directives(request_headers);
     if req.no_store {
         response
@@ -132,7 +139,7 @@ pub async fn maybe_store(
     let initial_age_secs =
         initial_age_secs(response.headers(), now, context.timing.response_delay_secs);
     let Some(vary_values) = cache_vary_values(
-        HeaderView::new(request_headers),
+        request_headers.view(),
         &vary,
         storage_key.content_digest.as_deref(),
     ) else {
@@ -331,9 +338,8 @@ async fn delete_obsolete_variants(
     }
 }
 
-pub async fn revalidate_not_modified(
-    request_method: &Method,
-    request_headers: &http::HeaderMap,
+pub async fn revalidate_not_modified<B>(
+    request: &OwnerRequest<B>,
     policy: &CachePolicyConfig,
     not_modified: Response<Body>,
     state: RevalidationState,
@@ -343,6 +349,8 @@ pub async fn revalidate_not_modified(
     if !policy.enabled {
         return Ok(not_modified);
     }
+    let request_method = request.method();
+    let request_headers = request.headers();
     let Some(backend) = backends.get(policy.backend.as_str()) else {
         return Ok(not_modified);
     };
@@ -391,7 +399,7 @@ pub async fn revalidate_not_modified(
             freshness_lifetime_secs: freshness,
             vary_headers: vary_headers.clone(),
             vary_values: refreshed_vary_values(
-                HeaderView::new(request_headers),
+                request_headers.view(),
                 &vary_headers,
                 &state.envelope.vary_values,
             ),
@@ -419,7 +427,7 @@ pub async fn revalidate_not_modified(
         freshness_lifetime_secs: freshness,
         vary_headers: vary_headers.clone(),
         vary_values: refreshed_vary_values(
-            HeaderView::new(request_headers),
+            request_headers.view(),
             &vary_headers,
             &state.envelope.vary_values,
         ),
@@ -456,7 +464,7 @@ fn object_retention_ttl_secs(freshness_lifetime_secs: u64, directives: &Response
 }
 
 pub(super) fn is_response_storable(
-    request_headers: &http::HeaderMap,
+    request_headers: &OwnedHeaders,
     request_method: &Method,
     key: Option<&CacheRequestKey>,
     response: &Response<Body>,
@@ -493,7 +501,7 @@ pub(super) fn is_response_storable(
     // public, must-revalidate, or s-maxage. proxy-revalidate alone governs
     // stale revalidation, not storage permission (s-maxage implies
     // proxy-revalidate semantics, not the reverse).
-    if request_headers.contains_key(AUTHORIZATION)
+    if request_headers.contains_key(&ord("authorization"))
         && !(directives.public || directives.s_maxage.is_some() || directives.must_revalidate)
     {
         return false;
@@ -503,7 +511,8 @@ pub(super) fn is_response_storable(
     // Vary-less canonical variant would be served to other credentials.
     // Mirrors the `Set-Cookie` gate above; operators whose representations do
     // not vary by credentials can opt out via policy.
-    if request_headers.contains_key(AUTHORIZATION) && !policy.allow_authorization_without_vary_store
+    if request_headers.contains_key(&ord("authorization"))
+        && !policy.allow_authorization_without_vary_store
     {
         match parse_vary(response.headers()) {
             VarySpec::Fields(fields) if fields.iter().any(|name| name == "authorization") => {}
@@ -552,7 +561,7 @@ fn has_explicit_freshness(
 }
 
 fn cache_vary_values(
-    request_headers: HeaderView<'_>,
+    request_headers: OwnedHeaderView<'_>,
     vary_headers: &[String],
     content_digest: Option<&str>,
 ) -> Option<Vec<(String, VarySelector)>> {
@@ -564,7 +573,7 @@ fn cache_vary_values(
 }
 
 fn refreshed_vary_values(
-    request_headers: HeaderView<'_>,
+    request_headers: OwnedHeaderView<'_>,
     vary_headers: &[String],
     previous: &[(String, VarySelector)],
 ) -> Vec<(String, VarySelector)> {

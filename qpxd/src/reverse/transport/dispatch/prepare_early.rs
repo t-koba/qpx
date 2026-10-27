@@ -5,17 +5,17 @@ use super::route_constraints::{ReverseEarlyResult, reverse_security_rejection};
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::ReverseConnInfo;
 use anyhow::Result;
-use hyper::Request;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) enum EarlyReversePrepare {
     Settled(Box<ReverseEarlyResult<PreparedReverseRequest>>),
-    Continue(Box<Request<Body>>),
+    Continue(Box<OwnerRequest<Body>>),
 }
 
 pub(super) async fn check_early_reverse_prepare(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,

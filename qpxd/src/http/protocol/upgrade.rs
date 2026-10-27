@@ -35,9 +35,8 @@ pub(crate) fn install(req: &mut Request<Body>) -> DownstreamUpgradeCommit {
     DownstreamUpgradeCommit { inner: Some(tx) }
 }
 
-pub(crate) fn on(req: &mut Request<Body>) -> PendingDownstreamUpgrade {
-    let receiver = req
-        .extensions_mut()
+pub(crate) fn on(extensions: &mut http::Extensions) -> PendingDownstreamUpgrade {
+    let receiver = extensions
         .remove::<DownstreamUpgradeRequest>()
         .and_then(|request| request.inner.lock().ok().and_then(|mut inner| inner.take()))
         .unwrap_or_else(|| {

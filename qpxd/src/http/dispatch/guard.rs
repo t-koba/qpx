@@ -4,7 +4,8 @@ use crate::http::policy::guard::{CompiledHttpGuardProfile, HttpGuardReject};
 use crate::http::policy::rule_context::attach_destination_trace;
 use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::Result;
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 
 pub(crate) struct DispatchGuardInput<'a> {

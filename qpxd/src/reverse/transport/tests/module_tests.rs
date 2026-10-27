@@ -115,14 +115,16 @@ settings:
         StdArc::<str>::from("reverse_http_modules_compression"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("/asset")
-        .header("host", "reverse.test")
-        .header("accept-encoding", "gzip")
-        .version(http::Version::HTTP_11)
-        .body(Body::empty())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header("host", "reverse.test")
+            .header("accept-encoding", "gzip")
+            .version(http::Version::HTTP_11)
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     let (_, response) = handle_request_with_interim(
         request,
@@ -266,13 +268,15 @@ settings:
         StdArc::<str>::from("reverse_http_modules_subrequest"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("/asset")
-        .header("host", "reverse.test")
-        .version(http::Version::HTTP_11)
-        .body(Body::empty())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header("host", "reverse.test")
+            .version(http::Version::HTTP_11)
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     let (_, response) = handle_request_with_interim(
         request,
@@ -327,15 +331,17 @@ edges:
         StdArc::<str>::from("header-ordering-test"),
     )
     .expect("reverse");
-    let request = Request::builder()
-        .uri("/")
-        .header("host", "reverse.test")
-        .header("connection", "X-QpX-TrUsTeD, forwarded")
-        .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
-        .header("x-qpx-trusted", "client-value")
-        .header("x-client-only", "must-not-leak")
-        .body(Body::empty())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .uri("/")
+            .header("host", "reverse.test")
+            .header("connection", "X-QpX-TrUsTeD, forwarded")
+            .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
+            .header("x-qpx-trusted", "client-value")
+            .header("x-client-only", "must-not-leak")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let (_, response) = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         handle_request_with_interim(

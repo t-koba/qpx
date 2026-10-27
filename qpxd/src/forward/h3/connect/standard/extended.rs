@@ -29,8 +29,8 @@ pub(super) struct UpstreamExtendedConnectStream {
 }
 
 pub(super) struct OpenUpstreamExtendedConnectInput<'a> {
-    pub(super) req_head: &'a ::http::Request<()>,
-    pub(super) sanitized_headers: &'a http::HeaderMap,
+    pub(super) req_head: &'a qpx_core::http_message::Request<()>,
+    pub(super) sanitized_headers: &'a qpx_core::http_message::Headers,
     pub(super) proxy_name: &'a str,
     pub(super) upstream: Option<&'a str>,
     pub(super) verify_upstream: bool,
@@ -61,16 +61,16 @@ fn http1_uri_to_http_uri(uri: &::http::Uri) -> Result<http::Uri> {
 
 pub(in crate::forward) fn normalize_h3_upstream_connect_headers(
     uri: &::http::Uri,
-    headers: &http::HeaderMap,
+    headers: &qpx_core::http_message::Headers,
     proxy_name: &str,
 ) -> Result<::http::HeaderMap> {
-    let mut request = hyper::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri(http1_uri_to_http_uri(uri)?)
-        .body(Body::empty())?;
+    let mut request = qpx_core::http_message::Request::new(Body::empty());
+    *request.method_mut() = http::Method::CONNECT;
+    *request.uri_mut() = http1_uri_to_http_uri(uri)?;
     *request.version_mut() = http::Version::HTTP_3;
     *request.headers_mut() = headers.clone();
     prepare_request_with_headers_in_place(&mut request, proxy_name, None, false);
+    let request = request.into_http_for_codec()?;
     http_headers_to_h1(request.headers())
 }
 

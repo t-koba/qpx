@@ -1,24 +1,28 @@
 use super::*;
 use qpx_core::config::CaptureRedactionConfig;
+use qpx_core::http_message::Request as OwnerRequest;
 
 #[tokio::test]
 async fn request_preview_is_byte_exact_and_omits_custom_secret_headers() {
-    let mut request = Request::builder()
-        .method("POST")
-        .uri("/path?x=1")
-        .version(http::Version::HTTP_11)
-        .body(Body::from("abc"))
-        .expect("valid request");
-    request.headers_mut().append(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_static(" 003 "),
+    let mut request = OwnerRequest::from_http(
+        http::Request::builder()
+            .method("POST")
+            .uri("/path?x=1")
+            .version(http::Version::HTTP_11)
+            .body(Body::from("abc"))
+            .expect("valid request"),
     );
+    request
+        .headers_mut()
+        .append_content_length_value(http::HeaderValue::from_static(" 003 "));
+    request
+        .headers_mut()
+        .append_content_length_value(http::HeaderValue::from_static("3"));
     request.headers_mut().append(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_static("3"),
-    );
-    request.headers_mut().append(
-        http::header::HeaderName::from_static("x-api-key"),
+        qpx_core::http_message::OrdinaryHeaderName::try_from(
+            http::header::HeaderName::from_static("x-api-key"),
+        )
+        .expect("ordinary header"),
         http::HeaderValue::from_static("synthetic-secret"),
     );
 
@@ -535,7 +539,7 @@ fn non_utf8_plaintext_bytes_export_uses_redacted_marker_not_input_prefix() {
 
 #[tokio::test]
 async fn rejected_http_userinfo_request_is_captured_redacted() {
-    let req = Request::builder()
+    let req = http::Request::builder()
         .uri("http://synthetic-user@host/file")
         .header("host", "host")
         .body(Body::empty())
@@ -562,7 +566,7 @@ edges:
     )
     .unwrap();
     let response = crate::forward::handle_request_inner(
-        req,
+        OwnerRequest::from_http(req),
         crate::runtime::Runtime::new(config).unwrap(),
         "test",
         "127.0.0.1:12345".parse().unwrap(),

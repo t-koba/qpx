@@ -1,8 +1,10 @@
-use ::http::{Request as Http1Request, Response as Http1Response};
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
+use ::http::Request as Http1Request;
+use ::http::Response as Http1Response;
 use anyhow::{Result, anyhow};
 use http::header::COOKIE;
-use hyper::{Request, Uri};
-use qpx_http::body::Body;
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
+use qpx_core::http_message::Request;
 use qpx_http::protocol::semantics::response_status_has_no_body;
 
 pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
@@ -10,17 +12,22 @@ pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::Header
     for (name, value) in src {
         let name = http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             .map_err(|e| anyhow!("invalid header name from HTTP/3 message: {e}"))?;
-        let value = http::HeaderValue::from_bytes(value.as_bytes())
+        let sensitive = value.is_sensitive();
+        let mut value = http::HeaderValue::from_bytes(value.as_bytes())
             .map_err(|e| anyhow!("invalid header value from HTTP/3 message: {e}"))?;
+        value.set_sensitive(sensitive);
         if name == COOKIE
             && let Some(existing) = headers.get(COOKIE).cloned()
         {
+            let sensitive = existing.is_sensitive() || value.is_sensitive();
             let mut merged =
                 Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
             merged.extend_from_slice(existing.as_bytes());
             merged.extend_from_slice(b"; ");
             merged.extend_from_slice(value.as_bytes());
-            headers.insert(COOKIE, http::HeaderValue::from_bytes(merged.as_slice())?);
+            let mut merged = http::HeaderValue::from_bytes(merged.as_slice())?;
+            merged.set_sensitive(sensitive);
+            headers.insert(COOKIE, merged);
             continue;
         }
         headers.append(name, value);
@@ -33,8 +40,10 @@ pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::Header
     for (name, value) in src {
         let name = ::http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             .map_err(|e| anyhow!("invalid header name for HTTP/3 message: {e}"))?;
-        let value = ::http::HeaderValue::from_bytes(value.as_bytes())
+        let sensitive = value.is_sensitive();
+        let mut value = ::http::HeaderValue::from_bytes(value.as_bytes())
             .map_err(|e| anyhow!("invalid header value for HTTP/3 message: {e}"))?;
+        value.set_sensitive(sensitive);
         headers.append(name, value);
     }
     Ok(headers)
@@ -65,27 +74,18 @@ pub(crate) fn sanitize_interim_response_for_h3(
 // knob for stricter limits.
 pub(crate) const H3_MAX_HEADER_COUNT: usize = 128;
 
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 #[derive(Debug, thiserror::Error)]
 #[error("HTTP/3 request header fields exceeded configured limits")]
 struct H3HeaderCountTooLarge;
 
-pub(crate) fn h3_request_to_hyper(req: Http1Request<()>, body: Body) -> Result<Request<Body>> {
-    let (parts, _) = req.into_parts();
-    if parts.headers.len() > H3_MAX_HEADER_COUNT {
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
+pub(crate) fn h3_request_to_owned<B>(mut req: Http1Request<B>) -> Result<Request<B>> {
+    if req.method() != http::Method::CONNECT && req.headers().len() > H3_MAX_HEADER_COUNT {
         return Err(H3HeaderCountTooLarge.into());
     }
-    let method = parts
-        .method
-        .as_str()
-        .parse::<http::Method>()
-        .map_err(|_| anyhow!("invalid HTTP/3 method"))?;
-    let uri =
-        Uri::from_parts(parts.uri.into_parts()).map_err(|e| anyhow!("invalid HTTP/3 URI: {e}"))?;
-
-    let mut out = Request::builder().method(method).uri(uri).body(body)?;
-    *out.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    *out.version_mut() = http::Version::HTTP_3;
-    Ok(out)
+    *req.version_mut() = http::Version::HTTP_3;
+    Ok(Request::from_http(req))
 }
 
 #[derive(Debug, Clone)]
@@ -158,11 +158,12 @@ pub(crate) fn prepare_h3_response_head(
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
+    use super::h3_request_to_owned;
     use super::sanitize_interim_response_for_h3;
-    use super::{
-        H3_MAX_HEADER_COUNT, h1_headers_to_http, h3_request_to_hyper, prepare_h3_response_head,
-    };
+    use super::{H3_MAX_HEADER_COUNT, prepare_h3_response_head};
 
+    #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
     #[test]
     fn h3_options_asterisk_uri_preserves_scheme_and_authority() {
         let uri = ::http::Uri::builder()
@@ -177,8 +178,7 @@ mod tests {
             .body(())
             .expect("request");
 
-        let converted = h3_request_to_hyper(request, qpx_http::body::Body::empty())
-            .expect("convert H3 request");
+        let converted = h3_request_to_owned(request).expect("convert H3 request");
         assert_eq!(converted.method(), ::http::Method::OPTIONS);
         assert_eq!(converted.uri().scheme_str(), Some("https"));
         assert_eq!(
@@ -191,16 +191,61 @@ mod tests {
         assert_eq!(converted.uri().path_and_query().unwrap().as_str(), "*");
     }
 
+    #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
     #[test]
-    fn h3_cookie_fields_are_merged_for_generic_context() {
-        let mut headers = ::http::HeaderMap::new();
-        headers.append("cookie", ::http::HeaderValue::from_static("a=1"));
-        headers.append("cookie", ::http::HeaderValue::from_static("b=2"));
+    fn h3_cookie_fields_remain_separate_for_policy() {
+        use qpx_core::http_message::OrdinaryHeaderName;
+        let mut request = ::http::Request::builder()
+            .uri("https://example.test/")
+            .body(())
+            .unwrap();
+        request
+            .headers_mut()
+            .append("cookie", ::http::HeaderValue::from_static("a=1"));
+        let mut second = ::http::HeaderValue::from_static("b=2");
+        second.set_sensitive(true);
+        request.headers_mut().append("cookie", second);
+        request.extensions_mut().insert(42_u32);
+        let converted = h3_request_to_owned(request).expect("decoded request");
+        let cookie = OrdinaryHeaderName::try_from("cookie").unwrap();
+        let values: Vec<_> = converted.headers().get_all(&cookie).collect();
+        assert_eq!(
+            values.iter().map(|v| v.as_bytes()).collect::<Vec<_>>(),
+            vec![b"a=1".as_slice(), b"b=2".as_slice()]
+        );
+        assert!(values[1].is_sensitive());
+        assert_eq!(converted.extensions().get::<u32>(), Some(&42));
+    }
 
-        let converted = h1_headers_to_http(&headers).expect("headers convert");
-        let cookie = converted.get("cookie").expect("cookie header");
-        assert_eq!(cookie.to_str().unwrap(), "a=1; b=2");
-        assert_eq!(converted.get_all("cookie").iter().count(), 1);
+    #[test]
+    fn h3_header_export_preserves_duplicate_bytes_and_sensitivity() {
+        let mut source = http::HeaderMap::new();
+        let mut first = http::HeaderValue::from_bytes(b"opaque-\xff").unwrap();
+        first.set_sensitive(true);
+        source.append("set-cookie", first);
+        source.append("set-cookie", http::HeaderValue::from_static("second=value"));
+
+        let converted = super::http_headers_to_h1(&source).expect("convert H3 headers");
+        let values: Vec<_> = converted.get_all("set-cookie").iter().collect();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].as_bytes(), b"opaque-\xff");
+        assert!(values[0].is_sensitive());
+        assert_eq!(values[1].as_bytes(), b"second=value");
+        assert!(!values[1].is_sensitive());
+    }
+
+    #[test]
+    fn h3_header_import_preserves_sensitivity_when_joining_cookie_fields() {
+        let mut source = ::http::HeaderMap::new();
+        source.append("cookie", ::http::HeaderValue::from_static("a=1"));
+        let mut second = ::http::HeaderValue::from_static("b=2");
+        second.set_sensitive(true);
+        source.append("cookie", second);
+
+        let converted = super::h1_headers_to_http(&source).expect("convert decoded headers");
+        let cookie = converted.get("cookie").expect("joined cookie");
+        assert_eq!(cookie.as_bytes(), b"a=1; b=2");
+        assert!(cookie.is_sensitive());
     }
 
     #[test]
@@ -412,6 +457,7 @@ mod tests {
         );
     }
 
+    #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
     #[test]
     fn h3_request_with_many_tiny_headers_is_refused_at_count_ceiling() {
         // 200 distinct tiny headers total ~2 KiB: far under the 128 KiB byte
@@ -424,7 +470,7 @@ mod tests {
             builder = builder.header(format!("x-tiny-{i:04}"), "b");
         }
         let request = builder.body(()).expect("request");
-        let result = h3_request_to_hyper(request, qpx_http::body::Body::empty());
+        let result = h3_request_to_owned(request);
         assert!(
             result.is_err(),
             "many-tiny-header H3 request must be refused at the count ceiling",

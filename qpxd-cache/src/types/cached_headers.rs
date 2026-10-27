@@ -77,7 +77,7 @@ impl CachedHeaders {
     pub(crate) fn is_revalidation_storable(
         &self,
         status: StatusCode,
-        request_headers: &http::HeaderMap,
+        request_headers: &qpx_core::http_message::Headers,
         request_method: &Method,
         policy: &CachePolicyConfig,
         freshness: u64,

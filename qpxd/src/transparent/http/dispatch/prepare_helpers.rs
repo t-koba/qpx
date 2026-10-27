@@ -11,7 +11,8 @@ use crate::http::policy::rule_context::{
 };
 use crate::http::protocol::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
 use crate::runtime::CompiledTransparentEdge;
-use hyper::{Request, StatusCode};
+use hyper::StatusCode;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::time::Duration;
@@ -23,7 +24,7 @@ use std::time::Duration;
 pub(super) fn response_request_observation(
     req: &Request<Body>,
     base: &crate::http::protocol::base_fields::BaseRequestFields,
-    sanitized_headers: &http::HeaderMap,
+    sanitized_headers: &qpx_core::http_message::Headers,
     destination: &crate::destination::DestinationMetadata,
     identity: &crate::policy_context::ResolvedIdentity,
     request_rpc: Option<&crate::http::rpc::RpcMatchContext>,

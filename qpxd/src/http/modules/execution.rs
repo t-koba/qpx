@@ -14,8 +14,9 @@ use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::{Context, Result, anyhow};
 use http::header::HOST;
 use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
-use hyper::{Request, Response};
+use hyper::Response;
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use qpxd_cache::{CacheRequestKey, purge_cache_key};
 use std::borrow::Cow;
@@ -40,11 +41,11 @@ struct FrozenRequestSnapshot {
     method: Method,
     version: Version,
     uri: http::Uri,
-    headers: HeaderMap,
+    headers: Headers,
 }
 
 impl FrozenRequestSnapshot {
-    fn from_request(req: &Request<Body>) -> Self {
+    fn from_request(req: &OwnerRequest<Body>) -> Self {
         Self {
             method: req.method().clone(),
             version: req.version(),
@@ -53,7 +54,7 @@ impl FrozenRequestSnapshot {
         }
     }
 
-    fn matches_request(&self, req: &Request<Body>) -> bool {
+    fn matches_request(&self, req: &OwnerRequest<Body>) -> bool {
         self.method == *req.method()
             && self.version == req.version()
             && self.uri == *req.uri()
@@ -73,12 +74,12 @@ pub struct HttpModuleRequestView<'a> {
     method: &'a Method,
     version: Version,
     uri: &'a http::Uri,
-    headers: &'a HeaderMap,
+    headers: &'a Headers,
 }
 
 impl<'a> HttpModuleRequestView<'a> {
     /// Borrows only the head of a caller-owned request, independent of its body type.
-    pub fn from_request<B>(request: &'a Request<B>) -> Self {
+    pub fn from_request<B>(request: &'a OwnerRequest<B>) -> Self {
         Self {
             method: request.method(),
             version: request.version(),
@@ -106,9 +107,11 @@ impl<'a> HttpModuleRequestView<'a> {
         self.uri.scheme_str()
     }
     pub fn host(&self) -> Option<&str> {
-        self.uri
-            .host()
-            .or_else(|| self.headers.get(HOST).and_then(|value| value.to_str().ok()))
+        self.uri.host().or_else(|| {
+            self.headers
+                .get(&OrdinaryHeaderName::try_from(HOST).expect("ordinary host"))
+                .and_then(|value| value.to_str().ok())
+        })
     }
     pub fn path(&self) -> &str {
         self.uri.path()
@@ -119,12 +122,15 @@ impl<'a> HttpModuleRequestView<'a> {
     pub fn authority(&self) -> Option<&str> {
         self.uri.authority().map(|value| value.as_str())
     }
-    fn headers(&self) -> &HeaderMap {
+    fn headers(&self) -> &Headers {
         self.headers
     }
     /// Returns whether this request contains the named header.
     pub fn has_header(&self, name: &HeaderName) -> bool {
-        self.headers.contains_key(name)
+        match OrdinaryHeaderName::try_from(name.clone()) {
+            Ok(name) => self.headers.contains_key(&name),
+            Err(_) => self.headers.contains_content_length(),
+        }
     }
     pub fn uri(&self) -> &http::Uri {
         self.uri
@@ -171,7 +177,7 @@ impl<'a> HttpModuleResponseView<'a> {
 
 /// An opaque borrowed mutable HTTP request for module events.
 ///
-/// The transport [`Request`] stays inside the owner; modules see only
+/// The [`OwnerRequest`] stays inside the module envelope; modules see only
 /// semantic views, scalar operations, named header operations and body
 /// moves. There is intentionally no access to the raw header map, raw
 /// values, iterators, callbacks, `Deref`, parts or transport conversions.
@@ -201,11 +207,11 @@ impl<'a> HttpModuleResponseView<'a> {
 /// }
 /// ```
 pub struct HttpModuleRequest<'a> {
-    inner: &'a mut Request<Body>,
+    inner: &'a mut OwnerRequest<Body>,
 }
 
 impl<'a> HttpModuleRequest<'a> {
-    pub(super) fn new(request: &'a mut Request<Body>) -> Self {
+    pub(super) fn new(request: &'a mut OwnerRequest<Body>) -> Self {
         Self { inner: request }
     }
 
@@ -249,7 +255,7 @@ impl<'a> HttpModuleRequest<'a> {
         self.inner.uri().host().or_else(|| {
             self.inner
                 .headers()
-                .get(HOST)
+                .get(&OrdinaryHeaderName::try_from(HOST).expect("ordinary host"))
                 .and_then(|value| value.to_str().ok())
         })
     }
@@ -281,24 +287,37 @@ impl<'a> HttpModuleRequest<'a> {
 
     /// Returns whether this request contains the named header.
     pub fn has_header(&self, name: &HeaderName) -> bool {
-        self.inner.headers().contains_key(name)
+        self.as_view().has_header(name)
     }
 
     /// Replaces all values of the named request header.
     pub fn set_header(&mut self, name: HeaderName, value: HeaderValue) {
-        self.inner.headers_mut().insert(name, value);
+        match OrdinaryHeaderName::try_from(name) {
+            Ok(name) => {
+                self.inner.headers_mut().insert(name, value);
+            }
+            Err(_) => self.inner.headers_mut().set_content_length_value(value),
+        }
     }
 
     /// Appends a value to the named request header, preserving order.
     pub fn append_header(&mut self, name: HeaderName, value: HeaderValue) {
-        self.inner.headers_mut().append(name, value);
+        match OrdinaryHeaderName::try_from(name) {
+            Ok(name) => self.inner.headers_mut().append(name, value),
+            Err(_) => self.inner.headers_mut().append_content_length_value(value),
+        }
     }
 
     /// Removes the named request header, returning whether it was present.
     pub fn remove_header(&mut self, name: &HeaderName) -> bool {
-        let present = self.inner.headers().contains_key(name);
+        let present = self.as_view().has_header(name);
         if present {
-            self.inner.headers_mut().remove(name);
+            match OrdinaryHeaderName::try_from(name.clone()) {
+                Ok(name) => {
+                    self.inner.headers_mut().remove(&name);
+                }
+                Err(_) => self.inner.headers_mut().remove_content_length(),
+            }
         }
         present
     }
@@ -313,11 +332,7 @@ impl<'a> HttpModuleRequest<'a> {
         crate::http::protocol::l7::replace_module_request_body(self.inner, body.into_transport());
     }
 
-    pub(super) fn as_raw(&self) -> &Request<Body> {
-        self.inner
-    }
-
-    pub(super) fn as_raw_mut(&mut self) -> &mut Request<Body> {
+    pub(super) fn as_owner(&self) -> &OwnerRequest<Body> {
         self.inner
     }
 }
@@ -487,7 +502,7 @@ impl HttpModuleContext {
         }
     }
 
-    pub(super) fn sync_frozen_request(&mut self, req: &Request<Body>) -> bool {
+    pub(super) fn sync_frozen_request(&mut self, req: &OwnerRequest<Body>) -> bool {
         if self
             .session
             .request
@@ -502,7 +517,12 @@ impl HttpModuleContext {
 
     pub(super) fn remember_request_header(&mut self, name: HeaderName, value: HeaderValue) {
         if let Some(request) = self.session.request.as_mut() {
-            request.headers.insert(name, value);
+            match OrdinaryHeaderName::try_from(name) {
+                Ok(name) => {
+                    request.headers.insert(name, value);
+                }
+                Err(_) => request.headers.set_content_length_value(value),
+            }
         }
     }
 
@@ -586,11 +606,11 @@ impl HttpModuleContext {
 
     /// Sends a caller-owned absolute-form request, returning an opaque module response.
     ///
-    /// The `Request` input stays caller-owned; the returned envelope wraps the raw
+    /// The `OwnerRequest` input is consumed; the returned envelope wraps the raw
     /// transport response without reading, buffering or cloning its body.
     ///
     /// ```compile_fail
-    /// use http::Request;
+    /// use qpx_core::http_message::Request;
     /// use qpxd::module_api::{Body, HttpModuleContext};
     /// async fn cannot_read_raw_headers(ctx: &HttpModuleContext) {
     ///     let response = ctx
@@ -601,24 +621,31 @@ impl HttpModuleContext {
     /// }
     /// ```
     /// ```compile_fail
-    /// use http::Request;
+    /// use qpx_core::http_message::Request;
     /// use qpxd::module_api::HttpModuleContext;
     /// async fn no_transport_body(ctx: &HttpModuleContext) {
     ///     let _ = ctx.send_absolute_request(Request::new(qpx_http::body::Body::empty())).await;
     /// }
     /// ```
+    /// Raw transport requests cannot bypass the request owner:
+    /// ```compile_fail
+    /// use qpxd::module_api::{Body, HttpModuleContext};
+    /// async fn no_raw_request(ctx: &HttpModuleContext) {
+    ///     let _ = ctx.send_absolute_request(http::Request::new(Body::empty())).await;
+    /// }
+    /// ```
     pub async fn send_absolute_request(
         &self,
-        req: Request<ModuleBody>,
+        req: OwnerRequest<ModuleBody>,
     ) -> Result<HttpModuleResponse> {
-        let mut req = req.map(ModuleBody::into_transport);
+        let mut req = req.map_body(ModuleBody::into_transport);
         crate::http::protocol::l7::mark_module_request_body_replaced(&mut req);
         self.send_absolute_request_inner(req)
             .await
             .map(HttpModuleResponse::from_inner)
     }
 
-    async fn send_absolute_request_inner(&self, req: Request<Body>) -> Result<Response<Body>> {
+    async fn send_absolute_request_inner(&self, req: OwnerRequest<Body>) -> Result<Response<Body>> {
         let url = req.uri().to_string();
         let origin = OriginEndpoint::direct(url.as_str());
         let inner = proxy_http(
@@ -639,10 +666,10 @@ impl HttpModuleContext {
     /// without reading, buffering or cloning its body.
     pub async fn send_absolute_request_to_addr(
         &self,
-        req: Request<ModuleBody>,
+        req: OwnerRequest<ModuleBody>,
         connect_addr: SocketAddr,
     ) -> Result<HttpModuleResponse> {
-        let mut req = req.map(ModuleBody::into_transport);
+        let mut req = req.map_body(ModuleBody::into_transport);
         crate::http::protocol::l7::mark_module_request_body_replaced(&mut req);
         self.send_absolute_request_to_addr_inner(req, connect_addr)
             .await
@@ -651,7 +678,7 @@ impl HttpModuleContext {
 
     async fn send_absolute_request_to_addr_inner(
         &self,
-        req: Request<Body>,
+        req: OwnerRequest<Body>,
         connect_addr: SocketAddr,
     ) -> Result<Response<Body>> {
         let uri = req.uri();
@@ -688,10 +715,8 @@ impl HttpModuleContext {
 
     /// Builds the cache key for a module request view.
     ///
-    /// Normalization stays owned by `CacheRequestKey::for_target`. Live views
-    /// delegate with their private raw request; frozen views rebuild a minimal
-    /// private request carrying the frozen method, URI and first Host value,
-    /// which are the only inputs the key builder reads.
+    /// Normalization stays owned by `CacheRequestKey::for_target`. Only the
+    /// method, target and first Host value are needed, for live and frozen views.
     pub fn cache_request_key(
         &self,
         request: &HttpModuleRequestView<'_>,
@@ -706,13 +731,13 @@ impl HttpModuleContext {
             .ok_or_else(|| anyhow!("cache purge missing default scheme"))?;
         // The cache owner needs only method, target and the first Host value.
         // Adapt borrowed head fields without exposing transport body storage.
-        let mut builder = Request::builder()
-            .method(request.method().clone())
-            .uri(request.uri().clone());
-        if let Some(host) = request.headers().get(HOST).cloned() {
-            builder = builder.header(HOST, host);
+        let mut minimal = OwnerRequest::new(());
+        *minimal.method_mut() = request.method().clone();
+        *minimal.uri_mut() = request.uri().clone();
+        let host = OrdinaryHeaderName::try_from(HOST).expect("ordinary host");
+        if let Some(value) = request.headers().get(&host).cloned() {
+            minimal.headers_mut().insert(host, value);
         }
-        let minimal = builder.body(Body::empty())?;
         CacheRequestKey::for_target(&minimal, default_scheme)
     }
 
@@ -763,7 +788,7 @@ impl HttpModuleExecution {
 
     pub(crate) async fn on_request_headers(
         &mut self,
-        req: &mut Request<Body>,
+        req: &mut OwnerRequest<Body>,
     ) -> Result<RequestHeadersOutcome> {
         let Some((chain, context)) = self.active_mut() else {
             return Ok(RequestHeadersOutcome::Continue);
@@ -828,7 +853,7 @@ impl HttpModuleExecution {
         Ok(())
     }
 
-    pub(crate) async fn on_upstream_request(&mut self, req: &mut Request<Body>) -> Result<()> {
+    pub(crate) async fn on_upstream_request(&mut self, req: &mut OwnerRequest<Body>) -> Result<()> {
         let Some((chain, context)) = self.active_mut() else {
             return Ok(());
         };

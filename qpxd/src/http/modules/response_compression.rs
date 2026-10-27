@@ -56,8 +56,11 @@ struct CompressionRequest {
 }
 
 impl CompressionRequest {
-    fn from_request(request: &hyper::Request<Body>) -> Option<Self> {
-        if !request.headers().contains_key(ACCEPT_ENCODING) {
+    fn from_request(request: &qpx_core::http_message::Request<Body>) -> Option<Self> {
+        if !request.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(ACCEPT_ENCODING)
+                .expect("ordinary accept-encoding"),
+        ) {
             return None;
         }
         let mut headers = HeaderMap::with_capacity(3);
@@ -66,7 +69,10 @@ impl CompressionRequest {
             http::HeaderName::from_static("available-dictionary"),
             http::HeaderName::from_static("dictionary-id"),
         ] {
-            for value in request.headers().get_all(&name) {
+            for value in request.headers().get_all(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from(name.clone())
+                    .expect("ordinary compression header"),
+            ) {
                 headers.append(name.clone(), value.clone());
             }
         }
@@ -289,7 +295,7 @@ impl HttpModule for ResponseCompressionModule {
     ) -> Result<HttpModuleEvent<'a>> {
         match (stage, event) {
             (HttpModuleStage::RequestHeaders, HttpModuleEvent::RequestHeaders(request)) => {
-                if let Some(request) = CompressionRequest::from_request(request.as_raw()) {
+                if let Some(request) = CompressionRequest::from_request(request.as_owner()) {
                     ctx.extensions_mut().insert(request);
                 }
                 Ok(HttpModuleEvent::RequestHeadersResult(

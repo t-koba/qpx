@@ -7,10 +7,10 @@ pub(crate) struct DispatchConnectRuleContextInput<'a> {
     pub(crate) host: &'a str,
     pub(crate) path: Option<&'a str>,
     pub(crate) authority: &'a str,
-    pub(crate) http_version: &'a str,
+    pub(crate) http_version: http::Version,
     pub(crate) alpn: Option<&'a str>,
     pub(crate) destination: &'a crate::destination::DestinationMetadata,
-    pub(crate) headers: &'a http::HeaderMap,
+    pub(crate) headers: &'a qpx_core::http_message::Headers,
     pub(crate) identity: &'a crate::policy_context::ResolvedIdentity,
 }
 
@@ -37,9 +37,11 @@ pub(crate) fn build_dispatch_connect_rule_context<'a>(
         method: Some("CONNECT"),
         path,
         authority: Some(authority),
-        http_version: Some(http_version),
+        http_version: Some(crate::http::protocol::common::http_version_label(
+            http_version,
+        )),
         alpn,
-        headers: Some(qpx_core::http_content_length::HeaderView::new(headers)),
+        owned_headers: Some(headers.request_policy_view(http_version)),
         ..Default::default()
     };
     crate::http::policy::rule_context::apply_identity(&mut ctx, identity);

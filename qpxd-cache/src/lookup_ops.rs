@@ -14,17 +14,21 @@ use super::types::{
 use super::util::{cache_namespace, now_millis};
 use super::vary::matches_vary;
 use anyhow::Result;
-use http::header::{IF_MODIFIED_SINCE, IF_NONE_MATCH};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
-use qpx_core::http_content_length::HeaderView;
+use qpx_core::http_message::{
+    Headers as OwnedHeaders, OrdinaryHeaderName, Request as OwnerRequest,
+};
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}
+
 pub async fn lookup(
-    request_method: &hyper::Method,
-    request_headers: &http::HeaderMap,
+    request: &OwnerRequest<()>,
     key: &CacheRequestKey,
     policy: &CachePolicyConfig,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
@@ -33,6 +37,8 @@ pub async fn lookup(
     if !policy.enabled {
         return Ok(LookupOutcome::Miss);
     }
+    let request_method = request.method();
+    let request_headers = request.headers();
     let req = parse_request_directives(request_headers);
     if let Some(outcome) = lookup_precheck(request_method, &req) {
         return Ok(outcome);
@@ -42,7 +48,7 @@ pub async fn lookup(
         return Ok(LookupOutcome::Miss);
     };
 
-    let vary_headers = HeaderView::new(request_headers);
+    let vary_headers = request_headers.view();
     let namespace = cache_namespace(policy, "default");
     if can_use_hot_response_candidate(request_method, &req) {
         let storage_key = key.primary_index_storage_key_arc();
@@ -369,12 +375,12 @@ async fn load_cached_response(
 }
 
 pub fn attach_revalidation_headers(
-    request_headers: &mut http::HeaderMap,
+    request_headers: &mut OwnedHeaders,
     state: &RevalidationState,
 ) -> bool {
     // Do not override client-supplied conditions; they are end-to-end semantics.
-    if request_headers.contains_key(IF_NONE_MATCH)
-        || request_headers.contains_key(IF_MODIFIED_SINCE)
+    if request_headers.contains_key(&ord("if-none-match"))
+        || request_headers.contains_key(&ord("if-modified-since"))
     {
         return false;
     }
@@ -386,13 +392,13 @@ pub fn attach_revalidation_headers(
     if let Some(v) = etag
         && let Ok(hv) = http::HeaderValue::from_str(v)
     {
-        request_headers.insert(IF_NONE_MATCH, hv);
+        request_headers.insert(ord("if-none-match"), hv);
         attached = true;
     }
     if let Some(v) = last_modified
         && let Ok(hv) = http::HeaderValue::from_str(v)
     {
-        request_headers.insert(IF_MODIFIED_SINCE, hv);
+        request_headers.insert(ord("if-modified-since"), hv);
         attached = true;
     }
     attached

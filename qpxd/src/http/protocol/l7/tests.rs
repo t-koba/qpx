@@ -18,21 +18,37 @@ fn finalize_response_preserves_pre_sanitized_body() {
 
 #[test]
 fn prepare_request_synchronizes_host_only_for_absolute_targets() {
-    let mut absolute = Request::builder()
-        .uri("https://example.com/resource")
-        .header(http::header::HOST, "stale.example")
-        .body(Body::empty())
-        .expect("absolute request");
+    let mut absolute = Request::from_http(
+        http::Request::builder()
+            .uri("https://example.com/resource")
+            .header(http::header::HOST, "stale.example")
+            .body(Body::empty())
+            .expect("absolute request"),
+    );
     prepare_request_with_headers_in_place(&mut absolute, "qpx", None, false);
-    assert_eq!(absolute.headers()[http::header::HOST], "example.com");
+    assert_eq!(
+        absolute
+            .headers()
+            .get(&OrdinaryHeaderName::try_from(http::header::HOST.clone()).expect("ordinary field"))
+            .unwrap(),
+        "example.com"
+    );
 
-    let mut origin = Request::builder()
-        .uri("/resource")
-        .header(http::header::HOST, "origin.example")
-        .body(Body::empty())
-        .expect("origin-form request");
+    let mut origin = Request::from_http(
+        http::Request::builder()
+            .uri("/resource")
+            .header(http::header::HOST, "origin.example")
+            .body(Body::empty())
+            .expect("origin-form request"),
+    );
     prepare_request_with_headers_in_place(&mut origin, "qpx", None, false);
-    assert_eq!(origin.headers()[http::header::HOST], "origin.example");
+    assert_eq!(
+        origin
+            .headers()
+            .get(&OrdinaryHeaderName::try_from(http::header::HOST.clone()).expect("ordinary field"))
+            .unwrap(),
+        "origin.example"
+    );
 }
 
 #[tokio::test]
@@ -82,12 +98,14 @@ async fn prepare_request_rejects_forbidden_h2_trailers() {
         http::header::CONTENT_LENGTH,
         http::HeaderValue::from_static("2"),
     );
-    let mut request = Request::builder()
-        .method(Method::POST)
-        .uri("https://example.com/upload")
-        .version(http::Version::HTTP_2)
-        .body(Body::replay(Bytes::from_static(b"ok"), Some(trailers)))
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("https://example.com/upload")
+            .version(http::Version::HTTP_2)
+            .body(Body::replay(Bytes::from_static(b"ok"), Some(trailers)))
+            .expect("request"),
+    );
 
     prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
 
@@ -136,18 +154,20 @@ async fn finalize_response_preserves_body_stream_errors() {
 
 #[tokio::test]
 async fn trace_loopback_filters_sensitive_headers_by_default() {
-    let mut request = Request::builder()
-        .method(Method::TRACE)
-        .uri("http://example.com/trace")
-        .header(http::header::HOST, "example.com")
-        .header(http::header::AUTHORIZATION, "Bearer secret")
-        .header(http::header::COOKIE, "sid=abc")
-        .header(http::header::CONNECTION, "keep-alive")
-        .header("x-forwarded-for", "203.0.113.9")
-        .header("traceparent", "00-abc-123-01")
-        .header("x-visible", "kept")
-        .body(Body::from("body"))
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .method(Method::TRACE)
+            .uri("http://example.com/trace")
+            .header(http::header::HOST, "example.com")
+            .header(http::header::AUTHORIZATION, "Bearer secret")
+            .header(http::header::COOKIE, "sid=abc")
+            .header(http::header::CONNECTION, "keep-alive")
+            .header("x-forwarded-for", "203.0.113.9")
+            .header("traceparent", "00-abc-123-01")
+            .header("x-visible", "kept")
+            .body(Body::from("body"))
+            .expect("request"),
+    );
 
     let body = serialize_trace_loopback_message(&mut request, false, 1024, Duration::from_secs(1))
         .await
@@ -167,14 +187,16 @@ async fn trace_loopback_filters_sensitive_headers_by_default() {
 
 #[tokio::test]
 async fn trace_loopback_can_reflect_all_headers_when_enabled() {
-    let mut request = Request::builder()
-        .method(Method::TRACE)
-        .uri("http://example.com/trace")
-        .header(http::header::HOST, "example.com")
-        .header(http::header::AUTHORIZATION, "Bearer secret")
-        .header("x-forwarded-for", "203.0.113.9")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .method(Method::TRACE)
+            .uri("http://example.com/trace")
+            .header(http::header::HOST, "example.com")
+            .header(http::header::AUTHORIZATION, "Bearer secret")
+            .header("x-forwarded-for", "203.0.113.9")
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     let body = serialize_trace_loopback_message(&mut request, true, 1024, Duration::from_secs(1))
         .await
@@ -187,11 +209,13 @@ async fn trace_loopback_can_reflect_all_headers_when_enabled() {
 
 #[tokio::test]
 async fn trace_loopback_rejects_body_above_hard_cap() {
-    let mut request = Request::builder()
-        .method(Method::TRACE)
-        .uri("http://example.com/trace")
-        .body(Body::from("body"))
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .method(Method::TRACE)
+            .uri("http://example.com/trace")
+            .body(Body::from("body"))
+            .expect("request"),
+    );
 
     let err = serialize_trace_loopback_message(&mut request, false, 3, Duration::from_secs(1))
         .await
@@ -203,14 +227,17 @@ async fn run_max_forwards(
     method: Method,
     values: &[&str],
 ) -> (Option<Response<Body>>, Request<Body>) {
-    let mut request = Request::builder()
-        .method(method)
-        .uri("/")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .method(method)
+            .uri("/")
+            .body(Body::empty())
+            .expect("request"),
+    );
     for value in values {
         request.headers_mut().append(
-            http::header::MAX_FORWARDS,
+            OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS.clone())
+                .expect("ordinary field"),
             http::HeaderValue::from_str(value).expect("header value"),
         );
     }
@@ -227,7 +254,13 @@ async fn max_forwards_accepts_only_ows_wrapped_decimal_and_decrements() {
         let (response, request) = run_max_forwards(Method::OPTIONS, &[value]).await;
         assert!(response.is_none(), "{value:?} should be forwarded");
         assert_eq!(
-            request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+            request
+                .headers()
+                .get(
+                    &OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS.clone())
+                        .expect("ordinary field")
+                )
+                .unwrap(),
             expected
         );
     }
@@ -271,14 +304,26 @@ async fn max_forwards_caps_large_decimal_values_before_forwarding() {
     let (response, request) = run_max_forwards(Method::OPTIONS, &["4294967295"]).await;
     assert!(response.is_none());
     assert_eq!(
-        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        request
+            .headers()
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS.clone())
+                    .expect("ordinary field")
+            )
+            .unwrap(),
         "4294967294"
     );
 
     let (response, request) = run_max_forwards(Method::OPTIONS, &["4294967296"]).await;
     assert!(response.is_none());
     assert_eq!(
-        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        request
+            .headers()
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS.clone())
+                    .expect("ordinary field")
+            )
+            .unwrap(),
         "4294967295"
     );
 
@@ -286,7 +331,13 @@ async fn max_forwards_caps_large_decimal_values_before_forwarding() {
     let (response, request) = run_max_forwards(Method::OPTIONS, &["4294967297"]).await;
     assert!(response.is_none());
     assert_eq!(
-        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        request
+            .headers()
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS.clone())
+                    .expect("ordinary field")
+            )
+            .unwrap(),
         "4294967295"
     );
 
@@ -294,7 +345,13 @@ async fn max_forwards_caps_large_decimal_values_before_forwarding() {
     let (response, request) = run_max_forwards(Method::OPTIONS, &[very_large.as_str()]).await;
     assert!(response.is_none());
     assert_eq!(
-        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        request
+            .headers()
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS.clone())
+                    .expect("ordinary field")
+            )
+            .unwrap(),
         "4294967295"
     );
 }
@@ -304,7 +361,13 @@ async fn max_forwards_is_ignored_for_other_methods() {
     let (response, request) = run_max_forwards(Method::POST, &["+1"]).await;
     assert!(response.is_none());
     assert_eq!(
-        request.headers().get(http::header::MAX_FORWARDS).unwrap(),
+        request
+            .headers()
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS.clone())
+                    .expect("ordinary field")
+            )
+            .unwrap(),
         "+1"
     );
 }
@@ -325,23 +388,36 @@ request_set:
   keep-alive: timeout=5
 "#,
     );
-    let mut request = Request::builder()
-        .uri("https://example.com/")
-        .header("connection", "X-QpX-TrUsTeD, x-ClIeNt-OnLy")
-        .header("connection", "Keep-Alive")
-        .header("x-qpx-trusted", "client-value")
-        .header("x-client-only", "must-not-leak")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .uri("https://example.com/")
+            .header("connection", "X-QpX-TrUsTeD, x-ClIeNt-OnLy")
+            .header("connection", "Keep-Alive")
+            .header("x-qpx-trusted", "client-value")
+            .header("x-client-only", "must-not-leak")
+            .body(Body::empty())
+            .expect("request"),
+    );
     prepare_request_with_headers_in_place(&mut request, "qpx", Some(&control), false);
-    assert_eq!(request.headers()["x-qpx-trusted"], "proxy-value");
+    assert_eq!(
+        request
+            .headers()
+            .get(&OrdinaryHeaderName::try_from("x-qpx-trusted").expect("ordinary field"))
+            .unwrap(),
+        "proxy-value"
+    );
     for name in [
         "x-client-only",
         "connection",
         "x-configured-hop",
         "keep-alive",
     ] {
-        assert!(!request.headers().contains_key(name), "{name}");
+        assert!(
+            !request
+                .headers()
+                .contains_key(&OrdinaryHeaderName::try_from(name).expect("ordinary field")),
+            "{name}"
+        );
     }
 }
 
@@ -349,17 +425,19 @@ request_set:
 fn consume_hop_headers_preserves_websocket_detection_and_strips_nominations() {
     use crate::http::protocol::websocket::is_websocket_upgrade;
     let control = request_set_headers("request_set: { x-qpx-trusted: proxy-value }");
-    let mut request = Request::builder()
-        .uri("http://example.com/socket")
-        .header("connection", "UpGrAdE, X-QpX-TrUsTeD")
-        .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
-        .header("upgrade", "websocket")
-        .header("sec-websocket-version", "13")
-        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-        .header("x-qpx-trusted", "client-value")
-        .header("x-client-only", "must-not-leak")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .uri("http://example.com/socket")
+            .header("connection", "UpGrAdE, X-QpX-TrUsTeD")
+            .header("connection", "x-ClIeNt-OnLy, Keep-Alive")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("x-qpx-trusted", "client-value")
+            .header("x-client-only", "must-not-leak")
+            .body(Body::empty())
+            .expect("request"),
+    );
     assert!(is_websocket_upgrade(request.method(), request.headers()).expect("original upgrade"));
     consume_request_hop_headers(&mut request);
     // Reverse applies route controls before it detects upgrades.
@@ -367,30 +445,58 @@ fn consume_hop_headers_preserves_websocket_detection_and_strips_nominations() {
     let websocket = is_websocket_upgrade(request.method(), request.headers()).expect("upgrade");
     assert!(websocket);
     prepare_request_with_headers_in_place(&mut request, "qpx", None, websocket);
-    assert_eq!(request.headers()["connection"], "upgrade");
-    assert_eq!(request.headers()["upgrade"], "websocket");
-    assert_eq!(request.headers()["x-qpx-trusted"], "proxy-value");
-    assert!(!request.headers().contains_key("x-client-only"));
+    assert_eq!(
+        request
+            .headers()
+            .get(&OrdinaryHeaderName::try_from("connection").expect("ordinary field"))
+            .unwrap(),
+        "upgrade"
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get(&OrdinaryHeaderName::try_from("upgrade").expect("ordinary field"))
+            .unwrap(),
+        "websocket"
+    );
+    assert_eq!(
+        request
+            .headers()
+            .get(&OrdinaryHeaderName::try_from("x-qpx-trusted").expect("ordinary field"))
+            .unwrap(),
+        "proxy-value"
+    );
+    assert!(
+        !request
+            .headers()
+            .contains_key(&OrdinaryHeaderName::try_from("x-client-only").expect("ordinary field"))
+    );
 }
 
 #[test]
 fn consume_hop_headers_defers_incomplete_upgrade_to_existing_route_controls() {
     use crate::http::protocol::websocket::is_websocket_upgrade;
-    let mut request = Request::builder()
-        .header("connection", "X-Client-Only")
-        .header("upgrade", "websocket")
-        .header("sec-websocket-version", "13")
-        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
-        .header("x-client-only", "must-not-leak")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .header("connection", "X-Client-Only")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .header("x-client-only", "must-not-leak")
+            .body(Body::empty())
+            .expect("request"),
+    );
     consume_request_hop_headers(&mut request);
     assert!(is_websocket_upgrade(request.method(), request.headers()).is_err());
     // Existing route-driven completion of an upgrade is not moved before controls.
     let control = request_set_headers("request_set: { connection: upgrade }");
     apply_request_header_control_in_place(&mut request, Some(&control));
     assert!(is_websocket_upgrade(request.method(), request.headers()).expect("route upgrade"));
-    assert!(!request.headers().contains_key("x-client-only"));
+    assert!(
+        !request
+            .headers()
+            .contains_key(&OrdinaryHeaderName::try_from("x-client-only").expect("ordinary field"))
+    );
 }
 
 #[tokio::test]
@@ -400,15 +506,21 @@ async fn consume_hop_headers_keeps_h1_trailer_validation() {
         http::header::CONTENT_LENGTH,
         http::HeaderValue::from_static("2"),
     );
-    let mut request = Request::builder()
-        .version(http::Version::HTTP_11)
-        .header("trailer", "content-length")
-        .header("connection", "X-Client-Only")
-        .body(Body::replay(Bytes::from_static(b"ok"), Some(trailers)))
-        .expect("request");
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .version(http::Version::HTTP_11)
+            .header("trailer", "content-length")
+            .header("connection", "X-Client-Only")
+            .body(Body::replay(Bytes::from_static(b"ok"), Some(trailers)))
+            .expect("request"),
+    );
     consume_request_hop_headers(&mut request);
     prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
-    assert!(!request.headers().contains_key("trailer"));
+    assert!(
+        !request
+            .headers()
+            .contains_key(&OrdinaryHeaderName::try_from("trailer").expect("ordinary field"))
+    );
     assert_eq!(request.body_mut().data().await.unwrap().unwrap(), "ok");
     assert!(request.body_mut().trailers().await.is_err());
 }

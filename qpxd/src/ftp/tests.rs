@@ -9,6 +9,7 @@ use super::{
 };
 use hyper::{Method, Request, StatusCode};
 use qpx_core::config::FtpConfig;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::io::Cursor;
 use std::net::SocketAddr;
@@ -110,11 +111,13 @@ async fn stream_ftp_upload_body_times_out_idle_body() {
 #[tokio::test]
 async fn unsupported_method_does_not_wait_for_request_body() {
     let (_sender, body) = Body::channel();
-    let req = Request::builder()
-        .method(Method::PATCH)
-        .uri("ftp://example.com/file.txt")
-        .body(body)
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::PATCH)
+            .uri("ftp://example.com/file.txt")
+            .body(body)
+            .expect("request"),
+    );
     let response = timeout(
         StdDuration::from_millis(50),
         handle_ftp(
@@ -139,11 +142,13 @@ async fn unsupported_method_does_not_wait_for_request_body() {
 
 #[test]
 fn ftp_ingress_strips_userinfo_before_generic_preflight_and_metadata() {
-    let mut req = Request::builder()
-        .uri("ftp://synthetic%2Duser:synthetic%2Dpass@[::1]:2121/file?ok=1")
-        .header("host", "[::1]:2121")
-        .body(())
-        .unwrap();
+    let mut req = OwnerRequest::from_http(
+        Request::builder()
+            .uri("ftp://synthetic%2Duser:synthetic%2Dpass@[::1]:2121/file?ok=1")
+            .header("host", "[::1]:2121")
+            .body(())
+            .unwrap(),
+    );
     let credentials = super::extract_forward_credentials(&mut req).unwrap();
     assert_eq!(credentials.user, "synthetic-user");
     assert_eq!(credentials.pass, "synthetic-pass");
@@ -169,22 +174,26 @@ fn ftp_ingress_strips_userinfo_before_generic_preflight_and_metadata() {
         );
     }
     for scheme in ["http", "https"] {
-        let mut req = Request::builder()
-            .uri(format!("{scheme}://synthetic-user@host/file"))
-            .header("host", "host")
-            .body(())
-            .unwrap();
+        let mut req = OwnerRequest::from_http(
+            Request::builder()
+                .uri(format!("{scheme}://synthetic-user@host/file"))
+                .header("host", "host")
+                .body(())
+                .unwrap(),
+        );
         super::extract_forward_credentials(&mut req).unwrap();
         assert!(
             qpx_http::protocol::semantics::validate_incoming_request_with_metadata(&req).is_err()
         );
     }
     // Generic (non-forward) validation still rejects FTP userinfo.
-    let req = Request::builder()
-        .uri("ftp://synthetic-user@host/file")
-        .header("host", "host")
-        .body(())
-        .unwrap();
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .uri("ftp://synthetic-user@host/file")
+            .header("host", "host")
+            .body(())
+            .unwrap(),
+    );
     assert!(qpx_http::protocol::semantics::validate_incoming_request_with_metadata(&req).is_err());
     for value in [
         "synthetic-user:%0d%0aNOOP",
@@ -193,10 +202,12 @@ fn ftp_ingress_strips_userinfo_before_generic_preflight_and_metadata() {
         "synthetic%ZZ:pass",
         "synthetic@user:pass",
     ] {
-        let mut req = Request::builder()
-            .uri(format!("ftp://{value}@host/file"))
-            .body(())
-            .unwrap();
+        let mut req = OwnerRequest::from_http(
+            Request::builder()
+                .uri(format!("ftp://{value}@host/file"))
+                .body(())
+                .unwrap(),
+        );
         let error = super::extract_forward_credentials(&mut req).unwrap_err();
         assert_eq!(error.to_string(), "invalid FTP credentials");
         assert!(!format!("{error:?}").contains("synthetic"));
@@ -276,13 +287,15 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
             .unwrap();
     });
     let runtime = ftp_forward_test_runtime();
-    let req = Request::builder()
-        .uri(format!(
-            "ftp://synthetic%2Duser:synthetic%2Dpass@{addr}/file.txt"
-        ))
-        .header("host", addr.to_string())
-        .body(Body::empty())
-        .unwrap();
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .uri(format!(
+                "ftp://synthetic%2Duser:synthetic%2Dpass@{addr}/file.txt"
+            ))
+            .header("host", addr.to_string())
+            .body(Body::empty())
+            .unwrap(),
+    );
     let response = timeout(
         StdDuration::from_secs(5),
         crate::forward::handle_request_inner(
@@ -306,11 +319,13 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
 #[tokio::test]
 async fn forward_http_userinfo_is_rejected_before_dispatch() {
     for scheme in ["http", "https"] {
-        let req = Request::builder()
-            .uri(format!("{scheme}://synthetic-user@host/file"))
-            .header("host", "host")
-            .body(Body::empty())
-            .unwrap();
+        let req = OwnerRequest::from_http(
+            Request::builder()
+                .uri(format!("{scheme}://synthetic-user@host/file"))
+                .header("host", "host")
+                .body(Body::empty())
+                .unwrap(),
+        );
         let response = crate::forward::handle_request_inner(
             req,
             ftp_forward_test_runtime(),

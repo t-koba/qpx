@@ -14,7 +14,8 @@ use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::upstream::http1::proxy_http1_request_with_interim;
 use anyhow::Result;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
+use qpx_core::http_message::Request;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -33,7 +34,7 @@ pub(super) struct ForwardUpstreamInput<'a> {
     pub(super) proxy_name: &'a str,
     pub(super) headers: Option<Arc<qpx_core::rules::CompiledHeaderControl>>,
     pub(super) cache_policy: Option<qpx_core::config::CachePolicyConfig>,
-    pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<&'a Request<()>>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) cache_target_key: Option<&'a CacheRequestKey>,
     pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
@@ -91,6 +92,8 @@ pub(super) async fn execute_forward_upstream(
         true,
     )
     .await;
+    // Genuine upstream network egress: the origin backend exports exactly once
+    // at the Hyper/client serialization boundary.
     let proxied_result = proxy_http1_request_with_interim(
         req,
         upstream,

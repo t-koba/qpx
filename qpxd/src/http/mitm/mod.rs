@@ -4,6 +4,7 @@ use crate::runtime::Runtime;
 use anyhow::Result;
 use hyper::client::conn::http1::SendRequest;
 use hyper::{Request, Response};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
@@ -25,15 +26,18 @@ pub struct MitmRouteContext<'a> {
 }
 
 pub(crate) async fn proxy_mitm_request(
-    mut req: Request<Body>,
+    req: Request<Body>,
     runtime: Runtime,
     sender: Arc<Mutex<SendRequest<Body>>>,
     route: MitmRouteContext<'_>,
 ) -> Result<Response<Body>> {
+    // The MITM HTTP server has decoded the client request; retain its head
+    // (including upgrade extensions) until the upstream client handoff.
+    let req = OwnerRequest::from_http(req);
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let validated_request = match preflight_validate(
-        &mut req,
+        &req,
         proxy_name,
         PreflightOptions::allow_connect(
             state.plan.limits.general.trace_enabled,

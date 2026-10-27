@@ -3,14 +3,15 @@ use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::reverse::transport::{InterimList, ReverseConnInfo, empty_interim_response};
 use anyhow::Result;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use tracing::warn;
 
 pub(super) type ReverseEarlyResult<T> = std::result::Result<T, (InterimList, Response<Body>)>;
 
 pub(super) fn reverse_security_rejection(
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
     conn: &ReverseConnInfo,
     state: &crate::runtime::RuntimeState,
     compiled: &crate::reverse::CompiledReverse,
@@ -35,12 +36,12 @@ pub(super) fn reverse_security_rejection(
 }
 
 pub(super) fn enforce_selected_reverse_route_constraints(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     route: &crate::reverse::router::HttpRoute,
     request_method: &Method,
     state: &crate::runtime::RuntimeState,
     conn: &ReverseConnInfo,
-) -> Result<ReverseEarlyResult<Request<Body>>> {
+) -> Result<ReverseEarlyResult<OwnerRequest<Body>>> {
     let request_version = req.version();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     if let Err(error) = route.plan.client_certificate.apply(
@@ -159,7 +160,7 @@ fn fetch_metadata_rejection(
     route: &crate::reverse::router::HttpRoute,
     conn: &ReverseConnInfo,
     problem: (StatusCode, &'static str, String),
-) -> Result<ReverseEarlyResult<Request<Body>>> {
+) -> Result<ReverseEarlyResult<OwnerRequest<Body>>> {
     let (status, title, detail) = problem;
     let body = qpx_http::problem::ProblemDetails::new(status, title)
         .with_detail(detail)

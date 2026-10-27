@@ -1,5 +1,5 @@
 use crate::http::body::size::set_observed_request_size;
-use crate::http3::codec::{h3_request_to_hyper, sanitize_interim_response_for_h3};
+use crate::http3::codec::{h3_request_to_owned, sanitize_interim_response_for_h3};
 use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::response_options::H3ResponseSendOptions;
 use crate::http3::server::{
@@ -10,7 +10,8 @@ use crate::http3::server::{
 use crate::runtime::ResolvedStreamingLimits;
 use anyhow::Result;
 use async_trait::async_trait;
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request};
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -128,7 +129,7 @@ pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
 
     fn request_streaming_limits(
         &self,
-        _req_head: &::http::Request<()>,
+        _req_head: &Request<()>,
         _conn: &H3ConnInfo,
         fallback: ResolvedStreamingLimits,
     ) -> ResolvedStreamingLimits {
@@ -155,7 +156,7 @@ pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
 
     async fn handle_connect(
         &self,
-        req_head: ::http::Request<()>,
+        req_head: Request<()>,
         req_stream: H3ServerRequestStream,
         conn: H3ConnInfo,
         kind: H3ConnectKind,
@@ -173,6 +174,14 @@ async fn handle_stream<H: H3RequestHandler>(
     disabled_datagram_registration: Option<DatagramRegistration>,
 ) {
     let _disabled_datagram_registration = disabled_datagram_registration;
+    let req_head = match h3_request_to_owned(req_head) {
+        Ok(head) => head,
+        Err(err) => {
+            warn!(error = ?err, "invalid HTTP/3 request");
+            reject_malformed_h3_request(&mut req_stream);
+            return;
+        }
+    };
     let request_method = req_head
         .method()
         .as_str()
@@ -276,9 +285,9 @@ async fn handle_stream<H: H3RequestHandler>(
     if crate::http::protocol::sse::is_sse_reconnect(&request_headers) {
         crate::http::protocol::sse::emit_sse_reconnect(limits.listener_name.as_ref(), "unknown");
     }
-    let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
+    let grpc_protocol = crate::http::rpc::request_streaming_rpc_protocol(&request_headers);
     let grpc_request_content_type = request_headers
-        .get(http::header::CONTENT_TYPE)
+        .get(&OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE).expect("ordinary"))
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let grpc_started = Instant::now();
@@ -298,9 +307,8 @@ async fn handle_stream<H: H3RequestHandler>(
     let grpc_observer = request_streaming
         .observe_grpc_messages
         .then(|| {
-            crate::http::rpc::streaming_rpc_observer(
+            crate::http::rpc::request_streaming_rpc_observer(
                 &request_headers,
-                None,
                 Some(request_streaming.max_grpc_message_bytes),
                 Some(request_streaming.max_grpc_web_trailer_bytes),
             )
@@ -320,14 +328,7 @@ async fn handle_stream<H: H3RequestHandler>(
         },
     );
     let mut request_body = Some(request_body_completion);
-    let mut req = match h3_request_to_hyper(req_head, body) {
-        Ok(req) => req,
-        Err(err) => {
-            warn!(error = ?err, "invalid HTTP/3 request");
-            reject_malformed_h3_response_stream(&mut send_stream);
-            return;
-        }
-    };
+    let mut req = req_head.map_body(|()| body);
     if let Some(content_length) = declared_content_length {
         set_observed_request_size(&mut req, content_length);
     }
@@ -336,7 +337,7 @@ async fn handle_stream<H: H3RequestHandler>(
     }
     if let Some(priority) = req
         .headers()
-        .get("priority")
+        .get(&OrdinaryHeaderName::try_from("priority").expect("ordinary"))
         .and_then(|value| value.to_str().ok())
         .map(crate::http3::priority::parse_priority)
     {
@@ -501,18 +502,19 @@ async fn handle_stream<H: H3RequestHandler>(
 #[cfg(test)]
 mod tests;
 
-fn parse_content_length(headers: &http::HeaderMap) -> Result<Option<u64>, String> {
-    qpx_core::http_content_length::declared_content_length(headers).map_err(|err| err.to_string())
+fn parse_content_length(headers: &Headers) -> Result<Option<u64>, String> {
+    headers
+        .declared_content_length()
+        .map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Clone, Copy)]
 struct InvalidExpectHeader;
 
-fn parse_expect_continue(
-    headers: &::http::HeaderMap,
-) -> std::result::Result<bool, InvalidExpectHeader> {
+fn parse_expect_continue(headers: &Headers) -> std::result::Result<bool, InvalidExpectHeader> {
     let mut saw_expect = false;
-    for value in headers.get_all(::http::header::EXPECT).iter() {
+    let expect = OrdinaryHeaderName::try_from(::http::header::EXPECT).expect("ordinary");
+    for value in headers.get_all(&expect) {
         let raw = value.to_str().map_err(|_| InvalidExpectHeader)?;
         for token in raw.split(',') {
             let token = token.trim();
@@ -525,7 +527,7 @@ fn parse_expect_continue(
             }
         }
     }
-    if headers.contains_key(::http::header::EXPECT) && !saw_expect {
+    if headers.contains_key(&expect) && !saw_expect {
         return Err(InvalidExpectHeader);
     }
     Ok(saw_expect)

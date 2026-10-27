@@ -688,11 +688,13 @@ edges:
         .route_at(0)
         .and_then(|route| route.webdav.as_ref())
         .expect("embedded WebDAV origin");
-    let request = http::Request::builder()
-        .method("OPTIONS")
-        .uri("/dav/")
-        .body(Vec::new())
-        .expect("request");
+    let request = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method("OPTIONS")
+            .uri("/dav/")
+            .body(Vec::new())
+            .expect("request"),
+    );
     assert_eq!(
         service
             .handle(request, &qpx_webdav::WebDavRequestContext::default())

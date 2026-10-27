@@ -155,7 +155,7 @@ mod tests {
         use crate::http::protocol::base_fields::extract_base_request_fields;
         use crate::reverse::router::ReverseRouter;
         use crate::reverse::transport::{InterimList, ReverseConnInfo};
-        use hyper::{Method, Request, Response, StatusCode, Version};
+        use hyper::{Method, Response, StatusCode, Version};
         use qpx_http::body::{Body, to_bytes};
         use std::time::Duration;
 
@@ -213,11 +213,15 @@ edges:
                 if case == "stop" {
                     while route.policy.retry_budget.try_consume_retry() {}
                 }
-                let request = Request::builder()
-                    .uri("http://example.test/asset")
-                    .body(Body::empty())?;
+                let request = qpx_core::http_message::Request::from_http(
+                    http::Request::builder()
+                        .uri("http://example.test/asset")
+                        .body(())
+                        .expect("request"),
+                );
                 let key = CacheRequestKey::for_lookup(&request, "http")?.unwrap();
-                let policy = serde_yaml::from_str("enabled: true\nbackend: disk")?;
+                let policy: qpx_core::config::CachePolicyConfig =
+                    serde_yaml::from_str("enabled: true\nbackend: disk")?;
                 let qpxd_cache::RequestCollapseJoin::Leader(guard) =
                     state.cache.begin_request_collapse(&key)
                 else {
@@ -232,8 +236,7 @@ edges:
                 tokio::pin!(wait);
                 assert!(futures_util::poll!(wait.as_mut()).is_pending());
                 let cached = qpxd_cache::maybe_store(
-                    &Method::GET,
-                    request.headers(),
+                    &request,
                     &key,
                     &policy,
                     Response::builder()
@@ -253,8 +256,7 @@ edges:
                 assert_eq!(to_bytes(cached.into_body()).await?, "cached");
                 assert!(wait.await, "cache writeback completed");
                 let LookupOutcome::Revalidate(stale) = qpxd_cache::lookup(
-                    &Method::GET,
-                    request.headers(),
+                    &request,
                     &key,
                     &policy,
                     &state.cache.backends,

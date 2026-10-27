@@ -1,7 +1,8 @@
 use crate::runtime::{CompiledForwardedHop, CompiledForwardedHopCache, CompiledForwardedPolicy};
 use anyhow::{Result, anyhow};
-use http::{HeaderMap, HeaderValue, header::HeaderName};
+use http::{HeaderValue, header::HeaderName};
 use qpx_core::config::UntrustedForwardedChainPolicy;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 use qpx_http::forwarded::{FORWARDED, ForwardedElement, parse_forwarded, serialize_forwarded};
 use std::fmt::Write as _;
 use std::net::IpAddr;
@@ -16,7 +17,7 @@ static FORWARDED_CHAIN_HEADERS: [HeaderName; 5] = [
 ];
 
 pub(crate) fn apply_forwarded_policy(
-    headers: &mut HeaderMap,
+    headers: &mut Headers,
     policy: Option<&CompiledForwardedPolicy>,
     peer_ip: IpAddr,
     scheme: &str,
@@ -30,7 +31,7 @@ pub(crate) fn apply_forwarded_policy(
         .iter()
         .any(|network| network.contains(&peer_ip));
     let mut present_headers = 0_u8;
-    for name in headers.keys() {
+    for (name, _) in headers.iter() {
         present_headers |= match name.as_str() {
             "forwarded" => 1 << 0,
             "x-forwarded-for" => 1 << 1,
@@ -42,8 +43,11 @@ pub(crate) fn apply_forwarded_policy(
     }
     let has_forwarded_chain = present_headers & 1 != 0;
     let mut chain = if trusted && has_forwarded_chain {
-        parse_forwarded(headers)
-            .map_err(|error| anyhow!("invalid trusted Forwarded chain: {error}"))?
+        parse_forwarded(
+            headers
+                .get_all(&OrdinaryHeaderName::try_from(FORWARDED.clone()).expect("ordinary field")),
+        )
+        .map_err(|error| anyhow!("invalid trusted Forwarded chain: {error}"))?
     } else {
         if has_forwarded_chain && policy.untrusted_chain == UntrustedForwardedChainPolicy::Reject {
             return Err(anyhow!("untrusted peer supplied a Forwarded chain"));
@@ -52,14 +56,13 @@ pub(crate) fn apply_forwarded_policy(
     };
     for (index, name) in FORWARDED_CHAIN_HEADERS.iter().enumerate() {
         if present_headers & (1 << index) != 0 {
-            headers.remove(name);
+            headers.remove(&OrdinaryHeaderName::try_from(name.clone()).expect("ordinary field"));
         }
     }
 
     if chain.is_empty() {
-        headers.reserve(1);
         headers.insert(
-            FORWARDED.clone(),
+            OrdinaryHeaderName::try_from(FORWARDED.clone()).expect("ordinary field"),
             cached_current_hop(policy, peer_ip, scheme, host)?,
         );
         return Ok(());
@@ -79,7 +82,10 @@ pub(crate) fn apply_forwarded_policy(
     );
     let value = serialize_forwarded(&chain)
         .map_err(|error| anyhow!("cannot serialize Forwarded chain: {error}"))?;
-    headers.insert(FORWARDED.clone(), value);
+    headers.insert(
+        OrdinaryHeaderName::try_from(FORWARDED.clone()).expect("ordinary field"),
+        value,
+    );
     Ok(())
 }
 
@@ -196,13 +202,31 @@ mod tests {
 
     #[test]
     fn discards_untrusted_chain_and_appends_current_hop() {
-        let mut headers = HeaderMap::new();
-        headers.insert("forwarded", "for=192.0.2.4".parse().expect("header"));
-        headers.insert("x-forwarded-for", "192.0.2.4".parse().expect("header"));
-        headers.insert("x-forwarded-host", "old.example".parse().expect("header"));
-        headers.insert("x-forwarded-proto", "http".parse().expect("header"));
-        headers.insert("x-forwarded-port", "80".parse().expect("header"));
-        headers.insert("x-unrelated", "preserved".parse().expect("header"));
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"),
+            "for=192.0.2.4".parse().expect("header"),
+        );
+        headers.insert(
+            OrdinaryHeaderName::try_from("x-forwarded-for").expect("ordinary field"),
+            "192.0.2.4".parse().expect("header"),
+        );
+        headers.insert(
+            OrdinaryHeaderName::try_from("x-forwarded-host").expect("ordinary field"),
+            "old.example".parse().expect("header"),
+        );
+        headers.insert(
+            OrdinaryHeaderName::try_from("x-forwarded-proto").expect("ordinary field"),
+            "http".parse().expect("header"),
+        );
+        headers.insert(
+            OrdinaryHeaderName::try_from("x-forwarded-port").expect("ordinary field"),
+            "80".parse().expect("header"),
+        );
+        headers.insert(
+            OrdinaryHeaderName::try_from("x-unrelated").expect("ordinary field"),
+            "preserved".parse().expect("header"),
+        );
         apply_forwarded_policy(
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Discard)),
@@ -212,20 +236,38 @@ mod tests {
         )
         .expect("apply policy");
         assert_eq!(
-            headers.get("forwarded").expect("Forwarded"),
+            headers
+                .get(&OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"))
+                .expect("Forwarded"),
             "for=203.0.113.8;by=qpx-edge;proto=https;host=example.com"
         );
-        assert!(!headers.contains_key("x-forwarded-for"));
-        assert!(!headers.contains_key("x-forwarded-host"));
-        assert!(!headers.contains_key("x-forwarded-proto"));
-        assert!(!headers.contains_key("x-forwarded-port"));
-        assert_eq!(headers.get("x-unrelated").expect("unrelated"), "preserved");
+        assert!(!headers.contains_key(
+            &OrdinaryHeaderName::try_from("x-forwarded-for").expect("ordinary field")
+        ));
+        assert!(!headers.contains_key(
+            &OrdinaryHeaderName::try_from("x-forwarded-host").expect("ordinary field")
+        ));
+        assert!(!headers.contains_key(
+            &OrdinaryHeaderName::try_from("x-forwarded-proto").expect("ordinary field")
+        ));
+        assert!(!headers.contains_key(
+            &OrdinaryHeaderName::try_from("x-forwarded-port").expect("ordinary field")
+        ));
+        assert_eq!(
+            headers
+                .get(&OrdinaryHeaderName::try_from("x-unrelated").expect("ordinary field"))
+                .expect("unrelated"),
+            "preserved"
+        );
     }
 
     #[test]
     fn preserves_only_strict_chain_from_trusted_peer() {
-        let mut headers = HeaderMap::new();
-        headers.insert("forwarded", "for=192.0.2.4".parse().expect("header"));
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"),
+            "for=192.0.2.4".parse().expect("header"),
+        );
         apply_forwarded_policy(
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Reject)),
@@ -235,15 +277,20 @@ mod tests {
         )
         .expect("trusted peer");
         assert_eq!(
-            headers.get("forwarded").expect("Forwarded"),
+            headers
+                .get(&OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"))
+                .expect("Forwarded"),
             "for=192.0.2.4, for=10.0.0.8;by=qpx-edge;proto=http"
         );
     }
 
     #[test]
     fn rejects_untrusted_chain_when_configured() {
-        let mut headers = HeaderMap::new();
-        headers.insert("forwarded", "for=192.0.2.4".parse().expect("header"));
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"),
+            "for=192.0.2.4".parse().expect("header"),
+        );
         let error = apply_forwarded_policy(
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Reject)),

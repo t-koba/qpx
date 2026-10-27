@@ -74,7 +74,10 @@ fn request_snapshot_is_absent_without_accept_encoding() {
         )
         .body(Body::empty())
         .expect("request");
-    assert!(CompressionRequest::from_request(&request).is_none());
+    assert!(
+        CompressionRequest::from_request(&qpx_core::http_message::Request::from_http(request))
+            .is_none()
+    );
 }
 
 #[test]
@@ -86,7 +89,9 @@ fn request_snapshot_only_copies_compression_negotiation_fields() {
         .header("x-unrelated", "must-not-be-copied")
         .body(Body::empty())
         .expect("request");
-    let snapshot = CompressionRequest::from_request(&request).expect("snapshot");
+    let snapshot =
+        CompressionRequest::from_request(&qpx_core::http_message::Request::from_http(request))
+            .expect("snapshot");
     assert_eq!(snapshot.method, Method::POST);
     assert_eq!(
         snapshot.headers.get(ACCEPT_ENCODING),

@@ -9,7 +9,8 @@
 use crate::structured_fields::{
     BareItem, ItemSerializer, ListEntry, ListSerializer, parse_item, parse_list,
 };
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::{HeaderName, HeaderValue};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 use thiserror::Error;
 use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -18,6 +19,14 @@ pub static CLIENT_CERT: HeaderName = HeaderName::from_static("client-cert");
 
 /// RFC 9440 client certificate chain field.
 pub static CLIENT_CERT_CHAIN: HeaderName = HeaderName::from_static("client-cert-chain");
+
+fn client_cert_name() -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(CLIENT_CERT.clone()).expect("client-cert is ordinary")
+}
+
+fn client_cert_chain_name() -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(CLIENT_CERT_CHAIN.clone()).expect("client-cert-chain is ordinary")
+}
 
 /// Default maximum size of one DER certificate before Structured Fields encoding.
 pub const DEFAULT_MAX_CERTIFICATE_BYTES: usize = 64 * 1024;
@@ -239,12 +248,12 @@ impl ClientCertificateHeaders {
     }
 
     /// Apply the prepared fields after removing all previous occurrences.
-    pub fn apply_to(&self, headers: &mut HeaderMap) {
-        headers.remove(&CLIENT_CERT);
-        headers.remove(&CLIENT_CERT_CHAIN);
-        headers.insert(CLIENT_CERT.clone(), self.client_cert.clone());
+    pub fn apply_to(&self, headers: &mut Headers) {
+        headers.remove(&client_cert_name());
+        headers.remove(&client_cert_chain_name());
+        headers.insert(client_cert_name(), self.client_cert.clone());
         if let Some(value) = self.client_cert_chain.as_ref() {
-            headers.insert(CLIENT_CERT_CHAIN.clone(), value.clone());
+            headers.insert(client_cert_chain_name(), value.clone());
         }
     }
 }
@@ -320,17 +329,17 @@ impl ClientCertPolicy {
     /// Sanitize and, when enabled, add RFC 9440 fields to an origin request.
     pub fn apply(
         &self,
-        headers: &mut HeaderMap,
+        headers: &mut Headers,
         peer_certificates: Option<&[Vec<u8>]>,
     ) -> Result<(), ClientCertError> {
         self.limits.validate()?;
         if self.reject_inbound {
-            if headers.contains_key(&CLIENT_CERT) {
+            if headers.contains_key(&client_cert_name()) {
                 return Err(ClientCertError::InboundHeader {
                     field: "Client-Cert",
                 });
             }
-            if headers.contains_key(&CLIENT_CERT_CHAIN) {
+            if headers.contains_key(&client_cert_chain_name()) {
                 return Err(ClientCertError::InboundHeader {
                     field: "Client-Cert-Chain",
                 });
@@ -352,8 +361,8 @@ impl ClientCertPolicy {
             None
         };
 
-        headers.remove(&CLIENT_CERT);
-        headers.remove(&CLIENT_CERT_CHAIN);
+        headers.remove(&client_cert_name());
+        headers.remove(&client_cert_chain_name());
         if let Some(prepared) = prepared {
             prepared.apply_to(headers);
         }
@@ -387,14 +396,14 @@ pub fn parse_client_cert(
 
 /// Parse all repeated RFC 9440 `Client-Cert-Chain` field lines in wire order.
 pub fn parse_client_cert_chain(
-    headers: &HeaderMap,
+    headers: &Headers,
     limits: &ClientCertLimits,
 ) -> Result<Option<Vec<Vec<u8>>>, ClientCertError> {
     let limits = (*limits).validate()?;
-    let values = headers.get_all(&CLIENT_CERT_CHAIN);
+    let chain_name = client_cert_chain_name();
     let mut combined = Vec::new();
     let mut present = false;
-    for value in values.iter() {
+    for value in headers.get_all(&chain_name) {
         present = true;
         if !combined.is_empty() {
             combined.extend_from_slice(b", ");
@@ -436,14 +445,15 @@ pub fn parse_client_cert_chain(
 
 /// Parse and validate both RFC 9440 fields from an origin request.
 pub fn parse_client_certificate_headers(
-    headers: &HeaderMap,
+    headers: &Headers,
     limits: &ClientCertLimits,
 ) -> Result<Option<ClientCertificate>, ClientCertError> {
     let limits = (*limits).validate()?;
-    let values = headers.get_all(&CLIENT_CERT);
-    let mut iter = values.iter();
+    let cert_name = client_cert_name();
+    let chain_name = client_cert_chain_name();
+    let mut iter = headers.get_all(&cert_name);
     let Some(value) = iter.next() else {
-        if headers.contains_key(&CLIENT_CERT_CHAIN) {
+        if headers.contains_key(&chain_name) {
             return Err(ClientCertError::ChainWithoutClientCert);
         }
         return Ok(None);
@@ -453,7 +463,7 @@ pub fn parse_client_certificate_headers(
     }
     let total = value
         .len()
-        .checked_add(combined_field_length(headers, &CLIENT_CERT_CHAIN)?)
+        .checked_add(combined_field_length(headers, &chain_name)?)
         .ok_or(ClientCertError::TotalFieldsTooLarge {
             limit: limits.max_total_field_bytes,
         })?;
@@ -470,9 +480,12 @@ pub fn parse_client_certificate_headers(
     Ok(Some(ClientCertificate { end_entity, chain }))
 }
 
-fn combined_field_length(headers: &HeaderMap, name: &HeaderName) -> Result<usize, ClientCertError> {
+fn combined_field_length(
+    headers: &Headers,
+    name: &OrdinaryHeaderName,
+) -> Result<usize, ClientCertError> {
     let mut length = 0usize;
-    for (index, value) in headers.get_all(name).iter().enumerate() {
+    for (index, value) in headers.get_all(name).enumerate() {
         if index != 0 {
             length = length
                 .checked_add(2)
@@ -601,7 +614,7 @@ mod tests {
         assert_eq!(prepared.client_cert.as_bytes()[0], b':');
         assert!(prepared.client_cert_chain.is_some());
 
-        let mut headers = HeaderMap::new();
+        let mut headers = Headers::new();
         prepared.apply_to(&mut headers);
         let parsed = parse_client_certificate_headers(&headers, &limits)
             .expect("parse RFC 9440 fields")
@@ -620,13 +633,13 @@ mod tests {
         )
         .expect("encode chain")
         .expect("non-empty chain");
-        let mut headers = HeaderMap::new();
+        let mut headers = Headers::new();
         headers.insert(
-            CLIENT_CERT.clone(),
+            client_cert_name(),
             encode_byte_sequence(&end_entity, "Client-Cert", ClientCertLimits::default())
                 .expect("encode certificate"),
         );
-        headers.insert(CLIENT_CERT_CHAIN.clone(), value);
+        headers.insert(client_cert_chain_name(), value);
         let parsed = parse_client_certificate_headers(&headers, &ClientCertLimits::default())
             .expect("parse chain")
             .expect("certificate fields present");
@@ -646,10 +659,10 @@ mod tests {
         let second = encode_chain(std::slice::from_ref(&root), limits)
             .expect("encode second chain")
             .expect("second chain");
-        let mut headers = HeaderMap::new();
-        headers.insert(CLIENT_CERT.clone(), client);
-        headers.append(CLIENT_CERT_CHAIN.clone(), first);
-        headers.append(CLIENT_CERT_CHAIN.clone(), second);
+        let mut headers = Headers::new();
+        headers.insert(client_cert_name(), client);
+        headers.append(client_cert_chain_name(), first);
+        headers.append(client_cert_chain_name(), second);
         let parsed = parse_client_certificate_headers(&headers, &limits)
             .expect("parse repeated chain")
             .expect("certificate fields present");
@@ -659,42 +672,42 @@ mod tests {
     #[test]
     fn policy_is_opt_in_and_sanitizes_untrusted_fields() {
         let (end_entity, _) = certificate_pair();
-        let mut headers = HeaderMap::new();
-        headers.insert(CLIENT_CERT.clone(), HeaderValue::from_static(":ZmFrZTo:"));
+        let mut headers = Headers::new();
+        headers.insert(client_cert_name(), HeaderValue::from_static(":ZmFrZTo:"));
         headers.insert(
-            CLIENT_CERT_CHAIN.clone(),
+            client_cert_chain_name(),
             HeaderValue::from_static(":ZmFrZTo:"),
         );
         ClientCertPolicy::default()
             .apply(&mut headers, Some(std::slice::from_ref(&end_entity)))
             .expect("disabled policy sanitizes fields");
-        assert!(!headers.contains_key(&CLIENT_CERT));
-        assert!(!headers.contains_key(&CLIENT_CERT_CHAIN));
+        assert!(!headers.contains_key(&client_cert_name()));
+        assert!(!headers.contains_key(&client_cert_chain_name()));
     }
 
     #[test]
     fn enabled_policy_rejects_inbound_field_injection() {
         let (end_entity, _) = certificate_pair();
-        let mut headers = HeaderMap::new();
-        headers.insert(CLIENT_CERT.clone(), HeaderValue::from_static(":ZmFrZTo:"));
+        let mut headers = Headers::new();
+        headers.insert(client_cert_name(), HeaderValue::from_static(":ZmFrZTo:"));
         let error = ClientCertPolicy::enabled()
             .apply(&mut headers, Some(std::slice::from_ref(&end_entity)))
             .expect_err("inbound RFC 9440 field must be rejected");
         assert!(matches!(error, ClientCertError::InboundHeader { .. }));
-        assert!(headers.contains_key(&CLIENT_CERT));
+        assert!(headers.contains_key(&client_cert_name()));
     }
 
     #[test]
     fn policy_removes_fields_when_mtls_was_not_negotiated() {
-        let mut headers = HeaderMap::new();
-        headers.insert(CLIENT_CERT.clone(), HeaderValue::from_static(":ZmFrZTo:"));
+        let mut headers = Headers::new();
+        headers.insert(client_cert_name(), HeaderValue::from_static(":ZmFrZTo:"));
         let mut policy = ClientCertPolicy::enabled();
         policy.reject_inbound = false;
         policy
             .apply(&mut headers, None)
             .expect("policy sanitizes request without mTLS");
-        assert!(!headers.contains_key(&CLIENT_CERT));
-        assert!(!headers.contains_key(&CLIENT_CERT_CHAIN));
+        assert!(!headers.contains_key(&client_cert_name()));
+        assert!(!headers.contains_key(&client_cert_chain_name()));
     }
 
     #[test]
@@ -747,9 +760,9 @@ mod tests {
         let limits = ClientCertLimits::default();
         let value =
             encode_byte_sequence(&end_entity, "Client-Cert", limits).expect("encode certificate");
-        let mut headers = HeaderMap::new();
-        headers.append(CLIENT_CERT.clone(), value.clone());
-        headers.append(CLIENT_CERT.clone(), value);
+        let mut headers = Headers::new();
+        headers.append(client_cert_name(), value.clone());
+        headers.append(client_cert_name(), value);
         assert!(matches!(
             parse_client_certificate_headers(&headers, &limits),
             Err(ClientCertError::MultipleClientCertFields)
@@ -763,8 +776,8 @@ mod tests {
         let chain = encode_chain(std::slice::from_ref(&intermediate), limits)
             .expect("encode chain")
             .expect("non-empty chain");
-        let mut headers = HeaderMap::new();
-        headers.insert(CLIENT_CERT_CHAIN.clone(), chain);
+        let mut headers = Headers::new();
+        headers.insert(client_cert_chain_name(), chain);
         assert!(matches!(
             parse_client_certificate_headers(&headers, &limits),
             Err(ClientCertError::ChainWithoutClientCert)

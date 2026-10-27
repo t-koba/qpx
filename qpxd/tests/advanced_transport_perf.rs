@@ -855,7 +855,7 @@ impl qpx_h3::RequestHandler for QpxH3ExtendedEchoHandler {
 
     async fn handle_connect_stream(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: qpx_h3::RequestStream,
         _conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
@@ -922,7 +922,7 @@ impl qpx_h3::RequestHandler for QpxH3WebTransportEchoHandler {
 
     async fn handle_webtransport_connect(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: qpx_h3::RequestStream,
         _conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,

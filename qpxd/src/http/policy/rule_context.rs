@@ -9,7 +9,7 @@ use qpx_observability::access_log::RequestLogContext;
 
 pub(crate) struct RequestRuleContextInput<'a> {
     pub(crate) base: &'a BaseRequestFields,
-    pub(crate) headers: &'a HeaderMap,
+    pub(crate) headers: &'a qpx_core::http_message::Headers,
     pub(crate) destination: &'a DestinationMetadata,
     pub(crate) identity: &'a ResolvedIdentity,
     pub(crate) request_size: Option<u64>,
@@ -44,7 +44,8 @@ pub(crate) fn build_request_rule_match_context(
         upstream_cert,
     } = input;
     let mut ctx = base.rule_match_context();
-    ctx.headers = Some(qpx_core::http_content_length::HeaderView::new(headers));
+    ctx.headers = None;
+    ctx.owned_headers = Some(headers.request_policy_view(base.version));
     ctx.request_size = request_size;
     destination.apply_to_rule_context(&mut ctx);
     apply_identity(&mut ctx, identity);
@@ -152,6 +153,111 @@ fn apply_rpc<'a>(ctx: &mut RuleMatchContext<'a>, rpc: &'a RpcMatchContext) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cookie_engine(value: Option<&str>, regex: Option<&str>) -> qpx_core::rules::RuleEngine {
+        use qpx_core::config::{ActionConfig, ActionKind, HeaderMatch, MatchConfig, RuleConfig};
+        let rule = RuleConfig {
+            name: "cookie".into(),
+            r#match: Some(MatchConfig {
+                headers: vec![HeaderMatch {
+                    name: "cookie".into(),
+                    value: value.map(str::to_owned),
+                    regex: regex.map(str::to_owned),
+                }],
+                ..Default::default()
+            }),
+            auth: None,
+            action: None,
+            headers: None,
+            rate_limit: None,
+        };
+        qpx_core::rules::RuleEngine::new(
+            vec![rule],
+            ActionConfig {
+                kind: ActionKind::Direct,
+                upstream: None,
+                local_response: None,
+            },
+        )
+        .expect("compile rule")
+    }
+
+    #[test]
+    fn request_cookie_rules_use_decoded_protocol_without_mutating_headers() {
+        use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
+        use http::{HeaderValue, Version};
+        use qpx_core::http_message::{OrdinaryHeaderName, Request};
+
+        let exact = cookie_engine(Some("a=1; b=2"), None);
+        let regex = cookie_engine(None, Some("^a=1; b=2$"));
+        let fragment = cookie_engine(Some("a=1"), None);
+        let present = cookie_engine(None, None);
+        let name = OrdinaryHeaderName::try_from(http::header::COOKIE).unwrap();
+        let destination = DestinationMetadata::default();
+        let identity = ResolvedIdentity::default();
+        for version in [Version::HTTP_11, Version::HTTP_2, Version::HTTP_3] {
+            for fields in [
+                [b"a=1".as_slice(), b"b=2".as_slice()],
+                [b"".as_slice(), b"".as_slice()],
+                [b"a=1".as_slice(), b"\xff".as_slice()],
+            ] {
+                let mut raw = http::Request::builder()
+                    .version(version)
+                    .uri("/")
+                    .body(())
+                    .unwrap();
+                for (index, field) in fields.iter().enumerate() {
+                    let mut value = HeaderValue::from_bytes(field).unwrap();
+                    value.set_sensitive(index == 0);
+                    raw.headers_mut().append(http::header::COOKIE, value);
+                }
+                let req = Request::from_http(raw);
+                let original: Vec<_> = req
+                    .headers()
+                    .get_all(&name)
+                    .map(|v| (v.as_bytes().to_vec(), v.is_sensitive()))
+                    .collect();
+                let base = extract_base_request_fields(&req, BaseRequestContext::default());
+                let ctx = build_request_rule_match_context(RequestRuleContextInput {
+                    base: &base,
+                    headers: req.headers(),
+                    destination: &destination,
+                    identity: &identity,
+                    request_size: None,
+                    rpc: None,
+                    client_cert: None,
+                    upstream_cert: None,
+                });
+                let matches = |engine: &qpx_core::rules::RuleEngine| {
+                    engine.evaluate_ref(&ctx).matched_rule.is_some()
+                };
+                let joined = fields[1] == b"b=2" && version != Version::HTTP_11;
+                assert_eq!(matches(&exact), joined, "{version:?} {fields:?}");
+                assert_eq!(matches(&regex), joined, "{version:?} {fields:?}");
+                assert_eq!(
+                    matches(&fragment),
+                    version == Version::HTTP_11 && fields[0] == b"a=1",
+                    "{version:?} {fields:?}"
+                );
+                let expected_present = if version == Version::HTTP_11 {
+                    true
+                } else {
+                    fields[1] == b"b=2" || (version == Version::HTTP_3 && fields[0].is_empty())
+                };
+                assert_eq!(
+                    matches(&present),
+                    expected_present,
+                    "{version:?} {fields:?}"
+                );
+                let after: Vec<_> = req
+                    .headers()
+                    .get_all(&name)
+                    .map(|v| (v.as_bytes().to_vec(), v.is_sensitive()))
+                    .collect();
+                assert_eq!(after, original);
+            }
+        }
+    }
 
     #[test]
     fn apply_identity_maps_all_seven_fields() {

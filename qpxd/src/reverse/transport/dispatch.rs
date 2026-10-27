@@ -9,7 +9,8 @@ use crate::reverse::router::HttpRoute;
 use crate::runtime::Runtime;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -86,7 +87,7 @@ use self::webdav::{
 };
 
 pub(super) async fn dispatch_reverse_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: BaseRequestFields,
     reverse: &ReloadableReverse,
     runtime: &Runtime,
@@ -110,7 +111,7 @@ pub(super) async fn dispatch_reverse_request(
 }
 
 async fn execute_reverse_dispatch(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: BaseRequestFields,
     reverse: &ReloadableReverse,
     runtime: &Runtime,
@@ -150,7 +151,10 @@ async fn execute_reverse_dispatch(
             request_version,
             http::Version::HTTP_11 | http::Version::HTTP_2
         )
-        && !req.headers().contains_key(http::header::UPGRADE)
+        && !req.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::UPGRADE)
+                .expect("ordinary"),
+        )
         && let Some(route) = compiled
             .router
             .single_plain_http_route()
@@ -186,7 +190,10 @@ async fn execute_reverse_dispatch(
             request_version,
             http::Version::HTTP_11 | http::Version::HTTP_2
         )
-        && !req.headers().contains_key(http::header::UPGRADE)
+        && !req.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::UPGRADE)
+                .expect("ordinary"),
+        )
         && let Some(route) = compiled.router.single_direct_local_response_route()
     {
         match prepare_single_local_response_reverse_request(req, &base, conn, &state, &compiled)? {
@@ -217,7 +224,10 @@ async fn execute_reverse_dispatch(
             request_version,
             http::Version::HTTP_11 | http::Version::HTTP_2
         )
-        && !req.headers().contains_key(http::header::UPGRADE)
+        && !req.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::UPGRADE)
+                .expect("ordinary"),
+        )
         && let Some(route) = compiled.router.single_direct_webdav_route()
     {
         match prepare_single_webdav_reverse_request(req, &base, conn, &state, &compiled)? {
@@ -407,7 +417,10 @@ async fn execute_reverse_request(
             request_version,
             http::Version::HTTP_11 | http::Version::HTTP_2
         )
-        && !req.headers().contains_key(http::header::UPGRADE)
+        && !req.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::UPGRADE)
+                .expect("ordinary"),
+        )
     {
         return dispatch_plain_reverse_http(
             req,
@@ -500,7 +513,10 @@ async fn execute_reverse_request(
     )?;
 
     if (*request_method == http::Method::TRACE || *request_method == http::Method::OPTIONS)
-        && req.headers().contains_key(http::header::MAX_FORWARDS)
+        && req.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS)
+                .expect("ordinary"),
+        )
         && let Some(response) = annotated_max_forwards_response(
             &mut req,
             proxy_name,

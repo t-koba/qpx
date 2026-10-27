@@ -8,14 +8,15 @@ use crate::upstream::raw_http1::{
 };
 use anyhow::{Result, anyhow};
 use hyper::header::{HOST, HeaderValue};
-use hyper::{Request, Response, Uri};
+use hyper::{Response, Uri};
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(crate) async fn shared_reverse_https_request_with_trust(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
     let target = absolute_request_target(req.uri())?;
@@ -41,8 +42,9 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
     {
         HttpsConnectionAcquisition::H2Ready { shared, ready } => {
             let req = prepare_internal_h2_request(req, target.scheme.as_str(), authority.as_str())?;
+            let hyper_req = req.into_http_for_codec().map_err(|err| anyhow!("{err}"))?;
             let mut proxied = send_h2_request_with_sender(
-                req,
+                hyper_req,
                 ready,
                 Some(shared.upstream_cert.clone()),
                 Some(shared.inflight_streams.clone()),
@@ -67,14 +69,15 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
 pub(super) async fn send_tls_http1_with_recycle(
     slot: Arc<HttpsOriginSlot>,
     entry: TlsHttp1OriginConnection,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
 ) -> Result<Http1ResponseWithInterim> {
     let upstream_cert = entry.upstream_cert.clone();
+    let hyper_req = crate::upstream::http1::into_http1_for_codec(req)?;
     let mut proxied = send_http1_request_with_interim_reusable(
         entry.stream,
         entry.read_buf,
         entry.write_buf,
-        req,
+        hyper_req,
         Http1ConnectionRecycler::new({
             let slot = slot.clone();
             move |stream, read_buf, write_buf| {
@@ -100,14 +103,15 @@ struct AbsoluteRequestTarget {
 }
 
 fn prepare_internal_http1_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     authority: &str,
-) -> Result<Request<Body>> {
+) -> Result<OwnerRequest<Body>> {
     *req.version_mut() = http::Version::HTTP_11;
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
-    if !req.headers().contains_key(HOST) {
+    let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
+    if !req.headers().contains_key(&host) {
         req.headers_mut()
-            .insert(HOST, HeaderValue::from_str(authority)?);
+            .insert(host, HeaderValue::from_str(authority)?);
     }
     Ok(req)
 }

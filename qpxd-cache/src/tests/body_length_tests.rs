@@ -3,7 +3,7 @@ use super::*;
 // Leave one writeback slot available, then wait for it to be released. This
 // observes completion of both successful and rejected asynchronous stores.
 async fn store_length_case(
-    request: &Request<Body>,
+    request: &OwnerRequest<()>,
     response: Response<Body>,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
 ) -> Response<Body> {
@@ -17,8 +17,7 @@ async fn store_length_case(
     }
     drop(reserved.pop());
     let response = maybe_store(
-        request.method(),
-        request.headers(),
+        request,
         &key,
         &policy(),
         response,
@@ -52,22 +51,15 @@ async fn store_length_case(
 }
 
 async fn lookup_length_case(
-    request: &Request<Body>,
+    request: &OwnerRequest<()>,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
 ) -> LookupOutcome {
     let key = CacheRequestKey::for_lookup(request, "http")
         .expect("key")
         .expect("some key");
-    lookup(
-        request.method(),
-        request.headers(),
-        &key,
-        &policy(),
-        backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup")
+    lookup(request, &key, &policy(), backends, &test_revalidations())
+        .await
+        .expect("lookup")
 }
 
 #[tokio::test]

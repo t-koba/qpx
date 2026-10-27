@@ -33,7 +33,7 @@ pub(crate) struct ResolvedPolicy {
     pub(crate) effective_policy: crate::policy_context::EffectivePolicyContext,
     pub(crate) destination: crate::destination::DestinationMetadata,
     pub(crate) identity: crate::policy_context::ResolvedIdentity,
-    pub(crate) sanitized_headers: http::HeaderMap,
+    pub(crate) sanitized_headers: qpx_core::http_message::Headers,
     pub(crate) response_engine: Option<Arc<HttpResponseRuleEngine>>,
     pub(crate) selected_plan: ExecutionPlan,
     pub(crate) action: ActionConfig,
@@ -57,7 +57,7 @@ pub(crate) struct RequestObservation {
 }
 
 pub(crate) struct PreparedRequestParts<P, M> {
-    pub(crate) req: hyper::Request<Body>,
+    pub(crate) req: qpx_core::http_message::Request<Body>,
     pub(crate) base: BaseRequestFields,
     pub(crate) context: RequestContext,
     pub(crate) policy: P,

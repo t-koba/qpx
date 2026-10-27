@@ -3,8 +3,8 @@ use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use crate::xdp;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use hyper::Request;
 use qpx_core::config::{ActionConfig, IngressEdgeConfig, OriginalDstSource};
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
 use std::net::SocketAddr;
@@ -155,7 +155,10 @@ pub(super) fn resolve_http_target(
         None => {
             let host_from_request = req
                 .headers()
-                .get(http::header::HOST)
+                .get(
+                    &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::HOST)
+                        .expect("Host is ordinary"),
+                )
                 .and_then(|v| v.to_str().ok())
                 .or_else(|| req.uri().authority().map(|a| a.as_str()))
                 .and_then(|v| parse_authority_host_port(v, 80));
@@ -313,17 +316,17 @@ fn original_dst_socket(
 mod tests {
     use crate::transparent::destination::*;
     use cidr::IpCidr;
-    use hyper::Request;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
 
     #[test]
     fn resolve_http_target_prefers_original_target_over_host_fallback() {
-        let request = Request::builder()
+        let request = hyper::Request::builder()
             .uri("/resource")
             .header(http::header::HOST, "ignored.example:8080")
             .body(Body::empty())
             .expect("request");
+        let request = Request::from_http(request);
         let fallback = ConnectTarget::Socket("127.0.0.1:18080".parse().expect("socket"));
 
         let (target, host_for_match) =
@@ -334,15 +337,31 @@ mod tests {
 
     #[test]
     fn resolve_http_target_uses_host_header_when_original_target_is_unavailable() {
-        let request = Request::builder()
+        let request = hyper::Request::builder()
             .uri("/resource")
             .header(http::header::HOST, "example.com:8443")
             .body(Body::empty())
             .expect("request");
 
+        let request = Request::from_http(request);
         let (target, host_for_match) = resolve_http_target(&request, None).expect("target");
         assert!(matches!(target, ConnectTarget::HostPort(ref host, 8443) if host == "example.com"));
         assert_eq!(host_for_match.as_deref(), Some("example.com"));
+    }
+
+    #[test]
+    fn resolve_http_target_uses_uri_authority_and_rejects_missing_host() {
+        let request = Request::from_http(
+            hyper::Request::builder()
+                .uri("http://example.net:8081/resource")
+                .body(Body::empty())
+                .expect("request"),
+        );
+        let (target, host) = resolve_http_target(&request, None).expect("target");
+        assert!(matches!(target, ConnectTarget::HostPort(ref host, 8081) if host == "example.net"));
+        assert_eq!(host.as_deref(), Some("example.net"));
+        let missing = Request::from_http(hyper::Request::new(Body::empty()));
+        assert!(resolve_http_target(&missing, None).is_err());
     }
 
     fn proxy_v2_header(src: SocketAddr, dst: SocketAddr) -> Vec<u8> {

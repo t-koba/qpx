@@ -1,6 +1,7 @@
 use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_incoming_request_with_metadata;
 
@@ -44,7 +45,7 @@ pub(crate) enum PreflightOutcome {
 }
 
 pub(crate) fn preflight_validate<B>(
-    req: &mut Request<B>,
+    req: &Request<B>,
     proxy_name: &str,
     options: PreflightOptions<'_>,
     rejection: Option<Response<Body>>,

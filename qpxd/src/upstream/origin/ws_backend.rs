@@ -1,6 +1,7 @@
 use anyhow::Result;
-use hyper::header::{HOST, HeaderValue};
-use hyper::{Request, Response};
+use hyper::Response;
+use hyper::header::HeaderValue;
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
@@ -18,7 +19,7 @@ use super::OriginEndpoint;
 use super::dispatch::{OriginScheme, origin_scheme};
 
 pub(crate) async fn proxy_websocket(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     timeout_dur: Duration,
@@ -75,20 +76,21 @@ pub(crate) async fn proxy_websocket(
 }
 
 fn prepare_websocket_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     host_authority: &str,
     proxy_name: &str,
-) -> Result<Request<Body>> {
+) -> Result<OwnerRequest<Body>> {
     prepare_request_with_headers_in_place(&mut req, proxy_name, None, true);
     *req.version_mut() = http::Version::HTTP_11;
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
+    let host = OrdinaryHeaderName::try_from(http::header::HOST).expect("host is an ordinary field");
     req.headers_mut()
-        .insert(HOST, HeaderValue::from_str(host_authority)?);
+        .insert(host, HeaderValue::from_str(host_authority)?);
     Ok(req)
 }
 
 async fn proxy_wss(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     connect_authority: &str,
     server_name: &str,
     timeout_dur: Duration,
@@ -98,7 +100,7 @@ async fn proxy_wss(
 ) -> Result<Response<Body>> {
     let (expected_accept, offered_protocols) =
         crate::http::protocol::websocket::websocket_response_expectation(req.headers())?;
-    let client_upgrade = crate::http::protocol::upgrade::on(&mut req);
+    let client_upgrade = crate::http::protocol::upgrade::on(req.extensions_mut());
     let tcp = timeout(timeout_dur, TcpStream::connect(connect_authority)).await??;
     let _ = tcp.set_nodelay(true);
     let tls = timeout(
@@ -118,8 +120,8 @@ async fn proxy_wss(
             warn!(error = ?err, upstream = %authority, "reverse_edges websocket TLS upstream closed");
         }
     });
-    qpx_core::http_content_length::canonicalize_content_length(req.headers_mut());
-    let mut response = timeout(timeout_dur, sender.send_request(req))
+    let hyper_req = crate::upstream::http1::into_http1_for_codec(req)?;
+    let mut response = timeout(timeout_dur, sender.send_request(hyper_req))
         .await??
         .map(Body::from);
     crate::http::protocol::websocket::validate_websocket_switching_response(

@@ -1,6 +1,6 @@
-#[cfg(feature = "http3")]
-use http::HeaderMap;
 use qpx_core::config::SseStreamingPolicy;
+#[cfg(feature = "http3")]
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 
 #[cfg(feature = "http3")]
 #[path = "sse/metrics.rs"]
@@ -140,8 +140,8 @@ impl SseEventObserver {
 }
 
 #[cfg(feature = "http3")]
-pub(crate) fn is_sse_reconnect(headers: &HeaderMap) -> bool {
-    headers.contains_key("last-event-id")
+pub(crate) fn is_sse_reconnect(headers: &Headers) -> bool {
+    headers.contains_key(&OrdinaryHeaderName::try_from("last-event-id").expect("ordinary"))
 }
 
 #[cfg(test)]

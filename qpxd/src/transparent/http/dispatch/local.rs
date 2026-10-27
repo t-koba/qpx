@@ -4,7 +4,8 @@ use crate::http::dispatch::{
 };
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use anyhow::Result;
-use hyper::{Request, StatusCode};
+use hyper::StatusCode;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use tokio::time::Duration;
 

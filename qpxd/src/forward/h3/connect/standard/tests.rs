@@ -232,17 +232,18 @@ fn normalize_h3_upstream_connect_headers_strips_proxy_auth_and_adds_via() {
         .path_and_query("/chat")
         .build()
         .unwrap();
-    let mut headers = http::HeaderMap::new();
+    let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(
-        http::header::HeaderName::from_static("proxy-authorization"),
+        qpx_core::http_message::OrdinaryHeaderName::try_from("proxy-authorization")
+            .expect("ordinary"),
         http::HeaderValue::from_static("Basic dGVzdA=="),
     );
     headers.insert(
-        http::header::HeaderName::from_static("connection"),
+        qpx_core::http_message::OrdinaryHeaderName::try_from("connection").expect("ordinary"),
         http::HeaderValue::from_static("proxy-authorization"),
     );
     headers.insert(
-        http::header::HeaderName::from_static("x-custom"),
+        qpx_core::http_message::OrdinaryHeaderName::try_from("x-custom").expect("ordinary"),
         http::HeaderValue::from_static("ok"),
     );
 

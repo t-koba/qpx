@@ -25,8 +25,9 @@ use crate::policy_context::{
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use crate::runtime::{ExecutionPlan, Runtime};
 use anyhow::Result;
+use hyper::Response;
 use hyper::client::conn::http1::SendRequest;
-use hyper::{Request, Response};
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::format_authority_host_port;
@@ -35,7 +36,7 @@ use tokio::sync::Mutex;
 use tokio::time::{Duration, timeout};
 
 pub(super) struct MitmDispatch<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) base: &'a BaseRequestFields,
     pub(super) runtime: Runtime,
     pub(super) sender: Arc<Mutex<SendRequest<Body>>>,
@@ -108,12 +109,13 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
     strip_identity(&state, effective_policy, src_ip, input.req.headers_mut())?;
     prepare_request(&mut input.req, proxy_name, route_headers, input.websocket);
     *input.req.version_mut() = http::Version::HTTP_11;
-    if !input.req.headers().contains_key(http::header::HOST) {
+    let host_header = OrdinaryHeaderName::try_from(http::header::HOST)?;
+    if !input.req.headers().contains_key(&host_header) {
         let authority = format_authority_host_port(input.route.host, input.route.dst_port);
         input
             .req
             .headers_mut()
-            .insert(http::header::HOST, http::HeaderValue::from_str(&authority)?);
+            .insert(host_header, http::HeaderValue::from_str(&authority)?);
     }
     let module_init = mitm_module_init(proxy_name, &input.route, &input.identity);
     let mut http_modules = selected_plan
@@ -152,9 +154,12 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             crate::http::protocol::websocket::websocket_response_expectation(input.req.headers())
         })
         .transpose()?;
-    qpx_core::http_content_length::canonicalize_content_length(input.req.headers_mut());
     let mut guard = input.sender.lock().await;
-    let upstream_result = timeout(upstream_timeout, guard.send_request(input.req)).await;
+    let upstream_result = timeout(
+        upstream_timeout,
+        guard.send_request(crate::upstream::http1::into_http1_for_codec(input.req)?),
+    )
+    .await;
     record_upstream_request_duration(input.audit.kind, upstream_started.elapsed());
     let mut response = match upstream_result {
         Ok(Ok(response)) => response.map(Body::from),

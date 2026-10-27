@@ -41,7 +41,7 @@ pub(super) struct H3ConnectPolicyContext<'a> {
     pub(super) host: &'a str,
     pub(super) port: u16,
     pub(super) authority: &'a str,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: qpx_core::http_message::Headers,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
     pub(super) initial_action: ActionConfig,
 }
@@ -111,6 +111,7 @@ pub(super) async fn prepare_h3_connect_stream(
                 host: ctx.host,
                 port: ctx.port,
                 authority: ctx.authority,
+                request_version: http::Version::HTTP_3,
                 sanitized_headers: &ctx.sanitized_headers,
                 identity: ctx.identity,
                 client_hello,

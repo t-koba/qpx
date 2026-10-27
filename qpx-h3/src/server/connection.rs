@@ -17,9 +17,9 @@ use crate::protocol::{
     read_frame_header, read_frame_header_after_idle, read_varint,
 };
 use crate::qpack::QpackConnection;
-use crate::response::parse_content_length;
 use crate::transport::{BidiStream, DatagramDispatch, OpenStreams, RequestStream, UniRecvStream};
 use anyhow::anyhow;
+use qpx_core::http_message::OrdinaryHeaderName;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -405,7 +405,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
             decoded
                 .request
                 .headers()
-                .get("priority")
+                .get(&OrdinaryHeaderName::try_from("priority").expect("ordinary"))
                 .and_then(|value| value.to_str().ok()),
         )
         .await;
@@ -430,7 +430,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
             return Ok(());
         }
     }
-    let declared_content_length = match parse_content_length(decoded.request.headers()) {
+    let declared_content_length = match decoded.request.headers().declared_content_length() {
         Ok(value) => value,
         Err(err) => {
             warn!(error = ?err, "qpx-h3 rejected malformed Content-Length");

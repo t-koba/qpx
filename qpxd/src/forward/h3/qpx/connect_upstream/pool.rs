@@ -297,7 +297,7 @@ pub(super) async fn open_pooled_qpx_h3_extended_connect_stream(
     pool: &QpxH3UpstreamSessionPool,
     key: QpxH3UpstreamSessionKey,
     trust: Option<&qpx_core::tls::CompiledUpstreamTlsTrust>,
-    request: http::Request<()>,
+    request: qpx_core::http_message::Request<()>,
     protocol: Option<qpx_h3::Protocol>,
     timeout_dur: Duration,
 ) -> Result<qpx_h3::ExtendedConnectStream> {
@@ -305,7 +305,11 @@ pub(super) async fn open_pooled_qpx_h3_extended_connect_stream(
     for attempt in 0..2 {
         let session = pool.acquire(key.clone(), trust, timeout_dur).await?;
         match session
-            .open_extended_connect_stream(request.clone(), protocol.clone(), timeout_dur)
+            .open_extended_connect_stream(
+                request.clone().into_http_for_codec()?,
+                protocol.clone(),
+                timeout_dur,
+            )
             .await
         {
             Ok(stream) => return Ok(stream),

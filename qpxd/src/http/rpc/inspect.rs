@@ -6,7 +6,7 @@ use super::protocol::rpc_protocol_from_content_type;
 use super::protocol::{
     detect_rpc_protocol, extract_rpc_status_and_message, extract_service_and_method,
     infer_request_streaming, infer_response_streaming, is_grpc_web_text_content_type,
-    response_content_type,
+    request_content_type, request_rpc_protocol, response_content_type,
 };
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use super::streaming::ConnectFrameObserver;
@@ -16,7 +16,8 @@ use crate::http::body::size::{
     observed_response_trailers,
 };
 use anyhow::Result;
-use http::{HeaderMap, Request, Response};
+use http::Response;
+use qpx_core::http_message::{Headers, Request};
 use qpx_http::body::Body;
 
 const CONNECT_STATUS_BODY_PREFIX_BYTES: usize = 16 * 1024;
@@ -33,7 +34,7 @@ pub(crate) fn inspect_request(
     let precomputed_body_summary = req.extensions().get::<PrecomputedRpcBodySummary>().cloned();
 
     async move {
-        let protocol = detect_rpc_protocol(&headers, None);
+        let protocol = request_rpc_protocol(&headers);
         let (service, method) = extract_service_and_method(path.as_str())
             .map(|(service, method)| (Some(service.to_string()), Some(method.to_string())))
             .unwrap_or((None, None));
@@ -180,7 +181,7 @@ pub(crate) fn inspect_response(
 
 async fn summarize_observed_request_body(
     protocol: Option<&str>,
-    headers: &HeaderMap,
+    headers: &Headers,
     body: Option<&ObservedBodyReader>,
 ) -> Result<Option<FramedBodySummary>> {
     let Some(body) = body else {
@@ -192,7 +193,7 @@ async fn summarize_observed_request_body(
             observe_grpc_observed_body(
                 body,
                 GrpcFrameObserver::grpc_web(
-                    response_content_type(headers)
+                    request_content_type(headers)
                         .as_deref()
                         .map(is_grpc_web_text_content_type)
                         .unwrap_or(false),
@@ -203,7 +204,7 @@ async fn summarize_observed_request_body(
             .await?
         }
         Some("connect") => {
-            connect_observed_body_summary(body, response_content_type(headers).as_deref()).await?
+            connect_observed_body_summary(body, request_content_type(headers).as_deref()).await?
         }
         _ => FramedBodySummary {
             message_count: usize::from(body.len() > 0),

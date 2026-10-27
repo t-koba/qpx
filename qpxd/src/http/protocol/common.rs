@@ -15,6 +15,7 @@ pub(crate) fn trim_http_ows(value: &str) -> &str {
 }
 
 /// Counts the bytes left after trimming HTTP optional whitespace.
+#[cfg(test)]
 pub(crate) fn trim_http_ows_len(value: &[u8]) -> usize {
     let (start, end) = http_ows_bounds(value);
     end - start

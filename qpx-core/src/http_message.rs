@@ -21,7 +21,7 @@ use crate::http_content_length::{
     ContentLengthError, HeaderDiagnostic, HeaderPredicate, HeaderTextSelection, HeaderView,
     VarySelector, canonical_content_length_value,
 };
-use http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
+use http::header::{CONTENT_LENGTH, COOKIE, HeaderName, HeaderValue};
 use http::{Extensions, HeaderMap, Method, StatusCode, Uri, Version};
 use std::fmt;
 
@@ -74,9 +74,10 @@ impl OrdinaryHeaderName {
 /// An owner-scoped header view with redacted Content-Length diagnostics.
 ///
 /// This wraps the closed [`HeaderView`] policy API for [`Headers`] only. Predicate
-/// matching (`matches`) is unchanged for every field, including Content-Length.
-/// Ordinary-field `trace` diagnostics still report the first matching textual
-/// value. Content-Length `trace` diagnostics never report text: `actual` is always
+/// matching (`matches`) is unchanged for every field, including Content-Length,
+/// except for Cookie in the explicit request policy view.
+/// Ordinary-field `trace` diagnostics report the first matching textual
+/// value, except for Cookie in the request policy view. Content-Length `trace` diagnostics never report text: `actual` is always
 /// `None` while `matched` reports the same predicate result the wrapped view
 /// computed, matched case-insensitively on the field name. `joined_text` stays
 /// unrepresentable for Content-Length and `vary_selector` remains the literal
@@ -106,6 +107,7 @@ impl OrdinaryHeaderName {
 #[derive(Clone, Copy)]
 pub struct OwnedHeaderView<'a> {
     inner: HeaderView<'a>,
+    request: Option<(&'a HeaderMap, Version)>,
 }
 
 impl fmt::Debug for OwnedHeaderView<'_> {
@@ -115,11 +117,51 @@ impl fmt::Debug for OwnedHeaderView<'_> {
 }
 
 impl<'a> OwnedHeaderView<'a> {
-    /// Whether any textual value for `name` matches, without allocating.
-    ///
-    /// Matching is unchanged for every field, including Content-Length.
+    /// Whether a textual value for `name` matches. Request policy views join
+    /// multiple H2/H3 Cookie fields as the legacy decoder did.
     pub fn matches(&self, name: &str, predicate: HeaderPredicate<'_>) -> bool {
-        self.inner.matches(name, predicate)
+        self.cookie_diagnostic(name, predicate).map_or_else(
+            || self.inner.matches(name, predicate),
+            |result| result.matched,
+        )
+    }
+
+    fn cookie_diagnostic(
+        &self,
+        name: &str,
+        predicate: HeaderPredicate<'_>,
+    ) -> Option<HeaderDiagnostic> {
+        let (headers, version) = self.request?;
+        if !name.eq_ignore_ascii_case("cookie")
+            || !matches!(version, Version::HTTP_2 | Version::HTTP_3)
+        {
+            return None;
+        }
+        let mut values = headers.get_all(COOKIE).iter();
+        let first = values.next()?;
+        let second = values.next()?;
+        let mut joined = first.as_bytes().to_vec();
+        for value in std::iter::once(second).chain(values) {
+            if version == Version::HTTP_3 || !joined.is_empty() {
+                joined.extend_from_slice(b"; ");
+            }
+            joined.extend_from_slice(value.as_bytes());
+        }
+        // H2 omits an empty merged field; H3 retains its separators. Preserve
+        // opaque bytes instead of skipping a non-textual occurrence.
+        let actual = if version == Version::HTTP_2 && joined.is_empty() {
+            None
+        } else {
+            HeaderValue::from_bytes(&joined)
+                .ok()
+                .and_then(|v| v.to_str().ok().map(str::to_owned))
+        };
+        let matched = actual.as_deref().is_some_and(|value| match predicate {
+            HeaderPredicate::Present => true,
+            HeaderPredicate::Exact(expected) => value == expected,
+            HeaderPredicate::Regex(regex) => regex.is_match(value),
+        });
+        Some(HeaderDiagnostic { actual, matched })
     }
 
     /// Reports the predicate result without exposing Content-Length text.
@@ -127,7 +169,7 @@ impl<'a> OwnedHeaderView<'a> {
     /// For Content-Length (matched case-insensitively), `actual` is always
     /// `None` and `matched` is the wrapped predicate result. Ordinary fields
     /// delegate unchanged: the first matching textual value, else the first
-    /// textual value.
+    /// textual value, except Cookie in a request policy view.
     pub fn trace(&self, name: &str, predicate: HeaderPredicate<'_>) -> HeaderDiagnostic {
         if name.eq_ignore_ascii_case("content-length") {
             HeaderDiagnostic {
@@ -135,7 +177,8 @@ impl<'a> OwnedHeaderView<'a> {
                 matched: self.inner.matches(name, predicate),
             }
         } else {
-            self.inner.trace(name, predicate)
+            self.cookie_diagnostic(name, predicate)
+                .unwrap_or_else(|| self.inner.trace(name, predicate))
         }
     }
 
@@ -232,7 +275,129 @@ impl PartialEq for Headers {
 
 impl Eq for Headers {}
 
+/// A closed authorization-selection failure, without field or token contents.
+/// Diagnostics and authentication decisions belong to the caller.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IdentityAuthorizationError {
+    /// More than one occurrence, regardless of the contents.
+    Duplicate,
+    /// The single occurrence cannot be read as text.
+    NonTextual,
+    /// Missing token separator, empty token or whitespace inside the token.
+    MalformedBearer,
+    /// The scheme is neither Bearer nor DPoP.
+    MalformedAuthorization,
+    /// The field uses DPoP while that extraction mode is disabled.
+    DpopDisabled,
+}
+
 impl Headers {
+    /// Select the first nonempty trimmed textual identity value in occurrence
+    /// order. Configured identity fields include Content-Length: this operation
+    /// selects literal text, never a parsed or canonicalized length.
+    pub fn identity_text(&self, name: &HeaderName) -> Option<String> {
+        self.inner
+            .get_all(name)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .map(str::trim)
+            .find(|value| !value.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Select comma-separated identity members in occurrence/member order,
+    /// skipping nontextual values and empty trimmed members. Deduplication is
+    /// stable and case-sensitive, including for literal Content-Length text.
+    pub fn identity_members(&self, name: &HeaderName) -> Vec<String> {
+        let mut selected = Vec::new();
+        for member in crate::http_token::header_value_members(&self.inner, name) {
+            if !member.is_empty() && !selected.iter().any(|value| value == member) {
+                selected.push(member.to_string());
+            }
+        }
+        selected
+    }
+
+    /// Select the first eligible assertion, skipping nontextual/empty values.
+    /// Trim the occurrence, remove the configured literal (case-sensitive)
+    /// prefix when present, then trim the token and skip empty tokens. No
+    /// verification or trust decision is performed here.
+    ///
+    /// These closed selections do not grant raw access, even for a configured
+    /// Content-Length identity source:
+    /// ```compile_fail
+    /// use qpx_core::http_message::Headers;
+    /// let headers = Headers::new();
+    /// let _ = headers.get_all(&http::header::CONTENT_LENGTH);
+    /// ```
+    /// Nor may a caller replace the selection with an arbitrary callback:
+    /// ```compile_fail
+    /// use qpx_core::http_message::Headers;
+    /// let headers = Headers::new();
+    /// headers.identity_assertion(&http::header::CONTENT_LENGTH, |value| value);
+    /// ```
+    pub fn identity_assertion<'a>(
+        &'a self,
+        name: &HeaderName,
+        prefix: Option<&str>,
+    ) -> Option<&'a str> {
+        for value in self.inner.get_all(name).iter() {
+            let Ok(value) = value.to_str() else { continue };
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            if let Some(prefix) = prefix {
+                if let Some(token) = value.strip_prefix(prefix) {
+                    let token = token.trim();
+                    if !token.is_empty() {
+                        return Some(token);
+                    }
+                }
+                continue;
+            }
+            return Some(value);
+        }
+        None
+    }
+
+    /// Select a Bearer/DPoP credential from exactly one configured occurrence.
+    /// Absence is distinct from duplicate, nontextual and malformed values;
+    /// no joining or fallback to a later occurrence is allowed. The boolean
+    /// identifies the DPoP scheme. This only extracts credentials, not trust.
+    pub fn identity_authorization<'a>(
+        &'a self,
+        name: &HeaderName,
+        dpop_enabled: bool,
+    ) -> Result<Option<(&'a str, bool)>, IdentityAuthorizationError> {
+        use IdentityAuthorizationError::*;
+        let mut values = self.inner.get_all(name).iter();
+        let Some(value) = values.next() else {
+            return Ok(None);
+        };
+        if values.next().is_some() {
+            return Err(Duplicate);
+        }
+        let value = value.to_str().map_err(|_| NonTextual)?;
+        let Some((scheme, token)) = value.trim().split_once(' ') else {
+            return Err(MalformedBearer);
+        };
+        let dpop_scheme = if scheme.eq_ignore_ascii_case("dpop") {
+            if !dpop_enabled {
+                return Err(DpopDisabled);
+            }
+            true
+        } else if scheme.eq_ignore_ascii_case("bearer") {
+            false
+        } else {
+            return Err(MalformedAuthorization);
+        };
+        if token.is_empty() || token.contains(char::is_whitespace) {
+            return Err(MalformedBearer);
+        }
+        Ok(Some((token, dpop_scheme)))
+    }
+
     /// Literal presence, even when the declaration is malformed or conflicting.
     /// This does not parse or return the stored declaration.
     pub fn contains_content_length(&self) -> bool {
@@ -314,6 +479,19 @@ impl Headers {
     pub fn view(&self) -> OwnedHeaderView<'_> {
         OwnedHeaderView {
             inner: HeaderView::new(&self.inner),
+            request: None,
+        }
+    }
+
+    /// Request policy view matching the legacy H2/H3 decoder's Cookie joining.
+    ///
+    /// Only Cookie predicate matching and diagnostics change. The stored fields,
+    /// other names, text selection and Vary selection remain untouched. Use
+    /// [`Self::view`] for responses, trailers and protocol-neutral operations.
+    pub fn request_policy_view(&self, version: Version) -> OwnedHeaderView<'_> {
+        OwnedHeaderView {
+            inner: HeaderView::new(&self.inner),
+            request: Some((&self.inner, version)),
         }
     }
 
@@ -343,6 +521,74 @@ impl Headers {
     /// Remove every occurrence of an ordinary field.
     pub fn remove(&mut self, name: &OrdinaryHeaderName) -> Option<HeaderValue> {
         self.inner.remove(&name.0)
+    }
+
+    /// Render selected textual field occurrences for an external metadata message.
+    /// Unlike ordinary-field access, this serializer preserves framing spellings
+    /// and duplicates; it does not validate or canonicalize the live message.
+    pub fn selected_fields_for_serialization(
+        &self,
+        selected: &[HeaderName],
+    ) -> std::collections::HashMap<String, Vec<String>> {
+        selected
+            .iter()
+            .filter_map(|name| {
+                let values: Vec<_> = self
+                    .inner
+                    .get_all(name)
+                    .iter()
+                    .filter_map(|value| value.to_str().ok())
+                    .map(str::to_owned)
+                    .collect();
+                (!values.is_empty()).then(|| (name.as_str().to_owned(), values))
+            })
+            .collect()
+    }
+
+    /// Serialize HTTP field lines without exporting a map or framing values.
+    /// Used by the TRACE message/http serializer; preserves exact field bytes.
+    pub fn write_http_field_lines(
+        &self,
+        output: &mut Vec<u8>,
+        include: impl Fn(&HeaderName) -> bool,
+    ) {
+        for (name, value) in &self.inner {
+            if include(name) {
+                output.extend_from_slice(name.as_str().as_bytes());
+                output.extend_from_slice(b": ");
+                output.extend_from_slice(value.as_bytes());
+                output.extend_from_slice(b"\r\n");
+            }
+        }
+    }
+
+    /// Number of field occurrences, including framing fields and duplicates.
+    /// This exposes only the count, never Content-Length values.
+    pub fn field_count(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// Sum field-name and value byte lengths, including every framing occurrence.
+    /// When `trim_ows` is set, exclude leading and trailing HTTP whitespace from
+    /// each value. Only the aggregate is exposed, not framing field bytes.
+    pub fn field_bytes(&self, trim_ows: bool) -> usize {
+        self.inner.iter().fold(0usize, |total, (name, value)| {
+            let bytes = value.as_bytes();
+            let length = if trim_ows {
+                let start = bytes
+                    .iter()
+                    .position(|b| !matches!(b, b' ' | b'\t'))
+                    .unwrap_or(bytes.len());
+                let end = bytes
+                    .iter()
+                    .rposition(|b| !matches!(b, b' ' | b'\t'))
+                    .map_or(start, |i| i + 1);
+                end - start
+            } else {
+                bytes.len()
+            };
+            total.saturating_add(name.as_str().len() + length)
+        })
     }
 
     /// Iterate ordinary fields only. Content-Length is never included.
@@ -389,7 +635,7 @@ pub enum HeaderTransferMode {
 /// operation, including an explicit rename; it does not expose its value:
 /// ```
 /// use qpx_core::http_message::{HeaderTransferPatch, HeaderTransferMode, Headers};
-/// use http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
+/// use http::header::{CONTENT_LENGTH, COOKIE, HeaderName, HeaderValue};
 /// let mut source = http::Response::new(());
 /// source.headers_mut().insert(CONTENT_LENGTH, HeaderValue::from_static(" 007 "));
 /// let destination_name = HeaderName::from_static("content-length");
@@ -725,7 +971,7 @@ pub(crate) fn replace_header_regex(
 /// let wire = request.into_http_for_codec().unwrap();
 /// assert_eq!(wire.headers()[http::header::CONTENT_LENGTH], "3");
 /// ```
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct Request<B> {
     method: Method,
     uri: Uri,

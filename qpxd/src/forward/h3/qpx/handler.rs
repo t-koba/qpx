@@ -3,14 +3,14 @@ use super::connect::{handle_qpx_connect_stream, handle_qpx_traditional_connect_s
 use super::response::{send_qpx_response_stream, send_qpx_static_response};
 use super::webtransport_dispatch::handle_qpx_webtransport_connect as dispatch_qpx_webtransport_connect;
 use crate::http::body::size::set_observed_request_size;
-use crate::http3::codec::h3_request_to_hyper;
 use crate::http3::response_options::H3ResponseSendOptions;
 use crate::runtime::{ResolvedStreamingLimits, Runtime};
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::{ConnectIpConfig, ConnectUdpConfig};
+use qpx_core::http_message::{OrdinaryHeaderName, Request};
 use qpx_http::body::Body;
-use qpx_http::protocol::semantics::capsule_protocol_enabled;
+use qpx_http::protocol::semantics::request_capsule_protocol_enabled;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant};
 use tracing::warn;
@@ -55,21 +55,22 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         conn: qpx_h3::ConnectionInfo,
         req_stream: qpx_h3::RequestStream,
     ) -> qpx_h3::H3Result<()> {
-        if request.head.method() == http::Method::CONNECT {
+        let head = request.head;
+        if head.method() == http::Method::CONNECT {
             return self
-                .handle_connect(request, conn, req_stream)
+                .handle_connect(head, request.protocol, conn, req_stream)
                 .await
                 .map_err(Into::into);
         }
 
-        self.handle_http_request(request, conn.remote_addr, req_stream)
+        self.handle_http_request(head, conn.remote_addr, req_stream)
             .await
             .map_err(Into::into)
     }
 
     async fn handle_webtransport_connect(
         &self,
-        req_head: http::Request<()>,
+        req_head: Request<()>,
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
@@ -81,7 +82,7 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
 
     async fn handle_connect_stream(
         &self,
-        req_head: http::Request<()>,
+        req_head: Request<()>,
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         protocol: qpx_h3::Protocol,
@@ -96,35 +97,63 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
 impl ForwardQpxHandler {
     fn request_streaming_limits(
         &self,
-        req_head: &http::Request<()>,
+        req_head: &Request<()>,
         remote_addr: std::net::SocketAddr,
-    ) -> ResolvedStreamingLimits {
-        super::super::streaming::request_streaming_limits_for_head(
+    ) -> std::result::Result<
+        ResolvedStreamingLimits,
+        qpx_http::protocol::semantics::RequestValidationError,
+    > {
+        // Policy must see a valid H3 head and unambiguous authority, without
+        // normalizing Cookie or other fields before selection.
+        qpx_http::protocol::semantics::validate_h2_h3_request_headers(
+            http::Version::HTTP_3,
+            req_head.headers(),
+        )?;
+        qpx_http::protocol::semantics::resolve_request_authority(
+            req_head.headers(),
+            req_head.uri().authority(),
+            req_head.uri().scheme_str(),
+        )?
+        .ok_or(qpx_http::protocol::semantics::RequestValidationError::MissingHost)?;
+        Ok(super::super::streaming::request_streaming_limits_for_head(
             &self.runtime,
             self.listener_name.as_ref(),
             req_head,
             remote_addr,
             self.listener_streaming_limits(),
-        )
+        ))
     }
 
     async fn handle_http_request(
         &self,
-        request: qpx_h3::Request,
+        request: Request<()>,
         remote_addr: std::net::SocketAddr,
         mut req_stream: qpx_h3::RequestStream,
     ) -> Result<()> {
-        let request_headers = request.head.headers().clone();
+        let request_headers = request.headers().clone();
         if crate::http::protocol::sse::is_sse_reconnect(&request_headers) {
             crate::http::protocol::sse::emit_sse_reconnect(self.listener_name.as_ref(), "unknown");
         }
-        let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
+        let grpc_protocol = crate::http::rpc::request_streaming_rpc_protocol(&request_headers);
         let grpc_request_content_type = request_headers
-            .get(http::header::CONTENT_TYPE)
+            .get(&OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE).expect("ordinary"))
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
         let grpc_started = Instant::now();
-        let listener_streaming = self.request_streaming_limits(&request.head, remote_addr);
+        let listener_streaming = match self.request_streaming_limits(&request, remote_addr) {
+            Ok(limits) => limits,
+            Err(error) => {
+                let body = error.to_string();
+                return send_qpx_static_response(
+                    &mut req_stream,
+                    error.http_status(),
+                    body.as_bytes(),
+                    request.method(),
+                    self.runtime.state().plan.identity.proxy_name.as_ref(),
+                )
+                .await;
+            }
+        };
         let grpc_deadline = grpc_protocol.as_deref().map(|protocol| {
             crate::http::rpc::resolve_rpc_deadline(
                 &request_headers,
@@ -133,8 +162,7 @@ impl ForwardQpxHandler {
                 grpc_started,
             )
         });
-        let declared_content_length =
-            crate::http::codec::h2::parse_declared_content_length(request.head.headers())?;
+        let declared_content_length = request.headers().declared_content_length()?;
         if let Some(content_length) = declared_content_length
             && content_length > listener_streaming.max_request_body_bytes as u64
         {
@@ -142,14 +170,21 @@ impl ForwardQpxHandler {
                 &mut req_stream,
                 StatusCode::PAYLOAD_TOO_LARGE,
                 b"request payload too large",
-                request.head.method(),
+                request.method(),
                 self.runtime.state().plan.identity.proxy_name.as_ref(),
             )
             .await;
         }
 
         let (sender, body) = Body::channel_with_capacity(listener_streaming.body_channel_capacity);
-        let mut req = h3_request_to_hyper(request.head, body)?;
+        if request.headers().field_count() > crate::http3::codec::H3_MAX_HEADER_COUNT {
+            return Err(anyhow!(
+                "HTTP/3 request header fields exceeded configured limits"
+            ));
+        }
+        // Keep decoded field occurrences intact through common request policy;
+        // protocol-specific normalization belongs at an upstream codec boundary.
+        let mut req = request.map_body(|()| body);
         if let Some(content_length) = declared_content_length {
             set_observed_request_size(&mut req, content_length);
         }
@@ -192,9 +227,8 @@ impl ForwardQpxHandler {
         let grpc_observer = listener_streaming
             .observe_grpc_messages
             .then(|| {
-                crate::http::rpc::streaming_rpc_observer(
+                crate::http::rpc::request_streaming_rpc_observer(
                     &request_headers,
-                    None,
                     Some(listener_streaming.max_grpc_message_bytes),
                     Some(listener_streaming.max_grpc_web_trailer_bytes),
                 )
@@ -353,11 +387,12 @@ impl ForwardQpxHandler {
 
     async fn handle_connect(
         &self,
-        request: qpx_h3::Request,
+        request: Request<()>,
+        protocol: Option<qpx_h3::Protocol>,
         conn: qpx_h3::ConnectionInfo,
         mut req_stream: qpx_h3::RequestStream,
     ) -> Result<()> {
-        match request.protocol {
+        match protocol {
             Some(qpx_h3::Protocol::ConnectUdp) => {
                 self.handle_connect_udp(request, &mut req_stream).await
             }
@@ -370,15 +405,13 @@ impl ForwardQpxHandler {
                 )
                 .await
             }
-            None => {
-                handle_qpx_traditional_connect_stream(self, request.head, req_stream, conn).await
-            }
+            None => handle_qpx_traditional_connect_stream(self, request, req_stream, conn).await,
         }
     }
 
     async fn handle_connect_udp(
         &self,
-        request: qpx_h3::Request,
+        request: Request<()>,
         req_stream: &mut qpx_h3::RequestStream,
     ) -> Result<()> {
         if !self.connect_udp.enabled {
@@ -394,13 +427,13 @@ impl ForwardQpxHandler {
 
         qpx_http::protocol::semantics::validate_h2_h3_request_headers(
             http::Version::HTTP_3,
-            request.head.headers(),
+            request.headers(),
         )
         .map_err(|err| anyhow!("invalid CONNECT-UDP headers: {err}"))?;
-        qpx_http::protocol::semantics::validate_expect_header(request.head.headers())
+        qpx_http::protocol::semantics::validate_expect_header(request.headers())
             .map_err(|err| anyhow!("invalid CONNECT-UDP headers: {err}"))?;
 
-        if !capsule_protocol_enabled(request.head.headers()) {
+        if !request_capsule_protocol_enabled(request.headers()) {
             return self
                 .static_response(
                     req_stream,
@@ -411,8 +444,7 @@ impl ForwardQpxHandler {
                 .await;
         }
 
-        let _ =
-            parse_connect_udp_target(request.head.uri(), self.connect_udp.uri_template.as_deref())?;
+        let _ = parse_connect_udp_target(request.uri(), self.connect_udp.uri_template.as_deref())?;
 
         let mut response = crate::http::protocol::common::connect_established_response();
         response.headers_mut().insert(
@@ -474,7 +506,7 @@ impl ForwardQpxHandler {
 
     async fn handle_qpx_webtransport_connect(
         &self,
-        req_head: http::Request<()>,
+        req_head: Request<()>,
         req_stream: qpx_h3::RequestStream,
         conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
@@ -503,4 +535,127 @@ pub(crate) fn h3_body_read_timeout(runtime: &Runtime) -> Duration {
             .h3_read_timeout_ms
             .max(1),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qpx_core::config::Config;
+
+    fn handler() -> ForwardQpxHandler {
+        let config: Config = serde_yaml::from_str(
+            r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action: {type: direct}
+  streaming: {max_request_body_bytes: 17}
+"#,
+        )
+        .expect("config");
+        ForwardQpxHandler {
+            runtime: Runtime::new(config).expect("runtime"),
+            listener_name: Arc::from("forward"),
+            connect_udp: serde_yaml::from_str("{}").expect("CONNECT-UDP config"),
+            connect_ip: serde_yaml::from_str(
+                "uri_template: 'https://proxy.test/ip/{target}/{ipproto}/'",
+            )
+            .expect("CONNECT-IP config"),
+        }
+    }
+
+    #[test]
+    fn conflicting_h3_host_is_rejected_at_streaming_policy_boundary() {
+        let handler = handler();
+        let remote = "127.0.0.1:12345".parse().expect("remote");
+        let head = Request::from_http(
+            http::Request::builder()
+                .version(http::Version::HTTP_3)
+                .uri("https://authority.test/upload")
+                .header("host", "different.test")
+                .body(())
+                .expect("decoded head"),
+        );
+        // Call the actual production boundary, not just the semantic validator.
+        // Before the guard, this selected the listener's streaming policy using
+        // the unvalidated Host/URI pair and returned Ok(limits).
+        let error = handler
+            .request_streaming_limits(&head, remote)
+            .expect_err("conflicting authority must not select limits");
+        assert_eq!(
+            error,
+            qpx_http::protocol::semantics::RequestValidationError::HostAuthorityMismatch
+        );
+        assert_eq!(error.http_status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            error.to_string(),
+            "Host header does not match request authority"
+        );
+
+        let mut valid = head;
+        valid.headers_mut().insert(
+            OrdinaryHeaderName::try_from("host").expect("ordinary"),
+            http::HeaderValue::from_static("authority.test"),
+        );
+        assert_eq!(
+            handler
+                .request_streaming_limits(&valid, remote)
+                .expect("valid head")
+                .max_request_body_bytes,
+            17
+        );
+    }
+
+    #[test]
+    fn owned_h3_head_preserves_duplicate_cookies_during_policy_selection() {
+        let mut head = Request::from_http(
+            http::Request::builder()
+                .version(http::Version::HTTP_3)
+                .uri("https://authority.test/")
+                .header("cookie", "a=1")
+                .header("cookie", "b=2")
+                .header("x-repeat", " first ")
+                .header("x-repeat", "second")
+                .header("content-length", "000")
+                .header("content-length", "0")
+                .body(())
+                .expect("head"),
+        );
+        let cookie = OrdinaryHeaderName::try_from("cookie").expect("ordinary");
+        let repeat = OrdinaryHeaderName::try_from("x-repeat").expect("ordinary");
+        assert_eq!(head.headers().get_all(&cookie).count(), 2);
+        assert_eq!(head.headers().field_count(), 6);
+        let mut cookies: Vec<_> = head.headers().get_all(&cookie).cloned().collect();
+        cookies[1].set_sensitive(true);
+        head.headers_mut().remove(&cookie);
+        for value in cookies {
+            head.headers_mut().append(cookie.clone(), value);
+        }
+        assert_eq!(head.version(), http::Version::HTTP_3);
+        let original = head.headers().clone();
+        let handler = handler();
+        handler
+            .request_streaming_limits(&head, "127.0.0.1:12345".parse().expect("remote"))
+            .expect("policy");
+        assert_eq!(head.headers(), &original);
+        let attached = head.map_body(|()| Body::empty());
+        assert_eq!(attached.headers().get_all(&cookie).count(), 2);
+        assert_eq!(attached.headers().field_count(), 6);
+        assert_eq!(attached.version(), http::Version::HTTP_3);
+        assert_eq!(
+            attached
+                .headers()
+                .get_all(&repeat)
+                .map(|v| v.as_bytes())
+                .collect::<Vec<_>>(),
+            [b" first ".as_slice(), b"second".as_slice()]
+        );
+        assert_eq!(
+            attached
+                .headers()
+                .declared_content_length()
+                .expect("length"),
+            Some(0)
+        );
+    }
 }

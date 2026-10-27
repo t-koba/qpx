@@ -7,6 +7,7 @@ use super::{
     validate_h3_trailer_field,
 };
 use http::HeaderValue;
+use qpx_core::http_message::OrdinaryHeaderName;
 
 // Exercise both the Vec-fields decoder and the production streaming sink. These
 // fields deliberately bypass client encoders, which can reject malformed heads
@@ -67,7 +68,13 @@ fn request_authority_accepts_matching_values() {
         for decoded in decode_request_heads(&fields) {
             let request = decoded.expect("matching authorities").request;
             assert_eq!(request.uri().authority().unwrap().as_str(), authority);
-            assert_eq!(request.headers()["host"], host);
+            assert_eq!(
+                request
+                    .headers()
+                    .get(&OrdinaryHeaderName::try_from("host").unwrap())
+                    .unwrap(),
+                host
+            );
         }
     }
 }
@@ -102,7 +109,13 @@ fn request_authority_uses_host_only_for_http_and_https() {
                 assert_eq!(request.uri().authority().unwrap().as_str(), host);
                 assert_eq!(request.uri().scheme_str(), Some(scheme));
                 assert_eq!(request.uri().path_and_query().unwrap(), "/test?q=1");
-                assert_eq!(request.headers()["host"], host);
+                assert_eq!(
+                    request
+                        .headers()
+                        .get(&OrdinaryHeaderName::try_from("host").unwrap())
+                        .unwrap(),
+                    host
+                );
             }
         }
         // :authority alone is also sufficient.
@@ -328,7 +341,13 @@ fn request_authority_preserves_expect_for_application_preflight() {
         let request = decoded
             .expect("Expect policy belongs to the application")
             .request;
-        assert_eq!(request.headers()["expect"], "application-specific");
+        assert_eq!(
+            request
+                .headers()
+                .get(&OrdinaryHeaderName::try_from("expect").unwrap())
+                .unwrap(),
+            "application-specific"
+        );
     }
 }
 
@@ -616,4 +635,96 @@ fn h3_forbidden_regular_fields_are_rejected() {
     assert!(validate_h3_regular_field("transfer-encoding", b"chunked").is_err());
     assert!(validate_h3_regular_field("te", b"trailers").is_ok());
     assert!(validate_h3_regular_field("te", b"trailers, gzip").is_err());
+}
+
+#[test]
+fn decoded_request_preserves_field_occurrences_and_length_states() {
+    for (lengths, expected) in [
+        (vec![], Ok(None)),
+        (vec!["000", "0"], Ok(Some(0))),
+        (vec!["7", "007"], Ok(Some(7))),
+        (vec!["7", "8"], Err(())),
+        (vec!["invalid"], Err(())),
+    ] {
+        let mut fields = request_authority_fields("https", Some("example.test"), None);
+        fields.extend([
+            ("cookie", "a=1"),
+            ("cookie", "b=2"),
+            ("x-repeat", " first "),
+            ("x-repeat", "second"),
+        ]);
+        fields.extend(lengths.iter().map(|value| ("content-length", *value)));
+        for decoded in decode_request_heads(&fields) {
+            let request = decoded.expect("decoded request").request;
+            assert_eq!(request.version(), http::Version::HTTP_3);
+            assert_eq!(request.method(), http::Method::GET);
+            assert_eq!(request.uri(), "https://example.test/test?q=1");
+            assert_eq!(request.headers().field_count(), 4 + lengths.len());
+            assert_eq!(
+                request.headers().declared_content_length().map_err(|_| ()),
+                expected
+            );
+            for (name, expected) in [
+                ("cookie", vec!["a=1", "b=2"]),
+                ("x-repeat", vec![" first ", "second"]),
+            ] {
+                let name = OrdinaryHeaderName::try_from(name).unwrap();
+                assert_eq!(
+                    request
+                        .headers()
+                        .get_all(&name)
+                        .map(|value| value.to_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+            }
+            // Preserve the existing public qpx-h3 Request Clone capability
+            // without exporting or canonicalizing its owned field section.
+            let cloned = request.clone();
+            assert_eq!(cloned.headers(), request.headers());
+            assert_eq!(cloned.version(), request.version());
+            assert_eq!(cloned.uri(), request.uri());
+        }
+    }
+}
+
+#[test]
+fn request_sink_preserves_per_occurrence_sensitivity() {
+    use super::fields::{DecodedField, FieldSink, RequestHeadSink};
+    let mut sink = RequestHeadSink::default();
+    for (name, value, sensitive) in [
+        (":method", "GET", false),
+        (":scheme", "https", false),
+        (":authority", "example.test", false),
+        (":path", "/", false),
+        ("cookie", "a=1", true),
+        ("cookie", "b=2", false),
+        ("x-repeat", " first ", false),
+        ("x-repeat", "second", true),
+        ("content-length", "000", true),
+        ("content-length", "0", false),
+    ] {
+        sink.push(
+            DecodedField::owned(
+                name.to_string(),
+                bytes::Bytes::from_static(value.as_bytes()),
+            )
+            .with_sensitive(sensitive),
+        )
+        .unwrap();
+    }
+    let request = sink.finish().unwrap().request;
+    assert_eq!(request.headers().declared_content_length(), Ok(Some(0)));
+    assert_eq!(request.headers().field_count(), 6);
+    for (name, expected) in [("cookie", [true, false]), ("x-repeat", [false, true])] {
+        let name = OrdinaryHeaderName::try_from(name).unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get_all(&name)
+                .map(HeaderValue::is_sensitive)
+                .collect::<Vec<_>>(),
+            expected
+        );
+    }
 }

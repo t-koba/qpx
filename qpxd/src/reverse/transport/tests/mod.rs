@@ -121,10 +121,12 @@ fn test_decision_service_config(name: &str, endpoint: String) -> DecisionService
 }
 
 fn make_req(uri: &str) -> Request<Body> {
-    Request::builder()
-        .uri(uri)
-        .body(Body::empty())
-        .expect("test request")
+    Request::from_http(
+        http::Request::builder()
+            .uri(uri)
+            .body(Body::empty())
+            .expect("test request"),
+    )
 }
 
 fn compile_headers(name: &str, value: &str) -> Arc<CompiledHeaderControl> {
@@ -155,11 +157,13 @@ fn make_base_request_fields(
         Some(query) => format!("https://{authority}{path}?{query}"),
         None => format!("https://{authority}{path}"),
     };
-    let request = Request::builder()
-        .method(method)
-        .uri(request_uri)
-        .body(())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(method)
+            .uri(request_uri)
+            .body(())
+            .expect("request"),
+    );
     crate::http::protocol::base_fields::extract_base_request_fields(
         &request,
         crate::http::protocol::base_fields::BaseRequestContext::default(),

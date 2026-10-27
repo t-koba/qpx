@@ -17,8 +17,8 @@ use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use tokio::time::Duration;
 
 pub(super) struct OpenUpstreamQpxExtendedConnectInput<'a> {
-    pub(super) req_head: &'a http::Request<()>,
-    pub(super) sanitized_headers: &'a http::HeaderMap,
+    pub(super) req_head: &'a qpx_core::http_message::Request<()>,
+    pub(super) sanitized_headers: &'a qpx_core::http_message::Headers,
     pub(super) proxy_name: &'a str,
     pub(super) upstream: Option<&'a str>,
     pub(super) verify_upstream: bool,
@@ -29,8 +29,8 @@ pub(super) struct OpenUpstreamQpxExtendedConnectInput<'a> {
 }
 
 pub(super) fn validate_qpx_connect_head(
-    req_head: &http::Request<()>,
-    headers: &http::HeaderMap,
+    req_head: &qpx_core::http_message::Request<()>,
+    headers: &qpx_core::http_message::Headers,
     authority_host: &str,
     authority_port: u16,
     protocol: Option<&qpx_h3::Protocol>,
@@ -39,7 +39,8 @@ pub(super) fn validate_qpx_connect_head(
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     qpx_http::protocol::semantics::validate_expect_header(headers)
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
-    crate::http::codec::h2::parse_declared_content_length(headers)
+    headers
+        .declared_content_length()
         .map_err(|err| anyhow!("invalid CONNECT request headers: {}", err))?;
     let protocol = match protocol {
         Some(qpx_h3::Protocol::ConnectUdp) => H3ConnectProtocol::ConnectUdp,
@@ -94,13 +95,8 @@ pub(super) async fn open_upstream_qpx_extended_connect_stream(
         timeout_dur,
     } = input;
     let (connect_host, connect_port) = parse_extended_connect_upstream(req_head.uri(), upstream)?;
-    let normalized_headers =
-        normalize_qpx_upstream_connect_headers(req_head.uri(), sanitized_headers, proxy_name)?;
-    let mut request = http::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri(req_head.uri().clone())
-        .body(())?;
-    *request.headers_mut() = normalized_headers;
+    let request =
+        normalized_qpx_upstream_connect_request(req_head.uri(), sanitized_headers, proxy_name);
     let enable_webtransport = protocol == qpx_h3::Protocol::WebTransport;
     let key = QpxH3UpstreamSessionKey {
         connect_host: connect_host.clone(),
@@ -137,17 +133,12 @@ pub(super) async fn open_upstream_qpx_connect_udp_stream(
             target_host,
             target_port,
         )?;
-    let mut headers = http::HeaderMap::new();
+    let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(
-        http::header::HeaderName::from_static("capsule-protocol"),
-        http::header::HeaderValue::from_static("?1"),
+        qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol").expect("ordinary"),
+        http::HeaderValue::from_static("?1"),
     );
-    let normalized_headers = normalize_qpx_upstream_connect_headers(&uri, &headers, proxy_name)?;
-    let mut request = http::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri(uri)
-        .body(())?;
-    *request.headers_mut() = normalized_headers;
+    let request = normalized_qpx_upstream_connect_request(&uri, &headers, proxy_name);
 
     let key = QpxH3UpstreamSessionKey {
         connect_host: upstream_host.clone(),
@@ -181,17 +172,16 @@ pub(super) async fn open_upstream_qpx_connect_udp_stream(
     Ok(stream)
 }
 
-fn normalize_qpx_upstream_connect_headers(
+fn normalized_qpx_upstream_connect_request(
     uri: &http::Uri,
-    headers: &http::HeaderMap,
+    headers: &qpx_core::http_message::Headers,
     proxy_name: &str,
-) -> Result<http::HeaderMap> {
-    let mut request = hyper::Request::builder()
-        .method(http::Method::CONNECT)
-        .uri(uri.to_string().parse::<http::Uri>()?)
-        .body(Body::empty())?;
+) -> qpx_core::http_message::Request<()> {
+    let mut request = qpx_core::http_message::Request::new(Body::empty());
+    *request.method_mut() = http::Method::CONNECT;
+    *request.uri_mut() = uri.clone();
     *request.version_mut() = http::Version::HTTP_3;
     *request.headers_mut() = headers.clone();
     prepare_request_with_headers_in_place(&mut request, proxy_name, None, false);
-    Ok(request.headers().clone())
+    request.map_body(|_| ())
 }

@@ -49,7 +49,7 @@ impl Authenticator {
     pub(crate) async fn authenticate_proxy(
         &self,
         _src_ip: Option<IpAddr>,
-        _headers: &http::HeaderMap,
+        _headers: &qpx_core::http_message::Headers,
         required_providers: &[String],
         _method: &str,
         _uri: &str,

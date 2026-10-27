@@ -116,7 +116,7 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
         // their own allocation boundary rather than imposing it on every caller.
         async move {
             let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
-                req,
+                qpx_core::http_message::Request::from_http(req),
                 reverse,
                 conn,
                 Some(origin_pool),
@@ -141,7 +141,7 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
         let origin_pool = &self.origin_pool;
         Box::into_pin(Box::write(Box::new_uninit(), async move {
             let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
-                req,
+                qpx_core::http_message::Request::from_http(req),
                 reverse,
                 conn,
                 Some(origin_pool),

@@ -174,11 +174,15 @@ fn signed_assertion_accepts_es256_public_key_tokens() {
         }),
     );
 
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert(
         "x-assertion",
         HeaderValue::from_str(token.as_str()).expect("header value"),
     );
+    let headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     let identity = compiled.extract(&headers).expect("valid assertion");
 
     assert_eq!(identity.user.as_deref(), Some("alice"));
@@ -219,11 +223,15 @@ fn signed_assertion_defaults_to_public_key_algorithms() {
         }),
     );
 
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert(
         "x-assertion",
         HeaderValue::from_str(token.as_str()).expect("header value"),
     );
+    let headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     let identity = compiled.extract(&headers).expect("valid assertion");
 
     assert_eq!(identity.user.as_deref(), Some("alice"));
@@ -233,8 +241,43 @@ fn signed_assertion_defaults_to_public_key_algorithms() {
 
 #[test]
 fn signed_assertion_rejects_invalid_present_token() {
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert("x-assertion", HeaderValue::from_static("not-a-jwt"));
 
+    let headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     assert!(compiled_hs256().extract(&headers).is_err());
+}
+
+#[test]
+fn signed_assertion_selects_first_eligible_literal_content_length_token() {
+    let mut compiled = compiled_hs256();
+    compiled.header = http::header::CONTENT_LENGTH;
+    compiled.prefix = Some("Assertion ".into());
+    let mut ingress = http::Request::new(());
+    for value in [
+        &b"\xff"[..],
+        b" ",
+        b"assertion wrong-case",
+        b"Assertion ",
+        b" Assertion not-a-jwt ",
+        b"Assertion later",
+    ] {
+        ingress.headers_mut().append(
+            http::header::CONTENT_LENGTH,
+            HeaderValue::from_bytes(value).unwrap(),
+        );
+    }
+    let request = qpx_core::http_message::Request::from_http(ingress);
+    // A selected but invalid assertion is an error, not an absent identity or
+    // permission to fall back to a later occurrence.
+    assert_eq!(
+        request
+            .headers()
+            .identity_assertion(&compiled.header, compiled.prefix.as_deref()),
+        Some("not-a-jwt")
+    );
+    assert!(compiled.extract(request.headers()).is_err());
 }

@@ -7,7 +7,8 @@ use crate::http::protocol::preflight::{
 use crate::runtime::Runtime;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use anyhow::Result;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Response, StatusCode};
+use qpx_core::http_message::Request;
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::convert::Infallible;
@@ -168,7 +169,7 @@ async fn handle_request_inner_with_origin_pool(
         };
     }
     let validated_request = match preflight_validate(
-        &mut req,
+        &req,
         proxy_name,
         PreflightOptions {
             trace_enabled: state.plan.limits.general.trace_enabled,

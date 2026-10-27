@@ -9,7 +9,8 @@ use crate::policy_context::{
     authentication_response_for_error, resolve_identity_for_request, sanitize_headers_for_policy,
 };
 use anyhow::Result;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
+use qpx_core::http_message::{Headers, Request};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::rules::RuleEngine;
 use qpx_http::body::Body;
@@ -38,7 +39,7 @@ pub(crate) struct DispatchRequestPrepareInput<'a> {
 pub(crate) struct PreparedDispatchRequest {
     pub(crate) req: Request<Body>,
     pub(crate) observation_plan: RequestObservationPlan,
-    pub(crate) sanitized_headers: http::HeaderMap,
+    pub(crate) sanitized_headers: Headers,
     pub(crate) identity: ResolvedIdentity,
     pub(crate) request_rpc: Option<crate::http::rpc::RpcMatchContext>,
 }

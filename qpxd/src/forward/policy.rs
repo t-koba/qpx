@@ -4,8 +4,8 @@ use crate::runtime::Runtime;
 use crate::runtime::auth::AuthChallenge;
 use crate::runtime::auth::{AuthOutcome, AuthenticatedUser};
 use anyhow::Result;
-use hyper::HeaderMap;
 use qpx_core::config::ActionConfig;
+use qpx_core::http_message::Headers;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_core::rules::RuleMatchContext;
 use std::collections::HashMap;
@@ -30,7 +30,7 @@ pub(crate) async fn evaluate_forward_policy_staged(
     runtime: &Runtime,
     listener_name: &str,
     ctx: RuleMatchContext<'_>,
-    request_headers: &HeaderMap,
+    request_headers: &Headers,
     auth_method: &str,
     auth_uri: &str,
 ) -> Result<PolicyStage<ForwardPolicyDecision>> {
@@ -56,7 +56,7 @@ pub(crate) async fn evaluate_forward_policy(
     runtime: &Runtime,
     listener_name: &str,
     ctx: RuleMatchContext<'_>,
-    request_headers: &HeaderMap,
+    request_headers: &Headers,
     auth_method: &str,
     auth_uri: &str,
 ) -> Result<ForwardPolicyDecision> {

@@ -206,8 +206,13 @@ fn is_csp_host_expression(value: &str) -> bool {
     }
 }
 
-fn parse_single_header<'a>(headers: &'a HeaderMap, name: &'static str) -> Result<Option<&'a str>> {
-    let mut values = headers.get_all(name).iter();
+fn parse_single_header<'a>(
+    headers: &'a crate::http_message::Headers,
+    name: &'static str,
+) -> Result<Option<&'a str>> {
+    let name_key = crate::http_message::OrdinaryHeaderName::try_from(name)
+        .expect("ordinary Fetch Metadata field");
+    let mut values = headers.get_all(&name_key);
     let Some(value) = values.next() else {
         return Ok(None);
     };
@@ -519,7 +524,7 @@ pub struct FetchMetadataRequest {
 
 impl FetchMetadataRequest {
     /// Parses all Fetch Metadata fields in `headers` with singleton semantics.
-    pub fn parse(headers: &HeaderMap) -> Result<Option<Self>> {
+    pub fn parse(headers: &crate::http_message::Headers) -> Result<Option<Self>> {
         let site = parse_single_header(headers, SEC_FETCH_SITE)?
             .map(str::parse)
             .transpose()?;
@@ -688,7 +693,10 @@ impl FetchMetadataPolicy {
     }
 
     /// Parses and evaluates Fetch Metadata fields from one request header map.
-    pub fn evaluate_headers(&self, headers: &HeaderMap) -> Result<FetchMetadataDecision> {
+    pub fn evaluate_headers(
+        &self,
+        headers: &crate::http_message::Headers,
+    ) -> Result<FetchMetadataDecision> {
         let request = FetchMetadataRequest::parse(headers)?;
         Ok(self.evaluate(request.as_ref()))
     }
@@ -2481,11 +2489,23 @@ mod tests {
 
     #[test]
     fn fetch_metadata_parser_is_strict_and_policy_is_deterministic() {
-        let mut headers = HeaderMap::new();
-        headers.insert(SEC_FETCH_SITE, HeaderValue::from_static("same-origin"));
-        headers.insert(SEC_FETCH_MODE, HeaderValue::from_static("navigate"));
-        headers.insert(SEC_FETCH_DEST, HeaderValue::from_static("document"));
-        headers.insert(SEC_FETCH_USER, HeaderValue::from_static("?1"));
+        let mut headers = crate::http_message::Headers::new();
+        headers.insert(
+            crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_SITE).unwrap(),
+            HeaderValue::from_static("same-origin"),
+        );
+        headers.insert(
+            crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_MODE).unwrap(),
+            HeaderValue::from_static("navigate"),
+        );
+        headers.insert(
+            crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_DEST).unwrap(),
+            HeaderValue::from_static("document"),
+        );
+        headers.insert(
+            crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_USER).unwrap(),
+            HeaderValue::from_static("?1"),
+        );
         let request = FetchMetadataRequest::parse(&headers)
             .expect("valid Fetch Metadata")
             .expect("metadata present");
@@ -2514,13 +2534,29 @@ mod tests {
             "accept-encoding, sec-fetch-site, sec-fetch-mode, sec-fetch-dest, sec-fetch-user"
         );
 
-        headers.insert(SEC_FETCH_SITE, HeaderValue::from_static("cross-site"));
+        headers.insert(
+            crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_SITE).unwrap(),
+            HeaderValue::from_static("cross-site"),
+        );
         let request = FetchMetadataRequest::parse(&headers)
             .expect("valid Fetch Metadata")
             .expect("metadata present");
         assert_eq!(policy.evaluate(Some(&request)), FetchMetadataDecision::Site);
 
-        headers.insert(SEC_FETCH_USER, HeaderValue::from_static("?0"));
+        headers.append(
+            crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_SITE).unwrap(),
+            HeaderValue::from_static("same-origin"),
+        );
+        assert!(matches!(
+            FetchMetadataRequest::parse(&headers),
+            Err(BrowserPolicyError::Duplicate { .. })
+        ));
+        headers.remove(&crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_SITE).unwrap());
+
+        headers.insert(
+            crate::http_message::OrdinaryHeaderName::try_from(SEC_FETCH_USER).unwrap(),
+            HeaderValue::from_static("?0"),
+        );
         assert_eq!(
             FetchMetadataRequest::parse(&headers),
             Err(invalid(SEC_FETCH_USER, "only ?1 is valid"))

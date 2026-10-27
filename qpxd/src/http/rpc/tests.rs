@@ -50,12 +50,14 @@ fn grpc_observer_parses_five_byte_header_split_one_byte_at_a_time() {
 async fn buffered_grpc_request_precomputes_rpc_summary() {
     let mut body = frame_grpc_message(Bytes::from_static(b"hello"));
     body.extend_from_slice(&frame_grpc_message(Bytes::from_static(b"world")));
-    let req = Request::builder()
-        .method("POST")
-        .uri("/demo.Echo/Say")
-        .header(http::header::CONTENT_TYPE, "application/grpc")
-        .body(Body::from(body))
-        .expect("request");
+    let req = qpx_core::http_message::Request::from_http(
+        Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .body(Body::from(body))
+            .expect("request"),
+    );
 
     let req = crate::http::body::size::buffer_request_body_with_reason(
         req,
@@ -82,12 +84,14 @@ async fn buffered_grpc_request_precomputes_rpc_summary() {
 async fn empty_grpc_request_reports_zero_payload_size_and_matches() {
     let body = frame_grpc_message(Bytes::from_static(b""));
     assert_eq!(body.len(), 5);
-    let req = Request::builder()
-        .method("POST")
-        .uri("/demo.Echo/Say")
-        .header(http::header::CONTENT_TYPE, "application/grpc")
-        .body(Body::from(body))
-        .expect("request");
+    let req = qpx_core::http_message::Request::from_http(
+        Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .body(Body::from(body))
+            .expect("request"),
+    );
 
     let req = crate::http::body::size::buffer_request_body_with_reason(
         req,
@@ -122,12 +126,14 @@ async fn empty_grpc_request_reports_zero_payload_size_and_matches() {
 
 #[tokio::test]
 async fn empty_grpc_response_reports_zero_payload_size() {
-    let req = Request::builder()
-        .method("POST")
-        .uri("/demo.Echo/Say")
-        .header(http::header::CONTENT_TYPE, "application/grpc")
-        .body(Body::empty())
-        .expect("request");
+    let req = qpx_core::http_message::Request::from_http(
+        Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let ctx = inspect_request(&req).await;
 
     let body = frame_grpc_message(Bytes::from_static(b""));
@@ -152,12 +158,14 @@ async fn empty_grpc_response_reports_zero_payload_size() {
 
 #[tokio::test]
 async fn trailer_only_grpc_web_response_keeps_zero_size_with_trailers() {
-    let req = Request::builder()
-        .method("POST")
-        .uri("/demo.Echo/Say")
-        .header(http::header::CONTENT_TYPE, "application/grpc-web+proto")
-        .body(Body::empty())
-        .expect("request");
+    let req = qpx_core::http_message::Request::from_http(
+        Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/grpc-web+proto")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let ctx = inspect_request(&req).await;
 
     let body = frame_grpc_web_trailers(b"grpc-status: 0\r\n");
@@ -191,12 +199,14 @@ async fn trailer_only_grpc_web_response_keeps_zero_size_with_trailers() {
 #[tokio::test]
 async fn malformed_grpc_request_falls_back_to_observed_size() {
     let body = vec![0, 0, 0, 0, 5, b'h', b'i'];
-    let req = Request::builder()
-        .method("POST")
-        .uri("/demo.Echo/Say")
-        .header(http::header::CONTENT_TYPE, "application/grpc")
-        .body(Body::from(body.clone()))
-        .expect("request");
+    let req = qpx_core::http_message::Request::from_http(
+        Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .body(Body::from(body.clone()))
+            .expect("request"),
+    );
 
     let req = crate::http::body::size::buffer_request_body_with_reason(
         req,
@@ -219,12 +229,14 @@ async fn malformed_grpc_request_falls_back_to_observed_size() {
 
 #[tokio::test]
 async fn malformed_grpc_response_falls_back_to_observed_size() {
-    let req = Request::builder()
-        .method("POST")
-        .uri("/demo.Echo/Say")
-        .header(http::header::CONTENT_TYPE, "application/grpc")
-        .body(Body::empty())
-        .expect("request");
+    let req = qpx_core::http_message::Request::from_http(
+        Request::builder()
+            .method("POST")
+            .uri("/demo.Echo/Say")
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let ctx = inspect_request(&req).await;
 
     let body = vec![0, 0, 0, 0, 5, b'h', b'i'];
@@ -553,14 +565,16 @@ fn grpc_timeout_parser_and_formatter_round_trip_common_units() {
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[test]
 fn grpc_deadline_prefers_client_timeout_when_shorter() {
+    use qpx_core::http_message::{Headers, OrdinaryHeaderName};
     let started = Instant::now();
-    let mut headers = HeaderMap::new();
-    headers.insert("grpc-timeout", http::HeaderValue::from_static("250m"));
+    let name = OrdinaryHeaderName::try_from("grpc-timeout").expect("grpc-timeout is ordinary");
+    let mut headers = Headers::new();
+    headers.insert(name.clone(), http::HeaderValue::from_static("250m"));
     assert_eq!(
         resolve_rpc_deadline(&headers, "grpc", Duration::from_secs(1), started).instant(),
         started + Duration::from_millis(250)
     );
-    headers.insert("grpc-timeout", http::HeaderValue::from_static("10S"));
+    headers.insert(name, http::HeaderValue::from_static("10S"));
     assert_eq!(
         resolve_rpc_deadline(&headers, "grpc", Duration::from_secs(1), started).instant(),
         started + Duration::from_secs(1)
@@ -570,9 +584,13 @@ fn grpc_deadline_prefers_client_timeout_when_shorter() {
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[test]
 fn grpc_deadline_clamps_oversized_client_timeout_before_instant_add() {
+    use qpx_core::http_message::{Headers, OrdinaryHeaderName};
     let started = Instant::now();
-    let mut headers = HeaderMap::new();
-    headers.insert("grpc-timeout", http::HeaderValue::from_static("99999999H"));
+    let mut headers = Headers::new();
+    headers.insert(
+        OrdinaryHeaderName::try_from("grpc-timeout").expect("grpc-timeout is ordinary"),
+        http::HeaderValue::from_static("99999999H"),
+    );
     assert_eq!(
         resolve_rpc_deadline(&headers, "grpc", Duration::from_secs(1), started).instant(),
         started + Duration::from_secs(1)
@@ -582,19 +600,34 @@ fn grpc_deadline_clamps_oversized_client_timeout_before_instant_add() {
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[test]
 fn connect_deadline_uses_connect_timeout_ms_header() {
+    use qpx_core::http_message::{Headers, OrdinaryHeaderName};
     let started = Instant::now();
-    let mut headers = HeaderMap::new();
-    headers.insert("connect-timeout-ms", http::HeaderValue::from_static("250"));
-    headers.insert("grpc-timeout", http::HeaderValue::from_static("1n"));
+    let mut headers = Headers::new();
+    headers.insert(
+        OrdinaryHeaderName::try_from("connect-timeout-ms").expect("ordinary"),
+        http::HeaderValue::from_static("250"),
+    );
+    headers.insert(
+        OrdinaryHeaderName::try_from("grpc-timeout").expect("ordinary"),
+        http::HeaderValue::from_static("1n"),
+    );
     let deadline = resolve_rpc_deadline(&headers, "connect", Duration::from_secs(1), started);
     assert_eq!(deadline.instant(), started + Duration::from_millis(250));
     assert_eq!(deadline.protocol(), RpcDeadlineProtocol::Connect);
 
-    let mut forwarded = HeaderMap::new();
-    forwarded.insert("grpc-timeout", http::HeaderValue::from_static("1n"));
+    let mut forwarded = Headers::new();
+    forwarded.insert(
+        OrdinaryHeaderName::try_from("grpc-timeout").expect("ordinary"),
+        http::HeaderValue::from_static("1n"),
+    );
     apply_grpc_deadline_header(&mut forwarded, deadline);
-    assert!(!forwarded.contains_key("grpc-timeout"));
-    assert!(forwarded.contains_key("connect-timeout-ms"));
+    assert!(
+        !forwarded.contains_key(&OrdinaryHeaderName::try_from("grpc-timeout").expect("ordinary"))
+    );
+    assert!(
+        forwarded
+            .contains_key(&OrdinaryHeaderName::try_from("connect-timeout-ms").expect("ordinary"))
+    );
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
@@ -927,12 +960,14 @@ mod connect_inspection_tests {
     }
 
     async fn connect_request_ctx() -> RpcMatchContext {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/demo.Echo/Say")
-            .header(http::header::CONTENT_TYPE, "application/connect+json")
-            .body(Body::empty())
-            .expect("request");
+        let req = qpx_core::http_message::Request::from_http(
+            Request::builder()
+                .method("POST")
+                .uri("/demo.Echo/Say")
+                .header(http::header::CONTENT_TYPE, "application/connect+json")
+                .body(Body::empty())
+                .expect("request"),
+        );
         inspect_request(&req).await
     }
 
@@ -1021,12 +1056,14 @@ mod connect_inspection_tests {
         content_type: &'static str,
         reason: &'static str,
     ) -> RpcMatchContext {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/demo.Echo/Say")
-            .header(http::header::CONTENT_TYPE, content_type)
-            .body(Body::from(body))
-            .expect("request");
+        let req = qpx_core::http_message::Request::from_http(
+            Request::builder()
+                .method("POST")
+                .uri("/demo.Echo/Say")
+                .header(http::header::CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+                .expect("request"),
+        );
         let req = buffer_request_body_with_reason(req, 1024, Duration::from_secs(1), reason)
             .await
             .expect("buffered");
@@ -1037,13 +1074,15 @@ mod connect_inspection_tests {
         body: Vec<u8>,
         reason: &'static str,
     ) -> RpcMatchContext {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/demo.Echo/Say")
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .header("connect-protocol-version", "1")
-            .body(Body::from(body))
-            .expect("request");
+        let req = qpx_core::http_message::Request::from_http(
+            Request::builder()
+                .method("POST")
+                .uri("/demo.Echo/Say")
+                .header(http::header::CONTENT_TYPE, "application/json")
+                .header("connect-protocol-version", "1")
+                .body(Body::from(body))
+                .expect("request"),
+        );
         let req = buffer_request_body_with_reason(req, 1024, Duration::from_secs(1), reason)
             .await
             .expect("buffered");
@@ -1146,12 +1185,14 @@ async fn connect_enveloped_request_keeps_whole_body_without_backend_features() {
     let expected = body.len() as u64;
     assert_eq!(expected, 12);
     for reason in ["rpc.body", "http_guard.body"] {
-        let req = Request::builder()
-            .method("POST")
-            .uri("/demo.Echo/Say")
-            .header(http::header::CONTENT_TYPE, "application/connect+proto")
-            .body(Body::from(body.clone()))
-            .expect("request");
+        let req = qpx_core::http_message::Request::from_http(
+            Request::builder()
+                .method("POST")
+                .uri("/demo.Echo/Say")
+                .header(http::header::CONTENT_TYPE, "application/connect+proto")
+                .body(Body::from(body.clone()))
+                .expect("request"),
+        );
         let req = crate::http::body::size::buffer_request_body_with_reason(
             req,
             1024,
@@ -1184,12 +1225,14 @@ fn connect_get_is_labeled_unary() {
 
 #[tokio::test]
 async fn recognized_connect_get_keeps_unary_label_on_response() {
-    let req = Request::builder()
-        .method("GET")
-        .uri("/demo.Echo/Say?connect=v1&message=%7B%7D")
-        .header(http::header::CONTENT_TYPE, "application/connect+json")
-        .body(Body::empty())
-        .expect("request");
+    let req = qpx_core::http_message::Request::from_http(
+        Request::builder()
+            .method("GET")
+            .uri("/demo.Echo/Say?connect=v1&message=%7B%7D")
+            .header(http::header::CONTENT_TYPE, "application/connect+json")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let ctx = inspect_request(&req).await;
     assert_eq!(ctx.protocol.as_deref(), Some("connect"));
     assert_eq!(ctx.streaming.as_deref(), Some("unary"));

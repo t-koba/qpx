@@ -1,7 +1,8 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
 use super::protocol::{
     detect_rpc_protocol, is_grpc_web_text_content_type, parse_grpc_web_trailer_block,
-    response_content_type, rpc_protocol_from_content_type,
+    request_content_type, request_rpc_protocol, response_content_type,
+    rpc_protocol_from_content_type,
 };
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use super::streaming::ConnectFrameObserver;
@@ -9,6 +10,7 @@ use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use http::HeaderMap;
+use qpx_core::http_message::Headers;
 
 pub(super) const DEFAULT_MAX_GRPC_WEB_TRAILER_BYTES: u64 = 64 * 1024;
 
@@ -53,20 +55,28 @@ impl RpcBodySummaryObserver {
     }
 }
 
-pub(crate) fn request_body_summary_observer(headers: &HeaderMap) -> Option<RpcBodySummaryObserver> {
-    body_summary_observer(detect_rpc_protocol(headers, None).as_deref(), headers)
+pub(crate) fn request_body_summary_observer(headers: &Headers) -> Option<RpcBodySummaryObserver> {
+    body_summary_observer(
+        request_rpc_protocol(headers).as_deref(),
+        request_content_type(headers).as_deref(),
+    )
 }
 
 pub(crate) fn response_body_summary_observer(
     headers: &HeaderMap,
 ) -> Option<RpcBodySummaryObserver> {
-    body_summary_observer(response_content_type(headers).as_deref(), headers)
-        .or_else(|| body_summary_observer(detect_rpc_protocol(headers, None).as_deref(), headers))
+    let content_type = response_content_type(headers);
+    body_summary_observer(content_type.as_deref(), content_type.as_deref()).or_else(|| {
+        body_summary_observer(
+            detect_rpc_protocol(headers, None).as_deref(),
+            content_type.as_deref(),
+        )
+    })
 }
 
 fn body_summary_observer(
     protocol_or_content_type: Option<&str>,
-    headers: &HeaderMap,
+    content_type: Option<&str>,
 ) -> Option<RpcBodySummaryObserver> {
     let value = protocol_or_content_type?;
     let protocol = rpc_protocol_from_content_type(value).or(match value {
@@ -76,14 +86,12 @@ fn body_summary_observer(
         _ => None,
     })?;
     if protocol == "connect" {
-        return connect_summary_observer(headers);
+        return connect_summary_observer(content_type);
     }
-    let content_type = response_content_type(headers);
     let inner = match protocol {
         "grpc" => RpcSummaryInner::Grpc(GrpcFrameObserver::new(None)),
         "grpc_web" => RpcSummaryInner::Grpc(GrpcFrameObserver::grpc_web(
             content_type
-                .as_deref()
                 .map(is_grpc_web_text_content_type)
                 .unwrap_or(false),
             None,
@@ -98,9 +106,8 @@ fn body_summary_observer(
 /// streaming observer uses. Unary Connect bodies carry no framing, so they
 /// stay unobserved here and keep the buffered whole-body fallback.
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-fn connect_summary_observer(headers: &HeaderMap) -> Option<RpcBodySummaryObserver> {
-    response_content_type(headers)
-        .as_deref()
+fn connect_summary_observer(content_type: Option<&str>) -> Option<RpcBodySummaryObserver> {
+    content_type
         .is_some_and(|value| rpc_protocol_from_content_type(value) == Some("connect"))
         .then(|| RpcBodySummaryObserver {
             inner: RpcSummaryInner::Connect(ConnectFrameObserver::new(None, None)),
@@ -108,7 +115,7 @@ fn connect_summary_observer(headers: &HeaderMap) -> Option<RpcBodySummaryObserve
 }
 
 #[cfg(not(any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
-fn connect_summary_observer(_headers: &HeaderMap) -> Option<RpcBodySummaryObserver> {
+fn connect_summary_observer(_content_type: Option<&str>) -> Option<RpcBodySummaryObserver> {
     None
 }
 

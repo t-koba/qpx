@@ -102,7 +102,7 @@ async fn decision_service_unknown_rate_limit_profile_fails_closed() {
         caches: Vec::new(),
     })
     .expect("runtime");
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::GET)
         .uri("http://example.com/")
         .header("host", "example.com")
@@ -111,7 +111,7 @@ async fn decision_service_unknown_rate_limit_profile_fails_closed() {
         .expect("request");
 
     let err = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),

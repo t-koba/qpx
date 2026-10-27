@@ -2,6 +2,7 @@ use anyhow::Result;
 use arc_swap::ArcSwapOption;
 use hyper::header::{HOST, HeaderValue};
 use hyper::{Request, Response};
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -195,7 +196,7 @@ pub(crate) use self::shared::shared_reverse_https_request_with_trust;
 
 pub(crate) async fn proxy_http(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -209,7 +210,7 @@ pub(crate) async fn proxy_http(
 
 pub(crate) async fn proxy_http_with_interim(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -227,7 +228,7 @@ pub(crate) async fn proxy_http_with_interim(
 
 pub(crate) async fn proxy_http_with_interim_timeout(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -239,7 +240,7 @@ pub(crate) async fn proxy_http_with_interim_timeout(
 
 pub(crate) async fn proxy_http_with_interim_timeout_on_connection(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -260,7 +261,7 @@ pub(crate) async fn proxy_http_with_interim_timeout_on_connection(
 
 async fn proxy_http_with_interim_timeout_inner(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -276,14 +277,17 @@ async fn proxy_http_with_interim_timeout_inner(
         }
         OriginScheme::H3 => proxy_h3(pools, req, origin, proxy_name, trust, timeout_dur).await,
         OriginScheme::Ipc | OriginScheme::IpcUnix => {
-            proxy_ipc_with_interim(pools, req, origin, proxy_name).await
+            let hyper_req = req
+                .into_http_for_codec()
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
+            proxy_ipc_with_interim(pools, hyper_req, origin, proxy_name).await
         }
     }
 }
 
 async fn proxy_h3(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -324,7 +328,7 @@ async fn open_plain_http_origin_stream(
 
 async fn proxy_plain_http(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
@@ -345,7 +349,7 @@ async fn proxy_plain_http(
 
 pub(crate) async fn proxy_direct_plain_http1_with_interim(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     connect_authority: &str,
     host_authority: &str,
 ) -> Result<Http1ResponseWithInterim> {
@@ -355,7 +359,7 @@ pub(crate) async fn proxy_direct_plain_http1_with_interim(
 
 async fn proxy_direct_plain_http1_with_interim_inner(
     pools: &crate::pool::PoolRegistry,
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     connect_authority: &str,
     host_authority: &str,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
@@ -379,11 +383,12 @@ async fn proxy_direct_plain_http1_with_interim_inner(
     let recycler = local_target
         .map(Http1ConnectionRecycler::from_target)
         .unwrap_or_else(|| Http1ConnectionRecycler::from_target(slot));
+    let hyper_req = crate::upstream::http1::into_http1_for_codec(req)?;
     let mut response = send_http1_request_with_interim_reusable(
         connection.stream,
         connection.read_buf,
         connection.write_buf,
-        req,
+        hyper_req,
         recycler,
     )
     .await?;
@@ -663,7 +668,7 @@ async fn take_reusable_plain_http_stream_from_target(
 
 async fn proxy_https_with_options(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -728,8 +733,11 @@ async fn proxy_https_with_options(
     {
         HttpsConnectionAcquisition::H2Ready { shared, ready } => {
             let req = prepare_proxy_h2_request(req, "https", host_authority.as_str(), proxy_name)?;
+            let hyper_req = req
+                .into_http_for_codec()
+                .map_err(|err| anyhow::anyhow!("{err}"))?;
             let proxied = send_h2_request_with_sender(
-                req,
+                hyper_req,
                 ready,
                 Some(shared.upstream_cert.clone()),
                 Some(shared.inflight_streams.clone()),
@@ -756,15 +764,16 @@ async fn proxy_https_with_options(
 }
 
 pub(crate) fn prepare_proxy_http1_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     host_authority: &str,
     proxy_name: &str,
-) -> Result<Request<Body>> {
+) -> Result<OwnerRequest<Body>> {
     prepare_request_for_fixed_authority_in_place(&mut req, proxy_name);
     *req.version_mut() = http::Version::HTTP_11;
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
+    let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
     req.headers_mut()
-        .insert(HOST, cached_origin_authority(host_authority)?);
+        .insert(host, cached_origin_authority(host_authority)?);
     Ok(req)
 }
 

@@ -1,10 +1,11 @@
 use crate::upstream::http1::UpstreamProxyScheme;
 use crate::upstream::pool::ResolvedUpstreamProxy;
 use anyhow::{Result, anyhow};
-use hyper::header::{HOST, HeaderMap, HeaderName, HeaderValue};
+use hyper::header::{HOST, HeaderValue};
 use hyper::{StatusCode, Version};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 use qpx_http::protocol::address::format_authority_host_port;
-use qpx_http::protocol::semantics::append_via_for_version;
+use qpx_http::protocol::semantics::via_header_value;
 use qpx_http::tls::builder::connect_client_http1;
 use std::net::SocketAddr;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -26,19 +27,30 @@ fn build_upstream_connect_request(
     proxy_authorization: Option<&HeaderValue>,
     proxy_name: &str,
 ) -> Result<String> {
-    let mut headers = HeaderMap::new();
-    headers.insert(HOST, HeaderValue::from_str(authority)?);
+    // Owner CONNECT head at the genuine network serialization boundary: the
+    // shared Via/trace helpers see the same owner headers that are serialized.
+    let mut headers = Headers::new();
+    headers.insert(
+        OrdinaryHeaderName::try_from(HOST).expect("host is ordinary"),
+        HeaderValue::from_str(authority)?,
+    );
     if let Some(value) = proxy_authorization {
         headers.insert(
-            HeaderName::from_static("proxy-authorization"),
+            OrdinaryHeaderName::try_from("proxy-authorization")
+                .expect("proxy-authorization is ordinary"),
             value.clone(),
         );
     }
-    append_via_for_version(&mut headers, Version::HTTP_11, proxy_name);
+    if let Some(value) = via_header_value(Version::HTTP_11, proxy_name) {
+        headers.append(
+            OrdinaryHeaderName::try_from("via").expect("via is ordinary"),
+            value,
+        );
+    }
     qpx_observability::inject_trace_context(&mut headers);
 
     let mut request = format!("CONNECT {} HTTP/1.1\r\n", authority);
-    for (name, value) in &headers {
+    for (name, value) in headers.iter() {
         request.push_str(name.as_str());
         request.push_str(": ");
         request.push_str(value.to_str()?);

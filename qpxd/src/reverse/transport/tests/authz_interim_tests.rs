@@ -120,13 +120,15 @@ async fn reverse_decision_service_rate_limit_profile_is_enforced() {
     .expect("reloadable reverse");
 
     let request = || {
-        Request::builder()
-            .method(Method::GET)
-            .uri("/asset")
-            .header("host", "reverse.test")
-            .version(http::Version::HTTP_11)
-            .body(Body::empty())
-            .expect("request")
+        Request::from_http(
+            http::Request::builder()
+                .method(Method::GET)
+                .uri("/asset")
+                .header("host", "reverse.test")
+                .version(http::Version::HTTP_11)
+                .body(Body::empty())
+                .expect("request"),
+        )
     };
     let conn = ReverseConnInfo::plain(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345), 80);
 
@@ -249,13 +251,15 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
         StdArc::<str>::from("reverse_upstreams_unhealthy"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("/asset")
-        .header("host", "reverse.test")
-        .version(http::Version::HTTP_3)
-        .body(Body::empty())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header("host", "reverse.test")
+            .version(http::Version::HTTP_3)
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     let (interim, response) = handle_request_with_interim(
         request,

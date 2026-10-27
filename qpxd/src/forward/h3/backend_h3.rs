@@ -8,8 +8,9 @@ use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::Result;
 use async_trait::async_trait;
-use hyper::{Request, Response};
+use hyper::Response;
 use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -112,7 +113,7 @@ impl H3RequestHandler for ForwardH3Handler {
 
     fn request_streaming_limits(
         &self,
-        req_head: &::http::Request<()>,
+        req_head: &Request<()>,
         conn: &H3ConnInfo,
         fallback: crate::runtime::ResolvedStreamingLimits,
     ) -> crate::runtime::ResolvedStreamingLimits {
@@ -200,7 +201,7 @@ impl H3RequestHandler for ForwardH3Handler {
 
     async fn handle_connect(
         &self,
-        req_head: ::http::Request<()>,
+        req_head: Request<()>,
         req_stream: crate::http3::server::H3ServerRequestStream,
         conn: H3ConnInfo,
         kind: H3ConnectKind,

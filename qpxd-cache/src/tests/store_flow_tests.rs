@@ -15,8 +15,7 @@ async fn stale_revalidation_lookup_defers_body_fetch_until_stale_fallback() {
         "body-a",
     );
     store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -31,16 +30,9 @@ async fn stale_revalidation_lookup_defers_body_fetch_until_stale_fallback() {
     .expect("store");
     backend.clear_get_log();
 
-    let outcome = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let outcome = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(outcome, LookupOutcome::Revalidate(_)));
     let variant_key = variant_storage_key(key.primary_hash().as_str(), &[]);
     let body_key = cache_body_storage_key(variant_key.as_str());
@@ -60,8 +52,7 @@ async fn unsafe_method_invalidates_cached_target() {
     let backends = backend_map();
     let response = make_response(StatusCode::OK, "max-age=60", "body-a");
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -91,15 +82,14 @@ async fn unsafe_method_invalidates_cached_target() {
 
     let mut only_cached = make_get_request("/invalidate");
     only_cached.headers_mut().insert(
-        CACHE_CONTROL,
+        ord("cache-control"),
         http::HeaderValue::from_static("only-if-cached"),
     );
     let key = CacheRequestKey::for_lookup(&only_cached, "http")
         .expect("key")
         .expect("some key");
     let out = lookup(
-        only_cached.method(),
-        only_cached.headers(),
+        &only_cached,
         &key,
         &policy(),
         &backends,
@@ -113,18 +103,19 @@ async fn unsafe_method_invalidates_cached_target() {
 #[tokio::test]
 async fn ipv6_content_location_invalidates_only_same_authority_targets() {
     let backends = backend_map();
-    let mut cached_request = Request::builder()
-        .method(Method::GET)
-        .uri("/target")
-        .header(HOST, "[2001:db8::1]:443")
-        .body(Body::empty())
-        .unwrap();
+    let mut cached_request = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/target")
+            .header(HOST, "[2001:db8::1]:443")
+            .body(())
+            .unwrap(),
+    );
     let cached_key = CacheRequestKey::for_lookup(&cached_request, "https")
         .unwrap()
         .unwrap();
     store_and_drain(
-        cached_request.method(),
-        cached_request.headers(),
+        &cached_request,
         &cached_key,
         &policy(),
         make_response(StatusCode::OK, "public, max-age=60", "cached"),
@@ -138,12 +129,14 @@ async fn ipv6_content_location_invalidates_only_same_authority_targets() {
     .await
     .unwrap();
 
-    let mutation_request = Request::builder()
-        .method(Method::POST)
-        .uri("/mutate")
-        .header(HOST, "[2001:db8::1]:443")
-        .body(Body::empty())
-        .unwrap();
+    let mutation_request = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("/mutate")
+            .header(HOST, "[2001:db8::1]:443")
+            .body(())
+            .unwrap(),
+    );
     let mutation_key = CacheRequestKey::for_target(&mutation_request, "https")
         .unwrap()
         .unwrap();
@@ -164,15 +157,14 @@ async fn ipv6_content_location_invalidates_only_same_authority_targets() {
     .unwrap();
 
     cached_request.headers_mut().insert(
-        CACHE_CONTROL,
+        ord("cache-control"),
         http::HeaderValue::from_static("only-if-cached"),
     );
     let cached_key = CacheRequestKey::for_lookup(&cached_request, "https")
         .unwrap()
         .unwrap();
     let outcome = lookup(
-        cached_request.method(),
-        cached_request.headers(),
+        &cached_request,
         &cached_key,
         &policy(),
         &backends,
@@ -194,8 +186,7 @@ async fn ipv6_content_location_invalidates_only_same_authority_targets() {
     .await
     .unwrap();
     let outcome = lookup(
-        cached_request.method(),
-        cached_request.headers(),
+        &cached_request,
         &cached_key,
         &policy(),
         &backends,
@@ -224,8 +215,7 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
     let stored = tokio::time::timeout(
         Duration::from_millis(25),
         super::maybe_store(
-            req.method(),
-            req.headers(),
+            &req,
             &key,
             &policy(),
             response,
@@ -252,16 +242,9 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
     );
     drop(sender);
 
-    let out = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out, LookupOutcome::Miss));
 }
 
@@ -276,8 +259,7 @@ async fn vary_less_store_publishes_no_variant_index() {
     backends.insert("b".to_string(), backend.clone() as Arc<dyn CacheBackend>);
     let response = make_response(StatusCode::OK, "max-age=60", "body-a");
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -301,16 +283,9 @@ async fn vary_less_store_publishes_no_variant_index() {
         "Vary-less stores must not publish a variant index"
     );
 
-    let outcome = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let outcome = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(
         matches!(outcome, LookupOutcome::Hit(_)),
         "lookup must hit the canonical default variant without an index"
@@ -323,35 +298,40 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     // responses for the target URI, including QUERY primaries holding
     // content-digest variants.
     fn query_key(path: &str, digest: &str) -> CacheRequestKey {
-        let req = hyper::Request::builder()
-            .method(Method::QUERY)
-            .uri(path)
-            .header(http::header::HOST, "example.com")
-            .body(Body::empty())
-            .expect("request");
+        let req = qpx_core::http_message::Request::from_http(
+            hyper::Request::builder()
+                .method(Method::QUERY)
+                .uri(path)
+                .header(http::header::HOST, "example.com")
+                .body(())
+                .expect("request"),
+        );
         CacheRequestKey::for_lookup(&req, "http")
             .expect("key")
             .expect("some key")
             .with_content_digest(digest)
     }
 
+    fn query_request() -> qpx_core::http_message::Request<()> {
+        qpx_core::http_message::Request::from_http(
+            hyper::Request::builder()
+                .method(Method::QUERY)
+                .uri("http://example.com/invalidate-query")
+                .header(http::header::HOST, "example.com")
+                .body(())
+                .expect("query request"),
+        )
+    }
+
     async fn lookup_hit(
-        method: &Method,
-        headers: &http::HeaderMap,
+        request: &qpx_core::http_message::Request<()>,
         key: &CacheRequestKey,
         backends: &HashMap<String, Arc<dyn CacheBackend>>,
     ) -> bool {
         matches!(
-            lookup(
-                method,
-                headers,
-                key,
-                &policy(),
-                backends,
-                &test_revalidations(),
-            )
-            .await
-            .expect("lookup"),
+            lookup(request, key, &policy(), backends, &test_revalidations(),)
+                .await
+                .expect("lookup"),
             LookupOutcome::Hit(_)
         )
     }
@@ -362,31 +342,22 @@ async fn unsafe_method_invalidates_cached_query_variants() {
         body_read_timeout: Duration::from_secs(1),
         request_collapse_guard: None,
     };
-    let headers = http::HeaderMap::new();
+    let query_req = query_request();
 
     let key_a = query_key("/invalidate-query", "sha-256:a");
     let key_b = query_key("/invalidate-query", "sha-256:b");
     for (key, body) in [(&key_a, "query-a"), (&key_b, "query-b")] {
         let response = make_response(StatusCode::OK, "public, max-age=60", body);
-        let _ = store_and_drain(
-            &Method::QUERY,
-            &headers,
-            key,
-            &policy(),
-            response,
-            timing(),
-            &backends,
-        )
-        .await
-        .expect("store query variant");
+        let _ = store_and_drain(&query_req, key, &policy(), response, timing(), &backends)
+            .await
+            .expect("store query variant");
     }
     let get_req = make_get_request("/invalidate-query");
     let get_key = CacheRequestKey::for_lookup(&get_req, "http")
         .expect("key")
         .expect("some key");
     let _ = store_and_drain(
-        get_req.method(),
-        get_req.headers(),
+        &get_req,
         &get_key,
         &policy(),
         make_response(StatusCode::OK, "public, max-age=60", "get-body"),
@@ -396,16 +367,18 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     .await
     .expect("store get");
 
-    assert!(lookup_hit(&Method::QUERY, &headers, &key_a, &backends).await);
-    assert!(lookup_hit(&Method::QUERY, &headers, &key_b, &backends).await);
-    assert!(lookup_hit(get_req.method(), get_req.headers(), &get_key, &backends).await);
+    assert!(lookup_hit(&query_req, &key_a, &backends).await);
+    assert!(lookup_hit(&query_req, &key_b, &backends).await);
+    assert!(lookup_hit(&get_req, &get_key, &backends).await);
 
-    let post_req = hyper::Request::builder()
-        .method(Method::POST)
-        .uri("/invalidate-query")
-        .header(http::header::HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let post_req = qpx_core::http_message::Request::from_http(
+        hyper::Request::builder()
+            .method(Method::POST)
+            .uri("/invalidate-query")
+            .header(http::header::HOST, "example.com")
+            .body(())
+            .expect("request"),
+    );
     let target_key = CacheRequestKey::for_target(&post_req, "http")
         .expect("key")
         .expect("some key");
@@ -423,21 +396,12 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     // Error responses must not invalidate: re-store, then fail the mutation.
     for (key, body) in [(&key_a, "query-a"), (&key_b, "query-b")] {
         let response = make_response(StatusCode::OK, "public, max-age=60", body);
-        let _ = store_and_drain(
-            &Method::QUERY,
-            &headers,
-            key,
-            &policy(),
-            response,
-            timing(),
-            &backends,
-        )
-        .await
-        .expect("re-store query variant");
+        let _ = store_and_drain(&query_req, key, &policy(), response, timing(), &backends)
+            .await
+            .expect("re-store query variant");
     }
     let _ = store_and_drain(
-        get_req.method(),
-        get_req.headers(),
+        &get_req,
         &get_key,
         &policy(),
         make_response(StatusCode::OK, "public, max-age=60", "get-body"),
@@ -456,9 +420,9 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     )
     .await
     .expect("invalidate attempt");
-    assert!(lookup_hit(&Method::QUERY, &headers, &key_a, &backends).await);
-    assert!(lookup_hit(&Method::QUERY, &headers, &key_b, &backends).await);
-    assert!(lookup_hit(get_req.method(), get_req.headers(), &get_key, &backends).await);
+    assert!(lookup_hit(&query_req, &key_a, &backends).await);
+    assert!(lookup_hit(&query_req, &key_b, &backends).await);
+    assert!(lookup_hit(&get_req, &get_key, &backends).await);
 
     // Successful mutation purges both QUERY digest variants and the GET entry.
     maybe_invalidate(
@@ -471,9 +435,9 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     )
     .await
     .expect("invalidate");
-    assert!(!lookup_hit(&Method::QUERY, &headers, &key_a, &backends).await);
-    assert!(!lookup_hit(&Method::QUERY, &headers, &key_b, &backends).await);
-    assert!(!lookup_hit(get_req.method(), get_req.headers(), &get_key, &backends).await);
+    assert!(!lookup_hit(&query_req, &key_a, &backends).await);
+    assert!(!lookup_hit(&query_req, &key_b, &backends).await);
+    assert!(!lookup_hit(&get_req, &get_key, &backends).await);
 }
 
 #[tokio::test]
@@ -536,8 +500,13 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
         .body(Body::empty())
         .expect("304 response");
     let response = revalidate_not_modified(
-        &Method::GET,
-        &http::HeaderMap::new(),
+        &qpx_core::http_message::Request::from_http(
+            hyper::Request::builder()
+                .method(Method::GET)
+                .uri("http://example.com/revalidate")
+                .body(())
+                .expect("revalidate request"),
+        ),
         &policy(),
         not_modified,
         state,

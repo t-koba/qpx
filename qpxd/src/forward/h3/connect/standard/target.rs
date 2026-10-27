@@ -16,7 +16,7 @@ pub(super) struct PreparedH3ConnectTarget {
 }
 
 pub(super) struct H3ConnectTargetInput<'a> {
-    pub(super) req_head: &'a ::http::Request<()>,
+    pub(super) req_head: &'a qpx_core::http_message::Request<()>,
     pub(super) req_stream: &'a mut H3ServerRequestStream,
     pub(super) connect_udp_cfg: Option<&'a ConnectUdpConfig>,
     pub(super) proxy_name: &'a str,
@@ -94,7 +94,7 @@ pub(super) async fn prepare_h3_connect_target(
 }
 
 async fn prepare_connect_udp_target(
-    req_head: &::http::Request<()>,
+    req_head: &qpx_core::http_message::Request<()>,
     req_stream: &mut H3ServerRequestStream,
     proxy_name: &str,
     max_h3_response_body_bytes: usize,
@@ -173,7 +173,7 @@ async fn prepare_connect_udp_target(
 }
 
 async fn prepare_connect_target(
-    req_head: &::http::Request<()>,
+    req_head: &qpx_core::http_message::Request<()>,
     req_stream: &mut H3ServerRequestStream,
     proxy_name: &str,
     max_h3_response_body_bytes: usize,

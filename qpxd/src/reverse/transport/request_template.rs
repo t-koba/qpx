@@ -1,7 +1,7 @@
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
-use http::header::TRANSFER_ENCODING;
-use hyper::{Request, Uri};
+use hyper::Uri;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use qpx_http::body::spool::SpoolFile;
 use std::sync::Arc;
@@ -19,7 +19,7 @@ pub(super) struct ReverseRequestTemplate {
     method: http::Method,
     uri: Uri,
     version: http::Version,
-    headers: http::HeaderMap,
+    headers: Headers,
     body: ReverseRequestTemplateBody,
 }
 
@@ -38,7 +38,7 @@ pub(super) struct ReverseRequestHeadTemplate {
     method: http::Method,
     uri: Uri,
     version: http::Version,
-    headers: http::HeaderMap,
+    headers: Headers,
 }
 
 #[derive(Clone)]
@@ -53,7 +53,7 @@ enum ReverseReplayRecorderState {
 }
 
 impl ReverseRequestTemplate {
-    pub(super) fn without_body(req: &Request<Body>) -> Self {
+    pub(super) fn without_body(req: &OwnerRequest<Body>) -> Self {
         Self {
             method: req.method().clone(),
             uri: req.uri().clone(),
@@ -67,27 +67,26 @@ impl ReverseRequestTemplate {
 
     #[cfg(test)]
     pub(super) async fn from_request(
-        req: Request<Body>,
+        req: OwnerRequest<Body>,
         max_body_bytes: usize,
         body_read_timeout: Duration,
     ) -> Result<Self> {
-        let (parts, body) = req.into_parts();
+        let (head, body) = req.into_head_and_body();
         let body = collect_body_template(body, max_body_bytes, body_read_timeout).await?;
         Ok(Self {
-            method: parts.method,
-            uri: parts.uri,
-            version: parts.version,
-            headers: parts.headers,
+            method: head.method().clone(),
+            uri: head.uri().clone(),
+            version: head.version(),
+            headers: head.headers().clone(),
             body,
         })
     }
 
-    pub(super) fn build(&self) -> Result<Request<Body>> {
-        let mut req = Request::builder()
-            .method(self.method.clone())
-            .uri(self.uri.clone())
-            .version(self.version)
-            .body(self.body.build())?;
+    pub(super) fn build(&self) -> Result<OwnerRequest<Body>> {
+        let mut req = OwnerRequest::new(self.body.build());
+        *req.method_mut() = self.method.clone();
+        *req.uri_mut() = self.uri.clone();
+        *req.version_mut() = self.version;
         *req.headers_mut() = self.headers.clone();
         Ok(req)
     }
@@ -95,26 +94,31 @@ impl ReverseRequestTemplate {
 
 impl ReverseReplayRecorder {
     pub(super) fn wrap_first_request(
-        req: Request<Body>,
+        req: OwnerRequest<Body>,
         max_body_bytes: usize,
         body_read_timeout: Duration,
         channel_capacity: usize,
-    ) -> (Request<Body>, Self) {
-        let (parts, body) = req.into_parts();
-        let head = ReverseRequestHeadTemplate::from_parts(&parts);
+    ) -> (OwnerRequest<Body>, Self) {
+        let (head, body) = req.into_head_and_body();
+        let head_template = ReverseRequestHeadTemplate::from_head(&head);
         let (mut sender, replay_body) = Body::channel_with_capacity(channel_capacity.max(1));
         let (result_tx, result_rx) = oneshot::channel();
         tokio::spawn(async move {
-            let result =
-                stream_and_record_body(body, head, max_body_bytes, body_read_timeout, &mut sender)
-                    .await;
+            let result = stream_and_record_body(
+                body,
+                head_template,
+                max_body_bytes,
+                body_read_timeout,
+                &mut sender,
+            )
+            .await;
             if result.is_err() {
                 sender.abort();
             }
             let _ = result_tx.send(result);
         });
         (
-            Request::from_parts(parts, replay_body),
+            head.map_body(|()| replay_body),
             Self {
                 state: Arc::new(Mutex::new(ReverseReplayRecorderState::Pending(Some(
                     result_rx,
@@ -287,28 +291,27 @@ impl SpooledTemplateFile {
 }
 
 impl ReverseRequestHeadTemplate {
-    pub(super) fn from_parts(parts: &http::request::Parts) -> Self {
+    pub(super) fn from_head(head: &OwnerRequest<()>) -> Self {
         Self {
-            method: parts.method.clone(),
-            uri: parts.uri.clone(),
-            version: parts.version,
-            headers: parts.headers.clone(),
+            method: head.method().clone(),
+            uri: head.uri().clone(),
+            version: head.version(),
+            headers: head.headers().clone(),
         }
     }
 
-    pub(super) fn build_with_body(&self, body: Body) -> Result<Request<Body>> {
-        let mut req = Request::builder()
-            .method(self.method.clone())
-            .uri(self.uri.clone())
-            .version(self.version)
-            .body(body)?;
+    pub(super) fn build_with_body(&self, body: Body) -> Result<OwnerRequest<Body>> {
+        let mut req = OwnerRequest::new(body);
+        *req.method_mut() = self.method.clone();
+        *req.uri_mut() = self.uri.clone();
+        *req.version_mut() = self.version;
         *req.headers_mut() = self.headers.clone();
         Ok(req)
     }
 }
 
 pub(super) fn request_is_retryable(
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
     method: &http::Method,
     body_threshold_bytes: usize,
 ) -> bool {
@@ -320,7 +323,10 @@ pub(super) fn request_is_retryable(
         // declares is the one the threshold applies to.
         return content_length(req).is_some_and(|len| len <= body_threshold_bytes as u64);
     }
-    if req.headers().contains_key(TRANSFER_ENCODING) {
+    if req.headers().contains_key(
+        &OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING)
+            .expect("transfer-encoding is ordinary"),
+    ) {
         // A chunked body has no declared length, so the threshold cannot be
         // applied to it and the request is not retried.
         return false;
@@ -328,7 +334,7 @@ pub(super) fn request_is_retryable(
     // The declaration answers both questions this decision asks - whether
     // the request may carry a body, and whether that body is within the
     // threshold - so it is read once and both answers come from that read.
-    let declared = qpx_core::http_content_length::declared_content_length(req.headers());
+    let declared = req.headers().declared_content_length();
     if !declaration_allows_a_body(declared) {
         return true;
     }
@@ -342,14 +348,16 @@ fn is_retryable_method(method: &http::Method) -> bool {
     qpx_http::protocol::method::method_semantics(method).idempotent
 }
 
-pub(super) fn request_may_have_body(req: &Request<Body>) -> bool {
-    if !http_body::Body::is_end_stream(req.body()) || req.headers().contains_key(TRANSFER_ENCODING)
+pub(super) fn request_may_have_body(req: &OwnerRequest<Body>) -> bool {
+    if !http_body::Body::is_end_stream(req.body())
+        || req.headers().contains_key(
+            &OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING)
+                .expect("transfer-encoding is ordinary"),
+        )
     {
         return true;
     }
-    declaration_allows_a_body(qpx_core::http_content_length::declared_content_length(
-        req.headers(),
-    ))
+    declaration_allows_a_body(req.headers().declared_content_length())
 }
 
 /// Whether the declaration says the request may carry a body.
@@ -366,13 +374,14 @@ fn declaration_allows_a_body(
     }
 }
 
-fn content_length(req: &Request<Body>) -> Option<u64> {
-    if req.headers().contains_key(TRANSFER_ENCODING) {
+fn content_length(req: &OwnerRequest<Body>) -> Option<u64> {
+    if req.headers().contains_key(
+        &OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING)
+            .expect("transfer-encoding is ordinary"),
+    ) {
         return None;
     }
-    qpx_core::http_content_length::declared_content_length(req.headers())
-        .ok()
-        .flatten()
+    req.headers().declared_content_length().ok().flatten()
 }
 
 #[cfg(test)]
@@ -439,19 +448,20 @@ async fn create_template_spool() -> Result<SpoolFile<TokioFile>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::reverse::transport::request_template::*;
+    use super::*;
     use bytes::Bytes;
-    use http::header::CONTENT_LENGTH;
-    use tokio::time::Duration;
+    use http::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 
     #[tokio::test]
     async fn reverse_request_template_times_out_idle_body() {
         let (_sender, body) = Body::channel();
-        let req = Request::builder()
-            .method(http::Method::POST)
-            .uri("http://example.test/upload")
-            .body(body)
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("http://example.test/upload")
+                .body(body)
+                .expect("request"),
+        );
 
         let err = match ReverseRequestTemplate::from_request(req, 1024, Duration::from_millis(10))
             .await
@@ -465,12 +475,14 @@ mod tests {
 
     #[tokio::test]
     async fn bodyless_template_replays_without_a_recorder_task() {
-        let req = Request::builder()
-            .method(http::Method::GET)
-            .uri("http://example.test/resource")
-            .header("x-test", "value")
-            .body(Body::empty())
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("http://example.test/resource")
+                .header("x-test", "value")
+                .body(Body::empty())
+                .expect("request"),
+        );
 
         let replay = ReverseRequestTemplate::without_body(&req)
             .build()
@@ -478,54 +490,70 @@ mod tests {
 
         assert_eq!(replay.method(), http::Method::GET);
         assert_eq!(replay.uri(), "http://example.test/resource");
-        assert_eq!(replay.headers()["x-test"], "value");
-        assert!(replay.into_body().data().await.is_none());
+        assert_eq!(
+            replay
+                .headers()
+                .get(&OrdinaryHeaderName::try_from("x-test").unwrap())
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            "value"
+        );
+        assert!(replay.into_head_and_body().1.data().await.is_none());
     }
 
     #[test]
     fn pre_header_retry_allows_small_declared_body_within_threshold() {
-        let req = Request::builder()
-            .method(http::Method::PUT)
-            .uri("http://example.test/upload")
-            .header(CONTENT_LENGTH, "16")
-            .body(Body::from("0123456789abcdef"))
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, "16")
+                .body(Body::from("0123456789abcdef"))
+                .expect("request"),
+        );
         assert!(request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(!request_is_retryable(&req, &http::Method::PUT, 15));
     }
 
     #[test]
     fn a_comma_list_of_equal_members_declares_one_length() {
-        let req = Request::builder()
-            .method(http::Method::PUT)
-            .uri("http://example.test/upload")
-            .header(CONTENT_LENGTH, "16, 16")
-            .body(Body::from("0123456789abcdef"))
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, "16, 16")
+                .body(Body::from("0123456789abcdef"))
+                .expect("request"),
+        );
         assert!(request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(!request_is_retryable(&req, &http::Method::PUT, 15));
     }
 
     #[test]
     fn a_signed_length_is_not_a_declared_length() {
-        let req = Request::builder()
-            .method(http::Method::PUT)
-            .uri("http://example.test/upload")
-            .header(CONTENT_LENGTH, "+16")
-            .body(Body::from("0123456789abcdef"))
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, "+16")
+                .body(Body::from("0123456789abcdef"))
+                .expect("request"),
+        );
         assert!(!request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(request_may_have_body(&req));
     }
 
     #[test]
     fn a_chunked_request_is_not_retried() {
-        let req = Request::builder()
-            .method(http::Method::PUT)
-            .uri("http://example.test/upload")
-            .header(TRANSFER_ENCODING, "chunked")
-            .body(Body::from("0123456789abcdef"))
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(TRANSFER_ENCODING, "chunked")
+                .body(Body::from("0123456789abcdef"))
+                .expect("request"),
+        );
         assert!(!request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(request_may_have_body(&req));
     }
@@ -533,35 +561,41 @@ mod tests {
     #[test]
     fn a_live_body_is_retried_within_the_threshold() {
         let (_sender, body) = Body::channel();
-        let req = Request::builder()
-            .method(http::Method::PUT)
-            .uri("http://example.test/upload")
-            .header(CONTENT_LENGTH, "16")
-            .body(body)
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, "16")
+                .body(body)
+                .expect("request"),
+        );
         assert!(request_is_retryable(&req, &http::Method::PUT, 16));
         assert!(!request_is_retryable(&req, &http::Method::PUT, 15));
     }
 
     #[test]
     fn a_list_of_zero_members_declares_no_body() {
-        let req = Request::builder()
-            .method(http::Method::GET)
-            .uri("http://example.test/resource")
-            .header(CONTENT_LENGTH, "0, 0")
-            .body(Body::empty())
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("http://example.test/resource")
+                .header(CONTENT_LENGTH, "0, 0")
+                .body(Body::empty())
+                .expect("request"),
+        );
         assert!(!request_may_have_body(&req));
     }
 
     #[test]
     fn an_unframed_live_body_is_not_treated_as_bodyless() {
         let (_sender, body) = Body::channel();
-        let req = Request::builder()
-            .method(http::Method::GET)
-            .uri("http://example.test/resource")
-            .body(body)
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("http://example.test/resource")
+                .body(body)
+                .expect("request"),
+        );
 
         assert!(request_may_have_body(&req));
     }
@@ -570,12 +604,14 @@ mod tests {
     #[cfg(unix)]
     async fn reverse_request_template_spools_large_body_outside_memory() {
         let payload = vec![b'x'; RETRY_TEMPLATE_MEMORY_BYTES + 1];
-        let req = Request::builder()
-            .method(http::Method::PUT)
-            .uri("http://example.test/upload")
-            .header(CONTENT_LENGTH, payload.len().to_string())
-            .body(Body::from(payload.clone()))
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, payload.len().to_string())
+                .body(Body::from(payload.clone()))
+                .expect("request"),
+        );
 
         let template =
             ReverseRequestTemplate::from_request(req, payload.len(), Duration::from_secs(1))
@@ -589,7 +625,7 @@ mod tests {
 
         for _ in 0..2 {
             let req = template.build().expect("build");
-            let body = qpx_http::body::to_bytes(req.into_body())
+            let body = qpx_http::body::to_bytes(req.into_head_and_body().1)
                 .await
                 .expect("read body");
             assert_eq!(body.as_ref(), payload.as_slice());
@@ -602,11 +638,13 @@ mod tests {
     #[tokio::test]
     async fn reverse_replay_recorder_streams_first_attempt_before_eof() {
         let (mut source_sender, source_body) = Body::channel_with_capacity(1);
-        let req = Request::builder()
-            .method(http::Method::PUT)
-            .uri("http://example.test/upload")
-            .body(source_body)
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .body(source_body)
+                .expect("request"),
+        );
         let (mut first_req, recorder) = ReverseReplayRecorder::wrap_first_request(
             req,
             RETRY_TEMPLATE_MEMORY_BYTES,
@@ -639,7 +677,7 @@ mod tests {
         assert!(first_req.body_mut().data().await.is_none());
 
         let template = recorder.template().await.expect("recorded template");
-        let mut replay = template.build().expect("replay").into_body();
+        let (_, mut replay) = template.build().expect("replay").into_head_and_body();
         let replay_first = replay
             .data()
             .await

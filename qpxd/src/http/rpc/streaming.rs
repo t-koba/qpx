@@ -181,11 +181,46 @@ pub(crate) fn streaming_rpc_observer(
         return None;
     }
     let protocol = streaming_rpc_protocol(headers, fallback)?;
+    streaming_rpc_observer_for_protocol(
+        protocol,
+        response_content_type(headers).as_deref(),
+        max_message_bytes,
+        max_trailer_bytes,
+    )
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn request_streaming_rpc_protocol(
+    headers: &qpx_core::http_message::Headers,
+) -> Option<String> {
+    super::protocol::request_rpc_protocol(headers)
+        .filter(|protocol| matches!(protocol.as_str(), "grpc" | "grpc_web" | "connect"))
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(crate) fn request_streaming_rpc_observer(
+    headers: &qpx_core::http_message::Headers,
+    max_message_bytes: Option<u64>,
+    max_trailer_bytes: Option<u64>,
+) -> Option<StreamingRpcObserver> {
+    streaming_rpc_observer_for_protocol(
+        request_streaming_rpc_protocol(headers)?,
+        super::protocol::request_content_type(headers).as_deref(),
+        max_message_bytes,
+        max_trailer_bytes,
+    )
+}
+
+fn streaming_rpc_observer_for_protocol(
+    protocol: String,
+    content_type: Option<&str>,
+    max_message_bytes: Option<u64>,
+    max_trailer_bytes: Option<u64>,
+) -> Option<StreamingRpcObserver> {
     let inner = match protocol.as_str() {
         "grpc" => StreamingRpcInner::Grpc(GrpcFrameObserver::new(max_message_bytes)),
         "grpc_web" => StreamingRpcInner::Grpc(GrpcFrameObserver::grpc_web(
-            response_content_type(headers)
-                .as_deref()
+            content_type
                 .map(is_grpc_web_text_content_type)
                 .unwrap_or(false),
             max_message_bytes,

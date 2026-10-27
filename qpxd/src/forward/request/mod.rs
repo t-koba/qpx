@@ -7,7 +7,8 @@ use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
 #[cfg(feature = "auth-basic")]
 use hyper::StatusCode;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -16,7 +17,7 @@ mod dispatch;
 use self::dispatch::dispatch_forward_request;
 
 pub(crate) async fn handle_request_inner(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
@@ -30,7 +31,7 @@ pub(crate) async fn handle_request_inner(
         .map(|_| crate::http::protocol::common::bad_request_response("invalid FTP request"));
     let ftp_credentials = ftp_credentials.unwrap_or_default();
     let validated_request = match preflight_validate(
-        &mut req,
+        &req,
         proxy_name,
         PreflightOptions::allow_connect(
             state.plan.limits.general.trace_enabled,

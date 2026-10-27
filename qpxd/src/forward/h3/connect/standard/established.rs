@@ -39,7 +39,7 @@ pub(super) struct EstablishedH3Connect {
     pub(super) audit_path: Option<String>,
     pub(super) upstream_timeout: Duration,
     pub(super) tunnel_idle_timeout: Duration,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: qpx_core::http_message::Headers,
     pub(super) identity: ResolvedIdentity,
     pub(super) server: TunnelIo,
 }
@@ -128,6 +128,7 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
                     host: host.as_str(),
                     port,
                     authority: authority.as_str(),
+                    request_version: http::Version::HTTP_3,
                     sanitized_headers: &sanitized_headers,
                     identity: &identity,
                     client_hello,

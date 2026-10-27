@@ -12,6 +12,7 @@ use qpx_core::config::{
     AccessLogConfig, AuditLogConfig, AuthConfig, Config, HttpModuleConfig, IdentityConfig,
     MessagesConfig, RuntimeConfig, SubrequestModuleConfig, SubrequestPhase, SystemLogConfig,
 };
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -88,10 +89,12 @@ async fn empty_module_chain_is_a_context_free_identity_transform() {
             cache_default_scheme: Some("https"),
         },
     );
-    let mut request = Request::builder()
-        .uri("https://example.com/resource")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = OwnerRequest::from_http(
+        Request::builder()
+            .uri("https://example.com/resource")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let response = Response::builder()
         .status(StatusCode::OK)
         .body(Body::from("body"))
@@ -150,34 +153,40 @@ fn request_inactive_modules_skip_session_allocation_without_skipping_applicable_
         cache_default_scheme: Some("http"),
     };
 
-    let ordinary = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/resource")
-        .body(Body::empty())
-        .expect("ordinary request");
+    let ordinary = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/resource")
+            .body(Body::empty())
+            .expect("ordinary request"),
+    );
     assert!(
         !chain
             .start_for_request(&state, &ordinary, init)
             .has_context()
     );
 
-    let compressed = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/resource")
-        .header(http::header::ACCEPT_ENCODING, "gzip")
-        .body(Body::empty())
-        .expect("compression request");
+    let compressed = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/resource")
+            .header(http::header::ACCEPT_ENCODING, "gzip")
+            .body(Body::empty())
+            .expect("compression request"),
+    );
     assert!(
         !chain
             .start_for_request(&state, &compressed, init)
             .has_context()
     );
 
-    let purge = Request::builder()
-        .method("PURGE")
-        .uri("http://example.com/resource")
-        .body(Body::empty())
-        .expect("purge request");
+    let purge = OwnerRequest::from_http(
+        Request::builder()
+            .method("PURGE")
+            .uri("http://example.com/resource")
+            .body(Body::empty())
+            .expect("purge request"),
+    );
     assert!(chain.start_for_request(&state, &purge, init).has_context());
 }
 
@@ -221,11 +230,13 @@ async fn response_compression_marks_absent_identity_before_gzip_variant() {
             .expect("origin response")
     };
 
-    let mut identity_request = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/resource")
-        .body(Body::empty())
-        .expect("request without Accept-Encoding");
+    let mut identity_request = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/resource")
+            .body(Body::empty())
+            .expect("request without Accept-Encoding"),
+    );
     let mut identity_execution = chain.start_for_request(&state, &identity_request, init);
     assert!(identity_execution.has_context());
     assert!(matches!(
@@ -259,12 +270,14 @@ async fn response_compression_marks_absent_identity_before_gzip_variant() {
         body.as_str()
     );
 
-    let mut gzip_request = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/resource")
-        .header(http::header::ACCEPT_ENCODING, "gzip")
-        .body(Body::empty())
-        .expect("gzip request");
+    let mut gzip_request = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/resource")
+            .header(http::header::ACCEPT_ENCODING, "gzip")
+            .body(Body::empty())
+            .expect("gzip request"),
+    );
     let mut gzip_execution = chain.start_for_request(&state, &gzip_request, init);
     assert!(matches!(
         gzip_execution
@@ -310,11 +323,13 @@ fn subrequest_template_compile_rejects_implicit_raw_placeholder() {
 #[test]
 fn subrequest_template_render_applies_urlquery_modifier() {
     let ctx = module_test_context();
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/a/b?x=1&y=two")
-        .body(Body::empty())
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/a/b?x=1&y=two")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let request = HttpModuleRequestView::from_request(&req);
     let template = compile_template(
         "http://127.0.0.1/check?path={request.path:urlquery}&q={request.query:urlquery}",
@@ -332,12 +347,14 @@ fn subrequest_template_render_applies_urlquery_modifier() {
 #[test]
 fn subrequest_template_render_applies_pathsegment_header_host_and_identity_modifiers() {
     let ctx = module_test_context();
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/a/b?token=a%2Fb")
-        .header("x-request-id", "req-1")
-        .body(Body::empty())
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/a/b?token=a%2Fb")
+            .header("x-request-id", "req-1")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let request = HttpModuleRequestView::from_request(&req);
     let template = compile_template(
             "http://{request.host:host}/u/{identity.user:pathsegment}/{request.path:pathsegment}?token={request.query.token:urlquery}&rid={request.header.X-Request-Id:header}&sni={request.sni:host}",
@@ -367,11 +384,13 @@ fn subrequest_template_rejects_raw_unknown_modifier_and_bad_host() {
     );
 
     let ctx = module_test_context();
-    let req = Request::builder()
-        .uri("/")
-        .header(HOST, "bad/host")
-        .body(Body::empty())
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .uri("/")
+            .header(HOST, "bad/host")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let request = HttpModuleRequestView::from_request(&req);
     let template = compile_template("http://{request.host:host}/check").expect("template");
     let err = render_template(&template, &request, &ctx).expect_err("host should fail");
@@ -381,10 +400,12 @@ fn subrequest_template_rejects_raw_unknown_modifier_and_bad_host() {
 #[test]
 fn subrequest_template_header_modifier_rejects_control_characters() {
     let ctx = module_test_context();
-    let req = Request::builder()
-        .uri("https://example.com/")
-        .body(Body::empty())
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .uri("https://example.com/")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let template = CompiledTemplate {
         parts: vec![TemplatePart::Placeholder {
             variable: TemplateVariable::RequestHeader(HeaderName::from_static("x-request-id")),
@@ -394,7 +415,7 @@ fn subrequest_template_header_modifier_rejects_control_characters() {
     };
     let mut req = req;
     req.headers_mut().insert(
-        HeaderName::from_static("x-request-id"),
+        OrdinaryHeaderName::try_from(HeaderName::from_static("x-request-id")).unwrap(),
         HeaderValue::from_bytes(b"ok\tbad").expect("header"),
     );
     let request = HttpModuleRequestView::from_request(&req);
@@ -479,11 +500,13 @@ async fn subrequest_rejects_private_ip_redirect_location() {
 #[test]
 fn sync_frozen_request_skips_rebuild_for_unchanged_request() {
     let mut ctx = module_test_context();
-    let req = Request::builder()
-        .uri("https://example.com/resource?x=1")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .uri("https://example.com/resource?x=1")
+            .header(HOST, "example.com")
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     assert!(ctx.sync_frozen_request(&req));
     assert!(!ctx.sync_frozen_request(&req));
@@ -492,17 +515,21 @@ fn sync_frozen_request_skips_rebuild_for_unchanged_request() {
 #[test]
 fn sync_frozen_request_rebuilds_after_request_change() {
     let mut ctx = module_test_context();
-    let mut req = Request::builder()
-        .uri("https://example.com/resource?x=1")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let mut req = OwnerRequest::from_http(
+        Request::builder()
+            .uri("https://example.com/resource?x=1")
+            .header(HOST, "example.com")
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     assert!(ctx.sync_frozen_request(&req));
     assert!(!ctx.sync_frozen_request(&req));
 
-    req.headers_mut()
-        .insert("x-module", HeaderValue::from_static("changed"));
+    req.headers_mut().insert(
+        OrdinaryHeaderName::try_from(HeaderName::from_static("x-module")).unwrap(),
+        HeaderValue::from_static("changed"),
+    );
 
     assert!(ctx.sync_frozen_request(&req));
     let frozen = ctx.frozen_request().expect("frozen request");
@@ -515,12 +542,14 @@ fn sync_frozen_request_rebuilds_after_request_change() {
 
 #[test]
 fn predicate_request_view_has_header_matches_live_and_frozen() {
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/resource")
-        .header("x-probe", "1")
-        .body(Body::empty())
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/resource")
+            .header("x-probe", "1")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let live = HttpModuleRequestView::from_request(&req);
     assert!(live.has_header(&HeaderName::from_static("x-probe")));
     assert!(!live.has_header(&HeaderName::from_static("x-missing")));
@@ -594,21 +623,25 @@ impl crate::module_api::HttpModule for PredicateProbeModule {
 fn predicate_probe_module_uses_semantic_views() {
     use super::HttpModuleResponseView;
     let module = PredicateProbeModule;
-    let req = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/resource")
-        .header("x-probe", "1")
-        .body(Body::empty())
-        .expect("request");
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/resource")
+            .header("x-probe", "1")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let view = crate::module_api::HttpModuleRequestView::from_request(&req);
     assert!(module.applies_to_request_headers(&view));
     assert!(!module.is_inactive_for_request(&view));
 
-    let plain = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/resource")
-        .body(Body::empty())
-        .expect("request");
+    let plain = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/resource")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let plain_view = crate::module_api::HttpModuleRequestView::from_request(&plain);
     assert!(!module.applies_to_request_headers(&plain_view));
     assert!(module.is_inactive_for_request(&plain_view));
@@ -706,7 +739,7 @@ fn event_facade_header_mutations_preserve_obs_text_bytes() {
     let name = HeaderName::from_static("x-octets");
     let first = b"first-\x80\xff";
     let second = b"second-\xfe\x81";
-    let mut request = Request::new(Body::empty());
+    let mut request = OwnerRequest::new(Body::empty());
     {
         let mut facade = HttpModuleRequest::new(&mut request);
         facade.set_header(
@@ -720,8 +753,7 @@ fn event_facade_header_mutations_preserve_obs_text_bytes() {
     }
     let values: Vec<_> = request
         .headers()
-        .get_all(&name)
-        .iter()
+        .get_all(&OrdinaryHeaderName::try_from(name.clone()).unwrap())
         .map(HeaderValue::as_bytes)
         .collect();
     assert_eq!(values, vec![first.as_slice(), second.as_slice()]);
@@ -776,11 +808,13 @@ async fn event_facade_body_move_round_trip() {
         b"again"
     );
 
-    let mut req = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/resource")
-        .body(Body::from("upstream"))
-        .expect("request");
+    let mut req = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/resource")
+            .body(Body::from("upstream"))
+            .expect("request"),
+    );
     let mut facade = HttpModuleRequest::new(&mut req);
     assert_eq!(facade.method(), Method::GET);
     facade.set_method(Method::POST);
@@ -879,11 +913,13 @@ fn event_facade_request_mutations_sync_to_frozen_snapshot() {
     use http::HeaderName;
 
     let mut ctx = module_test_context();
-    let mut req = Request::builder()
-        .method(Method::GET)
-        .uri("https://example.com/resource")
-        .body(Body::empty())
-        .expect("request");
+    let mut req = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("https://example.com/resource")
+            .body(Body::empty())
+            .expect("request"),
+    );
     assert!(ctx.sync_frozen_request(&req));
 
     {
@@ -944,18 +980,22 @@ fn cache_key_parts(key: &qpxd_cache::CacheRequestKey) -> (String, String, String
 #[test]
 fn cache_request_key_live_and_frozen_agree_on_authority_vs_host() {
     let ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
-    let absolute = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/resource?x=1")
-        .header(HOST, "conflicting.example")
-        .body(Body::empty())
-        .expect("absolute request");
-    let origin = Request::builder()
-        .method(Method::GET)
-        .uri("/resource?x=1")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("origin request");
+    let absolute = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/resource?x=1")
+            .header(HOST, "conflicting.example")
+            .body(Body::empty())
+            .expect("absolute request"),
+    );
+    let origin = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/resource?x=1")
+            .header(HOST, "example.com")
+            .body(Body::empty())
+            .expect("origin request"),
+    );
 
     let live_absolute = HttpModuleRequestView::from_request(&absolute);
     let live_origin = HttpModuleRequestView::from_request(&origin);
@@ -995,12 +1035,14 @@ fn cache_request_key_live_and_frozen_agree_on_authority_vs_host() {
 fn cache_request_key_applies_default_scheme_and_strips_default_port() {
     let ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
     // Origin-form without a scheme falls back to the configured default.
-    let origin = Request::builder()
-        .method(Method::GET)
-        .uri("/asset")
-        .header(HOST, "Example.COM:80")
-        .body(Body::empty())
-        .expect("origin request");
+    let origin = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header(HOST, "Example.COM:80")
+            .body(Body::empty())
+            .expect("origin request"),
+    );
     let live = HttpModuleRequestView::from_request(&origin);
     let key = ctx
         .cache_request_key(&live)
@@ -1019,11 +1061,13 @@ fn cache_request_key_applies_default_scheme_and_strips_default_port() {
     assert_eq!(cache_key_parts(&key), cache_key_parts(&frozen_key));
 
     // A non-default port is preserved byte-exactly after normalization.
-    let explicit = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com:8080/asset")
-        .body(Body::empty())
-        .expect("explicit port request");
+    let explicit = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com:8080/asset")
+            .body(Body::empty())
+            .expect("explicit port request"),
+    );
     let live_explicit = HttpModuleRequestView::from_request(&explicit);
     let explicit_key = ctx
         .cache_request_key(&live_explicit)
@@ -1033,12 +1077,14 @@ fn cache_request_key_applies_default_scheme_and_strips_default_port() {
 
     // HTTPS default ports and IPv6 authorities use the same cache owner.
     let https_ctx = cache_test_context(Some(cache_test_policy()), Some("https"));
-    let ipv6 = Request::builder()
-        .method(Method::GET)
-        .uri("/asset")
-        .header(HOST, "[2001:db8::1]:443")
-        .body(Body::empty())
-        .expect("IPv6 request");
+    let ipv6 = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header(HOST, "[2001:db8::1]:443")
+            .body(Body::empty())
+            .expect("IPv6 request"),
+    );
     let ipv6_view = HttpModuleRequestView::from_request(&ipv6);
     let ipv6_key = https_ctx
         .cache_request_key(&ipv6_view)
@@ -1046,7 +1092,16 @@ fn cache_request_key_applies_default_scheme_and_strips_default_port() {
         .expect("some key");
     assert_eq!(ipv6_key.scheme.as_ref(), "https");
     // Keep the adapter aligned with the cache owner's authority normalization.
-    let direct_ipv6_key = qpxd_cache::CacheRequestKey::for_target(&ipv6, "https")
+    let mut ipv6_head = OwnerRequest::new(());
+    *ipv6_head.method_mut() = ipv6.method().clone();
+    *ipv6_head.uri_mut() = ipv6.uri().clone();
+    {
+        let host = OrdinaryHeaderName::try_from(HOST).expect("ordinary host");
+        if let Some(value) = ipv6.headers().get(&host).cloned() {
+            ipv6_head.headers_mut().insert(host, value);
+        }
+    }
+    let direct_ipv6_key = qpxd_cache::CacheRequestKey::for_target(&ipv6_head, "https")
         .expect("direct IPv6 key")
         .expect("some direct key");
     assert_eq!(
@@ -1069,22 +1124,26 @@ fn cache_request_key_applies_default_scheme_and_strips_default_port() {
 #[test]
 fn cache_request_key_preserves_method_and_rejects_missing_or_invalid_host() {
     let ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
-    let get = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/resource")
-        .body(Body::empty())
-        .expect("GET request");
+    let get = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/resource")
+            .body(Body::empty())
+            .expect("GET request"),
+    );
     let get_key = ctx
         .cache_request_key(&HttpModuleRequestView::from_request(&get))
         .expect("GET key")
         .expect("some key");
     assert_eq!(get_key.method.as_ref(), "GET");
 
-    let head = Request::builder()
-        .method(Method::HEAD)
-        .uri("http://example.com/resource")
-        .body(Body::empty())
-        .expect("HEAD request");
+    let head = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::HEAD)
+            .uri("http://example.com/resource")
+            .body(Body::empty())
+            .expect("HEAD request"),
+    );
     let head_key = ctx
         .cache_request_key(&HttpModuleRequestView::from_request(&head))
         .expect("HEAD key")
@@ -1092,11 +1151,13 @@ fn cache_request_key_preserves_method_and_rejects_missing_or_invalid_host() {
     assert_eq!(head_key.method.as_ref(), "HEAD");
     assert_ne!(get_key.method, head_key.method);
 
-    let purge = Request::builder()
-        .method("PURGE")
-        .uri("http://example.com/resource")
-        .body(Body::empty())
-        .expect("purge request");
+    let purge = OwnerRequest::from_http(
+        Request::builder()
+            .method("PURGE")
+            .uri("http://example.com/resource")
+            .body(Body::empty())
+            .expect("purge request"),
+    );
     let live_purge = HttpModuleRequestView::from_request(&purge);
     let purge_key = ctx
         .cache_request_key(&live_purge)
@@ -1117,11 +1178,13 @@ fn cache_request_key_preserves_method_and_rejects_missing_or_invalid_host() {
     );
 
     // Origin-form without any Host or authority names no key.
-    let missing = Request::builder()
-        .method(Method::GET)
-        .uri("/resource")
-        .body(Body::empty())
-        .expect("missing host request");
+    let missing = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/resource")
+            .body(Body::empty())
+            .expect("missing host request"),
+    );
     let live_missing = HttpModuleRequestView::from_request(&missing);
     assert!(ctx.cache_request_key(&live_missing).expect("key").is_none());
     let mut missing_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
@@ -1135,12 +1198,14 @@ fn cache_request_key_preserves_method_and_rejects_missing_or_invalid_host() {
     );
 
     // An empty Host value is invalid and also names no key.
-    let empty = Request::builder()
-        .method(Method::GET)
-        .uri("/resource")
-        .header(HOST, "")
-        .body(Body::empty())
-        .expect("empty host request");
+    let empty = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/resource")
+            .header(HOST, "")
+            .body(Body::empty())
+            .expect("empty host request"),
+    );
     let live_empty = HttpModuleRequestView::from_request(&empty);
     assert!(ctx.cache_request_key(&live_empty).expect("key").is_none());
     let mut empty_ctx = cache_test_context(Some(cache_test_policy()), Some("http"));
@@ -1154,13 +1219,15 @@ fn cache_request_key_preserves_method_and_rejects_missing_or_invalid_host() {
     );
 
     // Obs-text cannot be lossily treated as a URI authority.
-    let mut obs_text_host = Request::builder()
-        .method(Method::GET)
-        .uri("/resource")
-        .body(Body::empty())
-        .expect("obs-text Host request");
+    let mut obs_text_host = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/resource")
+            .body(Body::empty())
+            .expect("obs-text Host request"),
+    );
     obs_text_host.headers_mut().insert(
-        HOST,
+        OrdinaryHeaderName::try_from(HOST).unwrap(),
         HeaderValue::from_bytes(b"\x80").expect("obs-text HeaderValue"),
     );
     let live_obs_text = HttpModuleRequestView::from_request(&obs_text_host);
@@ -1183,12 +1250,14 @@ fn cache_request_key_preserves_method_and_rejects_missing_or_invalid_host() {
 #[test]
 fn cache_request_key_live_mutation_does_not_change_frozen_view() {
     let mut ctx = cache_test_context(Some(cache_test_policy()), Some("https"));
-    let mut request = Request::builder()
-        .method(Method::GET)
-        .uri("/before?q=1")
-        .header(HOST, "before.example:443")
-        .body(Body::empty())
-        .expect("request");
+    let mut request = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("/before?q=1")
+            .header(HOST, "before.example:443")
+            .body(Body::empty())
+            .expect("request"),
+    );
     assert!(ctx.sync_frozen_request(&request));
     let frozen = ctx.frozen_request().expect("frozen");
     let before = ctx
@@ -1198,9 +1267,10 @@ fn cache_request_key_live_mutation_does_not_change_frozen_view() {
 
     *request.method_mut() = Method::HEAD;
     *request.uri_mut() = "/after?x=2".parse().expect("updated URI");
-    request
-        .headers_mut()
-        .insert(HOST, HeaderValue::from_static("after.example:8443"));
+    request.headers_mut().insert(
+        OrdinaryHeaderName::try_from(HOST).unwrap(),
+        HeaderValue::from_static("after.example:8443"),
+    );
     let live = HttpModuleRequestView::from_request(&request);
     let after = ctx
         .cache_request_key(&live)
@@ -1233,11 +1303,13 @@ fn cache_request_key_live_mutation_does_not_change_frozen_view() {
 
 #[test]
 fn cache_request_key_no_policy_returns_none_and_missing_default_scheme_errors() {
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/resource")
-        .body(Body::empty())
-        .expect("request");
+    let request = OwnerRequest::from_http(
+        Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/resource")
+            .body(Body::empty())
+            .expect("request"),
+    );
     let live = HttpModuleRequestView::from_request(&request);
 
     let no_policy = cache_test_context(None, Some("http"));
@@ -1373,11 +1445,11 @@ async fn module_forwarded_transport_sanitized_assertion_is_not_trusted() {
         )
         .mark_trailers_sanitized();
         let body = if via_request {
-            let mut request = Request::new(raw);
+            let mut request = OwnerRequest::new(raw);
             let mut request = HttpModuleRequest::new(&mut request);
             let body = request.take_body();
             request.set_body(body);
-            assert!(!request.as_raw().body().trailers_are_sanitized());
+            assert!(!request.as_owner().body().trailers_are_sanitized());
             request.take_body()
         } else {
             let mut response = HttpModuleResponse::from_inner(hyper::Response::new(raw));
@@ -1537,10 +1609,12 @@ async fn upstream_module_stage_validates_replaced_http11_body_trailers() {
     let chain = compile_http_modules(&configs, &registry.build()).expect("module chain");
     let runtime = module_test_runtime();
     let state = runtime.state();
-    let mut request = Request::builder()
-        .version(http::Version::HTTP_11)
-        .body(Body::from("original"))
-        .expect("request");
+    let mut request = OwnerRequest::from_http(
+        Request::builder()
+            .version(http::Version::HTTP_11)
+            .body(Body::from("original"))
+            .expect("request"),
+    );
     let mut execution = chain.start_for_request(&state, &request, || HttpModuleSessionInit {
         proxy_kind: crate::http::dispatch::ProxyKind::Forward,
         proxy_name: "test-proxy",
@@ -1557,7 +1631,7 @@ async fn upstream_module_stage_validates_replaced_http11_body_trailers() {
         .on_upstream_request(&mut request)
         .await
         .expect("upstream request module");
-    let mut body = request.into_body();
+    let mut body = request.into_head_and_body().1;
     assert_eq!(
         body.frame()
             .await
@@ -1588,21 +1662,28 @@ async fn module_replaced_request_trailers_are_validated_after_mitm_preparation()
     for version in [http::Version::HTTP_2, http::Version::HTTP_11] {
         for declared in [false, true] {
             for forbidden in [false, true] {
-                let mut request = Request::builder()
-                    .version(version)
-                    .uri("https://example.test/upload")
-                    .body(Body::from("original"))
-                    .unwrap();
+                let mut request = OwnerRequest::from_http(
+                    Request::builder()
+                        .version(version)
+                        .uri("https://example.test/upload")
+                        .body(Body::from("original"))
+                        .unwrap(),
+                );
                 if declared {
-                    request
-                        .headers_mut()
-                        .insert(http::header::TRAILER, HeaderValue::from_static("x-allowed"));
+                    request.headers_mut().insert(
+                        OrdinaryHeaderName::try_from(http::header::TRAILER).unwrap(),
+                        HeaderValue::from_static("x-allowed"),
+                    );
                 }
                 // The actual MITM order: prepare, normalize, module events,
                 // then prepare only a replaced body before upstream consumption.
                 prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
                 *request.version_mut() = http::Version::HTTP_11;
-                assert!(!request.headers().contains_key(http::header::TRAILER));
+                assert!(
+                    !request.headers().contains_key(
+                        &OrdinaryHeaderName::try_from(http::header::TRAILER).unwrap()
+                    )
+                );
                 let mut trailers = super::Trailers::new();
                 trailers.append(
                     HeaderName::from_static("x-allowed"),
@@ -1622,7 +1703,7 @@ async fn module_replaced_request_trailers_are_validated_after_mitm_preparation()
                 prepare_module_request_body_in_place(&mut request);
                 // This is the prepared body's upstream-sender boundary: forbidden
                 // trailers become an error, never a frame the sender could emit.
-                let mut body = request.into_body();
+                let mut body = request.into_head_and_body().1;
                 for expected in ["one", "two"] {
                     assert_eq!(
                         body.frame().await.unwrap().unwrap().into_data().unwrap(),
@@ -1649,10 +1730,12 @@ async fn module_request_preparation_leaves_untouched_bodies_and_consumes_replace
         prepare_module_request_body_in_place, prepare_request_with_headers_in_place,
     };
     for preparation in ["untouched", "backend", "mitm"] {
-        let mut request = Request::builder()
-            .version(http::Version::HTTP_2)
-            .body(Body::from("original"))
-            .unwrap();
+        let mut request = OwnerRequest::from_http(
+            Request::builder()
+                .version(http::Version::HTTP_2)
+                .body(Body::from("original"))
+                .unwrap(),
+        );
         prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
         if preparation != "untouched" {
             *request.version_mut() = http::Version::HTTP_11;
@@ -1754,14 +1837,14 @@ async fn module_context_absolute_dispatch_keeps_backend_request_trailer_validati
                     );
                     sender.try_send_trailers(trailers).unwrap();
                     drop(sender);
-                    let mut request = Request::builder()
+                    let mut request = OwnerRequest::from_http(Request::builder()
                         .method(Method::POST)
                         .version(version)
                         .uri(format!("http://{addr}/upload"))
                         .body(body)
-                        .unwrap();
+                        .unwrap());
                     if version == http::Version::HTTP_11 && declared {
-                        request.headers_mut().insert(http::header::TRAILER, HeaderValue::from_static("x-allowed"));
+                        request.headers_mut().insert(OrdinaryHeaderName::try_from(http::header::TRAILER).unwrap(), HeaderValue::from_static("x-allowed"));
                     }
                     let client = async {
                         if pinned {
@@ -1782,4 +1865,122 @@ async fn module_context_absolute_dispatch_keeps_backend_request_trailer_validati
             }
         }
     }
+}
+
+#[test]
+fn owned_module_request_keeps_literal_framing_in_live_and_frozen_templates() {
+    use http::header::CONTENT_LENGTH;
+
+    let template = compile_template("{request.header.content-length:urlquery}").unwrap();
+    let mut ctx = module_test_context();
+    let mut req = OwnerRequest::new(Body::empty());
+    assert!(!HttpModuleRequestView::from_request(&req).has_header(&CONTENT_LENGTH));
+    for (first, second, output, length) in [
+        ("0", None, "0", Some(0)),
+        (" 007 ", Some("7"), "%20007%20", Some(7)),
+        ("invalid", None, "invalid", None),
+        ("1", Some("2"), "1", None),
+    ] {
+        {
+            let mut module = HttpModuleRequest::new(&mut req);
+            module.set_header(CONTENT_LENGTH, HeaderValue::from_str(first).unwrap());
+            if let Some(second) = second {
+                module.append_header(CONTENT_LENGTH, HeaderValue::from_str(second).unwrap());
+            }
+            assert!(module.has_header(&CONTENT_LENGTH));
+        }
+        assert_eq!(
+            req.headers().declared_content_length().ok().flatten(),
+            length
+        );
+        assert!(ctx.sync_frozen_request(&req));
+        assert!(!ctx.sync_frozen_request(&req));
+        for view in [
+            HttpModuleRequestView::from_request(&req),
+            ctx.frozen_request().unwrap(),
+        ] {
+            assert!(view.has_header(&CONTENT_LENGTH));
+            assert_eq!(render_template(&template, &view, &ctx).unwrap(), output);
+        }
+    }
+    assert!(HttpModuleRequest::new(&mut req).remove_header(&CONTENT_LENGTH));
+    assert!(!HttpModuleRequest::new(&mut req).remove_header(&CONTENT_LENGTH));
+    assert_eq!(req.headers().declared_content_length().unwrap(), None);
+}
+
+#[test]
+fn owned_subrequest_passes_only_first_occurrence_then_applies_configured_replacements() {
+    use http::header::CONTENT_LENGTH;
+
+    let ctx = module_test_context();
+    let mut req = OwnerRequest::new(Body::empty());
+    let octets = HeaderName::from_static("x-octets");
+    {
+        let mut module = HttpModuleRequest::new(&mut req);
+        module.set_header(
+            octets.clone(),
+            HeaderValue::from_bytes(b"first-\x80").unwrap(),
+        );
+        module.append_header(octets.clone(), HeaderValue::from_static("second"));
+        module.set_header(CONTENT_LENGTH, HeaderValue::from_static(" 007 "));
+        module.append_header(CONTENT_LENGTH, HeaderValue::from_static("9"));
+    }
+    let mut config = subrequest_config("https://auth.example.com/check");
+    config.pass_headers = vec![
+        "x-octets".into(),
+        "content-length".into(),
+        "x-absent".into(),
+    ];
+    let module = SubrequestModule::new(config.clone()).unwrap();
+    let subrequest = module
+        .build_subrequest(&ctx, &HttpModuleRequestView::from_request(&req))
+        .unwrap();
+    assert_eq!(
+        subrequest.headers().declared_content_length().unwrap(),
+        Some(7)
+    );
+    let values: Vec<_> = subrequest
+        .headers()
+        .get_all(&OrdinaryHeaderName::try_from(octets.clone()).unwrap())
+        .map(HeaderValue::as_bytes)
+        .collect();
+    assert_eq!(values, [b"first-\x80".as_slice()]);
+    let template = compile_template("{request.header.content-length:urlquery}").unwrap();
+    assert_eq!(
+        render_template(
+            &template,
+            &HttpModuleRequestView::from_request(&subrequest),
+            &ctx
+        )
+        .unwrap(),
+        "%20007%20"
+    );
+    assert!(
+        !HttpModuleRequestView::from_request(&subrequest)
+            .has_header(&HeaderName::from_static("x-absent"))
+    );
+
+    config
+        .request_headers
+        .insert("x-octets".into(), "replaced".into());
+    config
+        .request_headers
+        .insert("content-length".into(), "0".into());
+    let module = SubrequestModule::new(config).unwrap();
+    let subrequest = module
+        .build_subrequest(&ctx, &HttpModuleRequestView::from_request(&req))
+        .unwrap();
+    assert_eq!(
+        subrequest.headers().declared_content_length().unwrap(),
+        Some(0)
+    );
+    assert_eq!(
+        subrequest
+            .headers()
+            .get(&OrdinaryHeaderName::try_from(octets).unwrap())
+            .unwrap(),
+        "replaced"
+    );
+    // Construction does not mutate or resolve the source's conflicting declaration.
+    assert!(req.headers().declared_content_length().is_err());
 }

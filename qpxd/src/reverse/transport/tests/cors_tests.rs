@@ -62,20 +62,22 @@ fn connection() -> ReverseConnInfo {
 }
 
 fn preflight_request(version: Version, origin: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::OPTIONS)
-        .uri("/api/item")
-        .version(version)
-        .header("host", "api.example")
-        .header("origin", origin)
-        .header("access-control-request-method", "PUT")
-        .header(
-            "access-control-request-headers",
-            "Content-Type, X-Request-Id",
-        )
-        .header("access-control-request-private-network", "true")
-        .body(Body::empty())
-        .expect("preflight request")
+    Request::from_http(
+        http::Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/item")
+            .version(version)
+            .header("host", "api.example")
+            .header("origin", origin)
+            .header("access-control-request-method", "PUT")
+            .header(
+                "access-control-request-headers",
+                "Content-Type, X-Request-Id",
+            )
+            .header("access-control-request-private-network", "true")
+            .body(Body::empty())
+            .expect("preflight request"),
+    )
 }
 
 #[tokio::test]
@@ -125,13 +127,15 @@ async fn cors_preflight_selects_actual_method_route_for_all_http_versions() {
 
 #[tokio::test]
 async fn cors_actual_response_overrides_target_and_route_cors_fields() {
-    let request = Request::builder()
-        .method(Method::PUT)
-        .uri("/api/item")
-        .header("host", "api.example")
-        .header("origin", ALLOWED_ORIGIN)
-        .body(Body::from("payload"))
-        .expect("actual request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::PUT)
+            .uri("/api/item")
+            .header("host", "api.example")
+            .header("origin", ALLOWED_ORIGIN)
+            .body(Body::from("payload"))
+            .expect("actual request"),
+    );
     let (_, response) = handle_request_with_interim(request, build_cors_reverse(), connection())
         .await
         .expect("actual response");
@@ -182,13 +186,15 @@ async fn cors_denial_returns_problem_without_allow_fields() {
 
 #[tokio::test]
 async fn cors_disallowed_actual_origin_strips_target_allow_fields() {
-    let request = Request::builder()
-        .method(Method::PUT)
-        .uri("/api/item")
-        .header("host", "api.example")
-        .header("origin", "https://evil.example")
-        .body(Body::empty())
-        .expect("actual request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::PUT)
+            .uri("/api/item")
+            .header("host", "api.example")
+            .header("origin", "https://evil.example")
+            .body(Body::empty())
+            .expect("actual request"),
+    );
     let (_, response) = handle_request_with_interim(request, build_cors_reverse(), connection())
         .await
         .expect("actual response");
@@ -213,14 +219,16 @@ async fn cors_disallowed_actual_origin_strips_target_allow_fields() {
 
 #[tokio::test]
 async fn malformed_cors_request_is_rejected_explicitly() {
-    let request = Request::builder()
-        .method(Method::PUT)
-        .uri("/api/item")
-        .header("host", "api.example")
-        .header("origin", ALLOWED_ORIGIN)
-        .header("origin", "https://other.example")
-        .body(Body::empty())
-        .expect("malformed request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::PUT)
+            .uri("/api/item")
+            .header("host", "api.example")
+            .header("origin", ALLOWED_ORIGIN)
+            .header("origin", "https://other.example")
+            .body(Body::empty())
+            .expect("malformed request"),
+    );
     let (_, response) = handle_request_with_interim(request, build_cors_reverse(), connection())
         .await
         .expect("malformed CORS response");
@@ -251,13 +259,15 @@ async fn cors_is_applied_to_generated_upstream_failure_response() {
       type: upstream
       upstreams: [http://127.0.0.1:0]
 "#;
-    let request = Request::builder()
-        .method(Method::PUT)
-        .uri("/api/item")
-        .header("host", "api.example")
-        .header("origin", ALLOWED_ORIGIN)
-        .body(Body::empty())
-        .expect("actual request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::PUT)
+            .uri("/api/item")
+            .header("host", "api.example")
+            .header("origin", ALLOWED_ORIGIN)
+            .body(Body::empty())
+            .expect("actual request"),
+    );
     let (_, response) = handle_request_with_interim(request, build_reverse(config), connection())
         .await
         .expect("gateway error response");
@@ -312,14 +322,16 @@ async fn cors_preflight_does_not_grant_later_route_permission_for_earlier_owner(
         body: cors
 "#,
     );
-    let preflight = Request::builder()
-        .method(Method::OPTIONS)
-        .uri("/api/item")
-        .header("host", "api.example")
-        .header("origin", ALLOWED_ORIGIN)
-        .header("access-control-request-method", "PUT")
-        .body(Body::empty())
-        .expect("preflight request");
+    let preflight = Request::from_http(
+        http::Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/item")
+            .header("host", "api.example")
+            .header("origin", ALLOWED_ORIGIN)
+            .header("access-control-request-method", "PUT")
+            .body(Body::empty())
+            .expect("preflight request"),
+    );
     let (_, preflight_response) =
         handle_request_with_interim(preflight, reverse.clone(), connection())
             .await
@@ -333,13 +345,15 @@ async fn cors_preflight_does_not_grant_later_route_permission_for_earlier_owner(
     );
 
     // The actual request still selects the earlier route, without edge CORS.
-    let actual = Request::builder()
-        .method(Method::PUT)
-        .uri("/api/item")
-        .header("host", "api.example")
-        .header("origin", ALLOWED_ORIGIN)
-        .body(Body::empty())
-        .expect("actual request");
+    let actual = Request::from_http(
+        http::Request::builder()
+            .method(Method::PUT)
+            .uri("/api/item")
+            .header("host", "api.example")
+            .header("origin", ALLOWED_ORIGIN)
+            .body(Body::empty())
+            .expect("actual request"),
+    );
     let (_, actual_response) = handle_request_with_interim(actual, reverse, connection())
         .await
         .expect("actual response");

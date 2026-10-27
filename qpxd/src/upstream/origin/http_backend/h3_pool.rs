@@ -8,8 +8,7 @@ use crate::http3::quic::{
 };
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::HeaderMap;
-use hyper::Request;
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_request_trailers;
@@ -228,7 +227,7 @@ async fn send_h3_open_request(
 
 pub(super) async fn proxy_h3_origin(
     pool: &H3OriginPool,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
@@ -285,18 +284,14 @@ pub(super) async fn proxy_h3_origin(
     })
 }
 
-pub(super) fn clone_empty_body_request(req: &Request<Body>) -> Result<Request<Body>> {
-    let mut out = Request::builder()
-        .method(req.method().clone())
-        .uri(req.uri().clone())
-        .version(req.version())
-        .body(Body::empty())?;
+pub(super) fn clone_empty_body_request(req: &OwnerRequest<Body>) -> Result<OwnerRequest<Body>> {
+    let mut out = OwnerRequest::new(Body::empty());
+    *out.method_mut() = req.method().clone();
+    *out.uri_mut() = req.uri().clone();
+    *out.version_mut() = req.version();
     *out.headers_mut() = req.headers().clone();
+    *out.extensions_mut() = req.extensions().clone();
     Ok(out)
-}
-
-fn content_length_is_zero_or_absent(headers: &HeaderMap) -> bool {
-    matches!(parse_declared_content_length(headers), Ok(None | Some(0)))
 }
 
 async fn connect_h3_origin(
@@ -406,7 +401,7 @@ fn spawn_h3_request_open_actor(
 }
 
 fn prepare_h3_origin_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     authority: &str,
     proxy_name: &str,
 ) -> Result<(::http::Request<()>, Body, Option<u64>)> {
@@ -417,14 +412,17 @@ fn prepare_h3_origin_request(
         .unwrap_or("/")
         .to_string();
     prepare_request_with_headers_in_place(&mut req, proxy_name, None, false);
-    req.headers_mut().remove(http::header::HOST);
+    req.headers_mut().remove(
+        &OrdinaryHeaderName::try_from(http::header::HOST).expect("host is an ordinary field"),
+    );
     *req.version_mut() = http::Version::HTTP_3;
     *req.uri_mut() = http::Uri::builder()
         .scheme("https")
         .authority(authority)
         .path_and_query(path.as_str())
         .build()?;
-    let (parts, body) = req.into_parts();
+    let hyper_req = req.into_http_for_codec().map_err(|err| anyhow!("{err}"))?;
+    let (parts, body) = hyper_req.into_parts();
     let declared_length = parse_declared_content_length(&parts.headers)?;
     let mut out = ::http::Request::builder()
         .method(parts.method.as_str())
@@ -516,6 +514,33 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::Duration;
+
+    #[test]
+    fn h3_origin_request_export_preserves_cookie_occurrences_and_sensitivity() {
+        let mut request = ::http::Request::builder()
+            .method("GET")
+            .uri("https://origin.example.test/resource")
+            .body(Body::empty())
+            .expect("request");
+        *request.version_mut() = http::Version::HTTP_3;
+        request
+            .headers_mut()
+            .append("cookie", ::http::HeaderValue::from_static("a=1"));
+        let mut second = ::http::HeaderValue::from_static("b=2");
+        second.set_sensitive(true);
+        request.headers_mut().append("cookie", second);
+        let request = OwnerRequest::from_http(request);
+
+        let (prepared, _body, _declared_length) =
+            prepare_h3_origin_request(request, "origin.example.test:443", "qpx")
+                .expect("prepare H3 origin request");
+        let cookies: Vec<_> = prepared.headers().get_all("cookie").iter().collect();
+        assert_eq!(cookies.len(), 2);
+        assert_eq!(cookies[0].as_bytes(), b"a=1");
+        assert!(!cookies[0].is_sensitive());
+        assert_eq!(cookies[1].as_bytes(), b"b=2");
+        assert!(cookies[1].is_sensitive());
+    }
 
     #[test]
     fn h3_upstream_origin_key_keeps_authority_and_tls_name_distinct() {
@@ -674,51 +699,63 @@ mod tests {
 
     #[test]
     fn alt_svc_h3_auto_upgrade_only_uses_definitely_empty_safe_requests() {
-        let get = Request::builder()
-            .method(http::Method::GET)
-            .uri("https://example.test/")
-            .body(Body::empty())
-            .expect("request");
+        let get = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("https://example.test/")
+                .body(Body::empty())
+                .expect("request"),
+        );
         assert!(request_can_use_alt_svc_h3(&get));
 
-        let get_zero_cl = Request::builder()
-            .method(http::Method::GET)
-            .uri("https://example.test/")
-            .header(http::header::CONTENT_LENGTH, "0")
-            .body(Body::empty())
-            .expect("request");
+        let get_zero_cl = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("https://example.test/")
+                .header(http::header::CONTENT_LENGTH, "0")
+                .body(Body::empty())
+                .expect("request"),
+        );
         assert!(request_can_use_alt_svc_h3(&get_zero_cl));
 
-        let get_zero_cl_list = Request::builder()
-            .method(http::Method::GET)
-            .uri("https://example.test/")
-            .header(http::header::CONTENT_LENGTH, "0, 0")
-            .body(Body::empty())
-            .expect("request");
+        let get_zero_cl_list = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("https://example.test/")
+                .header(http::header::CONTENT_LENGTH, "0, 0")
+                .body(Body::empty())
+                .expect("request"),
+        );
         assert!(request_can_use_alt_svc_h3(&get_zero_cl_list));
 
-        let get_nonzero_cl = Request::builder()
-            .method(http::Method::GET)
-            .uri("https://example.test/")
-            .header(http::header::CONTENT_LENGTH, "1")
-            .body(Body::empty())
-            .expect("request");
+        let get_nonzero_cl = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("https://example.test/")
+                .header(http::header::CONTENT_LENGTH, "1")
+                .body(Body::empty())
+                .expect("request"),
+        );
         assert!(!request_can_use_alt_svc_h3(&get_nonzero_cl));
 
         let (_sender, streaming_body) = Body::channel();
-        let get_unknown_stream = Request::builder()
-            .method(http::Method::GET)
-            .uri("https://example.test/")
-            .body(streaming_body)
-            .expect("request");
+        let get_unknown_stream = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("https://example.test/")
+                .body(streaming_body)
+                .expect("request"),
+        );
         assert!(!request_can_use_alt_svc_h3(&get_unknown_stream));
 
-        let post = Request::builder()
-            .method(http::Method::POST)
-            .uri("https://example.test/")
-            .header(http::header::CONTENT_LENGTH, "1")
-            .body(Body::empty())
-            .expect("request");
+        let post = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::POST)
+                .uri("https://example.test/")
+                .header(http::header::CONTENT_LENGTH, "1")
+                .body(Body::empty())
+                .expect("request"),
+        );
         assert!(!request_can_use_alt_svc_h3(&post));
     }
 

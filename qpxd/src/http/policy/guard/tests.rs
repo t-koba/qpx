@@ -13,7 +13,7 @@ fn guard_detects_conflicting_content_length() {
             multipart: Default::default(),
         },
     };
-    let mut req = Request::builder()
+    let mut req = http::Request::builder()
         .uri("http://example.com/")
         .body(Body::empty())
         .expect("request");
@@ -25,6 +25,7 @@ fn guard_detects_conflicting_content_length() {
         http::header::CONTENT_LENGTH,
         http::HeaderValue::from_static("11"),
     );
+    let req = Request::from_http(req);
     let reject = profile.evaluate_request(&req).expect("guard");
     assert!(reject.is_some());
 }
@@ -73,7 +74,7 @@ fn strict_profile() -> CompiledHttpGuardProfile {
 }
 
 fn head_request(version: http::Version) -> Request<Body> {
-    let mut req = Request::builder()
+    let mut req = http::Request::builder()
         .uri("http://example.com/")
         .version(version)
         .body(Body::empty())
@@ -81,19 +82,17 @@ fn head_request(version: http::Version) -> Request<Body> {
     // `Request::builder` defaults to HTTP/1.1; enforce the requested version
     // explicitly so H1.0/H2 cases exercise their own policy branch.
     *req.version_mut() = version;
-    req
+    Request::from_http(req)
 }
 
 #[test]
 fn guard_rejects_content_length_with_transfer_encoding() {
     let profile = strict_profile();
     let mut req = head_request(http::Version::HTTP_11);
+    req.headers_mut()
+        .set_content_length_value(http::HeaderValue::from_static("10"));
     req.headers_mut().insert(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_static("10"),
-    );
-    req.headers_mut().insert(
-        http::header::TRANSFER_ENCODING,
+        OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING).unwrap(),
         http::HeaderValue::from_static("chunked"),
     );
     let reject = profile.evaluate_request(&req).expect("guard");
@@ -110,10 +109,8 @@ fn guard_accepts_content_length_values_that_declare_the_same_length() {
     for values in [["10", "10"], ["10", "10, 10"], ["10, 10", "10, 10"]] {
         let mut req = head_request(http::Version::HTTP_11);
         for value in values {
-            req.headers_mut().append(
-                http::header::CONTENT_LENGTH,
-                http::HeaderValue::from_static(value),
-            );
+            req.headers_mut()
+                .append_content_length_value(http::HeaderValue::from_static(value));
         }
         let reject = profile.evaluate_request(&req).expect("guard");
         assert!(reject.is_none(), "content-length {values:?} must pass");
@@ -126,10 +123,8 @@ fn guard_rejects_a_content_length_that_names_two_lengths() {
     // One value that names two lengths is a conflict as well, so the guard
     // refuses it rather than reading a length out of it.
     let mut req = head_request(http::Version::HTTP_11);
-    req.headers_mut().insert(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_static("10, 11"),
-    );
+    req.headers_mut()
+        .set_content_length_value(http::HeaderValue::from_static("10, 11"));
     let reject = profile.evaluate_request(&req).expect("guard");
     assert!(reject.is_some());
 }
@@ -141,8 +136,7 @@ fn guard_rejects_a_content_length_that_declares_no_length() {
     // length cannot be determined has ambiguous framing.
     for value in ["+10", "abc", "", "10,"] {
         let mut req = head_request(http::Version::HTTP_11);
-        req.headers_mut().insert(
-            http::header::CONTENT_LENGTH,
+        req.headers_mut().set_content_length_value(
             http::HeaderValue::from_str(value).expect("content-length value"),
         );
         let reject = profile.evaluate_request(&req).expect("guard");
@@ -164,7 +158,7 @@ fn guard_rejects_ambiguous_transfer_encoding_values() {
         // `chunked ` (trailing OWS) is valid framing and must pass; the rest
         // must reject fail-closed.
         req.headers_mut().insert(
-            http::header::TRANSFER_ENCODING,
+            OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING).unwrap(),
             http::HeaderValue::from_str(te).expect("te value"),
         );
         let reject = profile.evaluate_request(&req).expect("guard");
@@ -186,7 +180,7 @@ fn guard_preserves_invalid_transfer_encoding_error_message() {
 
     let mut invalid = head_request(http::Version::HTTP_11);
     invalid.headers_mut().insert(
-        http::header::TRANSFER_ENCODING,
+        OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING).unwrap(),
         http::HeaderValue::from_bytes(b"\xff").expect("obs-text header value"),
     );
     let reject = profile
@@ -201,11 +195,11 @@ fn guard_rejects_split_transfer_encoding_headers() {
     let profile = strict_profile();
     let mut req = head_request(http::Version::HTTP_11);
     req.headers_mut().append(
-        http::header::TRANSFER_ENCODING,
+        OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING).unwrap(),
         http::HeaderValue::from_static("chunked"),
     );
     req.headers_mut().append(
-        http::header::TRANSFER_ENCODING,
+        OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING).unwrap(),
         http::HeaderValue::from_static("chunked"),
     );
     let reject = profile.evaluate_request(&req).expect("guard");
@@ -217,7 +211,7 @@ fn guard_rejects_transfer_encoding_on_http10() {
     let profile = strict_profile();
     let mut req = head_request(http::Version::HTTP_10);
     req.headers_mut().insert(
-        http::header::TRANSFER_ENCODING,
+        OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING).unwrap(),
         http::HeaderValue::from_static("chunked"),
     );
     let reject = profile.evaluate_request(&req).expect("guard");
@@ -229,20 +223,20 @@ fn guard_allows_single_chunked_on_http11_and_trailers_on_h2() {
     let profile = strict_profile();
     let mut req = head_request(http::Version::HTTP_11);
     req.headers_mut().insert(
-        http::header::TRANSFER_ENCODING,
+        OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING).unwrap(),
         http::HeaderValue::from_static("chunked"),
     );
     assert!(profile.evaluate_request(&req).expect("guard").is_none());
     let mut h2 = head_request(http::Version::HTTP_2);
     h2.headers_mut().insert(
-        http::header::TE,
+        OrdinaryHeaderName::try_from(http::header::TE).unwrap(),
         http::HeaderValue::from_static(" \ttrailers\t "),
     );
     assert!(profile.evaluate_request(&h2).expect("guard").is_none());
 
     let mut invalid_h2 = head_request(http::Version::HTTP_2);
     invalid_h2.headers_mut().insert(
-        http::header::TE,
+        OrdinaryHeaderName::try_from(http::header::TE).unwrap(),
         http::HeaderValue::from_static("trailers, gzip"),
     );
     assert!(
@@ -268,13 +262,13 @@ async fn guard_streams_observed_json_without_full_bytes_materialization() {
             multipart: Default::default(),
         },
     };
-    let req = Request::builder()
+    let req = http::Request::builder()
         .uri("http://example.com/")
         .header(http::header::CONTENT_TYPE, "application/json")
         .body(Body::from(r#"{"outer":{"inner":1}}"#))
         .expect("request");
     let req = crate::http::body::size::buffer_request_body_with_reason(
-        req,
+        Request::from_http(req),
         1024,
         std::time::Duration::from_secs(1),
         "test",
@@ -306,7 +300,7 @@ async fn guard_streams_observed_multipart_without_full_bytes_materialization() {
             },
         },
     };
-    let req = Request::builder()
+    let req = http::Request::builder()
         .uri("http://example.com/")
         .header(
             http::header::CONTENT_TYPE,
@@ -317,7 +311,7 @@ async fn guard_streams_observed_multipart_without_full_bytes_materialization() {
         ))
         .expect("request");
     let req = crate::http::body::size::buffer_request_body_with_reason(
-        req,
+        Request::from_http(req),
         1024,
         std::time::Duration::from_secs(1),
         "test",
@@ -331,4 +325,68 @@ async fn guard_streams_observed_multipart_without_full_bytes_materialization() {
         .expect("guard")
         .expect("reject");
     assert_eq!(reject.status, StatusCode::PAYLOAD_TOO_LARGE);
+}
+
+#[test]
+fn guard_counts_separate_h3_cookie_fields() {
+    let mut profile = strict_profile();
+    profile.profile.limits.header_count = Some(1);
+    let req = Request::from_http(
+        http::Request::builder()
+            .version(http::Version::HTTP_3)
+            .uri("https://example.com/")
+            .header("cookie", "a=1")
+            .header("cookie", "b=2")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    assert_eq!(
+        profile.evaluate_request(&req).unwrap().unwrap().body,
+        "header count exceeds http_guard limit"
+    );
+    profile.profile.limits.header_count = Some(2);
+    assert!(profile.evaluate_request(&req).unwrap().is_none());
+    let cookie = OrdinaryHeaderName::try_from("cookie").unwrap();
+    assert_eq!(
+        req.headers()
+            .get_all(&cookie)
+            .map(|v| v.as_bytes())
+            .collect::<Vec<_>>(),
+        [b"a=1".as_slice(), b"b=2".as_slice()]
+    );
+}
+
+#[test]
+fn guard_header_limits_include_duplicate_content_length_and_ows() {
+    let mut profile = strict_profile();
+    profile.profile.limits.header_bytes = Some(30);
+    let mut req = head_request(http::Version::HTTP_11);
+    req.headers_mut()
+        .append_content_length_value(http::HeaderValue::from_static(" 1 "));
+    req.headers_mut()
+        .append_content_length_value(http::HeaderValue::from_static("1"));
+    assert_eq!(
+        profile.evaluate_request(&req).unwrap().unwrap().body,
+        "header bytes exceed http_guard limit"
+    );
+    profile.profile.normalize.headers = true;
+    assert!(profile.evaluate_request(&req).unwrap().is_none());
+    profile.profile.limits.header_count = Some(1);
+    assert_eq!(
+        profile.evaluate_request(&req).unwrap().unwrap().body,
+        "header count exceeds http_guard limit"
+    );
+}
+
+#[test]
+fn guard_framing_rejection_precedes_header_limits() {
+    let mut profile = strict_profile();
+    profile.profile.limits.header_count = Some(0);
+    let mut req = head_request(http::Version::HTTP_11);
+    req.headers_mut()
+        .set_content_length_value(http::HeaderValue::from_static("bad"));
+    assert_eq!(
+        profile.evaluate_request(&req).unwrap().unwrap().body,
+        "invalid Content-Length header"
+    );
 }

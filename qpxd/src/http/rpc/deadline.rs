@@ -4,8 +4,9 @@ use super::local_response::{
     connect_streaming_response_codec,
 };
 use anyhow::Result;
-use http::{HeaderMap, Response};
+use http::Response;
 use qpx_core::config::RpcLocalResponseConfig;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 use qpx_http::body::Body;
 use std::time::Duration;
 use tokio::time::Instant;
@@ -77,7 +78,7 @@ pub(crate) fn parse_connect_timeout_ms(value: &str) -> Option<Duration> {
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(crate) fn resolve_rpc_deadline(
-    request_headers: &HeaderMap,
+    request_headers: &qpx_core::http_message::Headers,
     protocol: &str,
     proxy_max_duration: Duration,
     started: Instant,
@@ -88,11 +89,17 @@ pub(crate) fn resolve_rpc_deadline(
     let deadline_protocol = RpcDeadlineProtocol::from_name(protocol);
     let client_duration = match deadline_protocol {
         RpcDeadlineProtocol::Connect => request_headers
-            .get("connect-timeout-ms")
+            .get(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from("connect-timeout-ms")
+                    .expect("ordinary"),
+            )
             .and_then(|value| value.to_str().ok())
             .and_then(parse_connect_timeout_ms),
         RpcDeadlineProtocol::Grpc | RpcDeadlineProtocol::GrpcWeb => request_headers
-            .get("grpc-timeout")
+            .get(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from("grpc-timeout")
+                    .expect("ordinary"),
+            )
             .and_then(|value| value.to_str().ok())
             .and_then(parse_grpc_timeout),
     };
@@ -128,21 +135,25 @@ pub(crate) fn format_grpc_timeout(duration: Duration) -> String {
 }
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
-pub(crate) fn apply_grpc_deadline_header(headers: &mut HeaderMap, deadline: ResolvedGrpcDeadline) {
+pub(crate) fn apply_grpc_deadline_header(headers: &mut Headers, deadline: ResolvedGrpcDeadline) {
     let remaining = deadline.instant().saturating_duration_since(Instant::now());
+    let grpc_timeout =
+        OrdinaryHeaderName::try_from("grpc-timeout").expect("grpc-timeout is ordinary");
+    let connect_timeout =
+        OrdinaryHeaderName::try_from("connect-timeout-ms").expect("connect-timeout-ms is ordinary");
     match deadline.protocol() {
         RpcDeadlineProtocol::Connect => {
-            headers.remove("grpc-timeout");
+            headers.remove(&grpc_timeout);
             let millis = remaining.as_millis().clamp(1, u128::from(u64::MAX));
             if let Ok(value) = http::HeaderValue::from_str(millis.to_string().as_str()) {
-                headers.insert("connect-timeout-ms", value);
+                headers.insert(connect_timeout, value);
             }
         }
         RpcDeadlineProtocol::Grpc | RpcDeadlineProtocol::GrpcWeb => {
-            headers.remove("connect-timeout-ms");
+            headers.remove(&connect_timeout);
             if let Ok(value) = http::HeaderValue::from_str(format_grpc_timeout(remaining).as_str())
             {
-                headers.insert("grpc-timeout", value);
+                headers.insert(grpc_timeout, value);
             }
         }
     }

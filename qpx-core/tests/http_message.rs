@@ -636,3 +636,256 @@ fn frozen_equality_is_literal_ordered_and_sensitivity_aware_for_every_field() {
     right.set_content_length_value(HeaderValue::from_static("worse"));
     assert_ne!(left, right); // even two malformed declarations differ literally
 }
+
+fn identity_headers(name: &HeaderName, values: &[&[u8]]) -> Headers {
+    let mut request = http::Request::new(());
+    for value in values {
+        request
+            .headers_mut()
+            .append(name, HeaderValue::from_bytes(value).unwrap());
+    }
+    Request::from_http(request).headers().clone()
+}
+
+#[test]
+fn identity_selections_preserve_literal_occurrence_and_member_order() {
+    // Both configured ordinary fields and Content-Length have the same literal
+    // extraction domain. None of these selections resolves framing.
+    for field in [HeaderName::from_static("x-identity"), CONTENT_LENGTH] {
+        let headers = identity_headers(
+            &field,
+            &[b"\xff", b" \t", b" 007, 7, 007, A, a ", b" a, 0, A "],
+        );
+        assert_eq!(
+            headers.identity_text(&field).as_deref(),
+            Some("007, 7, 007, A, a")
+        );
+        assert_eq!(
+            headers.identity_members(&field),
+            ["007", "7", "A", "a", "0"]
+        );
+        assert_eq!(
+            headers.identity_assertion(&field, None),
+            Some("007, 7, 007, A, a")
+        );
+        assert_eq!(
+            headers.identity_assertion(&field, Some("007,")),
+            Some("7, 007, A, a")
+        );
+        assert_eq!(format!("{headers:?}"), "Headers { .. }");
+    }
+}
+
+#[test]
+fn identity_content_length_is_not_parsed_or_canonicalized() {
+    for (values, scalar, members) in [
+        (vec![], None, vec![]),
+        (vec![&b""[..], b" \t"], None, vec![]),
+        (vec![&b" 000 "[..], b"0"], Some("000"), vec!["000", "0"]),
+        (
+            vec![&b" 007, 7 "[..], b"8"],
+            Some("007, 7"),
+            vec!["007", "7", "8"],
+        ),
+        (
+            vec![&b" invalid "[..], b"9"],
+            Some("invalid"),
+            vec!["invalid", "9"],
+        ),
+        (vec![&b"\xff"[..], b" 5 "], Some("5"), vec!["5"]),
+    ] {
+        let headers = identity_headers(&CONTENT_LENGTH, &values);
+        assert_eq!(headers.identity_text(&CONTENT_LENGTH).as_deref(), scalar);
+        assert_eq!(headers.identity_members(&CONTENT_LENGTH), members);
+        assert_eq!(headers.identity_assertion(&CONTENT_LENGTH, None), scalar);
+        // Selection leaves all bytes/occurrences unchanged inside the owner.
+        assert_eq!(headers, identity_headers(&CONTENT_LENGTH, &values));
+    }
+}
+
+#[test]
+fn identity_assertion_selects_first_eligible_literal_prefix() {
+    for field in [HeaderName::from_static("x-assertion"), CONTENT_LENGTH] {
+        let headers = identity_headers(
+            &field,
+            &[
+                b"\xff",
+                b" ",
+                b"token wrong-case",
+                b"Token ",
+                b"  Token   first  ",
+                b"Token second",
+            ],
+        );
+        assert_eq!(
+            headers.identity_assertion(&field, Some("Token ")),
+            Some("first")
+        );
+        assert_eq!(
+            headers.identity_assertion(&field, None),
+            Some("token wrong-case")
+        );
+        assert_eq!(headers.identity_assertion(&field, Some("missing ")), None);
+        assert_eq!(
+            headers.identity_assertion(&field, Some("")),
+            Some("token wrong-case")
+        );
+    }
+}
+
+#[test]
+fn identity_authorization_preserves_exact_one_and_malformed_distinctions() {
+    use qpx_core::http_message::IdentityAuthorizationError::*;
+    // Even a configured Content-Length credential source must select literals.
+    for field in [http::header::AUTHORIZATION, CONTENT_LENGTH] {
+        let cases: &[(&[&[u8]], _)] = &[
+            (&[], Ok(None)),
+            (&[b""], Err(MalformedBearer)),
+            (&[b"\xff"], Err(NonTextual)),
+            (&[b"", b"Bearer valid"], Err(Duplicate)),
+            (&[b"\xff", b"Bearer valid"], Err(Duplicate)),
+            (&[b"Bearer same", b"Bearer same"], Err(Duplicate)),
+            (&[b"Bearer"], Err(MalformedBearer)),
+            (&[b"Bearer "], Err(MalformedBearer)),
+            (&[b"Bearer  token"], Err(MalformedBearer)),
+            (&[b"Bearer a\tb"], Err(MalformedBearer)),
+            (&[b"Bearer a, Bearer b"], Err(MalformedBearer)),
+            (&[b"Basic token"], Err(MalformedAuthorization)),
+            (&[b"  bEaReR token \t"], Ok(Some(("token", false)))),
+            (&[b"DPoP proof"], Ok(Some(("proof", true)))),
+        ];
+        for (values, expected) in cases {
+            let headers = identity_headers(&field, values);
+            assert_eq!(headers.identity_authorization(&field, true), *expected);
+        }
+        assert_eq!(
+            identity_headers(&field, &[b"DPoP proof"]).identity_authorization(&field, false),
+            Err(DpopDisabled)
+        );
+    }
+}
+
+#[test]
+fn field_count_includes_duplicate_framing_fields_without_reading_them() {
+    let mut headers = Headers::new();
+    headers.append(name("cookie"), HeaderValue::from_static("a=1"));
+    headers.append(name("cookie"), HeaderValue::from_static("b=2"));
+    headers.append_content_length_value(HeaderValue::from_static("invalid"));
+    headers.append_content_length_value(HeaderValue::from_static("000"));
+    assert_eq!(headers.field_count(), 4);
+    assert_eq!(headers.iter().count(), 2);
+}
+
+#[test]
+fn field_bytes_include_all_occurrences_and_trim_only_http_ows() {
+    let mut headers = Headers::new();
+    headers.append_content_length_value(HeaderValue::from_static(" 01 "));
+    headers.append_content_length_value(HeaderValue::from_static("1"));
+    let field = name("x-test");
+    headers.append(field.clone(), HeaderValue::from_bytes(b" \t\xff ").unwrap());
+    headers.append(field, HeaderValue::from_static("\t  "));
+    assert_eq!(headers.field_count(), 4);
+    assert_eq!(
+        headers.field_bytes(false),
+        (14 + 4) + (14 + 1) + (6 + 4) + (6 + 3)
+    );
+    assert_eq!(headers.field_bytes(true), (14 + 2) + (14 + 1) + (6 + 1) + 6);
+}
+
+#[test]
+fn request_policy_cookie_view_matches_legacy_decoder_without_mutation() {
+    use qpx_core::http_content_length::HeaderView;
+
+    // Expected values are the old decoders' logical field, not a mutation of
+    // the input. None denotes an absent field; opaque values stay opaque.
+    type Case<'a> = (&'a [&'a [u8]], Option<&'a [u8]>, Option<&'a [u8]>);
+    let cases: &[Case<'_>] = &[
+        (&[], None, None),
+        (&[b""], Some(b""), Some(b"")),
+        (&[b"a=1"], Some(b"a=1"), Some(b"a=1")),
+        (&[b"", b""], None, Some(b"; ")),
+        (&[b"", b"a=1", b""], Some(b"a=1; "), Some(b"; a=1; ")),
+        (
+            &[b"a=1", b"", b"b=2"],
+            Some(b"a=1; ; b=2"),
+            Some(b"a=1; ; b=2"),
+        ),
+        (&[b"a=1", b"b=2"], Some(b"a=1; b=2"), Some(b"a=1; b=2")),
+        (&[b"\xff"], Some(b"\xff"), Some(b"\xff")),
+        (&[b"a=1", b"\xff"], Some(b"a=1; \xff"), Some(b"a=1; \xff")),
+        (&[b"\xff", b"a=1"], Some(b"\xff; a=1"), Some(b"\xff; a=1")),
+    ];
+    let regex = regex::Regex::new("a=1.*b=2").unwrap();
+    let predicates = [
+        HeaderPredicate::Present,
+        HeaderPredicate::Exact(""),
+        HeaderPredicate::Exact("a=1"),
+        HeaderPredicate::Exact("a=1; b=2"),
+        HeaderPredicate::Exact("; "),
+        HeaderPredicate::Regex(&regex),
+    ];
+    for (fields, h2, h3) in cases {
+        let mut headers = Headers::new();
+        for (index, value) in fields.iter().enumerate() {
+            let mut field = HeaderValue::from_bytes(value).unwrap();
+            field.set_sensitive(index % 2 == 0);
+            headers.append(name("cookie"), field);
+        }
+        headers.append(name("set-cookie"), HeaderValue::from_static("one"));
+        headers.append(name("set-cookie"), HeaderValue::from_static("two"));
+        headers.set_content_length(7);
+        let original: Vec<_> = headers
+            .get_all(&name("cookie"))
+            .map(|v| (v.as_bytes().to_vec(), v.is_sensitive()))
+            .collect();
+        for (version, expected) in [(Version::HTTP_2, h2), (Version::HTTP_3, h3)] {
+            let mut legacy = http::HeaderMap::new();
+            if let Some(value) = expected {
+                legacy.append("cookie", HeaderValue::from_bytes(value).unwrap());
+            }
+            let expected_view = HeaderView::new(&legacy);
+            let view = headers.request_policy_view(version);
+            for predicate in predicates {
+                assert_eq!(
+                    view.matches("CoOkIe", predicate),
+                    expected_view.matches("cookie", predicate),
+                    "{version:?} {fields:?}"
+                );
+                assert_eq!(
+                    view.trace("CoOkIe", predicate),
+                    expected_view.trace("cookie", predicate),
+                    "{version:?} {fields:?}"
+                );
+            }
+            assert!(view.matches("set-cookie", HeaderPredicate::Exact("two")));
+            assert_eq!(
+                view.trace("CONTENT-LENGTH", HeaderPredicate::Exact("7")),
+                HeaderDiagnostic {
+                    actual: None,
+                    matched: true
+                }
+            );
+            assert_eq!(
+                view.joined_text("cookie"),
+                headers.view().joined_text("cookie")
+            );
+            assert_eq!(
+                view.vary_selector("cookie"),
+                headers.view().vary_selector("cookie")
+            );
+        }
+        let after: Vec<_> = headers
+            .get_all(&name("cookie"))
+            .map(|v| (v.as_bytes().to_vec(), v.is_sensitive()))
+            .collect();
+        assert_eq!(original, after);
+        for predicate in predicates {
+            assert_eq!(
+                headers
+                    .request_policy_view(Version::HTTP_11)
+                    .trace("cookie", predicate),
+                headers.view().trace("cookie", predicate)
+            );
+        }
+    }
+}

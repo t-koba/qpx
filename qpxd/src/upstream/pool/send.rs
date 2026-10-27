@@ -7,21 +7,22 @@ use crate::upstream::http1::{
 };
 use crate::upstream::raw_http1::{Http1ResponseWithInterim, send_http1_request_with_interim};
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, Instant, timeout};
 
 pub(crate) async fn send_via_upstream_proxy(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     upstream: &ResolvedUpstreamProxy,
     timeout_dur: Duration,
     pool: &UpstreamProxyPool,
 ) -> Result<Response<Body>> {
     let endpoint = upstream.endpoint().clone();
     set_proxy_authorization_header(req.headers_mut(), endpoint.proxy_authorization.as_ref());
-    qpx_core::http_content_length::canonicalize_content_length(req.headers_mut());
+    let hyper_req = crate::upstream::http1::into_http1_for_codec(req)?;
     let pool_key = upstream_proxy_pool_key(&endpoint, upstream.trust());
 
     let slot = pool.slot_for(&pool_key).await;
@@ -67,7 +68,7 @@ pub(crate) async fn send_via_upstream_proxy(
     // request that already reached the peer. This covers the race where the
     // peer closes the connection between checkout and send, which the checkout
     // validation above cannot observe.
-    match timeout(timeout_dur, sender.try_send_request(req)).await {
+    match timeout(timeout_dur, sender.try_send_request(hyper_req)).await {
         Ok(Ok(response)) => {
             let response = response.map(Body::from);
             upstream.mark_http_response(response.status(), started.elapsed());
@@ -126,12 +127,13 @@ pub(super) fn upstream_proxy_pool_key(
 }
 
 pub(crate) async fn send_via_upstream_proxy_with_interim(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     upstream: &ResolvedUpstreamProxy,
     timeout_dur: Duration,
 ) -> Result<Http1ResponseWithInterim> {
     let endpoint = upstream.endpoint().clone();
     set_proxy_authorization_header(req.headers_mut(), endpoint.proxy_authorization.as_ref());
+    let hyper_req = crate::upstream::http1::into_http1_for_codec(req)?;
 
     let started = Instant::now();
     let stream = match timeout(
@@ -151,7 +153,12 @@ pub(crate) async fn send_via_upstream_proxy_with_interim(
         }
     };
 
-    match timeout(timeout_dur, send_http1_request_with_interim(stream, req)).await {
+    match timeout(
+        timeout_dur,
+        send_http1_request_with_interim(stream, hyper_req),
+    )
+    .await
+    {
         Ok(Ok(response)) => {
             upstream.mark_http_response(response.response.status(), started.elapsed());
             Ok(response)

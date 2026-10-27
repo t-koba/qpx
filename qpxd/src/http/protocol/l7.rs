@@ -1,12 +1,13 @@
 use crate::http::protocol::common::trim_http_ows;
 use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
 use crate::http::protocol::trailer_body;
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
+use qpx_core::http_message::{OrdinaryHeaderName, Request};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::{
     append_via_for_version, normalize_response_for_request_with_options,
-    sanitize_hop_by_hop_headers, sync_host_header_from_absolute_target,
+    sanitize_hop_by_hop_headers,
 };
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -281,17 +282,25 @@ pub(crate) fn consume_request_hop_headers(request: &mut Request<Body>) {
         .flat_map(|name| {
             request
                 .headers()
-                .get_all(&name)
-                .iter()
+                .get_all(&OrdinaryHeaderName::try_from(name.clone()).expect("ordinary field"))
                 .cloned()
+                .collect::<Vec<_>>()
+                .into_iter()
                 .map(move |value| (name.clone(), value))
         })
         .collect();
-    sanitize_hop_by_hop_headers(request.headers_mut(), true);
-    request.headers_mut().remove(http::header::UPGRADE);
-    request.headers_mut().remove(http::header::TRAILER);
+    qpx_http::protocol::semantics::sanitize_request_hop_by_hop_headers(request.headers_mut(), true);
+    request
+        .headers_mut()
+        .remove(&OrdinaryHeaderName::try_from(http::header::UPGRADE).expect("ordinary field"));
+    request
+        .headers_mut()
+        .remove(&OrdinaryHeaderName::try_from(http::header::TRAILER).expect("ordinary field"));
     for (name, value) in deferred {
-        request.headers_mut().append(name, value);
+        request.headers_mut().append(
+            OrdinaryHeaderName::try_from(name).expect("ordinary field"),
+            value,
+        );
     }
 }
 
@@ -351,15 +360,37 @@ fn prepare_request_headers_in_place(
         .is_some();
     let validate_trailers = module_body_replaced
         || request_version == http::Version::HTTP_2
-        || request.headers().contains_key(http::header::TRAILER);
-    sanitize_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
+        || request.headers().contains_key(
+            &OrdinaryHeaderName::try_from(http::header::TRAILER).expect("ordinary field"),
+        );
+    qpx_http::protocol::semantics::sanitize_request_hop_by_hop_headers(
+        request.headers_mut(),
+        preserve_upgrade,
+    );
     apply_request_headers(request.headers_mut(), header_control);
     if sync_target_authority && request.uri().authority().is_some() {
         let request_uri = request.uri().clone();
-        sync_host_header_from_absolute_target(request.headers_mut(), &request_uri);
+        if let Some(authority) = request_uri.authority()
+            && let Ok(value) = http::HeaderValue::from_str(authority.as_str())
+        {
+            request.headers_mut().insert(
+                OrdinaryHeaderName::try_from("host").expect("ordinary field"),
+                value,
+            );
+        }
     }
-    sanitize_hop_by_hop_headers(request.headers_mut(), preserve_upgrade);
-    append_via_for_version(request.headers_mut(), request_version, proxy_name);
+    qpx_http::protocol::semantics::sanitize_request_hop_by_hop_headers(
+        request.headers_mut(),
+        preserve_upgrade,
+    );
+    if let Some(value) =
+        qpx_http::protocol::semantics::via_header_value(request_version, proxy_name)
+    {
+        request.headers_mut().append(
+            OrdinaryHeaderName::try_from("via").expect("ordinary field"),
+            value,
+        );
+    }
     qpx_observability::inject_trace_context(request.headers_mut());
     #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
     if let Some(deadline) = request
@@ -417,8 +448,7 @@ pub(crate) async fn handle_max_forwards_in_place(
 
     let values: Vec<_> = request
         .headers()
-        .get_all(http::header::MAX_FORWARDS)
-        .iter()
+        .get_all(&OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS).expect("ordinary field"))
         .collect();
     if values.is_empty() {
         return None;
@@ -511,9 +541,10 @@ pub(crate) async fn handle_max_forwards_in_place(
 
     let next = (parsed - 1).min(u64::from(u32::MAX)).to_string();
     if let Ok(value) = http::HeaderValue::from_str(next.as_str()) {
-        request
-            .headers_mut()
-            .insert(http::header::MAX_FORWARDS, value);
+        request.headers_mut().insert(
+            OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS).expect("ordinary field"),
+            value,
+        );
     }
     None
 }
@@ -539,15 +570,9 @@ async fn serialize_trace_loopback_message(
     out.push(b' ');
     out.extend_from_slice(version.as_bytes());
     out.extend_from_slice(b"\r\n");
-    for (name, value) in request.headers().iter() {
-        if !should_reflect_trace_header(name, reflect_all_headers) {
-            continue;
-        }
-        out.extend_from_slice(name.as_str().as_bytes());
-        out.extend_from_slice(b": ");
-        out.extend_from_slice(value.as_bytes());
-        out.extend_from_slice(b"\r\n");
-    }
+    request.headers().write_http_field_lines(&mut out, |name| {
+        should_reflect_trace_header(name, reflect_all_headers)
+    });
     out.extend_from_slice(b"\r\n");
     let mut body_bytes = 0usize;
     while let Some(frame) = timeout(read_timeout, request.body_mut().data())

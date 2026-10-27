@@ -937,10 +937,9 @@ fn h2_cookie_fields_are_merged_for_generic_context() {
         ::http::header::COOKIE,
         ::http::HeaderValue::from_static("a=1"),
     );
-    headers.append(
-        ::http::header::COOKIE,
-        ::http::HeaderValue::from_static("b=2"),
-    );
+    let mut second_cookie = ::http::HeaderValue::from_static("b=2");
+    second_cookie.set_sensitive(true);
+    headers.append(::http::header::COOKIE, second_cookie);
 
     let converted = h1_headers_to_http(&headers).expect("convert headers");
     let cookie = converted
@@ -948,6 +947,12 @@ fn h2_cookie_fields_are_merged_for_generic_context() {
         .and_then(|value| value.to_str().ok())
         .expect("cookie header");
     assert_eq!(cookie, "a=1; b=2");
+    assert!(
+        converted
+            .get(http::header::COOKIE)
+            .expect("cookie header")
+            .is_sensitive()
+    );
     assert_eq!(converted.get_all(http::header::COOKIE).iter().count(), 1);
 }
 
@@ -1084,6 +1089,41 @@ async fn h2_server_refuses_header_count_over_edge_cap() {
 }
 
 #[tokio::test]
+async fn h2_request_preserves_cookie_occurrences_for_policy() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (socket, _) = listener.accept().await.unwrap();
+        let mut conn = h2::server::handshake(socket).await.unwrap();
+        let (request, _respond) = conn.accept().await.unwrap().unwrap();
+        let request = h2_request_to_hyper(request).unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get_all(http::header::COOKIE)
+                .iter()
+                .map(|v| v.as_bytes())
+                .collect::<Vec<_>>(),
+            [b"a=1".as_slice(), b"b=2".as_slice()]
+        );
+    });
+    let socket = TcpStream::connect(addr).await.unwrap();
+    let (client, connection) = h2::client::handshake(socket).await.unwrap();
+    tokio::spawn(async move {
+        let _ = connection.await;
+    });
+    let mut client = client.ready().await.unwrap();
+    let request = http::Request::builder()
+        .uri("https://example.com/")
+        .header("cookie", "a=1")
+        .header("cookie", "b=2")
+        .body(())
+        .unwrap();
+    let _ = client.send_request(request, true).unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn h2_server_refuses_cookie_split_over_edge_cap() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("addr");
@@ -1095,8 +1135,7 @@ async fn h2_server_refuses_cookie_split_over_edge_cap() {
             .handshake::<_, bytes::Bytes>(socket)
             .await
             .expect("handshake");
-        // 200 `cookie` fields merge to one downstream but must still count as
-        // 200 raw fields at the transport ceiling (H1 raw-field parity).
+        // Count all 200 Cookie fields at the transport ceiling (H1 parity).
         match conn.accept().await {
             None => "closed".to_string(),
             Some(Ok((request, _respond))) => match h2_request_to_hyper(request) {
@@ -1114,8 +1153,7 @@ async fn h2_server_refuses_cookie_split_over_edge_cap() {
     });
     client = client.ready().await.expect("ready");
     // 200 tiny `cookie` fields total ~800B: far under the byte cap, over the
-    // 128-field edge cap; without a pre-merge count they collapse to len==1
-    // and would be accepted.
+    // 128-field edge cap.
     let mut builder = ::http::Request::builder()
         .method("GET")
         .uri("https://reverse_edges.test/many-cookie");

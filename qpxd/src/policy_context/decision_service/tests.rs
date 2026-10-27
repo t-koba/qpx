@@ -369,18 +369,34 @@ fn decision_service_never_exports_credentials_or_sensitive_headers() {
         http::HeaderName::from_static("x-request-class"),
     ];
     cfg.sensitive_headers = HashSet::from([http::HeaderName::from_static("x-private-assertion")]);
-    let mut headers = HeaderMap::new();
+    let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(
-        http::header::AUTHORIZATION,
+        qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::AUTHORIZATION.clone())
+            .expect("ordinary field"),
         "Bearer secret".parse().unwrap(),
     );
     headers.insert(
-        http::header::PROXY_AUTHORIZATION,
+        qpx_core::http_message::OrdinaryHeaderName::try_from(
+            http::header::PROXY_AUTHORIZATION.clone(),
+        )
+        .expect("ordinary field"),
         "Basic secret".parse().unwrap(),
     );
-    headers.insert(http::header::COOKIE, "sid=secret".parse().unwrap());
-    headers.insert("x-private-assertion", "secret".parse().unwrap());
-    headers.insert("x-request-class", "interactive".parse().unwrap());
+    headers.insert(
+        qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::COOKIE.clone())
+            .expect("ordinary field"),
+        "sid=secret".parse().unwrap(),
+    );
+    headers.insert(
+        qpx_core::http_message::OrdinaryHeaderName::try_from("x-private-assertion")
+            .expect("ordinary field"),
+        "secret".parse().unwrap(),
+    );
+    headers.insert(
+        qpx_core::http_message::OrdinaryHeaderName::try_from("x-request-class")
+            .expect("ordinary field"),
+        "interactive".parse().unwrap(),
+    );
     let exported = build_selected_headers(&cfg, Some(&headers));
     assert_eq!(exported.len(), 1);
     assert_eq!(exported["x-request-class"], json!(["interactive"]));

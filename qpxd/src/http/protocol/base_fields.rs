@@ -1,7 +1,7 @@
 use crate::http::protocol::common::http_version_label;
 use http::Method;
 use http::uri::{Authority, Scheme};
-use hyper::Request;
+use qpx_core::http_message::{OrdinaryHeaderName, Request};
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::protocol::address::parse_authority_with_default_port;
 use std::net::IpAddr;
@@ -54,6 +54,7 @@ pub(crate) struct BaseRequestFields {
     pub(crate) scheme: Option<Scheme>,
     pub(crate) uri: http::Uri,
     request_uri: OnceLock<String>,
+    pub(crate) version: http::Version,
     pub(crate) http_version: &'static str,
 }
 
@@ -138,6 +139,7 @@ pub(crate) fn extract_base_request_fields<B>(
         scheme,
         uri,
         request_uri: OnceLock::new(),
+        version: req.version(),
         http_version: http_version_label(req.version()),
     }
 }
@@ -161,7 +163,9 @@ fn extract_authority<B>(
         let port = authority.port_u16().unwrap_or(default_port);
         return (Some(BaseAuthority::Parsed(authority)), Some(port));
     }
-    let Some(value) = req.headers().get(http::header::HOST) else {
+    let host_name = OrdinaryHeaderName::try_from(http::header::HOST.clone())
+        .expect("valid ordinary header name");
+    let Some(value) = req.headers().get(&host_name) else {
         return (None, None);
     };
     let Ok(raw) = value.to_str() else {
@@ -196,6 +200,12 @@ fn default_port_for_scheme(scheme: Option<&str>) -> u16 {
 #[cfg(test)]
 mod tests {
     use crate::http::protocol::base_fields::*;
+    use http::Request;
+    use qpx_core::http_message::Request as OwnedRequest;
+
+    fn import(req: Request<()>) -> OwnedRequest<()> {
+        OwnedRequest::from_http(req)
+    }
 
     #[test]
     fn extract_base_request_fields_splits_path_and_query() {
@@ -205,7 +215,7 @@ mod tests {
             .expect("request");
 
         let fields = extract_base_request_fields(
-            &req,
+            &import(req),
             BaseRequestContext {
                 peer_ip: Some("127.0.0.1".parse().expect("ip")),
                 ..Default::default()
@@ -231,7 +241,7 @@ mod tests {
             .body(())
             .expect("request");
 
-        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+        let fields = extract_base_request_fields(&import(req), BaseRequestContext::default());
 
         assert!(fields.request_uri.get().is_none());
         assert_eq!(fields.request_uri(), "/foo/bar?a=1&b=2");
@@ -245,7 +255,7 @@ mod tests {
             .body(())
             .expect("request");
 
-        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+        let fields = extract_base_request_fields(&import(req), BaseRequestContext::default());
 
         assert_eq!(fields.host(), Some("example.com"));
         assert!(fields.normalized_host.is_none());
@@ -260,7 +270,7 @@ mod tests {
             .body(())
             .expect("request");
 
-        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+        let fields = extract_base_request_fields(&import(req), BaseRequestContext::default());
 
         assert_eq!(fields.host(), Some("example.com"));
         assert_eq!(fields.normalized_host.as_deref(), Some("example.com"));
@@ -273,7 +283,7 @@ mod tests {
             .body(())
             .expect("request");
 
-        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+        let fields = extract_base_request_fields(&import(req), BaseRequestContext::default());
 
         assert_eq!(fields.host(), Some("example.com:http"));
         assert_eq!(fields.dst_port, None);
@@ -287,7 +297,8 @@ mod tests {
             .header(http::header::HOST, "example.com:http")
             .body(())
             .expect("request");
-        let err = qpx_http::protocol::semantics::validate_incoming_request_with_metadata(&req)
+        let owned = import(req);
+        let err = qpx_http::protocol::semantics::validate_incoming_request_with_metadata(&owned)
             .expect_err("explicit invalid port must fail validation");
         assert_eq!(
             err,
@@ -303,7 +314,7 @@ mod tests {
             .header(http::header::HOST, "example.com:http")
             .body(())
             .expect("request");
-        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+        let fields = extract_base_request_fields(&import(req), BaseRequestContext::default());
 
         assert!(matches!(
             fields.authority,
@@ -320,7 +331,7 @@ mod tests {
             .uri("http://example.com:http/")
             .body(())
             .expect("request");
-        let fields = extract_base_request_fields(&req, BaseRequestContext::default());
+        let fields = extract_base_request_fields(&import(req), BaseRequestContext::default());
 
         assert!(matches!(
             fields.authority,

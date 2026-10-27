@@ -108,6 +108,7 @@ fn validate_rejects_multiple_host_headers() {
         .append(HOST, HeaderValue::from_static("example.com"));
     req.headers_mut()
         .append(HOST, HeaderValue::from_static("example.com"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::MultipleHostHeaders);
 }
@@ -122,6 +123,7 @@ fn validate_rejects_invalid_host_value() {
         .expect("request");
     req.headers_mut()
         .insert(HOST, HeaderValue::from_static("exa mple.com"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidHostHeader);
 }
@@ -136,6 +138,7 @@ fn validate_rejects_host_with_userinfo() {
         .expect("request");
     req.headers_mut()
         .insert(HOST, HeaderValue::from_static("user@example.com"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidHostHeader);
 }
@@ -150,6 +153,7 @@ fn validate_accepts_default_port_equivalence() {
         .expect("request");
     req.headers_mut()
         .insert(HOST, HeaderValue::from_static("example.com"));
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("must pass");
 }
 
@@ -163,6 +167,7 @@ fn validation_metadata_reuses_the_parsed_host_authority() {
         .body(())
         .expect("request");
 
+    let req = OwnerRequest::from_http(req);
     let validated = validate_incoming_request_with_metadata(&req).expect("must pass");
 
     assert_eq!(
@@ -181,6 +186,7 @@ fn validation_metadata_prefers_the_absolute_target_authority() {
         .body(())
         .expect("request");
 
+    let req = OwnerRequest::from_http(req);
     let validated = validate_incoming_request_with_metadata(&req).expect("must pass");
 
     assert_eq!(
@@ -232,6 +238,7 @@ fn validate_rejects_missing_host_for_http11() {
         .uri("/only-path")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::MissingHost);
 }
@@ -247,6 +254,7 @@ fn absolute_form_uses_target_authority_over_host() {
             .body(())
             .expect("request");
 
+        let req = OwnerRequest::from_http(req);
         let validated = validate_incoming_request_with_metadata(&req)
             .expect("absolute-form target authority takes precedence");
         assert_eq!(
@@ -266,6 +274,7 @@ fn validate_rejects_http2_host_authority_mismatch() {
         .expect("request");
     req.headers_mut()
         .insert(HOST, HeaderValue::from_static("other.example"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::HostAuthorityMismatch);
 }
@@ -335,11 +344,12 @@ fn validate_rejects_mismatched_content_length_values() {
         .append(CONTENT_LENGTH, HeaderValue::from_static("10"));
     req.headers_mut()
         .append(CONTENT_LENGTH, HeaderValue::from_static("12"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidContentLength);
 }
 
-fn request_with_content_length(value: &str) -> http::Request<()> {
+fn request_with_content_length(value: &str) -> OwnerRequest<()> {
     let mut req = http::Request::builder()
         .version(Version::HTTP_11)
         .method(Method::POST)
@@ -352,7 +362,7 @@ fn request_with_content_length(value: &str) -> http::Request<()> {
         CONTENT_LENGTH,
         HeaderValue::from_str(value).expect("header"),
     );
-    req
+    OwnerRequest::from_http(req)
 }
 
 #[test]
@@ -399,6 +409,7 @@ fn validate_rejects_transfer_encoding_with_content_length() {
         .insert(CONTENT_LENGTH, HeaderValue::from_static("5"));
     req.headers_mut()
         .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(
         err,
@@ -416,6 +427,7 @@ fn validate_rejects_connect_without_port() {
         .expect("request");
     req.headers_mut()
         .insert(HOST, HeaderValue::from_static("example.com"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidConnectTarget);
 }
@@ -430,6 +442,7 @@ fn validate_accepts_h2_extended_connect_request() {
         .expect("request");
     req.extensions_mut()
         .insert(h2::ext::Protocol::from("websocket"));
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("must pass");
 }
 
@@ -443,6 +456,7 @@ fn validate_accepts_h2_extended_connect_default_port_authority() {
         .expect("request");
     req.extensions_mut()
         .insert(h2::ext::Protocol::from("websocket"));
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("must pass");
 }
 
@@ -456,6 +470,7 @@ fn validate_rejects_connection_header_for_h2() {
         .expect("request");
     req.headers_mut()
         .insert(CONNECTION, HeaderValue::from_static("keep-alive"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidH2H3ConnectionHeader);
 }
@@ -470,6 +485,7 @@ fn validate_accepts_te_trailers_for_h2() {
         .expect("request");
     req.headers_mut()
         .insert("te", HeaderValue::from_static("trailers"));
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("must pass");
 }
 
@@ -483,6 +499,7 @@ fn validate_rejects_invalid_te_for_h3() {
         .expect("request");
     req.headers_mut()
         .insert("te", HeaderValue::from_static("gzip"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidH2H3TeHeader);
 }
@@ -497,6 +514,7 @@ fn validate_rejects_transfer_encoding_for_h3() {
         .expect("request");
     req.headers_mut()
         .insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidH2H3ConnectionHeader);
 }
@@ -511,6 +529,7 @@ fn validate_accepts_expect_100_continue() {
         .header(EXPECT, "100-continue")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("must pass");
 }
 
@@ -524,6 +543,7 @@ fn validate_rejects_unknown_expectations() {
         .header(EXPECT, "100-continue, other")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidExpectHeader);
 }
@@ -541,6 +561,7 @@ fn validate_rejects_star_form_for_non_options() {
         .header(HOST, "example.com")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidRequestTarget);
 }
@@ -558,6 +579,7 @@ fn validate_allows_star_form_for_options() {
         .header(HOST, "example.com")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("must pass");
 }
 
@@ -577,6 +599,7 @@ fn validate_rejects_origin_form_without_leading_slash() {
         .header(HOST, "example.com")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidRequestTarget);
 }
@@ -590,6 +613,7 @@ fn validate_rejects_connect_missing_authority() {
         .header(HOST, "example.com:443")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::MissingConnectAuthority);
 }
@@ -603,6 +627,7 @@ fn validate_rejects_connect_absolute_form() {
         .header(HOST, "example.com:443")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("must fail");
     assert_eq!(err, RequestValidationError::InvalidConnectTarget);
 }
@@ -617,6 +642,7 @@ fn common_h2_retrieval_predicate_accepts_only_the_prevalidated_shape() {
         .body(())
         .expect("request");
 
+    let request = OwnerRequest::from_http(request);
     assert!(is_intrinsically_valid_common_h2_request(&request));
     validate_incoming_request(&request).expect("common shape must pass full validation");
 }
@@ -625,6 +651,13 @@ fn common_h2_retrieval_predicate_accepts_only_the_prevalidated_shape() {
 fn common_h2_retrieval_predicate_defers_validation_sensitive_fields() {
     for (name, value) in [
         ("content-length", "0"),
+        ("content-length", ""),
+        ("content-length", "0, 1"),
+        ("transfer-encoding", "chunked"),
+        ("connection", "close"),
+        ("proxy-connection", "close"),
+        ("keep-alive", "timeout=5"),
+        ("upgrade", "websocket"),
         ("expect", "100-continue"),
         ("host", "example.com"),
         ("te", "trailers"),
@@ -636,6 +669,7 @@ fn common_h2_retrieval_predicate_defers_validation_sensitive_fields() {
             .header(name, value)
             .body(())
             .expect("request");
+        let request = OwnerRequest::from_http(request);
         assert!(!is_intrinsically_valid_common_h2_request(&request));
     }
 }
@@ -651,6 +685,7 @@ fn validate_rejects_explicit_invalid_host_ports() {
             .expect("request");
         req.headers_mut()
             .insert(HOST, HeaderValue::from_str(host).expect("header"));
+        let req = OwnerRequest::from_http(req);
         let err = validate_incoming_request(&req).expect_err("must fail");
         assert_eq!(err, RequestValidationError::InvalidHostHeader, "{host}");
     }
@@ -671,6 +706,7 @@ fn validate_rejects_explicit_invalid_uri_authority_ports() {
             .expect("request");
         req.headers_mut()
             .insert(HOST, HeaderValue::from_static("example.test"));
+        let req = OwnerRequest::from_http(req);
         let err = validate_incoming_request(&req).expect_err("must fail");
         assert_eq!(err, RequestValidationError::InvalidRequestTarget, "{uri}");
     }
@@ -690,6 +726,7 @@ fn validate_keeps_explicit_valid_host_ports() {
             .expect("request");
         req.headers_mut()
             .insert(HOST, HeaderValue::from_str(host).expect("header"));
+        let req = OwnerRequest::from_http(req);
         validate_incoming_request(&req).expect("valid explicit port");
     }
 }
@@ -707,6 +744,7 @@ fn common_h2_retrieval_predicate_rejects_explicit_invalid_ports() {
             .uri(uri)
             .body(())
             .expect("request");
+        let request = OwnerRequest::from_http(request);
         assert!(!is_intrinsically_valid_common_h2_request(&request), "{uri}");
         assert!(validate_incoming_request(&request).is_err(), "{uri}");
     }
@@ -734,6 +772,7 @@ fn common_h2_retrieval_predicate_rejects_other_protocol_shapes() {
             .body(())
             .expect("origin-form request"),
     ] {
+        let request = OwnerRequest::from_http(request);
         assert!(!is_intrinsically_valid_common_h2_request(&request));
     }
 }
@@ -748,6 +787,7 @@ fn validate_accepts_h1_chunked_transfer_encoding() {
         .header(TRANSFER_ENCODING, "chunked")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("chunked-final TE must pass");
 }
 
@@ -761,6 +801,7 @@ fn validate_accepts_h1_transfer_encoding_ending_in_chunked() {
         .header(TRANSFER_ENCODING, "gzip, chunked")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("gzip, chunked must pass");
 }
 
@@ -774,6 +815,7 @@ fn validate_rejects_h1_chunked_not_final_transfer_encoding() {
         .header(TRANSFER_ENCODING, "chunked, identity")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("chunked, identity must fail");
     assert_eq!(err, RequestValidationError::InvalidTransferEncoding);
 }
@@ -788,6 +830,7 @@ fn validate_rejects_h1_transfer_encoding_without_chunked() {
         .header(TRANSFER_ENCODING, "gzip")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("gzip without chunked must fail");
     assert_eq!(err, RequestValidationError::InvalidTransferEncoding);
     assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
@@ -804,6 +847,7 @@ fn validate_rejects_h1_upgrade_with_content_length() {
         .header(CONTENT_LENGTH, "5")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     let err = validate_incoming_request(&req).expect_err("Upgrade+CL must fail");
     assert_eq!(err, RequestValidationError::UpgradeWithContentLength);
     assert_eq!(err.http_status(), StatusCode::BAD_REQUEST);
@@ -820,6 +864,7 @@ fn validate_accepts_h1_websocket_upgrade_without_body() {
         .header(CONNECTION, "Upgrade")
         .body(())
         .expect("request");
+    let req = OwnerRequest::from_http(req);
     validate_incoming_request(&req).expect("bodiless WS upgrade must pass");
 }
 
@@ -900,4 +945,189 @@ fn capsule_protocol_rejects_repeated_field_lines() {
         }
         assert!(!capsule_protocol_enabled(&headers), "{values:?}");
     }
+}
+
+#[test]
+fn authority_resolution_preserves_host_errors_even_for_http1_absolute_form() {
+    for (values, expected) in [
+        (
+            vec![b"".as_slice()],
+            RequestValidationError::EmptyHostHeader,
+        ),
+        (
+            vec![b" ".as_slice()],
+            RequestValidationError::EmptyHostHeader,
+        ),
+        (
+            vec![b"\xff".as_slice()],
+            RequestValidationError::InvalidHostHeader,
+        ),
+        (
+            vec![b"exa mple.com".as_slice()],
+            RequestValidationError::InvalidHostHeader,
+        ),
+        (
+            vec![b"", b"example.com".as_slice()],
+            RequestValidationError::MultipleHostHeaders,
+        ),
+    ] {
+        for version in [
+            Version::HTTP_10,
+            Version::HTTP_11,
+            Version::HTTP_2,
+            Version::HTTP_3,
+        ] {
+            let mut req = http::Request::builder()
+                .version(version)
+                .uri("https://example.com/")
+                .body(())
+                .expect("request");
+            for value in &values {
+                req.headers_mut()
+                    .append(HOST, HeaderValue::from_bytes(value).expect("header"));
+            }
+            let req = OwnerRequest::from_http(req);
+            assert_eq!(validate_incoming_request(&req), Err(expected.clone()));
+            assert_eq!(
+                resolve_request_authority(
+                    req.headers(),
+                    req.uri().authority(),
+                    req.uri().scheme_str()
+                ),
+                Err(expected.clone())
+            );
+        }
+    }
+}
+
+#[test]
+fn authority_resolution_preserves_fallback_and_scheme_default_ports() {
+    for (host, target, scheme, expected) in [
+        (
+            None,
+            "/",
+            Some("http"),
+            Err(RequestValidationError::MissingHost),
+        ),
+        (
+            None,
+            "/",
+            Some("https"),
+            Err(RequestValidationError::MissingHost),
+        ),
+        (None, "/", None, Ok(None)),
+        (
+            Some("Example.COM:443"),
+            "https://example.com/",
+            Some("https"),
+            Ok(Some("example.com")),
+        ),
+        (
+            Some("example.com:80"),
+            "/",
+            Some("http"),
+            Ok(Some("example.com:80")),
+        ),
+        (
+            Some("other.example"),
+            "https://example.com/",
+            Some("https"),
+            Err(RequestValidationError::HostAuthorityMismatch),
+        ),
+        (
+            Some("example.com"),
+            "https://example.com:abc/",
+            Some("https"),
+            Err(RequestValidationError::InvalidRequestTarget),
+        ),
+    ] {
+        let mut builder = http::Request::builder().uri(target);
+        if let Some(host) = host {
+            builder = builder.header(HOST, host);
+        }
+        let req = OwnerRequest::from_http(builder.body(()).expect("request"));
+        let result = resolve_request_authority(req.headers(), req.uri().authority(), scheme);
+        assert_eq!(
+            result
+                .as_ref()
+                .map(|a| a.as_ref().map(http::uri::Authority::as_str)),
+            expected.as_ref().map(|a| *a)
+        );
+    }
+}
+
+#[test]
+fn content_length_presence_and_errors_precede_connection_header_validation() {
+    for version in [Version::HTTP_11, Version::HTTP_2, Version::HTTP_3] {
+        for (length, expected) in [
+            (None, Ok(())),
+            (
+                Some("0"),
+                Err(RequestValidationError::BothTransferEncodingAndContentLength),
+            ),
+            (
+                Some("0, 0"),
+                Err(RequestValidationError::BothTransferEncodingAndContentLength),
+            ),
+            (Some(""), Err(RequestValidationError::InvalidContentLength)),
+            (
+                Some("0, 1"),
+                Err(RequestValidationError::InvalidContentLength),
+            ),
+        ] {
+            let mut builder = http::Request::builder()
+                .version(version)
+                .uri("https://example.com/")
+                .header(HOST, "example.com")
+                .header(TRANSFER_ENCODING, "chunked");
+            if let Some(length) = length {
+                builder = builder.header(CONTENT_LENGTH, length);
+            }
+            let req = OwnerRequest::from_http(builder.body(()).expect("request"));
+            let expected = if length.is_none() && version != Version::HTTP_11 {
+                Err(RequestValidationError::InvalidH2H3ConnectionHeader)
+            } else {
+                expected
+            };
+            assert_eq!(validate_incoming_request(&req), expected);
+        }
+    }
+}
+
+#[test]
+fn common_h2_head_shape_is_sufficient_with_opaque_ordinary_fields() {
+    let req = OwnerRequest::from_http(
+        http::Request::builder()
+            .version(Version::HTTP_2)
+            .method(Method::HEAD)
+            .uri("https://example.com/")
+            .header(
+                "x-opaque",
+                HeaderValue::from_bytes(b"\xff").expect("header"),
+            )
+            .body(())
+            .expect("request"),
+    );
+    assert!(is_intrinsically_valid_common_h2_request(&req));
+    validate_incoming_request(&req).expect("fast shape must pass full validation");
+}
+
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
+#[test]
+fn h3_connect_header_validation_keeps_content_length_error_precedence() {
+    let req = OwnerRequest::from_http(
+        http::Request::builder()
+            .header(CONTENT_LENGTH, "0, 1")
+            .header(CONNECTION, "close")
+            .body(())
+            .expect("request"),
+    );
+    assert_eq!(
+        validate_h2_h3_connect_headers(req.headers()),
+        Err(RequestValidationError::InvalidContentLength)
+    );
 }

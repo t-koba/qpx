@@ -6,7 +6,6 @@ use super::super::connect_upstream::validate_qpx_connect_head;
 use super::super::response::{send_qpx_response_stream, send_qpx_static_response};
 use super::ForwardQpxHandler;
 use crate::destination::DestinationInputs;
-use crate::http3::codec::h1_headers_to_http;
 use crate::policy_context::{
     IdentityRequestContext, authentication_response_for_error, resolve_identity_for_request,
     sanitize_headers_for_policy,
@@ -16,7 +15,7 @@ use anyhow::{Result, anyhow};
 use hyper::StatusCode;
 use qpx_core::config::{ActionConfig, ConnectIpConfig, ConnectUdpConfig};
 use qpx_core::rules::CompiledHeaderControl;
-use qpx_http::protocol::semantics::capsule_protocol_enabled;
+use qpx_http::protocol::semantics::request_capsule_protocol_enabled;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -39,11 +38,11 @@ pub(super) struct PreparedQpxConnect {
     pub(super) timeout_override: Option<Duration>,
     pub(super) rate_limit_profile: Option<String>,
     pub(super) rate_limit_context: RateLimitContext,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: qpx_core::http_message::Headers,
 }
 
 pub(super) struct PrepareQpxConnectInput<'a> {
-    pub(super) req_head: &'a http::Request<()>,
+    pub(super) req_head: &'a qpx_core::http_message::Request<()>,
     pub(super) req_stream: &'a mut qpx_h3::RequestStream,
     pub(super) handler: &'a ForwardQpxHandler,
     pub(super) conn: &'a qpx_h3::ConnectionInfo,
@@ -57,7 +56,7 @@ pub(super) struct ValidatedQpxConnect {
     pub(super) host: String,
     pub(super) port: u16,
     pub(super) auth_uri: String,
-    pub(super) headers: http::HeaderMap,
+    pub(super) headers: qpx_core::http_message::Headers,
 }
 
 struct ValidatedQpxConnectTarget {
@@ -73,7 +72,7 @@ pub(super) struct ConnectPolicyContext {
     pub(super) host: String,
     pub(super) port: u16,
     pub(super) auth_uri: String,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: qpx_core::http_message::Headers,
     pub(super) identity: crate::policy_context::ResolvedIdentity,
     pub(super) effective_policy: crate::policy_context::EffectivePolicyContext,
     pub(super) destination: crate::destination::DestinationMetadata,
@@ -170,7 +169,7 @@ async fn validate_connect_request(
         )
         .await;
     }
-    if is_connect_ip && !capsule_protocol_enabled(req_head.headers()) {
+    if is_connect_ip && !request_capsule_protocol_enabled(req_head.headers()) {
         return reject_bad_qpx_connect(
             req_stream,
             b"CONNECT-IP requires Capsule-Protocol: ?1",
@@ -207,17 +206,7 @@ async fn validate_connect_request(
         return Ok(None);
     };
 
-    let headers = match h1_headers_to_http(req_head.headers()) {
-        Ok(headers) => headers,
-        Err(_) => {
-            let message = if is_connect_udp {
-                b"invalid CONNECT-UDP headers".as_slice()
-            } else {
-                b"invalid CONNECT headers".as_slice()
-            };
-            return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
-        }
-    };
+    let headers = req_head.headers().clone();
 
     if let Err(err) = validate_qpx_connect_head(
         req_head,
@@ -269,7 +258,7 @@ async fn reject_bad_qpx_connect<T>(
 }
 
 struct ResolveQpxConnectTargetInput<'a> {
-    req_head: &'a http::Request<()>,
+    req_head: &'a qpx_core::http_message::Request<()>,
     req_stream: &'a mut qpx_h3::RequestStream,
     connect_udp_cfg: Option<&'a ConnectUdpConfig>,
     connect_ip_cfg: Option<&'a ConnectIpConfig>,
@@ -345,7 +334,7 @@ async fn resolve_qpx_connect_target(
 }
 
 async fn resolve_qpx_connect_ip_target(
-    req_head: &http::Request<()>,
+    req_head: &qpx_core::http_message::Request<()>,
     req_stream: &mut qpx_h3::RequestStream,
     connect_ip_cfg: Option<&ConnectIpConfig>,
     req_authority: &str,
@@ -400,7 +389,7 @@ async fn resolve_qpx_connect_ip_target(
 }
 
 async fn resolve_qpx_connect_udp_target(
-    req_head: &http::Request<()>,
+    req_head: &qpx_core::http_message::Request<()>,
     req_stream: &mut qpx_h3::RequestStream,
     connect_udp_cfg: Option<&ConnectUdpConfig>,
     req_authority: &str,

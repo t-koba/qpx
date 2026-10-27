@@ -4,9 +4,9 @@ use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use hyper::header::HOST;
-use hyper::{Method, Request, StatusCode, Uri};
+use hyper::{Method, StatusCode, Uri};
 use qpx_core::config::CacheBackendConfig;
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use qpx_http::protocol::common::Http1SendRequest;
 use qpx_http::tls::builder::connect_client_http1;
@@ -18,6 +18,17 @@ use tokio::time::timeout;
 
 const HTTP_CACHE_MAX_IDLE_CONNECTIONS: usize = 8;
 const HTTP_CACHE_MAX_ACTIVE_OPERATIONS: usize = 32;
+
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}
+
+fn owner_request(method: Method, uri: Uri, body: Body) -> OwnerRequest<Body> {
+    let mut req = OwnerRequest::new(body);
+    *req.method_mut() = method;
+    *req.uri_mut() = uri;
+    req
+}
 
 #[derive(Clone)]
 pub struct HttpCacheBackend {
@@ -140,11 +151,14 @@ impl HttpCacheBackend {
     async fn send_with_fresh_retry(
         &self,
         mut sender: Http1SendRequest,
-        req: Request<Body>,
+        req: OwnerRequest<Body>,
         scheme: &str,
         host: &str,
         port: u16,
     ) -> Result<(hyper::Response<hyper::body::Incoming>, Http1SendRequest)> {
+        let req = req
+            .into_http_for_codec()
+            .map_err(|err| anyhow!("cache backend request framing invalid: {err}"))?;
         match timeout(self.timeout, sender.try_send_request(req)).await? {
             Ok(resp) => Ok((resp, sender)),
             Err(mut err) => {
@@ -162,7 +176,10 @@ impl HttpCacheBackend {
         recycle_sender(self.idle.clone(), sender).await;
     }
 
-    async fn send_collect(&self, mut req: Request<Body>) -> Result<(StatusCode, bytes::Bytes)> {
+    async fn send_collect(
+        &self,
+        mut req: OwnerRequest<Body>,
+    ) -> Result<(StatusCode, bytes::Bytes)> {
         let _permit = self
             .active
             .clone()
@@ -187,9 +204,11 @@ impl HttpCacheBackend {
         let origin = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
         *req.uri_mut() = Uri::builder().path_and_query(origin).build()?;
         *req.version_mut() = http::Version::HTTP_11;
-        if !req.headers().contains_key(HOST) {
-            req.headers_mut()
-                .insert(HOST, http::HeaderValue::from_str(authority.as_str())?);
+        if !req.headers().contains_key(&ord("host")) {
+            req.headers_mut().insert(
+                ord("host"),
+                http::HeaderValue::from_str(authority.as_str())?,
+            );
         }
 
         let sender = self.checkout_sender(scheme, host, port).await?;
@@ -222,7 +241,7 @@ impl HttpCacheBackend {
 
     async fn send_collect_object(
         &self,
-        mut req: Request<Body>,
+        mut req: OwnerRequest<Body>,
     ) -> Result<(StatusCode, CachedBody)> {
         let _permit = self
             .active
@@ -248,9 +267,11 @@ impl HttpCacheBackend {
         let origin = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
         *req.uri_mut() = Uri::builder().path_and_query(origin).build()?;
         *req.version_mut() = http::Version::HTTP_11;
-        if !req.headers().contains_key(HOST) {
-            req.headers_mut()
-                .insert(HOST, http::HeaderValue::from_str(authority.as_str())?);
+        if !req.headers().contains_key(&ord("host")) {
+            req.headers_mut().insert(
+                ord("host"),
+                http::HeaderValue::from_str(authority.as_str())?,
+            );
         }
 
         let sender = self.checkout_sender(scheme, host, port).await?;
@@ -282,18 +303,19 @@ impl HttpCacheBackend {
         Ok((status, body))
     }
 
-    async fn send_status(&self, req: Request<Body>) -> Result<StatusCode> {
+    async fn send_status(&self, req: OwnerRequest<Body>) -> Result<StatusCode> {
         let (status, _) = self.send_collect(req).await?;
         Ok(status)
     }
 
-    fn apply_common_headers(&self, req: &mut Request<Body>) {
-        if let Some((name, value)) = &self.auth_header {
-            req.headers_mut().insert(name, value.clone());
+    fn apply_common_headers(&self, req: &mut OwnerRequest<Body>) {
+        if let Some((name, value)) = &self.auth_header
+            && let Ok(ordinary) = OrdinaryHeaderName::try_from(name.clone())
+        {
+            req.headers_mut().insert(ordinary, value.clone());
         }
         if let Some(value) = &self.user_agent {
-            req.headers_mut()
-                .insert(http::header::USER_AGENT, value.clone());
+            req.headers_mut().insert(ord("user-agent"), value.clone());
         }
     }
 }
@@ -337,10 +359,7 @@ async fn recycle_sender(idle: Arc<AsyncMutex<Vec<Http1SendRequest>>>, sender: Ht
 impl CacheBackend for HttpCacheBackend {
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<bytes::Bytes>> {
         let uri = self.object_uri(namespace, key)?;
-        let mut req = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Body::empty())?;
+        let mut req = owner_request(Method::GET, uri, Body::empty());
         self.apply_common_headers(&mut req);
 
         let (status, body) = self.send_collect(req).await?;
@@ -363,12 +382,13 @@ impl CacheBackend for HttpCacheBackend {
         }
         let uri = self.batch_get_uri(namespace)?;
         let payload = serde_json::to_vec(&BatchGetRequest { keys })?;
-        let mut req = Request::builder()
-            .method(Method::POST)
-            .uri(uri)
-            .header(http::header::CONTENT_TYPE, "application/json")
-            .header(http::header::CONTENT_LENGTH, payload.len().to_string())
-            .body(Body::from(payload))?;
+        let payload_len = payload.len() as u64;
+        let mut req = owner_request(Method::POST, uri, Body::from(payload));
+        req.headers_mut().insert(
+            ord("content-type"),
+            http::HeaderValue::from_static("application/json"),
+        );
+        req.headers_mut().set_content_length(payload_len);
         self.apply_common_headers(&mut req);
         let (status, body) = self.send_collect(req).await?;
         if status != StatusCode::OK {
@@ -399,10 +419,7 @@ impl CacheBackend for HttpCacheBackend {
 
     async fn get_object(&self, namespace: &str, key: &str) -> Result<Option<CachedBody>> {
         let uri = self.object_uri(namespace, key)?;
-        let mut req = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Body::empty())?;
+        let mut req = owner_request(Method::GET, uri, Body::empty());
         self.apply_common_headers(&mut req);
 
         let (status, body) = self.send_collect_object(req).await?;
@@ -429,13 +446,10 @@ impl CacheBackend for HttpCacheBackend {
             .await
             .map_err(|_| anyhow!("http cache backend operation limiter closed"))?;
         let uri = self.object_uri(namespace, key)?;
-        let mut req = Request::builder()
-            .method(Method::GET)
-            .uri(uri)
-            .body(Body::empty())?;
+        let mut req = owner_request(Method::GET, uri, Body::empty());
         if let Some((start, end)) = range {
             req.headers_mut().insert(
-                http::header::RANGE,
+                ord("range"),
                 http::HeaderValue::from_str(format!("bytes={start}-{end}").as_str())?,
             );
         }
@@ -458,9 +472,11 @@ impl CacheBackend for HttpCacheBackend {
         let origin = uri.path_and_query().map(|pq| pq.as_str()).unwrap_or("/");
         *req.uri_mut() = Uri::builder().path_and_query(origin).build()?;
         *req.version_mut() = http::Version::HTTP_11;
-        if !req.headers().contains_key(HOST) {
-            req.headers_mut()
-                .insert(HOST, http::HeaderValue::from_str(authority.as_str())?);
+        if !req.headers().contains_key(&ord("host")) {
+            req.headers_mut().insert(
+                ord("host"),
+                http::HeaderValue::from_str(authority.as_str())?,
+            );
         }
 
         let sender = self.checkout_sender(scheme, host, port).await?;
@@ -535,12 +551,15 @@ impl CacheBackend for HttpCacheBackend {
             ));
         }
         let uri = self.object_uri(namespace, key)?;
-        let mut req = Request::builder()
-            .method(Method::PUT)
-            .uri(uri)
-            .header("content-type", "application/octet-stream")
-            .header("x-qpx-ttl-secs", ttl_secs.to_string())
-            .body(Body::from(value.to_vec()))?;
+        let mut req = owner_request(Method::PUT, uri, Body::from(value.to_vec()));
+        req.headers_mut().insert(
+            ord("content-type"),
+            http::HeaderValue::from_static("application/octet-stream"),
+        );
+        req.headers_mut().insert(
+            ord("x-qpx-ttl-secs"),
+            http::HeaderValue::from_str(ttl_secs.to_string().as_str())?,
+        );
         self.apply_common_headers(&mut req);
 
         let status = self.send_status(req).await?;
@@ -565,13 +584,16 @@ impl CacheBackend for HttpCacheBackend {
             ));
         }
         let uri = self.object_uri(namespace, key)?;
-        let mut req = Request::builder()
-            .method(Method::PUT)
-            .uri(uri)
-            .header("content-type", "application/octet-stream")
-            .header(http::header::CONTENT_LENGTH, body.len().to_string())
-            .header("x-qpx-ttl-secs", ttl_secs.to_string())
-            .body(body.to_body())?;
+        let mut req = owner_request(Method::PUT, uri, body.to_body());
+        req.headers_mut().insert(
+            ord("content-type"),
+            http::HeaderValue::from_static("application/octet-stream"),
+        );
+        req.headers_mut().set_content_length(body.len());
+        req.headers_mut().insert(
+            ord("x-qpx-ttl-secs"),
+            http::HeaderValue::from_str(ttl_secs.to_string().as_str())?,
+        );
         self.apply_common_headers(&mut req);
 
         let status = self.send_status(req).await?;
@@ -596,12 +618,15 @@ impl CacheBackend for HttpCacheBackend {
             body_read_timeout,
         );
         let uri = self.object_uri(namespace, key)?;
-        let mut req = Request::builder()
-            .method(Method::PUT)
-            .uri(uri)
-            .header("content-type", "application/octet-stream")
-            .header("x-qpx-ttl-secs", ttl_secs.to_string())
-            .body(body)?;
+        let mut req = owner_request(Method::PUT, uri, body);
+        req.headers_mut().insert(
+            ord("content-type"),
+            http::HeaderValue::from_static("application/octet-stream"),
+        );
+        req.headers_mut().insert(
+            ord("x-qpx-ttl-secs"),
+            http::HeaderValue::from_str(ttl_secs.to_string().as_str())?,
+        );
         self.apply_common_headers(&mut req);
 
         let status = self.send_status(req).await?;
@@ -616,10 +641,7 @@ impl CacheBackend for HttpCacheBackend {
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
         let uri = self.object_uri(namespace, key)?;
-        let mut req = Request::builder()
-            .method(Method::DELETE)
-            .uri(uri)
-            .body(Body::empty())?;
+        let mut req = owner_request(Method::DELETE, uri, Body::empty());
         self.apply_common_headers(&mut req);
         let status = self.send_status(req).await?;
         if status != StatusCode::OK

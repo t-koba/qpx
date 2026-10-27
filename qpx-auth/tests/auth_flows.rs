@@ -1,6 +1,4 @@
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
-use http::HeaderMap;
-#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use qpx_auth::AuthOutcome;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth", feature = "ldap-auth"))]
 use qpx_auth::Authenticator;
@@ -8,9 +6,21 @@ use qpx_auth::Authenticator;
 use qpx_core::config::AuthConfig;
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 use qpx_core::config::LocalUser;
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 
 #[cfg(feature = "digest-auth")]
 use sha2::{Digest, Sha256};
+
+#[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
+fn proxy_auth_headers(value: http::HeaderValue) -> Headers {
+    let mut headers = Headers::new();
+    headers.insert(
+        OrdinaryHeaderName::try_from("proxy-authorization").expect("ordinary header name"),
+        value,
+    );
+    headers
+}
 
 #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
 fn local_config() -> AuthConfig {
@@ -28,11 +38,9 @@ fn local_config() -> AuthConfig {
 #[tokio::test]
 async fn basic_auth_allows_valid_local_credentials() {
     let auth = Authenticator::new(&local_config(), "qpx").expect("authenticator");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "proxy-authorization",
-        http::HeaderValue::from_static("Basic YWxpY2U6d29uZGVybGFuZA=="),
-    );
+    let headers = proxy_auth_headers(http::HeaderValue::from_static(
+        "Basic YWxpY2U6d29uZGVybGFuZA==",
+    ));
 
     let outcome = auth
         .authenticate_proxy(None, &headers, &["local".to_string()], "GET", "/resource")
@@ -49,11 +57,7 @@ async fn basic_auth_allows_valid_local_credentials() {
 #[tokio::test]
 async fn basic_auth_challenges_invalid_local_credentials() {
     let auth = Authenticator::new(&local_config(), "qpx").expect("authenticator");
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "proxy-authorization",
-        http::HeaderValue::from_static("Basic YWxpY2U6d3Jvbmc="),
-    );
+    let headers = proxy_auth_headers(http::HeaderValue::from_static("Basic YWxpY2U6d3Jvbmc="));
 
     let outcome = auth
         .authenticate_proxy(None, &headers, &["local".to_string()], "GET", "/resource")
@@ -74,10 +78,11 @@ async fn basic_auth_challenges_invalid_local_credentials() {
 #[tokio::test]
 async fn digest_auth_allows_rfc7616_sha256_response_from_challenge() {
     let auth = Authenticator::new(&local_config(), "qpx").expect("authenticator");
+    let empty_headers = Headers::new();
     let challenge = auth
         .authenticate_proxy(
             None,
-            &HeaderMap::new(),
+            &empty_headers,
             &["local".to_string()],
             "GET",
             "/resource",
@@ -110,11 +115,8 @@ async fn digest_auth_allows_rfc7616_sha256_response_from_challenge() {
     let header = format!(
         "Digest username=\"alice\", realm=\"qpx\", nonce=\"{nonce}\", uri=\"/resource\", algorithm=SHA-256, qop=auth, nc={nc}, cnonce=\"{cnonce}\", opaque=\"{opaque}\", response=\"{response}\""
     );
-    let mut headers = HeaderMap::new();
-    headers.insert(
-        "proxy-authorization",
-        http::HeaderValue::from_str(&header).expect("authorization header"),
-    );
+    let headers =
+        proxy_auth_headers(http::HeaderValue::from_str(&header).expect("authorization header"));
 
     let outcome = auth
         .authenticate_proxy(None, &headers, &["local".to_string()], "GET", "/resource")

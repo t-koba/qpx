@@ -20,6 +20,7 @@ use anyhow::Result;
 use anyhow::anyhow;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::config::IngressEdgeConfig;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
@@ -251,6 +252,8 @@ async fn handle_request(
 ) -> Result<Response<Body>, Infallible> {
     let started = Instant::now();
     let state = runtime.state();
+    // Single decoded-ingress import for the H1/H2 codec path; H3 callers migrate separately.
+    let req = OwnerRequest::from_http(req);
     let request_method = req.method().clone();
     let request_version = req.version();
     let result = handle_request_inner(req, runtime, &listener_name, remote_addr).await;

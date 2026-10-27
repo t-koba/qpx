@@ -111,7 +111,7 @@ settings:
             .expect("http module config"),
         ],
     );
-    let request = Request::builder()
+    let request = hyper::Request::builder()
         .method(http::Method::GET)
         .uri(format!("http://{upstream_addr}/asset"))
         .header("host", upstream_addr.to_string())
@@ -121,7 +121,7 @@ settings:
         .expect("request");
 
     let response = dispatch_transparent_request(
-        request,
+        Request::from_http(request),
         runtime,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         None,
@@ -165,7 +165,7 @@ async fn transparent_early_response_respects_response_body_cap() {
         Some("early-cap".to_string()),
         Vec::new(),
     );
-    let request = Request::builder()
+    let request = hyper::Request::builder()
         .method(http::Method::POST)
         .uri("http://example.com/")
         .header("host", "example.com")
@@ -175,7 +175,7 @@ async fn transparent_early_response_respects_response_body_cap() {
         .expect("request");
 
     let response = dispatch_transparent_request(
-        request,
+        Request::from_http(request),
         runtime,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         None,

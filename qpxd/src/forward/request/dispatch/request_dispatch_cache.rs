@@ -13,8 +13,9 @@ use crate::http::dispatch::{
 use crate::runtime::Runtime;
 use crate::upstream::http1::proxy_http1_request;
 use anyhow::Result;
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
 use qpx_core::config::ActionKind;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
 use std::time::Duration;
@@ -32,7 +33,7 @@ pub(super) struct ForwardCacheLookupInput<'a> {
     pub(super) headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
     pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
-    pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<&'a Request<()>>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) cache_target_key: Option<&'a CacheRequestKey>,
     pub(super) state: &'a crate::runtime::RuntimeState,
@@ -106,7 +107,7 @@ fn maybe_spawn_forward_background_revalidation(
     if *input.request_method != Method::GET {
         return;
     }
-    let (Some(policy), Some(snapshot), Some(lookup_key), Some(target_key)) = (
+    let (Some(policy), Some(_snapshot), Some(lookup_key), Some(target_key)) = (
         input.cache_policy,
         input.request_headers_snapshot,
         input.cache_lookup_key,
@@ -122,10 +123,10 @@ fn maybe_spawn_forward_background_revalidation(
     let listener_name = input.listener_name.to_string();
     let http_authority = input.http_authority.to_string();
     let policy = policy.clone();
-    let snapshot = snapshot.clone();
     let lookup_key = lookup_key.clone();
     let target_key = target_key.clone();
     let bg_req = clone_request_head_for_revalidation(input.req);
+    let snapshot = clone_request_head_for_revalidation(&bg_req);
     let upstream_timeout = input.upstream_timeout;
     let state = state.clone();
     tokio::spawn(async move {
@@ -135,6 +136,7 @@ fn maybe_spawn_forward_background_revalidation(
         let upstream = resolve_upstream(&action, &runtime_state, listener_name.as_str())
             .ok()
             .flatten();
+        let bg_req = bg_req.map_body(|()| Body::empty());
         let Ok(resp) = proxy_http1_request(
             bg_req,
             upstream.as_ref(),
@@ -148,16 +150,14 @@ fn maybe_spawn_forward_background_revalidation(
         };
         let response_delay_secs = started.elapsed().as_secs();
         let backends = &runtime_state.cache.backends;
-        let method = Method::GET;
         let _ = process_upstream_response_for_cache(
             resp,
             CacheWritebackContext {
-                request_method: &method,
+                request_snapshot: &snapshot,
                 response_delay_secs,
                 cache_target_key: Some(&target_key),
                 cache_lookup_key: Some(&lookup_key),
                 cache_policy: Some(&policy),
-                request_headers_snapshot: &snapshot,
                 revalidation_state: Some(state),
                 request_collapse_guard: None,
                 body_read_timeout: runtime_state
@@ -180,7 +180,7 @@ pub(super) struct ForwardCacheCollapseInput<'a> {
     pub(super) proxy_name: &'a str,
     pub(super) headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
     pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
-    pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<&'a Request<()>>,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) state: &'a crate::runtime::RuntimeState,
@@ -262,7 +262,7 @@ pub(super) async fn prepare_forward_cache_keys(
     body_read_timeout: Duration,
 ) -> Result<(
     Request<Body>,
-    Option<http::HeaderMap>,
+    Option<Request<()>>,
     Option<CacheRequestKey>,
     Option<CacheRequestKey>,
 )> {
@@ -285,13 +285,16 @@ pub(super) async fn prepare_forward_cache_keys(
         body_read_timeout,
     )
     .await?;
-    let snapshot = lookup.as_ref().map(|_| req.headers().clone());
+    let snapshot = lookup
+        .as_ref()
+        .map(|_| clone_request_head_for_revalidation(&req));
     Ok((req, snapshot, lookup, target))
 }
 
 #[cfg(test)]
 mod forward_query_cache_tests {
     use super::*;
+    use qpx_core::http_message::Request as OwnerRequest;
 
     async fn forward_keys(content_type: &str, body: &'static str) -> Option<CacheRequestKey> {
         let action = qpx_core::config::ActionConfig {
@@ -308,12 +311,14 @@ mod forward_query_cache_tests {
             allow_set_cookie_store: false,
             allow_authorization_without_vary_store: false,
         };
-        let req = Request::builder()
-            .method(Method::QUERY)
-            .uri("http://example.com/search")
-            .header(http::header::CONTENT_TYPE, content_type)
-            .body(Body::from(body))
-            .unwrap();
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(Method::QUERY)
+                .uri("http://example.com/search")
+                .header(http::header::CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+                .unwrap(),
+        );
         let (_, _, lookup, _) =
             prepare_forward_cache_keys(req, &action, Some(&policy), 1024, Duration::from_secs(1))
                 .await

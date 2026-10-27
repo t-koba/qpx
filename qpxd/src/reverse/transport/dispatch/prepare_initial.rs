@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 pub(super) struct InitialReverseScan {
     pub(super) selection: ReverseRouteSelection,
-    pub(super) owned_sanitized_headers: Option<http::HeaderMap>,
+    pub(super) owned_sanitized_headers: Option<qpx_core::http_message::Headers>,
     pub(super) identity_request: Option<IdentityRequestContext>,
 }
 
@@ -23,7 +23,7 @@ pub(super) struct InitialReverseScan {
     reason = "initial scan carries explicit immutable match facts for the first scan"
 )]
 pub(super) async fn initial_scan_reverse_routes(
-    request_headers: &http::HeaderMap,
+    request_headers: &qpx_core::http_message::Headers,
     request_version: http::Version,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,

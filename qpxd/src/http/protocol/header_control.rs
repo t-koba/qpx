@@ -1,13 +1,13 @@
 use qpx_core::rules::CompiledHeaderControl;
 
 pub(crate) trait HeaderTransform {
-    fn apply_request_transform(&self, headers: &mut http::HeaderMap);
+    fn apply_request_transform(&self, headers: &mut qpx_core::http_message::Headers);
     fn apply_response_transform(&self, headers: &mut http::HeaderMap);
 }
 
 impl HeaderTransform for CompiledHeaderControl {
-    fn apply_request_transform(&self, headers: &mut http::HeaderMap) {
-        for name in self.apply_request(headers) {
+    fn apply_request_transform(&self, headers: &mut qpx_core::http_message::Headers) {
+        for name in self.apply_request_owned(headers) {
             crate::http::metrics::header_regex_replace_invalid(crate::runtime::metric_names());
             tracing::warn!(
                 header = %name,
@@ -28,15 +28,20 @@ impl HeaderTransform for CompiledHeaderControl {
 }
 
 pub(crate) fn set_proxy_authorization_header(
-    headers: &mut http::HeaderMap,
+    headers: &mut qpx_core::http_message::Headers,
     value: Option<&http::HeaderValue>,
 ) {
-    headers.remove(http::header::PROXY_AUTHORIZATION);
-    let _ = value.map(|value| headers.insert(http::header::PROXY_AUTHORIZATION, value.clone()));
+    let name =
+        qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::PROXY_AUTHORIZATION)
+            .expect("proxy-authorization is an ordinary field");
+    headers.remove(&name);
+    if let Some(value) = value {
+        headers.insert(name, value.clone());
+    }
 }
 
 pub(crate) fn apply_request_headers(
-    headers: &mut http::HeaderMap,
+    headers: &mut qpx_core::http_message::Headers,
     control: Option<&CompiledHeaderControl>,
 ) {
     let Some(control) = control else {

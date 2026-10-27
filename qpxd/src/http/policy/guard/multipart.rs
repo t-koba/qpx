@@ -129,8 +129,15 @@ pub(super) async fn validate_multipart_limits_reader(
     .await
 }
 
-pub(super) fn multipart_boundary_from_headers(headers: &http::HeaderMap) -> Option<String> {
-    let value = headers.get(http::header::CONTENT_TYPE)?.to_str().ok()?;
+pub(super) fn multipart_boundary_from_headers(
+    headers: &qpx_core::http_message::Headers,
+) -> Option<String> {
+    let name = qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+        .expect("Content-Type is ordinary");
+    multipart_boundary(headers.get(&name)?.to_str().ok()?)
+}
+
+pub(super) fn multipart_boundary(value: &str) -> Option<String> {
     if !value
         .to_ascii_lowercase()
         .starts_with("multipart/form-data")

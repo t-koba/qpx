@@ -15,17 +15,18 @@ use crate::upstream::origin::{
     proxy_direct_plain_http1_raw_response_with_interim_on_connection,
 };
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reverse_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<std::result::Result<(InterimList, Response<Body>), Request<Body>>> {
+) -> Result<std::result::Result<(InterimList, Response<Body>), OwnerRequest<Body>>> {
     let request_version = req.version();
     if state.destination_trace_enabled()
         || qpx_observability::metrics_enabled()
@@ -36,7 +37,10 @@ pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reve
             request_version,
             http::Version::HTTP_11 | http::Version::HTTP_2
         )
-        || req.headers().contains_key(http::header::UPGRADE)
+        || req.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::UPGRADE)
+                .expect("ordinary"),
+        )
     {
         return Ok(Err(req));
     }
@@ -77,7 +81,7 @@ pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reve
 }
 
 pub(super) async fn dispatch_plain_reverse_http(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     state: &crate::runtime::RuntimeState,
     route: &HttpRoute,
     request_method: &http::Method,
@@ -92,7 +96,10 @@ pub(super) async fn dispatch_plain_reverse_http(
         .origin
         .direct_plain_http1_authorities()
         .ok_or_else(|| anyhow!("plain HTTP fast path requires a precompiled HTTP authority"))?;
+    // Raw fast path keeps the hyper send boundary; preparation runs on the owner
+    // with a single export immediately before the raw send.
     let req = prepare_proxy_http1_request(req, host_authority, proxy_name)?;
+    let req = crate::upstream::http1::into_http1_for_codec(req)?;
     let started = route
         .policy
         .passive_health
@@ -198,7 +205,7 @@ mod tests {
 
     #[test]
     fn plain_response_via_uses_upstream_version_for_http2_downstream() {
-        let request = Request::builder()
+        let request = http::Request::builder()
             .version(http::Version::HTTP_2)
             .body(Body::empty())
             .expect("downstream request");
@@ -221,7 +228,7 @@ mod tests {
 
     #[test]
     fn plain_response_via_uses_upstream_version_for_http10_upstream() {
-        let request = Request::builder()
+        let request = http::Request::builder()
             .version(http::Version::HTTP_11)
             .body(Body::empty())
             .expect("downstream request");

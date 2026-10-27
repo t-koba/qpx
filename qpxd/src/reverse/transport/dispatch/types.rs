@@ -7,7 +7,8 @@ use crate::reverse::router::{HttpRoute, SelectedMirrorTarget};
 use crate::reverse::transport::request_template::{ReverseReplayRecorder, ReverseRequestTemplate};
 use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use crate::runtime::{self, Runtime};
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
+use qpx_core::http_message::{Headers, Request as OwnerRequest};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -64,7 +65,7 @@ impl<T> IntoIterator for InlineCache<T> {
 }
 
 pub(super) struct PreparedReverseRequest {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) context: ReversePreparedContext,
     pub(super) route: ReversePreparedRoute,
     pub(super) observation: crate::http::pipeline::types::RequestObservation,
@@ -79,7 +80,7 @@ pub(super) struct ReversePreparedRoute {
     pub(super) route_idx: usize,
     pub(super) selected_policy: EffectivePolicyContext,
     pub(super) identity: crate::policy_context::ResolvedIdentity,
-    pub(super) sanitized_headers: Option<http::HeaderMap>,
+    pub(super) sanitized_headers: Option<Headers>,
     // Keyed by `destination_override_key` (identity of the route's compiled
     // override); see `prepare.rs`.
     pub(super) request_destination_cache: InlineCache<crate::destination::DestinationMetadata>,
@@ -87,7 +88,7 @@ pub(super) struct ReversePreparedRoute {
 }
 
 pub(super) struct ReverseWebsocketDispatch<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) state: &'a Arc<runtime::RuntimeState>,
     pub(super) route: &'a HttpRoute,
     pub(super) conn: &'a ReverseConnInfo,
@@ -114,7 +115,7 @@ pub(super) enum ReverseStageOutcome<T> {
 pub(super) type ReverseAccessOutcome = ReverseStageOutcome<ReverseAccessControl>;
 
 pub(super) struct ReverseAccessControl {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) audit_ctx: DispatchAuditContext,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) override_upstream: Option<String>,
@@ -135,24 +136,24 @@ pub(super) struct ReverseAccessInput<'a> {
     pub(super) request_method: &'a Method,
     pub(super) path: Option<&'a str>,
     pub(super) request_uri: &'a str,
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) route: &'a HttpRoute,
     pub(super) selected_policy: &'a EffectivePolicyContext,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
-    pub(super) sanitized_headers: Option<&'a http::HeaderMap>,
+    pub(super) sanitized_headers: Option<&'a Headers>,
     pub(super) request_destination: &'a crate::destination::DestinationMetadata,
 }
 
 pub(super) type ReverseModuleOutcome = ReverseStageOutcome<ReverseModuleDispatch>;
 
 pub(super) struct ReverseModuleDispatch {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) http_modules: crate::http::modules::HttpModuleExecution,
     pub(super) request_cache_policy: Option<qpx_core::config::CachePolicyConfig>,
 }
 
 pub(super) struct ReverseModuleInput<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) state: &'a Arc<runtime::RuntimeState>,
     pub(super) selected_policy: &'a EffectivePolicyContext,
     pub(super) conn: &'a ReverseConnInfo,
@@ -168,8 +169,8 @@ pub(super) struct ReverseModuleInput<'a> {
 pub(super) type ReverseCacheOutcome = ReverseStageOutcome<ReverseCacheState>;
 
 pub(super) struct ReverseCacheState {
-    pub(super) req: Request<Body>,
-    pub(super) request_headers_snapshot: Option<http::HeaderMap>,
+    pub(super) req: OwnerRequest<Body>,
+    pub(super) request_headers_snapshot: Option<OwnerRequest<()>>,
     pub(super) cache_lookup_key: Option<CacheRequestKey>,
     pub(super) cache_target_key: Option<CacheRequestKey>,
     pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
@@ -177,7 +178,7 @@ pub(super) struct ReverseCacheState {
 }
 
 pub(super) struct ReverseCacheInput<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) runtime: &'a Runtime,
     pub(super) state: &'a Arc<runtime::RuntimeState>,
     pub(super) route: &'a HttpRoute,
@@ -197,14 +198,14 @@ pub(super) struct ReverseCacheInput<'a> {
 
 pub(super) struct ReverseRetryDispatch {
     pub(super) attempts: usize,
-    pub(super) first_request: Option<Request<Body>>,
+    pub(super) first_request: Option<OwnerRequest<Body>>,
     pub(super) template: Option<ReverseRequestTemplate>,
     pub(super) replay_recorder: Option<ReverseReplayRecorder>,
     pub(super) mirror_upstreams: Vec<SelectedMirrorTarget>,
 }
 
 pub(super) struct ReverseRetryPrepareInput<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) route: &'a HttpRoute,
     pub(super) state: &'a runtime::RuntimeState,
     pub(super) request_method: &'a Method,
@@ -230,12 +231,12 @@ pub(super) struct ReverseHttpDispatchInput<'a> {
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
-    pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<&'a OwnerRequest<()>>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) cache_target_key: Option<&'a CacheRequestKey>,
     pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
     pub(super) cache_collapse_guard: Option<qpxd_cache::RequestCollapseGuard>,
-    pub(super) first_request: Option<Request<Body>>,
+    pub(super) first_request: Option<OwnerRequest<Body>>,
     pub(super) template: Option<ReverseRequestTemplate>,
     pub(super) replay_recorder: Option<ReverseReplayRecorder>,
     pub(super) mirror_upstreams: Vec<SelectedMirrorTarget>,
@@ -267,12 +268,12 @@ pub(super) struct ReverseIpcDispatchInput<'a> {
         Option<&'a qpx_core::ipc::meta::AuthorizationDecisionContext>,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
-    pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<&'a OwnerRequest<()>>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) cache_target_key: Option<&'a CacheRequestKey>,
     pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
     pub(super) cache_collapse_guard: Option<qpxd_cache::RequestCollapseGuard>,
-    pub(super) first_request: Option<Request<Body>>,
+    pub(super) first_request: Option<OwnerRequest<Body>>,
     pub(super) template: Option<ReverseRequestTemplate>,
     pub(super) replay_recorder: Option<ReverseReplayRecorder>,
     pub(super) mirror_upstreams: Vec<SelectedMirrorTarget>,
@@ -286,7 +287,7 @@ pub(super) struct ReverseIpcDispatchInput<'a> {
 }
 
 pub(super) struct ReversePostModuleInput<'a> {
-    pub(super) req: Request<Body>,
+    pub(super) req: OwnerRequest<Body>,
     pub(super) http_modules: crate::http::modules::HttpModuleExecution,
     pub(super) request_cache_policy: Option<qpx_core::config::CachePolicyConfig>,
     pub(super) base: &'a BaseRequestFields,
@@ -355,7 +356,7 @@ pub(super) struct ReverseSuccessInput<'a> {
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
-    pub(super) request_headers_snapshot: Option<&'a http::HeaderMap>,
+    pub(super) request_headers_snapshot: Option<&'a OwnerRequest<()>>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
     pub(super) cache_target_key: Option<&'a CacheRequestKey>,
     pub(super) revalidation_state: &'a mut Option<qpxd_cache::RevalidationState>,

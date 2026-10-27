@@ -11,7 +11,7 @@ use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::forbidden_response as forbidden;
 use crate::http::protocol::common::{
     blocked_response as blocked, connect_established_response as connect_established,
-    http_version_label, too_many_requests_response as too_many_requests,
+    too_many_requests_response as too_many_requests,
 };
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::policy_context::{
@@ -23,10 +23,11 @@ use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::upstream::connect::connect_tunnel_target;
 use crate::upstream::io_copy::BandwidthThrottle;
-use ::http::{Method, Request, Response, StatusCode};
+use ::http::{Method, Response, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
 use std::net::SocketAddr;
@@ -76,7 +77,7 @@ pub(super) fn acquire_initial_connect_rate_limit(
 }
 
 pub(super) async fn handle_connect(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     runtime: Runtime,
     listener_name: &str,
     remote_addr: SocketAddr,
@@ -153,7 +154,7 @@ pub(super) async fn handle_connect(
         host: host.as_str(),
         path: None,
         authority: authority.as_str(),
-        http_version: http_version_label(req_version),
+        http_version: req_version,
         alpn: None,
         destination: &destination,
         headers: &sanitized_headers,
@@ -423,6 +424,7 @@ pub(super) async fn handle_connect(
                             host,
                             port,
                             authority: authority_for_task,
+                            request_version: req_version,
                             sanitized_headers: sanitized_headers_for_task,
                             identity: identity_for_task,
                             initial_action: action_for_task,
@@ -488,6 +490,7 @@ pub(super) async fn handle_connect(
                         host,
                         port,
                         authority: authority_for_task,
+                        request_version: req_version,
                         sanitized_headers: sanitized_headers_for_task,
                         identity: identity_for_task,
                         initial_action: action_for_task,

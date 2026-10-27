@@ -46,7 +46,7 @@ const DECODER_INSTRUCTION_QUEUE_DEPTH: usize = 1024;
 
 #[derive(Debug)]
 pub(crate) struct DecodedRequestHead {
-    pub(crate) request: http::Request<()>,
+    pub(crate) request: qpx_core::http_message::Request<()>,
     pub(crate) protocol: Option<String>,
 }
 

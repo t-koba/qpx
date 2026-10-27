@@ -8,7 +8,7 @@ use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) async fn prepare_cors_preflight(
-    request_headers: http::HeaderMap,
+    request_headers: qpx_core::http_message::Headers,
     request_version: http::Version,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,

@@ -1,8 +1,13 @@
 use super::types::{
     ByteRangeSpec, CachedResponseEnvelope, IfRangeCondition, RequestDirectives, ResponseDirectives,
 };
-use http::header::{AGE, DATE, EXPIRES, IF_NONE_MATCH};
+use http::header::{AGE, DATE, EXPIRES};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_message::{Headers as OwnedHeaders, OrdinaryHeaderName};
+
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}
 
 pub fn current_age_secs(envelope: &CachedResponseEnvelope, now_ms: u64) -> u64 {
     let resident_ms = now_ms.saturating_sub(envelope.stored_at_ms);
@@ -127,9 +132,9 @@ pub fn active_range<'a>(
     Some(range)
 }
 
-pub fn parse_if_none_match(headers: &http::HeaderMap) -> Vec<String> {
+pub fn parse_if_none_match(headers: &OwnedHeaders) -> Vec<String> {
     let mut out = Vec::new();
-    for value in headers.get_all(IF_NONE_MATCH).iter() {
+    for value in headers.get_all(&ord("if-none-match")) {
         let Ok(raw) = value.to_str() else {
             continue;
         };

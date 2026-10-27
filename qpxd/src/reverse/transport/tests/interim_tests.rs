@@ -108,13 +108,15 @@ async fn handle_request_with_interim_returns_early_hints_for_h2_downstream() {
         StdArc::<str>::from("reverse_upstreams_unhealthy"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("/asset")
-        .header("host", "reverse.test")
-        .version(http::Version::HTTP_2)
-        .body(Body::empty())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header("host", "reverse.test")
+            .version(http::Version::HTTP_2)
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     let (interim, response) = handle_request_with_interim(
         request,
@@ -248,13 +250,15 @@ async fn handle_request_with_interim_returns_early_hints_for_h1_downstream() {
         StdArc::<str>::from("reverse_upstreams_unhealthy"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::GET)
-        .uri("/asset")
-        .header("host", "reverse.test")
-        .version(http::Version::HTTP_11)
-        .body(Body::empty())
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/asset")
+            .header("host", "reverse.test")
+            .version(http::Version::HTTP_11)
+            .body(Body::empty())
+            .expect("request"),
+    );
 
     let (interim, response) = handle_request_with_interim(
         request,

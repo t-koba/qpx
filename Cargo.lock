@@ -2868,6 +2868,7 @@ dependencies = [
  "libc",
  "parking_lot",
  "percent-encoding",
+ "qpx-core",
  "quick-xml",
  "redb",
  "serde",

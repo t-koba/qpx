@@ -45,7 +45,7 @@ struct CacheHitFastPath {
     namespace: Arc<str>,
     backend: Arc<dyn qpxd_cache::CacheBackend>,
     key: qpxd_cache::CacheRequestKey,
-    headers: http::HeaderMap,
+    snapshot: qpx_core::http_message::Request<()>,
     miss: Option<RawCacheMissDispatch>,
 }
 
@@ -469,6 +469,19 @@ fn build_raw_cache_hit_fast_path(
     let normalized_authority = qpxd_cache::normalize_authority(host_header, scheme)?;
     let namespace = Arc::from(qpxd_cache::cache_namespace(policy, "default"));
     let parsed_headers = crate::http::codec::h1_common::parse_header_map(headers).ok()?;
+    // Owned cache-metadata snapshot at the genuine H1 codec boundary. The raw
+    // parser/serializer bytes, eligibility and reuse behaviour above are
+    // unchanged; only the cache lookup/store head is owned. The snapshot
+    // carries `()` so `&snapshot` stays `Send` across cache awaits.
+    let snapshot = {
+        let uri = target.parse::<http::Uri>().ok()?;
+        let mut raw = Request::new(());
+        *raw.method_mut() = Method::GET;
+        *raw.uri_mut() = uri;
+        *raw.version_mut() = Version::HTTP_11;
+        *raw.headers_mut() = parsed_headers;
+        qpx_core::http_message::Request::from_http(raw)
+    };
     // Misses are served through the same raw origin machinery as plain
     // upstream dispatch; if the origin cannot be prepared, misses fall back
     // to the generic chain while hot hits keep working.
@@ -482,7 +495,7 @@ fn build_raw_cache_hit_fast_path(
             normalized_authority,
             target.to_string(),
         ),
-        headers: parsed_headers,
+        snapshot,
         miss,
     })
 }
@@ -576,8 +589,12 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     }
     if let Some(request) = prepared.generic_request() {
         session.release();
-        let (interim, response) =
-            super::handle_request_with_interim_ref(request, reverse, conn).await?;
+        let (interim, response) = super::handle_request_with_interim_ref(
+            qpx_core::http_message::Request::from_http(request),
+            reverse,
+            conn,
+        )
+        .await?;
         let mut response = response;
         if let Some(body) = take_in_memory_body(&interim, &mut response) {
             let (parts, _) = response.into_parts();
@@ -716,8 +733,7 @@ async fn dispatch_raw_cache_miss(
         return Ok(None);
     }
     let outcome = qpxd_cache::lookup(
-        &prepared.method,
-        &fast.headers,
+        &fast.snapshot,
         &fast.key,
         &miss.cache_policy,
         &prepared.state.cache.backends,
@@ -802,8 +818,7 @@ async fn serve_raw_cache_miss(
         false,
     );
     let mut response = qpxd_cache::maybe_store(
-        &prepared.method,
-        &fast.headers,
+        &fast.snapshot,
         &fast.key,
         &miss.cache_policy,
         response,
@@ -1539,10 +1554,17 @@ mod tests {
         };
 
         // Reference: the generic lookup on the same key.
-        let snapshot_headers = HeaderMap::from_iter([(
-            http::header::HOST,
-            http::HeaderValue::from_static("bench.local"),
-        )]);
+        let snapshot_request = qpx_core::http_message::Request::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("/bench-1")
+                .header(
+                    http::header::HOST,
+                    http::HeaderValue::from_static("bench.local"),
+                )
+                .body(())
+                .expect("snapshot request"),
+        );
         let reference_policy = qpx_core::config::CachePolicyConfig {
             enabled: true,
             backend: "disk".to_string(),
@@ -1553,8 +1575,7 @@ mod tests {
             allow_authorization_without_vary_store: false,
         };
         let reference = qpxd_cache::lookup(
-            &Method::GET,
-            &snapshot_headers,
+            &snapshot_request,
             &fast.key,
             &reference_policy,
             &prepared.state.cache.backends,

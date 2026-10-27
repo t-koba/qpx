@@ -222,7 +222,7 @@ pub(crate) struct DecisionServiceInput<'a> {
     pub(crate) matched_rule: Option<&'a str>,
     pub(crate) matched_route: Option<&'a str>,
     pub(crate) action: Option<&'a ActionConfig>,
-    pub(crate) headers: Option<&'a HeaderMap>,
+    pub(crate) headers: Option<&'a qpx_core::http_message::Headers>,
     pub(crate) identity: &'a ResolvedIdentity,
 }
 
@@ -454,7 +454,7 @@ async fn decision_service_round_trip(
             timeout(cfg.timeout, async {
                 let response = crate::upstream::origin::shared_reverse_https_request_with_trust(
                     pools,
-                    request,
+                    qpx_core::http_message::Request::from_http(request),
                     cfg.upstream_trust.as_deref(),
                 )
                 .await?;
@@ -561,7 +561,7 @@ async fn fetch_oauth2_client_credentials_token(
             timeout(cfg.timeout, async {
                 crate::upstream::origin::shared_reverse_https_request_with_trust(
                     pools,
-                    request,
+                    qpx_core::http_message::Request::from_http(request),
                     cfg.upstream_trust.as_deref(),
                 )
                 .await
@@ -1329,7 +1329,7 @@ fn builtin_effect_capability_value(
 
 fn build_selected_headers(
     cfg: &CompiledDecisionService,
-    headers: Option<&HeaderMap>,
+    headers: Option<&qpx_core::http_message::Headers>,
 ) -> Map<String, Value> {
     let mut selected = selected_headers_map(headers, &cfg.selected_headers);
     for forbidden in ["authorization", "proxy-authorization", "cookie"] {

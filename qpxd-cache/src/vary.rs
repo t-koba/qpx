@@ -1,4 +1,5 @@
-use qpx_core::http_content_length::{HeaderView, VarySelector};
+use qpx_core::http_content_length::VarySelector;
+use qpx_core::http_message::OwnedHeaderView;
 
 use super::types::{CachedResponseEnvelope, VarySpec};
 
@@ -31,7 +32,7 @@ pub fn parse_vary(headers: &http::HeaderMap) -> VarySpec {
 }
 
 pub fn vary_values_from_request_headers(
-    request_headers: HeaderView<'_>,
+    request_headers: OwnedHeaderView<'_>,
     vary_headers: &[String],
 ) -> Option<Vec<(String, VarySelector)>> {
     let mut out = Vec::with_capacity(vary_headers.len());
@@ -54,12 +55,12 @@ pub fn vary_values_from_request_headers(
 /// comma-joined trimmed values. `\x00`/`\x01` never appear in `to_str`
 /// output (visible ASCII only), so the sentinel cannot collide with a real
 /// value, nor with legacy `""` entries (which now safely miss).
-pub fn request_header_values(headers: HeaderView<'_>, name: &str) -> Option<VarySelector> {
+pub fn request_header_values(headers: OwnedHeaderView<'_>, name: &str) -> Option<VarySelector> {
     headers.vary_selector(name)
 }
 
 pub fn matches_vary(
-    request_headers: HeaderView<'_>,
+    request_headers: OwnedHeaderView<'_>,
     content_digest: Option<&str>,
     envelope: &CachedResponseEnvelope,
 ) -> bool {
@@ -91,14 +92,24 @@ pub fn index_storage_key(primary: &str) -> String {
 mod tests {
     use super::*;
 
-    fn header_map(pairs: &[(&str, Vec<Vec<u8>>)]) -> http::HeaderMap {
-        let mut map = http::HeaderMap::new();
+    fn header_map(pairs: &[(&str, Vec<Vec<u8>>)]) -> qpx_core::http_message::Headers {
+        use qpx_core::http_message::OrdinaryHeaderName;
+        let mut map = qpx_core::http_message::Headers::new();
         for (name, values) in pairs {
-            for v in values.iter() {
-                map.append(
-                    http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
-                    http::HeaderValue::from_bytes(v.as_slice()).unwrap(),
-                );
+            if name.eq_ignore_ascii_case("content-length") {
+                for v in values.iter() {
+                    map.append_content_length_value(
+                        http::HeaderValue::from_bytes(v.as_slice()).unwrap(),
+                    );
+                }
+            } else {
+                let ord = OrdinaryHeaderName::try_from(*name).expect("ordinary test header name");
+                for v in values.iter() {
+                    map.append(
+                        ord.clone(),
+                        http::HeaderValue::from_bytes(v.as_slice()).unwrap(),
+                    );
+                }
             }
         }
         map
@@ -124,76 +135,58 @@ mod tests {
     #[test]
     fn obs_text_selector_is_unrepresentable_so_store_is_refused() {
         let stored_headers = header_map(&[("x-tenant", vec![vec![0x80]])]);
-        assert!(request_header_values(HeaderView::new(&stored_headers), "x-tenant").is_none());
+        assert!(request_header_values(stored_headers.view(), "x-tenant").is_none());
         assert!(
-            vary_values_from_request_headers(
-                HeaderView::new(&stored_headers),
-                &["x-tenant".to_string()]
-            )
-            .is_none()
+            vary_values_from_request_headers(stored_headers.view(), &["x-tenant".to_string()])
+                .is_none()
         );
     }
 
     #[test]
     fn unrepresentable_selector_refuses_store_and_hit() {
         let stored = header_map(&[("x-tenant", vec![b"a".to_vec()])]);
-        let values =
-            vary_values_from_request_headers(HeaderView::new(&stored), &["x-tenant".to_string()])
-                .expect("ascii stores");
+        let values = vary_values_from_request_headers(stored.view(), &["x-tenant".to_string()])
+            .expect("ascii stores");
         let envelope = envelope_with(values);
         // Distinct obs-text value must not hit.
         let other = header_map(&[("x-tenant", vec![vec![0x81]])]);
-        assert!(!matches_vary(HeaderView::new(&other), None, &envelope));
+        assert!(!matches_vary(other.view(), None, &envelope));
         // Absent selector must not hit a present-value variant.
         let absent = header_map(&[]);
-        assert!(!matches_vary(HeaderView::new(&absent), None, &envelope));
+        assert!(!matches_vary(absent.view(), None, &envelope));
         // The obs-text request itself must not hit either (fail-closed).
         let obs = header_map(&[("x-tenant", vec![vec![0x80]])]);
-        assert!(!matches_vary(HeaderView::new(&obs), None, &envelope));
+        assert!(!matches_vary(obs.view(), None, &envelope));
     }
 
     #[test]
     fn present_empty_does_not_match_absence() {
         let present_empty = header_map(&[("x-tenant", vec![b"".to_vec()])]);
         let absent = header_map(&[]);
-        let present_enc =
-            request_header_values(HeaderView::new(&present_empty), "x-tenant").unwrap();
-        let absent_enc = request_header_values(HeaderView::new(&absent), "x-tenant").unwrap();
+        let present_enc = request_header_values(present_empty.view(), "x-tenant").unwrap();
+        let absent_enc = request_header_values(absent.view(), "x-tenant").unwrap();
         assert_ne!(present_enc, absent_enc);
         let envelope = envelope_with(vec![("x-tenant".to_string(), present_enc)]);
-        assert!(!matches_vary(HeaderView::new(&absent), None, &envelope));
-        assert!(matches_vary(
-            HeaderView::new(&present_empty),
-            None,
-            &envelope
-        ));
+        assert!(!matches_vary(absent.view(), None, &envelope));
+        assert!(matches_vary(present_empty.view(), None, &envelope));
         let envelope_absent = envelope_with(vec![("x-tenant".to_string(), absent_enc)]);
-        assert!(matches_vary(
-            HeaderView::new(&absent),
-            None,
-            &envelope_absent
-        ));
-        assert!(!matches_vary(
-            HeaderView::new(&present_empty),
-            None,
-            &envelope_absent
-        ));
+        assert!(matches_vary(absent.view(), None, &envelope_absent));
+        assert!(!matches_vary(present_empty.view(), None, &envelope_absent));
     }
 
     #[test]
     fn mixed_ascii_and_obs_text_selector_is_unrepresentable() {
         let mixed = header_map(&[("x-tenant", vec![b"en".to_vec(), vec![0x80]])]);
-        assert!(request_header_values(HeaderView::new(&mixed), "x-tenant").is_none());
+        assert!(request_header_values(mixed.view(), "x-tenant").is_none());
         assert!(
-            vary_values_from_request_headers(HeaderView::new(&mixed), &["x-tenant".to_string()])
-                .is_none()
+            vary_values_from_request_headers(mixed.view(), &["x-tenant".to_string()]).is_none()
         );
     }
 
     #[test]
     fn invalid_name_refuses_store_and_hit() {
-        let headers = http::HeaderMap::new();
-        let view = HeaderView::new(&headers);
+        let headers = qpx_core::http_message::Headers::new();
+        let view = headers.view();
         for name in ["", "bad name", "x-tenant:"] {
             assert_eq!(request_header_values(view, name), None);
             assert!(vary_values_from_request_headers(view, &[name.to_string()]).is_none());
@@ -213,19 +206,19 @@ mod tests {
                 b" a, b ".to_vec(),
             ],
         )]);
-        let view = HeaderView::new(&headers);
+        let view = headers.view();
         assert_eq!(
             request_header_values(view, "X-Tenant"),
             Some("\x01second,,first,a, b".to_owned().into())
         );
         let empty = header_map(&[("x-tenant", vec![b"".to_vec()])]);
-        let absent = http::HeaderMap::new();
+        let absent = qpx_core::http_message::Headers::new();
         assert_eq!(
-            request_header_values(HeaderView::new(&empty), "x-tenant"),
+            request_header_values(empty.view(), "x-tenant"),
             Some("\x01".to_owned().into())
         );
         assert_eq!(
-            request_header_values(HeaderView::new(&absent), "x-tenant"),
+            request_header_values(absent.view(), "x-tenant"),
             Some("\x00".to_owned().into())
         );
     }
@@ -234,14 +227,13 @@ mod tests {
     fn any_obs_text_duplicate_refuses_store_and_hit() {
         let clean = header_map(&[("x-tenant", vec![b"ascii".to_vec(), b"ascii".to_vec()])]);
         let fields = ["x-tenant".to_string()];
-        let envelope = envelope_with(
-            vary_values_from_request_headers(HeaderView::new(&clean), &fields).unwrap(),
-        );
+        let envelope =
+            envelope_with(vary_values_from_request_headers(clean.view(), &fields).unwrap());
         for position in 0..3 {
             let mut values = vec![b"ascii".to_vec(); 3];
             values[position] = vec![0x80];
             let headers = header_map(&[("x-tenant", values)]);
-            let view = HeaderView::new(&headers);
+            let view = headers.view();
             assert!(vary_values_from_request_headers(view, &fields).is_none());
             assert!(!matches_vary(view, None, &envelope));
         }
@@ -275,8 +267,7 @@ mod tests {
                 "content-length",
                 values.iter().map(|s| s.as_bytes().to_vec()).collect(),
             )]);
-            let selectors =
-                vary_values_from_request_headers(HeaderView::new(&headers), &fields).unwrap();
+            let selectors = vary_values_from_request_headers(headers.view(), &fields).unwrap();
             let encoded = expected.map_or_else(|| "\x00".to_owned(), |text| format!("\x01{text}"));
             assert_eq!(
                 selectors,
@@ -287,10 +278,7 @@ mod tests {
         }
         for (i, (headers, _, key)) in variants.iter().enumerate() {
             for (j, (_, envelope, other_key)) in variants.iter().enumerate() {
-                assert_eq!(
-                    matches_vary(HeaderView::new(headers), None, envelope),
-                    i == j
-                );
+                assert_eq!(matches_vary(headers.view(), None, envelope), i == j);
                 assert_eq!(key == other_key, i == j);
             }
         }
@@ -302,22 +290,21 @@ mod tests {
             let single = header_map(&[(name, vec![b"a,b".to_vec()])]);
             let duplicate = header_map(&[(name, vec![b" a ".to_vec(), b" b ".to_vec()])]);
             let fields = [name.to_string()];
-            let single_values =
-                vary_values_from_request_headers(HeaderView::new(&single), &fields).unwrap();
+            let single_values = vary_values_from_request_headers(single.view(), &fields).unwrap();
             let duplicate_values =
-                vary_values_from_request_headers(HeaderView::new(&duplicate), &fields).unwrap();
+                vary_values_from_request_headers(duplicate.view(), &fields).unwrap();
             assert_eq!(single_values, duplicate_values);
             assert_eq!(
                 variant_storage_key("primary", &single_values),
                 variant_storage_key("primary", &duplicate_values)
             );
             assert!(matches_vary(
-                HeaderView::new(&single),
+                single.view(),
                 None,
                 &envelope_with(duplicate_values)
             ));
             assert!(matches_vary(
-                HeaderView::new(&duplicate),
+                duplicate.view(),
                 None,
                 &envelope_with(single_values)
             ));
@@ -328,16 +315,15 @@ mod tests {
     fn content_length_obs_text_in_any_occurrence_refuses_store_and_hit() {
         let fields = ["CoNtEnT-LeNgTh".to_owned()];
         let clean = header_map(&[("content-length", vec![b"42".to_vec()])]);
-        let envelope = envelope_with(
-            vary_values_from_request_headers(HeaderView::new(&clean), &fields).unwrap(),
-        );
+        let envelope =
+            envelope_with(vary_values_from_request_headers(clean.view(), &fields).unwrap());
         for values in [
             vec![vec![0x80]],
             vec![b"42".to_vec(), vec![0x80]],
             vec![vec![0x80], b"42".to_vec()],
         ] {
             let headers = header_map(&[("content-length", values)]);
-            let view = HeaderView::new(&headers);
+            let view = headers.view();
             assert!(vary_values_from_request_headers(view, &fields).is_none());
             assert!(!matches_vary(view, None, &envelope));
         }
@@ -362,8 +348,7 @@ mod tests {
                 ("x-tenant", vec![b" a=b|c ".to_vec()]),
             ]);
             let fields = vec!["content-length".to_owned(), "x-tenant".to_owned()];
-            let mut selectors =
-                vary_values_from_request_headers(HeaderView::new(&headers), &fields).unwrap();
+            let mut selectors = vary_values_from_request_headers(headers.view(), &fields).unwrap();
             selectors.push(("@query-content".to_owned(), "digest-a".to_owned().into()));
             let mut envelope = envelope_with(selectors.clone());
             envelope.vary_headers = fields;
@@ -406,23 +391,15 @@ mod tests {
                 variant_storage_key("primary", &restarted.vary_values),
                 legacy_key
             );
-            assert!(matches_vary(
-                HeaderView::new(&headers),
-                Some("digest-a"),
-                &restarted
-            ));
-            assert!(!matches_vary(
-                HeaderView::new(&headers),
-                Some("digest-b"),
-                &restarted
-            ));
-            assert!(!matches_vary(HeaderView::new(&headers), None, &restarted));
+            assert!(matches_vary(headers.view(), Some("digest-a"), &restarted));
+            assert!(!matches_vary(headers.view(), Some("digest-b"), &restarted));
+            assert!(!matches_vary(headers.view(), None, &restarted));
         }
         assert_eq!(variant_storage_key("primary", &[]), "obj:primary:default");
         // Historical unsentinelled empty selectors must still miss, not mean absence.
         let legacy_empty = envelope_with(vec![("content-length".to_owned(), String::new().into())]);
         assert!(!matches_vary(
-            HeaderView::new(&http::HeaderMap::new()),
+            qpx_core::http_message::Headers::new().view(),
             None,
             &legacy_empty
         ));
@@ -431,7 +408,7 @@ mod tests {
     #[test]
     fn query_content_selector_still_matches_digest_not_a_header() {
         let headers = header_map(&[("x-tenant", vec![b"a".to_vec()])]);
-        let view = HeaderView::new(&headers);
+        let view = headers.view();
         let mut selectors =
             vary_values_from_request_headers(view, &["x-tenant".to_string()]).unwrap();
         selectors.push(("@query-content".to_string(), "digest-a".to_string().into()));
@@ -439,12 +416,8 @@ mod tests {
         assert!(matches_vary(view, Some("digest-a"), &envelope));
         assert!(!matches_vary(view, Some("digest-b"), &envelope));
         assert!(!matches_vary(view, None, &envelope));
-        let absent = http::HeaderMap::new();
-        assert!(!matches_vary(
-            HeaderView::new(&absent),
-            Some("digest-a"),
-            &envelope
-        ));
+        let absent = qpx_core::http_message::Headers::new();
+        assert!(!matches_vary(absent.view(), Some("digest-a"), &envelope));
     }
 
     #[test]

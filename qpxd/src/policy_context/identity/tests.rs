@@ -111,8 +111,12 @@ fn sanitize_strips_untrusted_headers() {
         identity_sources: vec!["headers".into()],
         decision_service: None,
     };
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert("x-user", "alice".parse().unwrap());
+    let mut headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     sanitize_headers_for_policy(
         &state,
         &policy,
@@ -120,7 +124,7 @@ fn sanitize_strips_untrusted_headers() {
         &mut headers,
     )
     .unwrap();
-    assert!(!headers.contains_key("x-user"));
+    assert!(!headers.contains_key(&OrdinaryHeaderName::try_from("x-user").unwrap()));
 }
 
 #[test]
@@ -133,9 +137,13 @@ fn sanitize_strips_global_untrusted_headers_even_when_policy_does_not_use_source
         identity_sources: Vec::new(),
         decision_service: None,
     };
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert("x-user", "alice".parse().unwrap());
     headers.insert("x-groups", "eng".parse().unwrap());
+    let mut headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     sanitize_headers_for_policy(
         &state,
         &policy,
@@ -143,8 +151,8 @@ fn sanitize_strips_global_untrusted_headers_even_when_policy_does_not_use_source
         &mut headers,
     )
     .unwrap();
-    assert!(!headers.contains_key("x-user"));
-    assert!(!headers.contains_key("x-groups"));
+    assert!(!headers.contains_key(&OrdinaryHeaderName::try_from("x-user").unwrap()));
+    assert!(!headers.contains_key(&OrdinaryHeaderName::try_from("x-groups").unwrap()));
 }
 
 #[test]
@@ -157,8 +165,12 @@ fn sanitize_preserves_trusted_headers() {
         identity_sources: vec!["headers".into()],
         decision_service: None,
     };
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert("x-user", "alice".parse().unwrap());
+    let mut headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     sanitize_headers_for_policy(
         &state,
         &policy,
@@ -166,7 +178,12 @@ fn sanitize_preserves_trusted_headers() {
         &mut headers,
     )
     .unwrap();
-    assert_eq!(headers.get("x-user").unwrap(), "alice");
+    assert_eq!(
+        headers
+            .get(&OrdinaryHeaderName::try_from("x-user").unwrap())
+            .unwrap(),
+        "alice"
+    );
 }
 
 #[test]
@@ -179,8 +196,12 @@ fn sanitize_strips_header_untrusted_by_any_declaring_source() {
         identity_sources: vec!["trusted-for-peer".into()],
         decision_service: None,
     };
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert("x-user", "alice".parse().unwrap());
+    let mut headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     sanitize_headers_for_policy(
         &state,
         &policy,
@@ -188,7 +209,7 @@ fn sanitize_strips_header_untrusted_by_any_declaring_source() {
         &mut headers,
     )
     .unwrap();
-    assert!(!headers.contains_key("x-user"));
+    assert!(!headers.contains_key(&OrdinaryHeaderName::try_from("x-user").unwrap()));
 }
 
 #[test]
@@ -201,7 +222,10 @@ fn sanitize_empty_headers() {
         identity_sources: vec!["headers".into()],
         decision_service: None,
     };
-    let mut headers = HeaderMap::new();
+    let request = http::Request::new(());
+    let mut headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     sanitize_headers_for_policy(
         &state,
         &policy,
@@ -209,7 +233,8 @@ fn sanitize_empty_headers() {
         &mut headers,
     )
     .unwrap();
-    assert!(headers.is_empty());
+    assert!(headers.iter().next().is_none());
+    assert!(!headers.contains_content_length());
 }
 
 #[tokio::test]
@@ -222,11 +247,15 @@ async fn resolve_identity_extracts_trusted_headers() {
         identity_sources: vec!["headers".into()],
         decision_service: None,
     };
-    let mut headers = HeaderMap::new();
+    let mut request = http::Request::new(());
+    let headers = request.headers_mut();
     headers.insert("x-user", "alice".parse().unwrap());
     headers.append("x-groups", "eng, ops, eng".parse().unwrap());
     headers.append("x-groups", ", ops, ".parse().unwrap());
     headers.append("x-groups", http::HeaderValue::from_bytes(b"\xff").unwrap());
+    let headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
     let identity = resolve_identity(
         &state,
         &policy,
@@ -239,4 +268,37 @@ async fn resolve_identity_extracts_trusted_headers() {
     assert_eq!(identity.user.as_deref(), Some("alice"));
     assert_eq!(identity.groups, vec!["eng".to_string(), "ops".to_string()]);
     assert_eq!(identity.identity_source.as_deref(), Some("headers"));
+}
+
+#[tokio::test]
+async fn trusted_identity_uses_configured_content_length_literal_values() {
+    let mut source = trusted_headers_source("literal", vec!["127.0.0.1/32"]);
+    let fields = source.headers.as_mut().unwrap();
+    fields.user = Some("Content-Length".into());
+    fields.groups = Some("content-length".into());
+    let state = runtime_with_sources(vec![source]);
+    let policy = EffectivePolicyContext {
+        identity_sources: vec!["literal".into()],
+        decision_service: None,
+    };
+    let mut ingress = http::Request::new(());
+    for value in [&b"\xff"[..], b" ", b" 007, 7, 007, A, a ", b"8, A"] {
+        ingress.headers_mut().append(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_bytes(value).unwrap(),
+        );
+    }
+    let request = qpx_core::http_message::Request::from_http(ingress);
+    let identity = resolve_identity(
+        &state,
+        &policy,
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        Some(request.headers()),
+        None,
+    )
+    .await
+    .unwrap();
+    assert_eq!(identity.user.as_deref(), Some("007, 7, 007, A, a"));
+    assert_eq!(identity.groups, ["007", "7", "A", "a", "8"]);
+    assert_eq!(identity.identity_source.as_deref(), Some("literal"));
 }

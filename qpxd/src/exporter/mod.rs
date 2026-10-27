@@ -4,9 +4,10 @@ use crate::http::body::size::{
 use crate::http::protocol::common::http_version_label;
 use anyhow::Result;
 use bytes::Bytes;
-use hyper::{Request, Response};
+use hyper::Response;
 use qpx_core::config::ExporterConfig;
 use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane, unix_timestamp_nanos};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::shm_ring::ShmRingBuffer;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -380,7 +381,7 @@ fn should_include_export_preview_header(name: &str) -> bool {
 }
 
 pub(crate) fn serialize_request_preview_async(
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
 ) -> impl std::future::Future<Output = Vec<u8>> + Send + 'static {
     let method = req.method().clone();
     let uri = req.uri().clone();
@@ -399,18 +400,13 @@ pub(crate) fn serialize_request_preview_async(
         out.push(' ');
         out.push_str(http_version_label(version));
         out.push_str("\r\n");
-        for (name, value) in &headers {
-            let name = name.as_str();
-            if !should_include_export_preview_header(name) {
-                continue;
-            }
-            out.push_str(name);
-            out.push_str(": ");
-            if let Ok(text) = value.to_str() {
-                out.push_str(text);
-            }
-            out.push_str("\r\n");
-        }
+        let mut header_bytes = Vec::new();
+        headers.write_http_field_lines(&mut header_bytes, |name| {
+            should_include_export_preview_header(name.as_str())
+        });
+        // Header lines are ASCII field names with textual allowlisted values;
+        // lossy conversion preserves the byte-exact fixture for valid previews.
+        out.push_str(&String::from_utf8_lossy(&header_bytes));
         out.push_str("\r\n");
         if let Some(chunks) = body.await {
             push_utf8_preview_chunks(&mut out, &chunks);

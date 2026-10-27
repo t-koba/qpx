@@ -3,7 +3,7 @@ use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_reques
 use crate::policy_context::sanitize_headers_for_policy;
 use crate::reverse::ReloadableReverse;
 use crate::runtime::ResolvedStreamingLimits;
-use http::Request;
+use qpx_core::http_message::Request;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::tls::extract_upstream_certificate_info;
 use std::net::SocketAddr;

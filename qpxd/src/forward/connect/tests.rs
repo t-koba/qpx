@@ -1,16 +1,17 @@
-use super::extended::normalize_h2_upstream_connect_headers;
+use super::extended::prepare_h2_upstream_connect_request;
 use super::*;
 use crate::tls::TlsClientHelloInfo;
-use http::{HeaderMap, Uri};
+use http::Uri;
 use qpx_core::config::{
     AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CertificateMatchConfig,
     Config, IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MatchConfig, MessagesConfig,
     RuleConfig, RuntimeConfig, SystemLogConfig, TlsFingerprintMatchConfig,
 };
+use qpx_core::http_message::Headers;
 use qpx_core::tls::UpstreamCertificateInfo;
 
-fn connect_runtime() -> Runtime {
-    Runtime::new(Config {
+fn connect_config() -> Config {
+    Config {
         state_dir: None,
         identity: IdentityConfig::default(),
         messages: MessagesConfig::default(),
@@ -89,8 +90,11 @@ fn connect_runtime() -> Runtime {
         })],
         upstreams: Vec::new(),
         caches: Vec::new(),
-    })
-    .expect("runtime")
+    }
+}
+
+fn connect_runtime() -> Runtime {
+    Runtime::new(connect_config()).expect("runtime")
 }
 
 #[test]
@@ -109,7 +113,7 @@ fn connect_tls_fingerprint_requirement_uses_the_compiled_forward_plan() {
 #[tokio::test]
 async fn connect_client_hello_policy_can_upgrade_tunnel_to_inspect() {
     let runtime = connect_runtime();
-    let sanitized_headers = HeaderMap::new();
+    let sanitized_headers = Headers::new();
     let identity = crate::policy_context::ResolvedIdentity::default();
     let client_hello = TlsClientHelloInfo {
         sni: Some("example.com".to_string()),
@@ -125,6 +129,7 @@ async fn connect_client_hello_policy_can_upgrade_tunnel_to_inspect() {
         host: "example.com",
         port: 443,
         authority: "example.com:443",
+        request_version: http::Version::HTTP_11,
         sanitized_headers: &sanitized_headers,
         identity: &identity,
         client_hello: &client_hello,
@@ -133,6 +138,87 @@ async fn connect_client_hello_policy_can_upgrade_tunnel_to_inspect() {
     .await
     .expect("action");
     assert!(matches!(action.kind, ActionKind::Inspect));
+}
+
+#[tokio::test]
+async fn connect_client_hello_policy_uses_protocol_cookie_view() {
+    use http::{HeaderValue, Version, header::COOKIE};
+    use qpx_core::config::HeaderMatch;
+    use qpx_core::http_message::OrdinaryHeaderName;
+
+    let cookie_rule = |name: &str, value: &str, kind| RuleConfig {
+        name: name.into(),
+        r#match: Some(MatchConfig {
+            headers: vec![HeaderMatch {
+                name: "cookie".into(),
+                value: Some(value.into()),
+                regex: None,
+            }],
+            ..Default::default()
+        }),
+        auth: None,
+        action: Some(ActionConfig {
+            kind,
+            upstream: None,
+            local_response: None,
+        }),
+        headers: None,
+        rate_limit: None,
+    };
+    let mut config = connect_config();
+    let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0] else {
+        panic!("forward edge");
+    };
+    // Put the fragment first so an incorrect per-field H3 match wins instead.
+    edge.rules = vec![
+        cookie_rule("fragment", "a=1", ActionKind::Block),
+        cookie_rule("joined", "a=1; b=2", ActionKind::Direct),
+    ];
+    let runtime = Runtime::new(config).expect("runtime");
+    let name = OrdinaryHeaderName::try_from(COOKIE).unwrap();
+    let mut headers = Headers::new();
+    let mut first = HeaderValue::from_static("a=1");
+    first.set_sensitive(true);
+    headers.append(name.clone(), first);
+    headers.append(name.clone(), HeaderValue::from_static("b=2"));
+    let before = headers.clone();
+    let identity = crate::policy_context::ResolvedIdentity::default();
+    let client_hello = TlsClientHelloInfo {
+        sni: Some("example.com".into()),
+        alpn: Some("h2".into()),
+        tls_version: Some("tls1.3".into()),
+        ja3: None,
+        ja4: None,
+    };
+    for (version, expected) in [
+        (Version::HTTP_3, ActionKind::Direct),
+        (Version::HTTP_11, ActionKind::Block),
+    ] {
+        let action = decide_connect_action_from_client_hello(ConnectPolicyInput {
+            runtime: &runtime,
+            listener_name: "forward",
+            remote_addr: SocketAddr::from(([127, 0, 0, 1], 12345)),
+            host: "example.com",
+            port: 443,
+            authority: "example.com:443",
+            request_version: version,
+            sanitized_headers: &headers,
+            identity: &identity,
+            client_hello: &client_hello,
+            upstream_cert: None,
+        })
+        .await
+        .expect("action");
+        assert_eq!(action.kind, expected, "{version:?}");
+        assert_eq!(headers, before);
+        assert_eq!(
+            headers
+                .get_all(&name)
+                .map(|v| (v.as_bytes().to_vec(), v.is_sensitive()))
+                .collect::<Vec<_>>(),
+            vec![(b"a=1".to_vec(), true), (b"b=2".to_vec(), false)]
+        );
+    }
 }
 
 #[tokio::test]
@@ -214,7 +300,7 @@ async fn connect_upstream_cert_policy_can_block_after_client_hello() {
         caches: Vec::new(),
     })
     .expect("runtime");
-    let sanitized_headers = HeaderMap::new();
+    let sanitized_headers = Headers::new();
     let identity = crate::policy_context::ResolvedIdentity::default();
     let client_hello = TlsClientHelloInfo {
         sni: Some("example.com".to_string()),
@@ -235,6 +321,7 @@ async fn connect_upstream_cert_policy_can_block_after_client_hello() {
         host: "example.com",
         port: 443,
         authority: "example.com:443",
+        request_version: http::Version::HTTP_11,
         sanitized_headers: &sanitized_headers,
         identity: &identity,
         client_hello: &client_hello,
@@ -245,35 +332,47 @@ async fn connect_upstream_cert_policy_can_block_after_client_hello() {
     assert!(matches!(action.kind, ActionKind::Block));
 }
 
-#[tokio::test]
-async fn normalize_h2_upstream_connect_headers_strips_proxy_auth_and_adds_via() {
+#[test]
+fn prepare_h2_upstream_connect_request_strips_proxy_auth_and_adds_via() {
+    use qpx_core::http_message::{Headers, OrdinaryHeaderName};
+
     let uri: Uri = "https://example.com:443/chat".parse().expect("uri");
-    let mut headers = http::HeaderMap::new();
+    let mut headers = Headers::new();
     headers.insert(
-        http::header::PROXY_AUTHORIZATION,
+        OrdinaryHeaderName::try_from(http::header::PROXY_AUTHORIZATION).expect("ordinary"),
         http::HeaderValue::from_static("Basic abc"),
     );
     headers.insert(
-        http::header::CONNECTION,
+        OrdinaryHeaderName::try_from(http::header::CONNECTION).expect("ordinary"),
         http::HeaderValue::from_static("keep-alive"),
     );
 
-    let normalized = normalize_h2_upstream_connect_headers(&uri, &headers, "qpx").expect("headers");
+    let normalized = prepare_h2_upstream_connect_request(&uri, &headers, "qpx")
+        .expect("prepared CONNECT request");
+    assert_eq!(normalized.method(), http::Method::CONNECT);
+    assert_eq!(normalized.version(), http::Version::HTTP_2);
+    let normalized = normalized.headers();
     assert!(
         normalized
-            .get(::http::header::PROXY_AUTHORIZATION)
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::PROXY_AUTHORIZATION).expect("ordinary")
+            )
             .is_none()
     );
-    assert!(normalized.get(::http::header::CONNECTION).is_none());
+    assert!(
+        normalized
+            .get(&OrdinaryHeaderName::try_from(http::header::CONNECTION).expect("ordinary"))
+            .is_none()
+    );
     assert_eq!(
         normalized
-            .get(::http::header::VIA)
+            .get(&OrdinaryHeaderName::try_from(http::header::VIA).expect("ordinary"))
             .and_then(|value| value.to_str().ok()),
         Some("2 qpx")
     );
     assert_eq!(
         normalized
-            .get(::http::header::HOST)
+            .get(&OrdinaryHeaderName::try_from(http::header::HOST).expect("ordinary"))
             .and_then(|value| value.to_str().ok()),
         Some("example.com:443")
     );

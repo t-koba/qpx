@@ -1,7 +1,6 @@
 pub(super) mod parse;
 
 use crate::http::dispatch::{DispatchConnectRuleContextInput, build_dispatch_connect_rule_context};
-use crate::http::protocol::common::http_version_label;
 use qpx_core::rules::RuleMatchContext;
 
 /// The parts of an HTTP/3 CONNECT request that its rule context carries.
@@ -12,7 +11,7 @@ pub(super) struct H3ConnectRuleContextInput<'a> {
     pub(super) path: Option<&'a str>,
     pub(super) authority: &'a str,
     pub(super) destination: &'a crate::destination::DestinationMetadata,
-    pub(super) headers: &'a http::HeaderMap,
+    pub(super) headers: &'a qpx_core::http_message::Headers,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
 }
 
@@ -41,7 +40,7 @@ pub(super) fn build_h3_connect_rule_context<'a>(
         host,
         path,
         authority,
-        http_version: http_version_label(http::Version::HTTP_3),
+        http_version: http::Version::HTTP_3,
         alpn: Some("h3"),
         destination,
         headers,

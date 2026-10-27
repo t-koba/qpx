@@ -13,7 +13,8 @@ use crate::upstream::origin::{
     proxy_http_with_interim_timeout_on_connection,
 };
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
 use url::Url;
@@ -71,10 +72,10 @@ pub(super) async fn reverse_continue_response_rule(
 
 pub(super) async fn build_reverse_attempt_request(
     attempt_idx: usize,
-    first_request: &mut Option<Request<Body>>,
+    first_request: &mut Option<OwnerRequest<Body>>,
     template: Option<&ReverseRequestTemplate>,
     replay_recorder: Option<&ReverseReplayRecorder>,
-) -> Result<Request<Body>> {
+) -> Result<OwnerRequest<Body>> {
     if attempt_idx == 0 {
         return match first_request.take() {
             Some(req) => Ok(req),
@@ -102,7 +103,7 @@ pub(super) struct ReverseHttpAttemptTransport<'a> {
 
 pub(super) async fn proxy_reverse_http_attempt(
     pools: &crate::pool::PoolRegistry,
-    req_for_upstream: Request<Body>,
+    req_for_upstream: OwnerRequest<Body>,
     upstream_origin: &OriginEndpoint,
     request_version: http::Version,
     proxy_name: &str,
@@ -122,9 +123,12 @@ pub(super) async fn proxy_reverse_http_attempt(
         {
             let url = Url::parse(upstream_origin.upstream.as_str())
                 .map_err(|err| anyhow!("invalid ipc upstream url: {}", err))?;
+            let hyper_req = req_for_upstream
+                .into_http_for_codec()
+                .map_err(|err| anyhow!("{err}"))?;
             return Ok((
                 Vec::new(),
-                proxy_ipc(pools, req_for_upstream, &url, proxy_name).await?,
+                proxy_ipc(pools, hyper_req, &url, proxy_name).await?,
                 None,
             ));
         }

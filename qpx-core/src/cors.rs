@@ -1,6 +1,7 @@
 //! Compiled Cross-Origin Resource Sharing policy and request semantics.
 
 use crate::config::CorsConfig;
+use crate::http_message::{Headers, OrdinaryHeaderName};
 use http::header::{HeaderName, HeaderValue, ORIGIN, VARY};
 use http::{HeaderMap, Method};
 use std::collections::HashSet;
@@ -327,7 +328,7 @@ impl AllowedHeaders {
 
 impl CorsRequest {
     /// Parses CORS request fields. `Ok(None)` means no `Origin` field exists.
-    pub fn parse(method: &Method, headers: &HeaderMap) -> Result<Option<Self>, CorsRequestError> {
+    pub fn parse(method: &Method, headers: &Headers) -> Result<Option<Self>, CorsRequestError> {
         let Some(origin) = single_header(headers, ORIGIN.as_str())? else {
             return Ok(None);
         };
@@ -567,10 +568,12 @@ fn is_forbidden_method(method: &str) -> bool {
 }
 
 fn single_header<'a>(
-    headers: &'a HeaderMap,
+    headers: &'a Headers,
     name: &'static str,
 ) -> Result<Option<&'a HeaderValue>, CorsRequestError> {
-    let mut values = headers.get_all(name).iter();
+    let ordinary =
+        OrdinaryHeaderName::try_from(name).map_err(|_| CorsRequestError::InvalidHeaders)?;
+    let mut values = headers.get_all(&ordinary);
     let first = values.next();
     if values.next().is_some() {
         return Err(CorsRequestError::DuplicateField(name));
@@ -578,10 +581,12 @@ fn single_header<'a>(
     Ok(first)
 }
 
-fn parse_request_headers(headers: &HeaderMap) -> Result<Vec<HeaderName>, CorsRequestError> {
+fn parse_request_headers(headers: &Headers) -> Result<Vec<HeaderName>, CorsRequestError> {
     let mut parsed = Vec::new();
     let mut seen = HashSet::new();
-    for value in headers.get_all(REQUEST_HEADERS) {
+    let ordinary = OrdinaryHeaderName::try_from(REQUEST_HEADERS)
+        .map_err(|_| CorsRequestError::InvalidHeaders)?;
+    for value in headers.get_all(&ordinary) {
         let value = value
             .to_str()
             .map_err(|_| CorsRequestError::InvalidHeaders)?;
@@ -600,7 +605,7 @@ fn parse_request_headers(headers: &HeaderMap) -> Result<Vec<HeaderName>, CorsReq
     Ok(parsed)
 }
 
-fn parse_private_network(headers: &HeaderMap) -> Result<bool, CorsRequestError> {
+fn parse_private_network(headers: &Headers) -> Result<bool, CorsRequestError> {
     let Some(value) = single_header(headers, REQUEST_PRIVATE_NETWORK)? else {
         return Ok(false);
     };
@@ -676,14 +681,23 @@ mod tests {
     #[test]
     fn preflight_validates_and_emits_fetch_fields() {
         let policy = CorsPolicy::compile(&config()).expect("policy");
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert(ORIGIN, HeaderValue::from_static("https://app.example"));
-        request_headers.insert(REQUEST_METHOD, HeaderValue::from_static("PUT"));
+        let mut request_headers = Headers::new();
         request_headers.insert(
-            REQUEST_HEADERS,
+            OrdinaryHeaderName::try_from(ORIGIN).expect("ordinary"),
+            HeaderValue::from_static("https://app.example"),
+        );
+        request_headers.insert(
+            OrdinaryHeaderName::try_from(REQUEST_METHOD).expect("ordinary"),
+            HeaderValue::from_static("PUT"),
+        );
+        request_headers.insert(
+            OrdinaryHeaderName::try_from(REQUEST_HEADERS).expect("ordinary"),
             HeaderValue::from_static("Content-Type, X-Request-Id"),
         );
-        request_headers.insert(REQUEST_PRIVATE_NETWORK, HeaderValue::from_static("true"));
+        request_headers.insert(
+            OrdinaryHeaderName::try_from(REQUEST_PRIVATE_NETWORK).expect("ordinary"),
+            HeaderValue::from_static("true"),
+        );
         let request = CorsRequest::parse(&Method::OPTIONS, &request_headers)
             .expect("valid request")
             .expect("CORS request");
@@ -703,8 +717,11 @@ mod tests {
     #[test]
     fn actual_response_is_authoritative_and_origin_specific() {
         let policy = CorsPolicy::compile(&config()).expect("policy");
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert(ORIGIN, HeaderValue::from_static("https://app.example"));
+        let mut request_headers = Headers::new();
+        request_headers.insert(
+            OrdinaryHeaderName::try_from(ORIGIN).expect("ordinary"),
+            HeaderValue::from_static("https://app.example"),
+        );
         let request = CorsRequest::parse(&Method::GET, &request_headers)
             .expect("valid request")
             .expect("CORS request");
@@ -725,10 +742,19 @@ mod tests {
         wildcard.allow_credentials = false;
         wildcard.allowed_headers = vec!["*".to_owned()];
         let policy = CorsPolicy::compile(&wildcard).expect("policy");
-        let mut request_headers = HeaderMap::new();
-        request_headers.insert(ORIGIN, HeaderValue::from_static("https://app.example"));
-        request_headers.insert(REQUEST_METHOD, HeaderValue::from_static("PUT"));
-        request_headers.insert(REQUEST_HEADERS, HeaderValue::from_static("authorization"));
+        let mut request_headers = Headers::new();
+        request_headers.insert(
+            OrdinaryHeaderName::try_from(ORIGIN).expect("ordinary"),
+            HeaderValue::from_static("https://app.example"),
+        );
+        request_headers.insert(
+            OrdinaryHeaderName::try_from(REQUEST_METHOD).expect("ordinary"),
+            HeaderValue::from_static("PUT"),
+        );
+        request_headers.insert(
+            OrdinaryHeaderName::try_from(REQUEST_HEADERS).expect("ordinary"),
+            HeaderValue::from_static("authorization"),
+        );
         let request = CorsRequest::parse(&Method::OPTIONS, &request_headers)
             .expect("valid request")
             .expect("CORS request");
@@ -757,8 +783,11 @@ mod actual_vary_tests {
     }
 
     fn actual_request(origin: &str) -> CorsRequest {
-        let mut headers = HeaderMap::new();
-        headers.insert(ORIGIN, HeaderValue::from_str(origin).expect("origin value"));
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from(ORIGIN).expect("ordinary"),
+            HeaderValue::from_str(origin).expect("origin value"),
+        );
         CorsRequest::parse(&Method::GET, &headers)
             .expect("valid request")
             .expect("CORS request")
@@ -817,10 +846,17 @@ mod actual_vary_tests {
     #[test]
     fn preflight_request_keeps_own_contract_without_actual_vary() {
         let policy = test_policy();
-        let mut headers = HeaderMap::new();
-        headers.insert(ORIGIN, HeaderValue::from_static("https://app.example"));
-        headers.insert(REQUEST_METHOD, HeaderValue::from_static("PUT"));
-        let request = CorsRequest::parse(&Method::OPTIONS, &headers)
+        let mut request_head = crate::http_message::Request::new(());
+        *request_head.method_mut() = Method::OPTIONS;
+        request_head.headers_mut().insert(
+            OrdinaryHeaderName::try_from(ORIGIN).expect("Origin is ordinary"),
+            HeaderValue::from_static("https://app.example"),
+        );
+        request_head.headers_mut().insert(
+            OrdinaryHeaderName::try_from(REQUEST_METHOD).expect("request method is ordinary"),
+            HeaderValue::from_static("PUT"),
+        );
+        let request = CorsRequest::parse(request_head.method(), request_head.headers())
             .expect("valid request")
             .expect("CORS request");
         assert!(request.is_preflight());

@@ -28,7 +28,7 @@ impl qpx_h3::RequestHandler for CaptureStream {
 
     async fn handle_connect_stream(
         &self,
-        _: http::Request<()>,
+        _: qpx_core::http_message::Request<()>,
         mut stream: qpx_h3::RequestStream,
         _: qpx_h3::ConnectionInfo,
         _: qpx_h3::Protocol,

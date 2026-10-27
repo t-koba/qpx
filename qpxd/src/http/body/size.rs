@@ -3,7 +3,8 @@ use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
 use http_body::{Body as _, Frame};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request;
 use qpx_http::body::spool::SpoolFile;
 use qpx_http::body::{Body, BodyError};
 use std::fmt;
@@ -39,7 +40,7 @@ pub(crate) fn observed_request_size(req: &Request<Body>) -> Option<u64> {
     req.extensions()
         .get::<ObservedBodySize>()
         .map(|size| size.0)
-        .or_else(|| declared_size_hint(req.headers()))
+        .or_else(|| req.headers().declared_content_length().ok().flatten())
 }
 
 pub(crate) fn has_observed_request_bytes(req: &Request<Body>) -> bool {
@@ -142,16 +143,14 @@ pub(crate) fn limit_request_body(
     if req.body().is_end_stream() {
         return Ok(req);
     }
-    let (parts, body) = req.into_parts();
-    Ok(Request::from_parts(
-        parts,
+    Ok(req.map_body(|body| {
         Body::wrap(LimitedBody {
             inner: body,
             seen: 0,
             limit: max_body_bytes,
             exceeded: false,
-        }),
-    ))
+        })
+    }))
 }
 
 #[derive(Debug)]
@@ -352,10 +351,10 @@ async fn observe_request_body(
     read_timeout: Duration,
     reason: &'static str,
 ) -> Result<Request<Body>> {
-    let (parts, body) = req.into_parts();
+    let (head, body) = req.into_head_and_body();
     if keep_bytes {
         let rpc_summary_observer = should_precompute_rpc_summary(reason)
-            .then(|| crate::http::rpc::request_body_summary_observer(&parts.headers))
+            .then(|| crate::http::rpc::request_body_summary_observer(head.headers()))
             .flatten();
         let (observed, trailers, rpc_summary) = collect_observed_body(
             body,
@@ -366,7 +365,7 @@ async fn observe_request_body(
             rpc_summary_observer,
         )
         .await?;
-        let mut req = Request::from_parts(parts, observed.replay_body(trailers.clone()));
+        let mut req = head.map_body(|()| observed.replay_body(trailers.clone()));
         set_observed_request_size(&mut req, observed.len);
         req.extensions_mut().insert(observed);
         if let Some(summary) = rpc_summary {
@@ -377,16 +376,16 @@ async fn observe_request_body(
         }
         Ok(req)
     } else {
-        if let Some(size) = declared_size_hint(&parts.headers) {
+        if let Some(size) = head.headers().declared_content_length().ok().flatten() {
             ensure_observed_size_within_limit(size, max_body_bytes)?;
-            let mut req = Request::from_parts(parts, body);
+            let mut req = head.map_body(|()| body);
             set_observed_request_size(&mut req, size);
             return Ok(req);
         }
         let (observed, trailers) =
             collect_observed_body_for_size(body, max_body_bytes, read_timeout, "request", reason)
                 .await?;
-        let mut req = Request::from_parts(parts, observed.replay_body(trailers));
+        let mut req = head.map_body(|()| observed.replay_body(trailers));
         set_observed_request_size(&mut req, observed.len);
         Ok(req)
     }

@@ -13,8 +13,9 @@ use crate::reverse::transport::{self, ReverseConnInfo};
 use crate::server::control::SidecarControl;
 use anyhow::Result;
 use async_trait::async_trait;
-use hyper::{Request, Response};
+use hyper::Response;
 use qpx_core::config::ReverseEdgeConfig;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 #[cfg(test)]
 use std::io::IoSliceMut;
@@ -177,7 +178,7 @@ impl H3RequestHandler for ReverseH3Handler {
 
     fn request_streaming_limits(
         &self,
-        req_head: &::http::Request<()>,
+        req_head: &Request<()>,
         conn: &H3ConnInfo,
         fallback: crate::runtime::ResolvedStreamingLimits,
     ) -> crate::runtime::ResolvedStreamingLimits {
@@ -242,7 +243,7 @@ impl H3RequestHandler for ReverseH3Handler {
 
     async fn handle_connect(
         &self,
-        _req_head: ::http::Request<()>,
+        _req_head: Request<()>,
         mut req_stream: H3ServerRequestStream,
         _conn: H3ConnInfo,
         _kind: H3ConnectKind,

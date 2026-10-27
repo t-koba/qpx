@@ -1,7 +1,7 @@
 use crate::structured_fields::{BareItem, parse_item};
 use http::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HOST, TRAILER, TRANSFER_ENCODING, VIA};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
-use qpx_core::http_content_length::declared_content_length;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request as OwnerRequest};
 use std::cell::RefCell;
 use std::fmt;
 
@@ -30,7 +30,15 @@ pub fn validate_http_status_class(status: StatusCode, context: &str) -> anyhow::
 /// Item. Unknown parameters are ignored; absent, false, non-Boolean, malformed,
 /// and repeated fields are treated as absent.
 pub fn capsule_protocol_enabled(headers: &HeaderMap) -> bool {
-    let mut values = headers.get_all("capsule-protocol").iter();
+    capsule_protocol_values_enabled(headers.get_all("capsule-protocol").iter())
+}
+
+pub fn request_capsule_protocol_enabled(headers: &Headers) -> bool {
+    let name = OrdinaryHeaderName::try_from("capsule-protocol").expect("ordinary");
+    capsule_protocol_values_enabled(headers.get_all(&name))
+}
+
+fn capsule_protocol_values_enabled<'a>(mut values: impl Iterator<Item = &'a HeaderValue>) -> bool {
     let Some(value) = values.next() else {
         return false;
     };
@@ -104,6 +112,43 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bo
         if upgrade_present {
             headers.remove("upgrade");
         }
+    }
+}
+
+/// Consume request hop fields without projecting its encapsulated map.
+pub fn sanitize_request_hop_by_hop_headers(headers: &mut Headers, preserve_upgrade: bool) {
+    let connection = OrdinaryHeaderName::try_from(CONNECTION).expect("ordinary field");
+    let mut keep_upgrade = false;
+    let names: Vec<_> = headers
+        .get_all(&connection)
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|raw| raw.split(','))
+        .map(str::trim)
+        .filter_map(|token| HeaderName::from_bytes(token.as_bytes()).ok())
+        .filter(|name| {
+            if name == "upgrade" {
+                keep_upgrade |= preserve_upgrade;
+                false
+            } else {
+                !is_well_known_hop_token(name.as_str())
+            }
+        })
+        .collect();
+    for name in names {
+        if name == CONTENT_LENGTH {
+            headers.remove_content_length();
+        } else if let Ok(name) = OrdinaryHeaderName::try_from(name) {
+            headers.remove(&name);
+        }
+    }
+    for name in &WELL_KNOWN_HOP_HEADERS {
+        headers.remove(&OrdinaryHeaderName::try_from(name.clone()).expect("ordinary field"));
+    }
+    if preserve_upgrade && keep_upgrade {
+        headers.insert(connection, HeaderValue::from_static("upgrade"));
+    } else {
+        headers.remove(&connection);
+        headers.remove(&OrdinaryHeaderName::try_from("upgrade").expect("ordinary field"));
     }
 }
 
@@ -249,7 +294,7 @@ impl ValidatedIncomingRequest {
     }
 }
 
-pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), RequestValidationError> {
+pub fn validate_incoming_request<B>(req: &OwnerRequest<B>) -> Result<(), RequestValidationError> {
     validate_incoming_request_with_metadata(req).map(|_| ())
 }
 
@@ -259,24 +304,25 @@ pub fn validate_incoming_request<B>(req: &http::Request<B>) -> Result<(), Reques
 /// This is deliberately a sufficient, not exhaustive, predicate. Requests
 /// outside this narrow shape must use [`validate_incoming_request_with_metadata`].
 #[inline]
-pub fn is_intrinsically_valid_common_h2_request<B>(req: &http::Request<B>) -> bool {
+pub fn is_intrinsically_valid_common_h2_request<B>(req: &OwnerRequest<B>) -> bool {
     if req.version() != Version::HTTP_2 || !matches!(*req.method(), Method::GET | Method::HEAD) {
         return false;
     }
-    if req.headers().keys().any(|name| {
-        matches!(
-            name.as_str(),
-            "host"
-                | "content-length"
-                | "transfer-encoding"
-                | "expect"
-                | "connection"
-                | "proxy-connection"
-                | "keep-alive"
-                | "upgrade"
-                | "te"
-        )
-    }) {
+    if req.headers().contains_content_length()
+        || req.headers().iter().any(|(name, _)| {
+            matches!(
+                name.as_str(),
+                "host"
+                    | "transfer-encoding"
+                    | "expect"
+                    | "connection"
+                    | "proxy-connection"
+                    | "keep-alive"
+                    | "upgrade"
+                    | "te"
+            )
+        })
+    {
         return false;
     }
     let Some(authority) = req.uri().authority() else {
@@ -298,7 +344,7 @@ pub fn is_intrinsically_valid_common_h2_request<B>(req: &http::Request<B>) -> bo
 /// and valid, and Host must agree with the URI authority when both are present.
 /// The URI authority takes precedence; otherwise the validated Host is returned.
 pub fn resolve_request_authority(
-    headers: &HeaderMap,
+    headers: &Headers,
     authority: Option<&http::uri::Authority>,
     scheme: Option<&str>,
 ) -> Result<Option<http::uri::Authority>, RequestValidationError> {
@@ -320,10 +366,9 @@ pub fn resolve_request_authority(
     Ok(resolved)
 }
 
-fn parse_host_header(
-    headers: &HeaderMap,
-) -> Result<Option<AuthorityParts>, RequestValidationError> {
-    let mut host_values = headers.get_all(HOST).iter();
+fn parse_host_header(headers: &Headers) -> Result<Option<AuthorityParts>, RequestValidationError> {
+    let host_name = OrdinaryHeaderName::try_from(HOST).expect("Host is ordinary");
+    let mut host_values = headers.get_all(&host_name);
     let host_value = host_values.next();
     if host_values.next().is_some() {
         return Err(RequestValidationError::MultipleHostHeaders);
@@ -345,7 +390,7 @@ fn parse_host_header(
 }
 
 pub fn validate_incoming_request_with_metadata<B>(
-    req: &http::Request<B>,
+    req: &OwnerRequest<B>,
 ) -> Result<ValidatedIncomingRequest, RequestValidationError> {
     validate_request_body_length_headers(req.version(), req.headers())?;
     validate_expect_header(req.headers())?;
@@ -501,29 +546,30 @@ fn is_prohibited_trailer_field(name: &str) -> bool {
     feature = "http3-backend-h3",
     not(feature = "http3-backend-qpx")
 ))]
-pub fn validate_h2_h3_connect_headers(headers: &HeaderMap) -> Result<(), RequestValidationError> {
+pub fn validate_h2_h3_connect_headers(headers: &Headers) -> Result<(), RequestValidationError> {
     validate_request_body_length_headers(Version::HTTP_3, headers)?;
     validate_h2_h3_request_headers(Version::HTTP_3, headers)
 }
 
 pub fn validate_h2_h3_request_headers(
     version: Version,
-    headers: &HeaderMap,
+    headers: &Headers,
 ) -> Result<(), RequestValidationError> {
     if version != Version::HTTP_2 && version != Version::HTTP_3 {
         return Ok(());
     }
 
-    if headers.contains_key(CONNECTION)
-        || headers.contains_key("proxy-connection")
-        || headers.contains_key("keep-alive")
-        || headers.contains_key("upgrade")
-        || headers.contains_key(TRANSFER_ENCODING)
-    {
+    if headers.iter().any(|(name, _)| {
+        matches!(
+            name.as_str(),
+            "connection" | "proxy-connection" | "keep-alive" | "upgrade" | "transfer-encoding"
+        )
+    }) {
         return Err(RequestValidationError::InvalidH2H3ConnectionHeader);
     }
 
-    for value in headers.get_all("te") {
+    let te_name = OrdinaryHeaderName::try_from("te").expect("TE is ordinary");
+    for value in headers.get_all(&te_name) {
         let raw = value
             .to_str()
             .map_err(|_| RequestValidationError::InvalidH2H3TeHeader)?;
@@ -717,12 +763,15 @@ fn default_port_for_scheme(scheme: &str) -> Option<u16> {
 
 fn validate_request_body_length_headers(
     version: Version,
-    headers: &HeaderMap,
+    headers: &Headers,
 ) -> Result<(), RequestValidationError> {
-    let parsed_content_length = declared_content_length(headers)
+    let transfer_encoding =
+        OrdinaryHeaderName::try_from(TRANSFER_ENCODING).expect("Transfer-Encoding is ordinary");
+    let parsed_content_length = headers
+        .declared_content_length()
         .map_err(|_| RequestValidationError::InvalidContentLength)?;
 
-    if parsed_content_length.is_some() && headers.contains_key(TRANSFER_ENCODING) {
+    if parsed_content_length.is_some() && headers.contains_key(&transfer_encoding) {
         return Err(RequestValidationError::BothTransferEncodingAndContentLength);
     }
 
@@ -730,10 +779,10 @@ fn validate_request_body_length_headers(
     // H2/H3 keep their existing connection-header/TE validation below, and H2
     // extended CONNECT / WebTransport never carry a plain Upgrade header.
     if version != Version::HTTP_2 && version != Version::HTTP_3 {
-        if headers.contains_key(TRANSFER_ENCODING) {
+        if headers.contains_key(&transfer_encoding) {
             let mut saw_coding = false;
             let mut last_coding: Option<String> = None;
-            for value in headers.get_all(TRANSFER_ENCODING) {
+            for value in headers.get_all(&transfer_encoding) {
                 let raw = value
                     .to_str()
                     .map_err(|_| RequestValidationError::InvalidTransferEncoding)?;
@@ -754,16 +803,21 @@ fn validate_request_body_length_headers(
                 _ => return Err(RequestValidationError::InvalidTransferEncoding),
             }
         }
-        if parsed_content_length.is_some() && headers.contains_key("upgrade") {
+        if parsed_content_length.is_some()
+            && headers.contains_key(
+                &OrdinaryHeaderName::try_from("upgrade").expect("Upgrade is ordinary"),
+            )
+        {
             return Err(RequestValidationError::UpgradeWithContentLength);
         }
     }
     Ok(())
 }
 
-pub fn validate_expect_header(headers: &HeaderMap) -> Result<(), RequestValidationError> {
+pub fn validate_expect_header(headers: &Headers) -> Result<(), RequestValidationError> {
+    let expect_name = OrdinaryHeaderName::try_from(EXPECT).expect("Expect is ordinary");
     let mut saw_expect = false;
-    for value in headers.get_all(EXPECT).iter() {
+    for value in headers.get_all(&expect_name) {
         let raw = value
             .to_str()
             .map_err(|_| RequestValidationError::InvalidExpectHeader)?;
@@ -778,7 +832,7 @@ pub fn validate_expect_header(headers: &HeaderMap) -> Result<(), RequestValidati
             }
         }
     }
-    if headers.contains_key(EXPECT) && !saw_expect {
+    if headers.contains_key(&expect_name) && !saw_expect {
         return Err(RequestValidationError::InvalidExpectHeader);
     }
     Ok(())

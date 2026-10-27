@@ -9,9 +9,9 @@ use super::super::{
 use crate::ipc_client::IpcUpstream;
 use crate::reverse::health::UpstreamEndpoint;
 use anyhow::Result;
-use hyper::Request;
 use qpx_core::config::WebDavOriginConfig;
 use qpx_core::config::{ReverseRouteConfig, ReverseRouteTargetConfig, UpstreamConfig};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterHint, StringInterner};
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
@@ -171,7 +171,7 @@ impl HttpRoute {
         &self,
         conn: &crate::reverse::transport::ReverseConnInfo,
         host: &str,
-        req: &Request<Body>,
+        req: &OwnerRequest<Body>,
         identity: &crate::policy_context::ResolvedIdentity,
     ) -> u64 {
         self.affinity.seed_http(conn, host, req, identity)

@@ -7,7 +7,7 @@ use crate::http::pipeline::PolicyStage;
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
-use hyper::Request;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 

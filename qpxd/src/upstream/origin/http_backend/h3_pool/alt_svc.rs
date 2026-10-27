@@ -1,7 +1,7 @@
-use super::{OriginEndpoint, content_length_is_zero_or_absent};
+use super::OriginEndpoint;
 use anyhow::Result;
 use http::HeaderMap;
-use hyper::Request;
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -165,12 +165,16 @@ pub(in crate::upstream::origin::http_backend) async fn forget_alt_svc_h3_endpoin
 }
 
 pub(in crate::upstream::origin::http_backend) fn request_can_use_alt_svc_h3(
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
 ) -> bool {
     qpx_http::protocol::method::method_semantics(req.method()).safe
-        && req.headers().get(http::header::TRANSFER_ENCODING).is_none()
+        && {
+            let te = OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING)
+                .expect("transfer-encoding is an ordinary field");
+            req.headers().get(&te).is_none()
+        }
         && http_body::Body::is_end_stream(req.body())
-        && content_length_is_zero_or_absent(req.headers())
+        && { matches!(req.headers().declared_content_length(), Ok(None | Some(0))) }
 }
 
 fn alt_svc_cache_key(origin: &OriginEndpoint) -> Result<String> {

@@ -21,7 +21,8 @@ use crate::tls::{
 };
 use crate::upstream::connect::{ConnectedTunnel, connect_tunnel_target};
 use crate::upstream::io_copy::BandwidthThrottle;
-use ::http::{HeaderMap, Request};
+#[cfg(feature = "mitm")]
+use ::http::Request as HyperRequest;
 #[cfg(feature = "mitm")]
 use ::http::{Response, StatusCode};
 #[cfg(feature = "mitm")]
@@ -29,6 +30,7 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::config::{ActionConfig, ActionKind};
+use qpx_core::http_message::{Headers, Request as OwnerRequest};
 use qpx_http::body::Body;
 #[cfg(feature = "mitm")]
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
@@ -47,7 +49,8 @@ pub(super) struct TunnelConnectContext {
     pub host: String,
     pub port: u16,
     pub authority: String,
-    pub sanitized_headers: HeaderMap,
+    pub request_version: http::Version,
+    pub sanitized_headers: Headers,
     pub identity: crate::policy_context::ResolvedIdentity,
     pub initial_action: ActionConfig,
     pub matched_rule: Option<String>,
@@ -57,7 +60,7 @@ pub(super) struct TunnelConnectContext {
 }
 
 pub(super) async fn tunnel_connect(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     server: ConnectedTunnel,
     runtime: Runtime,
     ctx: TunnelConnectContext,
@@ -69,7 +72,11 @@ pub(super) async fn tunnel_connect(
     let upgrade_wait = Duration::from_millis(state.plan.limits.timeouts.upgrade_wait_timeout_ms);
     let upstream_timeout =
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms);
-    let upgraded = timeout(upgrade_wait, crate::http::protocol::upgrade::on(&mut req)).await??;
+    let upgraded = timeout(
+        upgrade_wait,
+        crate::http::protocol::upgrade::on(req.extensions_mut()),
+    )
+    .await??;
     let (client_io, client_hello, action) =
         prepare_connect_client_io(upgraded, &runtime, &ctx).await?;
     let listener_upstream_trust = listener_cfg.upstream_tls_trust();
@@ -90,6 +97,7 @@ pub(super) async fn tunnel_connect(
         host,
         port,
         authority: _,
+        request_version: _,
         sanitized_headers: _,
         identity: _,
         initial_action: _,
@@ -151,7 +159,7 @@ pub(super) async fn tunnel_connect(
                 let access_cfg = state.resources.access_log.clone();
                 let access_name = Arc::<str>::from(listener_name.as_str());
                 let request_runtime = runtime.clone();
-                let service = handler_fn(move |inner_req: Request<Body>| {
+                let service = handler_fn(move |inner_req: HyperRequest<Body>| {
                     let sender = sender.clone();
                     let runtime = request_runtime.clone();
                     let listener_name = listener_name.clone();
@@ -276,6 +284,7 @@ async fn prepare_connect_upstream_after_preview(
                     host: ctx.host.as_str(),
                     port: ctx.port,
                     authority: ctx.authority.as_str(),
+                    request_version: ctx.request_version,
                     sanitized_headers: &ctx.sanitized_headers,
                     identity: &ctx.identity,
                     client_hello,
@@ -341,6 +350,7 @@ where
                 host: ctx.host.as_str(),
                 port: ctx.port,
                 authority: ctx.authority.as_str(),
+                request_version: ctx.request_version,
                 sanitized_headers: &ctx.sanitized_headers,
                 identity: &ctx.identity,
                 client_hello,

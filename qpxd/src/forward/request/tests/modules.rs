@@ -85,7 +85,7 @@ settings:
         caches: Vec::new(),
     })
     .expect("runtime");
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::GET)
         .uri(format!("http://{upstream_addr}/asset"))
         .header("host", upstream_addr.to_string())
@@ -95,7 +95,7 @@ settings:
         .expect("request");
 
     let response = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
@@ -200,7 +200,7 @@ settings:
         caches: Vec::new(),
     })
     .expect("runtime");
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::GET)
         .uri("http://127.0.0.1:9/asset")
         .header("host", "127.0.0.1:9")
@@ -210,7 +210,7 @@ settings:
         .expect("request");
 
     let response = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
@@ -360,7 +360,7 @@ settings:
             caches: Vec::new(),
         })
         .expect("runtime");
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::GET)
         .uri(format!("http://{upstream_addr}/asset"))
         .header("host", upstream_addr.to_string())
@@ -369,7 +369,7 @@ settings:
         .expect("request");
 
     let response = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),

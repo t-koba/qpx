@@ -84,9 +84,9 @@ pub(super) async fn open_upstream_connect_udp_stream(
         })
     };
 
-    let mut headers = http::HeaderMap::new();
+    let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(
-        http::header::HeaderName::from_static("capsule-protocol"),
+        qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol")?,
         http::header::HeaderValue::from_static("?1"),
     );
     let normalized_headers = normalize_h3_upstream_connect_headers(&uri, &headers, proxy_name)?;

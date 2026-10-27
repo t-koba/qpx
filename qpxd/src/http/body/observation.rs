@@ -4,7 +4,8 @@ use crate::http::body::size::{
 };
 use crate::http::policy::response_policy::ResponseRuleCandidates;
 use anyhow::Result;
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::rules::{CandidateRequestObservationRequirements, RuleEngine};
 use qpx_http::body::Body;

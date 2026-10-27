@@ -217,12 +217,20 @@ pub(in crate::http::modules) fn render_template(
                         continue;
                     }
                     TemplateVariable::RequestHeader(name) => {
-                        let value = request
-                            .headers()
-                            .get(name)
-                            .and_then(|value| value.to_str().ok())
-                            .unwrap_or_default();
-                        push_template_value(&mut out, value, *modifier)?;
+                        use qpx_core::http_message::{
+                            HeaderExpansionEncoding, HeaderExpansionPlan, HeaderExpansionSegment,
+                        };
+                        let encoding = match modifier {
+                            TemplateModifier::UrlQuery => HeaderExpansionEncoding::UrlQuery,
+                            TemplateModifier::PathSegment => HeaderExpansionEncoding::PathSegment,
+                            TemplateModifier::Header => HeaderExpansionEncoding::Header,
+                            TemplateModifier::Host => HeaderExpansionEncoding::Host,
+                        };
+                        let plan = HeaderExpansionPlan::new([HeaderExpansionSegment::Field {
+                            name: name.clone(),
+                            encoding,
+                        }]);
+                        out.push_str(&plan.render(request.headers())?);
                         continue;
                     }
                     TemplateVariable::RequestAuthority => request.authority().unwrap_or_default(),

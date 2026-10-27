@@ -8,7 +8,8 @@ use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use hyper::header::{CONNECTION, HOST, HeaderValue, UPGRADE};
-use hyper::{Request, Response, Uri};
+use hyper::{Response, Uri};
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use qpx_http::tls::builder::connect_client_http1;
@@ -83,8 +84,27 @@ impl UpstreamProxyScheme {
     }
 }
 
+// Called only after the upstream transport is known to be HTTP/1.
+pub(crate) fn into_http1_for_codec<B>(mut req: OwnerRequest<B>) -> Result<http::Request<B>> {
+    let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE)?;
+    let values: Vec<_> = req.headers().get_all(&cookie).cloned().collect();
+    if values.len() > 1 {
+        let mut merged = Vec::new();
+        for (index, value) in values.iter().enumerate() {
+            if index != 0 {
+                merged.extend_from_slice(b"; ");
+            }
+            merged.extend_from_slice(value.as_bytes());
+        }
+        let mut value = HeaderValue::from_bytes(&merged)?;
+        value.set_sensitive(values.iter().any(HeaderValue::is_sensitive));
+        req.headers_mut().insert(cookie, value);
+    }
+    req.into_http_for_codec().map_err(|err| anyhow!("{err}"))
+}
+
 pub(crate) fn ensure_absolute_uri(
-    req: &mut Request<Body>,
+    req: &mut OwnerRequest<Body>,
     scheme: &str,
     authority: &str,
 ) -> Result<()> {
@@ -119,7 +139,7 @@ pub(crate) fn ensure_absolute_uri(
 }
 
 pub(crate) fn set_absolute_uri(
-    req: &mut Request<Body>,
+    req: &mut OwnerRequest<Body>,
     scheme: &str,
     authority: &str,
 ) -> Result<()> {
@@ -137,7 +157,7 @@ pub(crate) fn set_absolute_uri(
     Ok(())
 }
 
-pub(crate) fn ensure_origin_form_uri(req: &mut Request<Body>) -> Result<()> {
+pub(crate) fn ensure_origin_form_uri(req: &mut OwnerRequest<Body>) -> Result<()> {
     if req.uri().scheme().is_none() && req.uri().authority().is_none() {
         return Ok(());
     }
@@ -173,16 +193,18 @@ pub(crate) fn ensure_origin_form_uri(req: &mut Request<Body>) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn ensure_host_header(req: &mut Request<Body>, authority: &str) -> Result<()> {
-    if !req.headers().contains_key(HOST) {
+pub(crate) fn ensure_host_header(req: &mut OwnerRequest<Body>, authority: &str) -> Result<()> {
+    let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
+    if !req.headers().contains_key(&host) {
         set_host_header(req, authority)?;
     }
     Ok(())
 }
 
-pub(crate) fn set_host_header(req: &mut Request<Body>, authority: &str) -> Result<()> {
+pub(crate) fn set_host_header(req: &mut OwnerRequest<Body>, authority: &str) -> Result<()> {
+    let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
     req.headers_mut()
-        .insert(HOST, HeaderValue::from_str(authority)?);
+        .insert(host, HeaderValue::from_str(authority)?);
     Ok(())
 }
 
@@ -340,7 +362,7 @@ pub(crate) async fn open_http1_sender(
 }
 
 pub(crate) async fn proxy_websocket_http1(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     cfg: WebsocketProxyConfig<'_>,
 ) -> Result<Response<Body>> {
     let WebsocketProxyConfig {
@@ -356,7 +378,7 @@ pub(crate) async fn proxy_websocket_http1(
     } = cfg;
     let (expected_accept, offered_protocols) =
         crate::http::protocol::websocket::websocket_response_expectation(req.headers())?;
-    let client_upgrade = crate::http::protocol::upgrade::on(&mut req);
+    let client_upgrade = crate::http::protocol::upgrade::on(req.extensions_mut());
 
     let mut sender = if let Some(upstream_proxy) = upstream_proxy {
         let endpoint = upstream_proxy.endpoint();
@@ -380,8 +402,8 @@ pub(crate) async fn proxy_websocket_http1(
         sender
     };
 
-    qpx_core::http_content_length::canonicalize_content_length(req.headers_mut());
-    let mut response = timeout(timeout_dur, sender.send_request(req))
+    let hyper_req = into_http1_for_codec(req)?;
+    let mut response = timeout(timeout_dur, sender.send_request(hyper_req))
         .await??
         .map(Body::from);
     crate::http::protocol::websocket::validate_websocket_switching_response(
@@ -414,7 +436,7 @@ pub(crate) fn normalize_websocket_switching_protocols_response(response: &mut Re
 }
 
 pub(crate) async fn proxy_http1_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
     direct_authority: &str,
     timeout_dur: Duration,
@@ -425,11 +447,12 @@ pub(crate) async fn proxy_http1_request(
     if let Some(upstream) = upstream_proxy {
         return send_via_upstream_proxy(req, upstream, timeout_dur, proxy_pool).await;
     }
-    Ok(timeout(timeout_dur, request_with_shared_client(req)).await??)
+    let hyper_req = into_http1_for_codec(req)?;
+    Ok(timeout(timeout_dur, request_with_shared_client(hyper_req)).await??)
 }
 
 pub(crate) async fn proxy_http1_request_with_interim(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     upstream_proxy: Option<&crate::upstream::pool::ResolvedUpstreamProxy>,
     direct_authority: &str,
     timeout_dur: Duration,
@@ -464,13 +487,86 @@ mod tests {
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
 
+    #[tokio::test]
+    async fn h3_cookies_join_only_at_http1_upstream_boundary() {
+        use tokio::io::AsyncWriteExt;
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut data = Vec::new();
+            loop {
+                let mut buf = [0; 1024];
+                let n = stream.read(&mut buf).await.unwrap();
+                assert_ne!(n, 0);
+                data.extend_from_slice(&buf[..n]);
+                if data.windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
+                assert!(data.len() < 8192);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+            data
+        });
+        let mut second = HeaderValue::from_bytes(b"b=\x80").unwrap();
+        second.set_sensitive(true);
+        let mut raw = http::Request::builder()
+            .version(http::Version::HTTP_3)
+            .uri(format!("http://{addr}/"))
+            .header("cookie", "a=1")
+            .body(Body::empty())
+            .unwrap();
+        raw.headers_mut().append(http::header::COOKIE, second);
+        let req = OwnerRequest::from_http(raw);
+        let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE).unwrap();
+        assert_eq!(req.headers().get_all(&cookie).count(), 2);
+        let cloned = req.headers().clone();
+        let check = OwnerRequest::from_http(http::Request::builder().body(()).unwrap());
+        let mut check = check;
+        *check.headers_mut() = cloned;
+        let exported = into_http1_for_codec(check).unwrap();
+        let value = exported.headers().get(http::header::COOKIE).unwrap();
+        assert_eq!(value.as_bytes(), b"a=1; b=\x80");
+        assert!(value.is_sensitive());
+        assert_eq!(
+            exported
+                .headers()
+                .get_all(http::header::COOKIE)
+                .iter()
+                .count(),
+            1
+        );
+        let pool = crate::upstream::pool::UpstreamProxyPool::default();
+        proxy_http1_request(req, None, &addr.to_string(), Duration::from_secs(3), &pool)
+            .await
+            .unwrap();
+        let wire = tokio::time::timeout(Duration::from_secs(3), server)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            wire.windows(b"cookie: a=1; b=\x80\r\n".len())
+                .any(|w| w == b"cookie: a=1; b=\x80\r\n")
+        );
+        assert_eq!(
+            wire.windows(b"cookie:".len())
+                .filter(|w| *w == b"cookie:")
+                .count(),
+            1
+        );
+    }
+
     #[test]
     fn ensure_absolute_uri_reconstructs_server_wide_options_target() {
-        let mut req = http::Request::builder()
+        let hyper_req = http::Request::builder()
             .method(http::Method::OPTIONS)
             .uri("*")
             .body(Body::empty())
             .expect("request");
+        let mut req = OwnerRequest::from_http(hyper_req);
         ensure_absolute_uri(&mut req, "http", "example.test").expect("absolute URI");
         assert_eq!(req.uri().scheme_str(), Some("http"));
         assert_eq!(
@@ -493,11 +589,12 @@ mod tests {
             .path_and_query("*")
             .build()
             .expect("absolute asterisk target");
-        let mut req = http::Request::builder()
+        let hyper_req = http::Request::builder()
             .method(http::Method::OPTIONS)
             .uri(absolute_asterisk)
             .body(Body::empty())
             .expect("request");
+        let mut req = OwnerRequest::from_http(hyper_req);
         ensure_absolute_uri(&mut req, "https", "ignored.example").expect("normalize absolute URI");
         assert_eq!(req.uri().scheme_str(), Some("http"));
         assert_eq!(
@@ -530,11 +627,12 @@ mod tests {
             ("OPTIONS", "http://example.test/", "/", false),
             ("OPTIONS", "*", "*", false),
         ] {
-            let mut req = http::Request::builder()
+            let hyper_req = http::Request::builder()
                 .method(method)
                 .uri(uri)
                 .body(Body::empty())
                 .expect("request");
+            let mut req = OwnerRequest::from_http(hyper_req);
             if raw_empty_path_options_target {
                 req.extensions_mut()
                     .insert(crate::http::protocol::EmptyPathAbsoluteOptions);
@@ -563,11 +661,12 @@ mod tests {
             std::future::pending::<()>().await;
         });
 
-        let req = Request::builder()
+        let hyper_req = http::Request::builder()
             .method(http::Method::GET)
             .uri("/")
             .body(Body::empty())
             .expect("request");
+        let req = OwnerRequest::from_http(hyper_req);
         let authority = addr.to_string();
         let result = proxy_http1_request_with_interim(
             req,

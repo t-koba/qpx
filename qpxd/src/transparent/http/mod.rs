@@ -49,7 +49,7 @@ where
             let request_version = req.version();
 
             match dispatch_transparent_request(
-                req,
+                qpx_core::http_message::Request::from_http(req),
                 runtime,
                 remote_addr,
                 original_target,

@@ -104,7 +104,7 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
     })
     .expect("runtime");
 
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::POST)
         .uri(format!("http://{upstream_addr}/demo.Echo/Say"))
         .header("host", upstream_addr.to_string())
@@ -114,7 +114,7 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
         .expect("request");
 
     let response = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
@@ -252,7 +252,7 @@ async fn assert_forward_response_rule_matches_streaming(
     })
     .expect("runtime");
 
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::POST)
         .uri(format!("http://{upstream_addr}/demo.Echo/Say"))
         .header("host", upstream_addr.to_string())
@@ -263,7 +263,7 @@ async fn assert_forward_response_rule_matches_streaming(
         .expect("request");
 
     let response = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),

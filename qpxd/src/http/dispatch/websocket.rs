@@ -1,11 +1,12 @@
 use crate::upstream::http1::{WebsocketProxyConfig, proxy_websocket_http1};
 use anyhow::Result;
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::time::Duration;
 
 pub(crate) struct DispatchWebsocketProxyInput<'a> {
-    pub(crate) req: Request<Body>,
+    pub(crate) req: OwnerRequest<Body>,
     pub(crate) upstream_proxy: Option<&'a crate::upstream::pool::ResolvedUpstreamProxy>,
     pub(crate) direct_connect_authority: &'a str,
     pub(crate) direct_host_header: &'a str,

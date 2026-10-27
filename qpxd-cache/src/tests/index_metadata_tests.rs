@@ -114,8 +114,7 @@ async fn request_collapse_guard_waits_for_cache_writeback() {
     let backends = backend_map();
     let writeback_admission = test_writeback_admission();
     let stored = super::maybe_store(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -217,8 +216,8 @@ fn decode_cached_response_metadata_rejects_non_http_status_class() {
 
 #[test]
 fn vary_matching_works() {
-    let mut req_headers = http::HeaderMap::new();
-    req_headers.insert("accept-language", http::HeaderValue::from_static("ja"));
+    let mut req_headers = qpx_core::http_message::Headers::new();
+    req_headers.insert(ord("accept-language"), http::HeaderValue::from_static("ja"));
     let envelope = CachedResponseEnvelope {
         status: 200,
         headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
@@ -230,16 +229,12 @@ fn vary_matching_works() {
         freshness_lifetime_secs: 30,
         vary_headers: vec!["accept-language".to_string()],
         vary_values: super::vary::vary_values_from_request_headers(
-            qpx_core::http_content_length::HeaderView::new(&req_headers),
+            req_headers.view(),
             &["accept-language".to_string()],
         )
         .expect("encodable vary selector"),
         response_directives: Default::default(),
         response_header_values: Default::default(),
     };
-    assert!(matches_vary(
-        qpx_core::http_content_length::HeaderView::new(&req_headers),
-        None,
-        &envelope,
-    ));
+    assert!(matches_vary(req_headers.view(), None, &envelope,));
 }

@@ -1,7 +1,8 @@
 use super::fields::build_request_uri;
 use super::{DecodedRequestHead, errors::HeaderDecodeError};
-use crate::qpack_fields::{append_header, validate_h3_regular_field};
+use crate::qpack_fields::validate_h3_regular_field;
 use http::{HeaderMap, Method};
+use qpx_core::http_message::Request;
 
 pub(crate) fn decode_request_head_from_fields(
     fields: Vec<(String, Vec<u8>)>,
@@ -79,8 +80,12 @@ pub(crate) fn decode_request_head_from_fields(
             _ => {
                 regular_seen = true;
                 validate_h3_regular_field(&name, &value)?;
-                append_header(&mut headers, &name, &value)
-                    .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
+                headers.append(
+                    http::HeaderName::from_bytes(name.as_bytes())
+                        .map_err(|err| HeaderDecodeError::message(err.to_string()))?,
+                    http::HeaderValue::from_bytes(&value)
+                        .map_err(|err| HeaderDecodeError::message(err.to_string()))?,
+                );
             }
         }
     }
@@ -110,21 +115,22 @@ pub(crate) fn decode_request_head_from_fields(
             return Err(HeaderDecodeError::message("missing :path"));
         }
     }
-    let uri = build_request_uri(
-        &headers,
-        &method,
+    let mut raw = http::Request::builder()
+        .method(method)
+        .version(http::Version::HTTP_3)
+        .body(())
+        .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
+    *raw.headers_mut() = headers;
+    let mut request = Request::from_http(raw);
+    *request.uri_mut() = build_request_uri(
+        request.headers(),
+        request.method(),
         scheme.as_deref(),
         authority.as_deref(),
         path.as_deref(),
-        method == Method::CONNECT && protocol.is_none(),
+        request.method() == Method::CONNECT && protocol.is_none(),
     )
     .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
-    let mut request = http::Request::builder()
-        .method(method)
-        .uri(uri)
-        .body(())
-        .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
-    *request.headers_mut() = headers;
     Ok(DecodedRequestHead { request, protocol })
 }
 

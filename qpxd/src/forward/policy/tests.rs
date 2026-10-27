@@ -10,6 +10,7 @@ use qpx_core::config::{
     RuleConfig, RuntimeConfig, SecurityConfig, StreamingRequirement, TelemetryConfig,
     TrafficConfig, UnknownLengthExactSizePolicy,
 };
+use qpx_core::http_message::{Headers as OwnerHeaders, OrdinaryHeaderName};
 
 #[tokio::test]
 async fn groups_mismatch_continues_to_next_rule() {
@@ -105,9 +106,9 @@ async fn groups_mismatch_continues_to_next_rule() {
     let runtime = Runtime::new(config).expect("runtime");
 
     let credentials = BASE64.encode("user:pass");
-    let mut headers = HeaderMap::new();
+    let mut headers = OwnerHeaders::new();
     headers.insert(
-        "proxy-authorization",
+        OrdinaryHeaderName::try_from("proxy-authorization").unwrap(),
         HeaderValue::from_str(format!("Basic {}", credentials).as_str()).unwrap(),
     );
 
@@ -262,12 +263,15 @@ async fn staged_policy_does_not_request_body_for_later_size_rule_after_header_ma
         caches: Vec::new(),
     };
     let runtime = Runtime::new(config).expect("runtime");
-    let headers = HeaderMap::new();
+    let context_headers = HeaderMap::new();
+    let request_headers = OwnerHeaders::new();
     let ctx = RuleMatchContext {
         method: Some("GET"),
         host: Some("example.com"),
         path: Some("/"),
-        headers: Some(qpx_core::http_content_length::HeaderView::new(&headers)),
+        headers: Some(qpx_core::http_content_length::HeaderView::new(
+            &context_headers,
+        )),
         user_groups: &[],
         posture: &[],
         ..Default::default()
@@ -277,7 +281,7 @@ async fn staged_policy_does_not_request_body_for_later_size_rule_after_header_ma
         &runtime,
         "forward",
         ctx,
-        &headers,
+        &request_headers,
         "GET",
         "http://example.com/",
     )

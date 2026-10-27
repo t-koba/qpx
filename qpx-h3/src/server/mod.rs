@@ -153,7 +153,7 @@ impl Default for Settings {
 #[derive(Debug, Clone)]
 pub struct Request {
     /// Request head without body.
-    pub head: http::Request<()>,
+    pub head: qpx_core::http_message::Request<()>,
     /// Extended CONNECT protocol, if any.
     pub protocol: Option<Protocol>,
     /// Priority update observer for this request.
@@ -181,7 +181,7 @@ pub trait RequestHandler: Clone + Send + Sync + 'static {
     /// Handles an extended CONNECT stream.
     fn handle_connect_stream(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         _protocol: Protocol,
@@ -203,7 +203,7 @@ pub trait RequestHandler: Clone + Send + Sync + 'static {
     /// Handles a WebTransport CONNECT stream.
     fn handle_webtransport_connect(
         &self,
-        _req_head: http::Request<()>,
+        _req_head: qpx_core::http_message::Request<()>,
         mut req_stream: RequestStream,
         _conn: ConnectionInfo,
         _session: WebTransportSession,

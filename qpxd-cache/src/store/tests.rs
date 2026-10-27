@@ -16,12 +16,14 @@ fn test_policy() -> CachePolicyConfig {
 
 #[test]
 fn must_understand_allows_storage_when_status_requirements_are_understood() {
-    let request = hyper::Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/cache")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let request = qpx_core::http_message::Request::from_http(
+        hyper::Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/cache")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("request"),
+    );
     let response = Response::builder()
         .status(StatusCode::OK)
         .header(
@@ -46,12 +48,14 @@ fn must_understand_allows_storage_when_status_requirements_are_understood() {
 
 #[test]
 fn must_understand_rejects_statuses_with_unimplemented_storage_requirements() {
-    let request = hyper::Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/cache")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let request = qpx_core::http_message::Request::from_http(
+        hyper::Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/cache")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("request"),
+    );
     let response = Response::builder()
         .status(StatusCode::PARTIAL_CONTENT)
         .header(
@@ -76,12 +80,14 @@ fn must_understand_rejects_statuses_with_unimplemented_storage_requirements() {
 
 #[test]
 fn must_understand_rejects_unknown_final_status_codes() {
-    let request = hyper::Request::builder()
-        .method(Method::GET)
-        .uri("http://example.com/cache")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let request = qpx_core::http_message::Request::from_http(
+        hyper::Request::builder()
+            .method(Method::GET)
+            .uri("http://example.com/cache")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("request"),
+    );
     let response = Response::builder()
         .status(StatusCode::from_u16(299).expect("status"))
         .header(
@@ -184,28 +190,26 @@ async fn length_checked_body_validates_terminal_frames_and_preserves_source_erro
 
 #[test]
 fn refreshed_selectors_preserve_query_digest_and_fail_closed_on_obs_text() {
+    use qpx_core::http_message::Headers as OwnedHeaders;
     let fields = vec!["content-length".to_owned()];
-    let mut headers = http::HeaderMap::new();
-    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("05"));
-    let previous = cache_vary_values(HeaderView::new(&headers), &fields, Some("digest-a")).unwrap();
-    headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("5"));
-    let refreshed = refreshed_vary_values(HeaderView::new(&headers), &fields, &previous);
+    let mut headers = OwnedHeaders::new();
+    headers.set_content_length_value(http::HeaderValue::from_static("05"));
+    let previous = cache_vary_values(headers.view(), &fields, Some("digest-a")).unwrap();
+    headers.set_content_length_value(http::HeaderValue::from_static("5"));
+    let refreshed = refreshed_vary_values(headers.view(), &fields, &previous);
     assert_eq!(
         refreshed,
-        cache_vary_values(HeaderView::new(&headers), &fields, Some("digest-a")).unwrap()
+        cache_vary_values(headers.view(), &fields, Some("digest-a")).unwrap()
     );
     assert_ne!(refreshed, previous);
-    headers.append(
-        CONTENT_LENGTH,
-        http::HeaderValue::from_bytes(&[0x80]).unwrap(),
-    );
+    headers.append_content_length_value(http::HeaderValue::from_bytes(&[0x80]).unwrap());
     assert_eq!(
-        refreshed_vary_values(HeaderView::new(&headers), &fields, &previous),
+        refreshed_vary_values(headers.view(), &fields, &previous),
         previous
     );
-    headers.clear();
+    headers = OwnedHeaders::new();
     assert_eq!(
-        refreshed_vary_values(HeaderView::new(&headers), &[], &previous),
+        refreshed_vary_values(headers.view(), &[], &previous),
         vec![previous[1].clone()]
     );
 }

@@ -10,8 +10,9 @@ use crate::http::protocol::l7::{
     finalize_response_for_request, finalize_response_with_headers_in_place,
 };
 use anyhow::{Result, anyhow};
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Method, Response, StatusCode};
 use qpx_core::config::ActionKind;
+use qpx_core::http_message::{OrdinaryHeaderName, Request};
 use qpx_http::body::Body;
 use qpx_http::protocol::address::format_authority_host_port;
 use std::sync::Arc;
@@ -100,7 +101,8 @@ pub(super) async fn handle_forward_ftp(
 }
 
 pub(super) fn ensure_forward_host_header(req: &mut Request<Body>, host: &HostPort) -> Result<()> {
-    if req.headers().contains_key("host") {
+    let host_name = OrdinaryHeaderName::try_from("host")?;
+    if req.headers().contains_key(&host_name) {
         return Ok(());
     }
     let default_port = match req.uri().scheme_str() {
@@ -112,8 +114,9 @@ pub(super) fn ensure_forward_host_header(req: &mut Request<Body>, host: &HostPor
         Some(port) if port != default_port => format_authority_host_port(host.host.as_str(), port),
         _ => host.host.clone(),
     };
-    req.headers_mut()
-        .insert("host", http::HeaderValue::from_str(&host_value)?);
+    let _ = req
+        .headers_mut()
+        .insert(host_name, http::HeaderValue::from_str(&host_value)?);
     Ok(())
 }
 

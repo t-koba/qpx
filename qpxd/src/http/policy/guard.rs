@@ -1,11 +1,12 @@
 use crate::http::codec::h1_common::{
     TransferEncodingClassificationError, has_only_chunked_transfer_encoding_values,
 };
-use crate::http::protocol::common::{trim_http_ows, trim_http_ows_len};
+use crate::http::protocol::common::trim_http_ows;
 use anyhow::{Result, anyhow};
-use hyper::{Request, StatusCode};
+use hyper::StatusCode;
 use qpx_core::config::HttpGuardProfileConfig;
 use qpx_core::http_content_length::ContentLengthError;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request};
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -66,10 +67,7 @@ impl CompiledHttpGuardProfile {
         self.requires_request_body_buffering_from_headers(req.headers())
     }
 
-    pub(crate) fn requires_request_body_buffering_from_headers(
-        &self,
-        headers: &http::HeaderMap,
-    ) -> bool {
+    pub(crate) fn requires_request_body_buffering_from_headers(&self, headers: &Headers) -> bool {
         self.profile.json.max_depth.is_some()
             || self.profile.json.max_fields.is_some()
             || (multipart_boundary_from_headers(headers).is_some()
@@ -113,7 +111,10 @@ impl CompiledHttpGuardProfile {
         let profile = (validate_json || validate_multipart).then(|| self.profile.clone());
         let content_type = validate_json.then(|| {
             req.headers()
-                .get(http::header::CONTENT_TYPE)
+                .get(
+                    &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                        .expect("Content-Type is ordinary"),
+                )
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned)
         });
@@ -157,7 +158,10 @@ impl CompiledHttpGuardProfile {
         }
         let content_type = req
             .headers()
-            .get(http::header::CONTENT_TYPE)
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                    .expect("Content-Type is ordinary"),
+            )
             .and_then(|value| value.to_str().ok());
         let boundary = multipart_boundary_from_headers(req.headers());
         let buffered = crate::http::body::size::observed_request_bytes(req);
@@ -238,23 +242,14 @@ fn validate_header_limits(
     profile: &HttpGuardProfileConfig,
 ) -> Option<HttpGuardReject> {
     if let Some(limit) = profile.limits.header_count
-        && req.headers().len() > limit
+        && req.headers().field_count() > limit
     {
         return Some(bad_request("header count exceeds http_guard limit"));
     }
-    if let Some(limit) = profile.limits.header_bytes {
-        let mut total = 0usize;
-        for (name, value) in req.headers() {
-            let value_len = if profile.normalize.headers {
-                trim_http_ows_len(value.as_bytes())
-            } else {
-                value.as_bytes().len()
-            };
-            total = total.saturating_add(name.as_str().len() + value_len);
-            if total > limit {
-                return Some(payload_too_large("header bytes exceed http_guard limit"));
-            }
-        }
+    if let Some(limit) = profile.limits.header_bytes
+        && req.headers().field_bytes(profile.normalize.headers) > limit
+    {
+        return Some(payload_too_large("header bytes exceed http_guard limit"));
     }
     None
 }
@@ -290,12 +285,14 @@ fn validate_query_limits(
 /// all. The name is one the Content-Length gate knows, so a guard that
 /// stops reading the declaration through the owner is caught by it.
 fn declared_request_length(
-    headers: &http::HeaderMap,
+    headers: &Headers,
 ) -> std::result::Result<Option<u64>, ContentLengthError> {
-    qpx_core::http_content_length::declared_content_length(headers)
+    headers.declared_content_length()
 }
 
 fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
+    let transfer_encoding = OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING)
+        .expect("Transfer-Encoding is ordinary");
     let declared = match declared_request_length(req.headers()) {
         Ok(declared) => declared,
         Err(ContentLengthError::Conflicting) => {
@@ -305,7 +302,7 @@ fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
             return Some(bad_request("invalid Content-Length header"));
         }
     };
-    if declared.is_some() && req.headers().contains_key(http::header::TRANSFER_ENCODING) {
+    if declared.is_some() && req.headers().contains_key(&transfer_encoding) {
         return Some(bad_request(
             "Transfer-Encoding with Content-Length is not allowed",
         ));
@@ -319,17 +316,14 @@ fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
     // trailers-only TE rule.
     if req.version() != http::Version::HTTP_2
         && req.version() != http::Version::HTTP_3
-        && req.headers().contains_key(http::header::TRANSFER_ENCODING)
+        && req.headers().contains_key(&transfer_encoding)
     {
         let classification = has_only_chunked_transfer_encoding_values(
-            req.headers()
-                .get_all(http::header::TRANSFER_ENCODING)
-                .iter()
-                .map(|value| {
-                    value
-                        .to_str()
-                        .map_err(|_| TransferEncodingClassificationError::InvalidHeader)
-                }),
+            req.headers().get_all(&transfer_encoding).map(|value| {
+                value
+                    .to_str()
+                    .map_err(|_| TransferEncodingClassificationError::InvalidHeader)
+            }),
         );
         match classification {
             Ok(true) => {}
@@ -355,12 +349,18 @@ fn validate_smuggling(req: &Request<Body>) -> Option<HttpGuardReject> {
 
 fn validate_invalid_framing(req: &Request<Body>) -> Option<HttpGuardReject> {
     if req.version() == http::Version::HTTP_2 || req.version() == http::Version::HTTP_3 {
-        if req.headers().contains_key(http::header::CONNECTION) {
+        if req.headers().contains_key(
+            &OrdinaryHeaderName::try_from(http::header::CONNECTION)
+                .expect("Connection is ordinary"),
+        ) {
             return Some(bad_request(
                 "Connection header is not valid on HTTP/2 or HTTP/3 requests",
             ));
         }
-        if let Some(value) = req.headers().get(http::header::TE) {
+        if let Some(value) = req
+            .headers()
+            .get(&OrdinaryHeaderName::try_from(http::header::TE).expect("TE is ordinary"))
+        {
             let Ok(value) = value.to_str() else {
                 return Some(bad_request("invalid TE header"));
             };

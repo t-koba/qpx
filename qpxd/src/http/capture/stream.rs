@@ -1,21 +1,22 @@
 use crate::exporter::ExportSession;
 use crate::runtime::ExecutionPlan;
 use bytes::Bytes;
-use hyper::{Request, Response};
+use hyper::Response;
 use qpx_core::http_content_length::declared_content_length;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::{Body, Sender};
 use tokio::time::{Duration, timeout};
 
 pub(crate) fn sample_request_body_for_export(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     sample_bytes: usize,
     channel_capacity: usize,
     read_timeout: Duration,
     session: ExportSession,
     client_to_server: bool,
-) -> Request<Body> {
+) -> OwnerRequest<Body> {
     let sample_bytes = sample_bytes.max(1);
-    let (parts, mut source) = req.into_parts();
+    let (head, mut source) = req.into_head_and_body();
     let (mut sender, body) = Body::channel_with_capacity(channel_capacity.max(1));
     tokio::spawn(async move {
         copy_body_with_sample(
@@ -28,19 +29,19 @@ pub(crate) fn sample_request_body_for_export(
         )
         .await;
     });
-    Request::from_parts(parts, body)
+    head.map_body(|()| body)
 }
 
 pub(crate) fn capture_request_body_for_export(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     max_capture_bytes: usize,
     channel_capacity: usize,
     read_timeout: Duration,
     session: ExportSession,
     client_to_server: bool,
-) -> Request<Body> {
+) -> OwnerRequest<Body> {
     let max_capture_bytes = max_capture_bytes.max(1);
-    let (parts, mut source) = req.into_parts();
+    let (head, mut source) = req.into_head_and_body();
     let (mut sender, body) = Body::channel_with_capacity(channel_capacity.max(1));
     tokio::spawn(async move {
         copy_body_with_full_capture(
@@ -53,15 +54,15 @@ pub(crate) fn capture_request_body_for_export(
         )
         .await;
     });
-    Request::from_parts(parts, body)
+    head.map_body(|()| body)
 }
 
 pub(crate) async fn emit_request_for_export(
-    mut request: Request<Body>,
+    mut request: OwnerRequest<Body>,
     plan: &ExecutionPlan,
     session: Option<&ExportSession>,
     client_to_server: bool,
-) -> Request<Body> {
+) -> OwnerRequest<Body> {
     let Some(session) = session else {
         return request;
     };
@@ -357,10 +358,12 @@ mod tests {
         };
         let sink = ExporterSink::from_config(&config).expect("sink");
         let session = sink.session("client", "server");
-        let req = Request::builder()
-            .uri("http://example.test/upload")
-            .body(Body::from("abcdef"))
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .uri("http://example.test/upload")
+                .body(Body::from("abcdef"))
+                .expect("request"),
+        );
 
         let mut req =
             sample_request_body_for_export(req, 3, 1, Duration::from_secs(1), session, true);
@@ -425,10 +428,12 @@ mod tests {
         };
         let sink = ExporterSink::from_config(&config).expect("sink");
         let session = sink.session("client", "server");
-        let req = Request::builder()
-            .uri("http://example.test/upload")
-            .body(Body::from("abcdef"))
-            .expect("request");
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .uri("http://example.test/upload")
+                .body(Body::from("abcdef"))
+                .expect("request"),
+        );
 
         let mut req =
             capture_request_body_for_export(req, 4, 1, Duration::from_secs(1), session, true);

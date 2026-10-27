@@ -5,7 +5,7 @@ use crate::http::dispatch::{
     rate_limit_response_for_parts_with_limits,
 };
 use anyhow::Result;
-use hyper::Request;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 
@@ -22,7 +22,7 @@ pub(super) struct TransparentBuildInput<'a> {
     pub(super) effective_policy: crate::policy_context::EffectivePolicyContext,
     pub(super) destination: crate::destination::DestinationMetadata,
     pub(super) identity: crate::policy_context::ResolvedIdentity,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: qpx_core::http_message::Headers,
     pub(super) response_engine:
         Option<std::sync::Arc<crate::http::policy::response_policy::HttpResponseRuleEngine>>,
     pub(super) selected_plan: crate::runtime::ExecutionPlan,

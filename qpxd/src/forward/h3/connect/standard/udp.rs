@@ -29,7 +29,7 @@ use tokio::time::{Duration, timeout};
 use tracing::warn;
 
 pub(in crate::forward::h3) async fn handle_h3_connect_udp(
-    req_head: ::http::Request<()>,
+    req_head: qpx_core::http_message::Request<()>,
     mut req_stream: H3ServerRequestStream,
     handler: ForwardH3Handler,
     conn: H3ConnInfo,

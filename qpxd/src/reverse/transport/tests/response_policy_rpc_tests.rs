@@ -300,15 +300,17 @@ async fn assert_reverse_response_rule_matches_streaming(
         StdArc::<str>::from("reverse_upstreams_unhealthy"),
     )
     .expect("reloadable reverse");
-    let request = Request::builder()
-        .method(Method::POST)
-        .uri("/demo.Echo/Say")
-        .header("host", "reverse.test")
-        .header(http::header::CONTENT_TYPE, "application/grpc")
-        .header(http::header::CONTENT_LENGTH, request_body.len().to_string())
-        .version(http::Version::HTTP_11)
-        .body(Body::from(request_body))
-        .expect("request");
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("/demo.Echo/Say")
+            .header("host", "reverse.test")
+            .header(http::header::CONTENT_TYPE, "application/grpc")
+            .header(http::header::CONTENT_LENGTH, request_body.len().to_string())
+            .version(http::Version::HTTP_11)
+            .body(Body::from(request_body))
+            .expect("request"),
+    );
 
     let (_, response) = handle_request_with_interim(
         request,

@@ -96,7 +96,7 @@ async fn request_size_rule_uses_actual_chunked_body_size() {
             .await
             .expect("send second chunk");
     });
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::POST)
         .uri("http://example.com/upload")
         .header("host", "example.com")
@@ -105,7 +105,7 @@ async fn request_size_rule_uses_actual_chunked_body_size() {
         .expect("request");
 
     let response = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
@@ -196,7 +196,7 @@ async fn forward_request_preserves_upstream_early_hints() {
     })
     .expect("runtime");
 
-    let request = Request::builder()
+    let request = http::Request::builder()
         .method(Method::GET)
         .uri(format!("http://{upstream_addr}/asset"))
         .header("host", upstream_addr.to_string())
@@ -205,7 +205,7 @@ async fn forward_request_preserves_upstream_early_hints() {
         .expect("request");
 
     let mut response = handle_request_inner(
-        request,
+        OwnerRequest::from_http(request),
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
@@ -252,7 +252,7 @@ edges:
     )
     .expect("config");
     let runtime = Runtime::new(config).expect("runtime");
-    let request = Request::builder()
+    let request = http::Request::builder()
         .uri(format!("http://{addr}/"))
         .header("host", addr.to_string())
         .header("connection", "X-QpX-TrUsTeD, forwarded")
@@ -264,7 +264,7 @@ edges:
     let response = tokio::time::timeout(
         std::time::Duration::from_secs(5),
         handle_request_inner(
-            request,
+            OwnerRequest::from_http(request),
             runtime,
             "forward",
             "192.0.2.1:12345".parse().expect("peer"),

@@ -7,8 +7,9 @@ use crate::upstream::raw_http1::Http1ResponseWithInterim;
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
+use hyper::Uri;
 use hyper::header::HOST;
-use hyper::{Request, Uri};
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::future::poll_fn;
@@ -18,11 +19,11 @@ use std::sync::atomic::AtomicUsize;
 use std::task::Poll;
 
 pub(super) fn prepare_proxy_h2_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     scheme: &str,
     authority: &str,
     proxy_name: &str,
-) -> Result<Request<Body>> {
+) -> Result<OwnerRequest<Body>> {
     let path = req
         .uri()
         .path_and_query()
@@ -30,7 +31,8 @@ pub(super) fn prepare_proxy_h2_request(
         .unwrap_or("/")
         .to_string();
     prepare_request_with_headers_in_place(&mut req, proxy_name, None, false);
-    req.headers_mut().remove(HOST);
+    req.headers_mut()
+        .remove(&OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field"));
     *req.version_mut() = http::Version::HTTP_2;
     *req.uri_mut() = Uri::builder()
         .scheme(scheme)
@@ -41,17 +43,18 @@ pub(super) fn prepare_proxy_h2_request(
 }
 
 pub(super) fn prepare_internal_h2_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     scheme: &str,
     authority: &str,
-) -> Result<Request<Body>> {
+) -> Result<OwnerRequest<Body>> {
     let path = req
         .uri()
         .path_and_query()
         .map(|value| value.as_str())
         .unwrap_or("/")
         .to_string();
-    req.headers_mut().remove(HOST);
+    req.headers_mut()
+        .remove(&OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field"));
     *req.version_mut() = http::Version::HTTP_2;
     *req.uri_mut() = Uri::builder()
         .scheme(scheme)
@@ -62,7 +65,7 @@ pub(super) fn prepare_internal_h2_request(
 }
 
 pub(super) async fn send_h2_request_with_sender(
-    req: Request<Body>,
+    req: hyper::Request<Body>,
     mut sender: h2::client::SendRequest<Bytes>,
     upstream_cert: Option<UpstreamCertificateInfo>,
     inflight_streams: Option<Arc<AtomicUsize>>,

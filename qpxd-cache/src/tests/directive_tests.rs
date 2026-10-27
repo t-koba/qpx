@@ -2,9 +2,9 @@ use super::*;
 
 #[test]
 fn parse_request_directives_max_stale_and_only_if_cached() {
-    let mut headers = http::HeaderMap::new();
+    let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(
-        CACHE_CONTROL,
+        qpx_core::http_message::OrdinaryHeaderName::try_from("cache-control").expect("ordinary"),
         http::HeaderValue::from_static("only-if-cached, max-stale=30, min-fresh=5"),
     );
     let parsed = parse_request_directives(&headers);
@@ -15,9 +15,9 @@ fn parse_request_directives_max_stale_and_only_if_cached() {
 
 #[test]
 fn parse_request_directives_invalid_max_stale_is_ignored() {
-    let mut headers = http::HeaderMap::new();
+    let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(
-        CACHE_CONTROL,
+        qpx_core::http_message::OrdinaryHeaderName::try_from("cache-control").expect("ordinary"),
         http::HeaderValue::from_static("max-stale=invalid"),
     );
     let parsed = parse_request_directives(&headers);
@@ -26,9 +26,15 @@ fn parse_request_directives_invalid_max_stale_is_ignored() {
 
 #[test]
 fn parse_request_directives_supports_single_byte_range() {
-    let mut headers = http::HeaderMap::new();
-    headers.insert(RANGE, http::HeaderValue::from_static("bytes=3-7"));
-    headers.insert(IF_RANGE, http::HeaderValue::from_static("\"v1\""));
+    let mut headers = qpx_core::http_message::Headers::new();
+    headers.insert(
+        qpx_core::http_message::OrdinaryHeaderName::try_from("range").expect("ordinary"),
+        http::HeaderValue::from_static("bytes=3-7"),
+    );
+    headers.insert(
+        qpx_core::http_message::OrdinaryHeaderName::try_from("if-range").expect("ordinary"),
+        http::HeaderValue::from_static("\"v1\""),
+    );
     let parsed = parse_request_directives(&headers);
     assert!(parsed.range.is_some());
     assert!(parsed.if_range.is_some());
@@ -37,9 +43,9 @@ fn parse_request_directives_supports_single_byte_range() {
 
 #[test]
 fn parse_request_directives_no_cache_with_field_names() {
-    let mut headers = http::HeaderMap::new();
+    let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(
-        CACHE_CONTROL,
+        qpx_core::http_message::OrdinaryHeaderName::try_from("cache-control").expect("ordinary"),
         http::HeaderValue::from_static("no-cache=\"set-cookie,authorization\""),
     );
     let parsed = parse_request_directives(&headers);

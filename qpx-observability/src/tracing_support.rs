@@ -134,7 +134,7 @@ pub fn extract_trace_context(headers: &http::HeaderMap) -> opentelemetry::Contex
 }
 
 /// Injects the current OpenTelemetry trace context into HTTP headers.
-pub fn inject_trace_context(headers: &mut http::HeaderMap) {
+pub fn inject_trace_context(headers: &mut qpx_core::http_message::Headers) {
     use opentelemetry::propagation::Injector;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -142,11 +142,11 @@ pub fn inject_trace_context(headers: &mut http::HeaderMap) {
         return;
     }
 
-    struct HeaderInjector<'a>(&'a mut http::HeaderMap);
+    struct HeaderInjector<'a>(&'a mut qpx_core::http_message::Headers);
 
     impl<'a> Injector for HeaderInjector<'a> {
         fn set(&mut self, key: &str, value: String) {
-            let Ok(name) = http::header::HeaderName::from_bytes(key.as_bytes()) else {
+            let Ok(name) = qpx_core::http_message::OrdinaryHeaderName::try_from(key) else {
                 return;
             };
             let Ok(value) = http::HeaderValue::from_str(value.as_str()) else {

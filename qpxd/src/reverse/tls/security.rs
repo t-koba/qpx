@@ -1,8 +1,8 @@
 use crate::reverse::router::normalize_host_for_match;
 use anyhow::{Result, anyhow};
 use globset::{Glob, GlobSet, GlobSetBuilder};
-use hyper::Request;
 use qpx_core::config::ReverseEdgeConfig;
+use qpx_core::http_message::{OrdinaryHeaderName, Request};
 use qpx_http::body::Body;
 
 #[derive(Clone)]
@@ -70,7 +70,7 @@ impl ReverseTlsHostPolicy {
 
 fn request_host(req: &Request<Body>) -> Option<String> {
     req.headers()
-        .get(http::header::HOST)
+        .get(&OrdinaryHeaderName::try_from(http::header::HOST).expect("ordinary header"))
         .and_then(|v| v.to_str().ok())
         .or_else(|| req.uri().authority().map(|a| a.as_str()))
         .map(normalize_host_for_match)
@@ -81,14 +81,16 @@ fn request_host(req: &Request<Body>) -> Option<String> {
 mod tests {
     use crate::reverse::tls::security::*;
     use globset::{Glob, GlobSetBuilder};
-    use hyper::Request;
+    use hyper::Request as HttpRequest;
 
     fn req_with_host(host: &str) -> Request<Body> {
-        Request::builder()
-            .uri(format!("https://{host}/"))
-            .header(http::header::HOST, host)
-            .body(Body::empty())
-            .expect("request")
+        Request::from_http(
+            HttpRequest::builder()
+                .uri(format!("https://{host}/"))
+                .header(http::header::HOST, host)
+                .body(Body::empty())
+                .expect("request"),
+        )
     }
 
     #[test]

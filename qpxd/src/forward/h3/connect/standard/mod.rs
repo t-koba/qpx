@@ -45,7 +45,7 @@ pub(super) struct PreparedH3Connect {
     pub(super) timeout_override: Option<Duration>,
     pub(super) rate_limit_profile: Option<String>,
     pub(super) rate_limit_context: RateLimitContext,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: qpx_core::http_message::Headers,
     pub(super) identity: crate::policy_context::ResolvedIdentity,
 }
 

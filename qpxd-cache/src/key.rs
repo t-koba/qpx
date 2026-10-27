@@ -1,12 +1,15 @@
 use super::types::CacheRequestKey;
 use anyhow::Result;
-use http::header::HOST;
-use hyper::{Method, Request};
-use qpx_http::body::Body;
+use hyper::Method;
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::protocol::address::format_authority_host_port;
 use std::cell::RefCell;
 use std::sync::Arc;
 use url::Url;
+
+fn host_name() -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from("host").expect("host is ordinary")
+}
 
 struct CachedRequestKey {
     method: Method,
@@ -22,12 +25,13 @@ thread_local! {
 }
 
 impl CacheRequestKey {
-    pub fn for_lookup(req: &Request<Body>, default_scheme: &str) -> Result<Option<Self>> {
+    pub fn for_lookup(req: &OwnerRequest<()>, default_scheme: &str) -> Result<Option<Self>> {
         Self::for_target(req, default_scheme)
     }
 
-    pub fn for_target(req: &Request<Body>, default_scheme: &str) -> Result<Option<Self>> {
-        let host = req.headers().get(HOST);
+    pub fn for_target(req: &OwnerRequest<()>, default_scheme: &str) -> Result<Option<Self>> {
+        let host_name = host_name();
+        let host = req.headers().get(&host_name);
         if let Some(key) = CACHED_REQUEST_KEY.with_borrow(|cached| {
             cached
                 .as_ref()
@@ -58,7 +62,7 @@ impl CacheRequestKey {
         Ok(key)
     }
 
-    fn for_target_uncached(req: &Request<Body>, default_scheme: &str) -> Result<Option<Self>> {
+    fn for_target_uncached(req: &OwnerRequest<()>, default_scheme: &str) -> Result<Option<Self>> {
         let scheme = req
             .uri()
             .scheme_str()
@@ -71,7 +75,7 @@ impl CacheRequestKey {
             .and_then(|a| normalize_authority(a.as_str(), scheme.as_str()))
             .or_else(|| {
                 req.headers()
-                    .get(HOST)
+                    .get(&host_name())
                     .and_then(|v| v.to_str().ok())
                     .and_then(|v| normalize_authority(v, scheme.as_str()))
             });
@@ -305,14 +309,38 @@ pub fn normalize_url_authority(url: &Url) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qpx_core::http_message::OrdinaryHeaderName;
+
+    fn owner_request(method: Method, uri: &str, host: Option<&str>) -> OwnerRequest<()> {
+        let mut req = OwnerRequest::new(());
+        *req.method_mut() = method;
+        *req.uri_mut() = uri.parse().expect("uri");
+        if let Some(host) = host {
+            req.headers_mut().insert(
+                OrdinaryHeaderName::try_from("host").expect("host"),
+                host.parse().expect("host value"),
+            );
+        }
+        req
+    }
+
+    fn owner_request_with_extra_host(
+        method: Method,
+        uri: &str,
+        first_host: &str,
+        extra_host: &str,
+    ) -> OwnerRequest<()> {
+        let mut req = owner_request(method, uri, Some(first_host));
+        req.headers_mut().append(
+            OrdinaryHeaderName::try_from("host").expect("host"),
+            extra_host.parse().expect("host value"),
+        );
+        req
+    }
 
     #[test]
     fn query_content_digest_selects_variant_without_fragmenting_primary_index() {
-        let request = Request::builder()
-            .method(Method::QUERY)
-            .uri("https://example.com/search")
-            .body(Body::empty())
-            .unwrap();
+        let request = owner_request(Method::QUERY, "https://example.com/search", None);
         let key = CacheRequestKey::for_lookup(&request, "https")
             .unwrap()
             .unwrap();
@@ -324,12 +352,7 @@ mod tests {
 
     #[test]
     fn repeated_request_key_reuses_normalized_components_without_cross_host_aliasing() {
-        let first_request = Request::builder()
-            .method(Method::GET)
-            .uri("/asset")
-            .header(HOST, "Example.COM:80")
-            .body(Body::empty())
-            .unwrap();
+        let first_request = owner_request(Method::GET, "/asset", Some("Example.COM:80"));
         let first = CacheRequestKey::for_lookup(&first_request, "http")
             .unwrap()
             .unwrap();
@@ -364,12 +387,7 @@ mod tests {
                 .primary_index_storage_key_arc()
         ));
 
-        let other_host = Request::builder()
-            .method(Method::GET)
-            .uri("/asset")
-            .header(HOST, "other.example")
-            .body(Body::empty())
-            .unwrap();
+        let other_host = owner_request(Method::GET, "/asset", Some("other.example"));
         let other = CacheRequestKey::for_lookup(&other_host, "http")
             .unwrap()
             .unwrap();
@@ -379,12 +397,11 @@ mod tests {
 
     #[test]
     fn ipv6_authority_normalization_preserves_uri_and_host_semantics() {
-        let absolute_request = Request::builder()
-            .method(Method::GET)
-            .uri("https://[2001:db8::1]:443/absolute?q=1")
-            .header(HOST, "other.example")
-            .body(Body::empty())
-            .unwrap();
+        let absolute_request = owner_request(
+            Method::GET,
+            "https://[2001:db8::1]:443/absolute?q=1",
+            Some("other.example"),
+        );
         let absolute = CacheRequestKey::for_target(&absolute_request, "http")
             .unwrap()
             .unwrap();
@@ -401,15 +418,12 @@ mod tests {
         assert_eq!(absolute_url.path(), "/absolute");
         assert_eq!(absolute_url.query(), Some("q=1"));
 
-        let mut host_fallback_request = Request::builder()
-            .method(Method::GET)
-            .uri("/host-fallback")
-            .header(HOST, "[2001:db8::1]:443")
-            .body(Body::empty())
-            .unwrap();
-        host_fallback_request
-            .headers_mut()
-            .append(HOST, http::HeaderValue::from_static("other.example"));
+        let host_fallback_request = owner_request_with_extra_host(
+            Method::GET,
+            "/host-fallback",
+            "[2001:db8::1]:443",
+            "other.example",
+        );
         let host_fallback = CacheRequestKey::for_target(&host_fallback_request, "https")
             .unwrap()
             .unwrap();

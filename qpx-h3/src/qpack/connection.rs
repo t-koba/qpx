@@ -326,7 +326,8 @@ impl QpackConnection {
                                 "invalid QPACK name-reference flags {flags:#b}"
                             )));
                         }
-                    };
+                    }
+                    .with_sensitive((first & 0x20) != 0);
                     push_decoded_field(
                         &mut sink,
                         &mut field_section_size,
@@ -337,7 +338,7 @@ impl QpackConnection {
                 }
                 if (first & 0xf0) == 0x00 {
                     let (flags, index) = reader.read_prefixed_int_after_first(first, 3).await?;
-                    if flags != 0 {
+                    if flags > 1 {
                         return Err(HeaderDecodeError::qpack(format!(
                             "invalid QPACK post-base name-reference flags {flags:#b}"
                         )));
@@ -346,7 +347,8 @@ impl QpackConnection {
                         .get_post_base_shared(prefix.base, index as usize)
                         .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?;
                     let value = reader.read_string(8).await?;
-                    let field = DecodedField::owned(name.to_string(), value);
+                    let field = DecodedField::owned(name.to_string(), value)
+                        .with_sensitive((first & 0x08) != 0);
                     push_decoded_field(
                         &mut sink,
                         &mut field_section_size,
@@ -362,7 +364,8 @@ impl QpackConnection {
                         String::from_utf8(name.to_vec())
                             .map_err(|err| HeaderDecodeError::qpack(err.to_string()))?,
                         value,
-                    );
+                    )
+                    .with_sensitive((first & 0x10) != 0);
                     push_decoded_field(
                         &mut sink,
                         &mut field_section_size,

@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
 use http::header::HeaderName;
-use hyper::HeaderMap;
+use qpx_core::http_message::Headers;
 use ring::signature;
 use serde_json::Value as JsonValue;
 use sha2::Digest;
@@ -25,31 +25,13 @@ pub(super) fn peer_matches(peer_ip: IpAddr, trusted_peers: &[cidr::IpCidr]) -> b
     trusted_peers.iter().any(|cidr| cidr.contains(&peer_ip))
 }
 
-pub(super) fn extract_first_header(
-    headers: &HeaderMap,
-    name: Option<&HeaderName>,
-) -> Option<String> {
-    let name = name?;
-    headers
-        .get_all(name)
-        .iter()
-        .filter_map(|value| value.to_str().ok())
-        .map(str::trim)
-        .find(|value| !value.is_empty())
-        .map(str::to_string)
+pub(super) fn extract_first_header(headers: &Headers, name: Option<&HeaderName>) -> Option<String> {
+    headers.identity_text(name?)
 }
 
-pub(super) fn extract_list_header(headers: &HeaderMap, name: Option<&HeaderName>) -> Vec<String> {
-    let Some(name) = name else {
-        return Vec::new();
-    };
-    let mut out = Vec::new();
-    for item in qpx_core::http_token::header_value_members(headers, name) {
-        if !item.is_empty() && !out.iter().any(|existing| existing == item) {
-            out.push(item.to_string());
-        }
-    }
-    out
+pub(super) fn extract_list_header(headers: &Headers, name: Option<&HeaderName>) -> Vec<String> {
+    name.map(|name| headers.identity_members(name))
+        .unwrap_or_default()
 }
 
 pub(super) fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
@@ -85,30 +67,11 @@ pub(super) fn normalize_string_list(values: Vec<String>) -> Vec<String> {
 }
 
 pub(super) fn extract_assertion_token<'a>(
-    headers: &'a HeaderMap,
+    headers: &'a Headers,
     name: &HeaderName,
     prefix: Option<&str>,
 ) -> Option<&'a str> {
-    for value in headers.get_all(name).iter() {
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        let value = value.trim();
-        if value.is_empty() {
-            continue;
-        }
-        if let Some(prefix) = prefix {
-            if let Some(token) = value.strip_prefix(prefix) {
-                let token = token.trim();
-                if !token.is_empty() {
-                    return Some(token);
-                }
-            }
-            continue;
-        }
-        return Some(value);
-    }
-    None
+    headers.identity_assertion(name, prefix)
 }
 
 pub(super) fn load_hmac_secret_from_env(env_name: &str) -> Result<Arc<[u8]>> {
@@ -334,23 +297,11 @@ pub(super) fn json_list_claim(
 }
 
 pub(super) fn selected_headers_map(
-    headers: Option<&HeaderMap>,
+    headers: Option<&Headers>,
     selected: &[HeaderName],
 ) -> HashMap<String, Vec<String>> {
     let Some(headers) = headers else {
         return HashMap::new();
     };
-    let mut out = HashMap::new();
-    for name in selected {
-        let values = headers
-            .get_all(name)
-            .iter()
-            .filter_map(|value| value.to_str().ok())
-            .map(str::to_string)
-            .collect::<Vec<_>>();
-        if !values.is_empty() {
-            out.insert(name.as_str().to_string(), values);
-        }
-    }
-    out
+    headers.selected_fields_for_serialization(selected)
 }

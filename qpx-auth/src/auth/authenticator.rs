@@ -140,7 +140,7 @@ impl Authenticator {
     pub async fn authenticate_proxy(
         &self,
         src_ip: Option<IpAddr>,
-        headers: &http::HeaderMap,
+        headers: &qpx_core::http_message::Headers,
         required_providers: &[String],
         method: &str,
         uri: &str,
@@ -154,7 +154,10 @@ impl Authenticator {
         }
 
         let header = headers
-            .get("proxy-authorization")
+            .get(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from("proxy-authorization")
+                    .expect("static ordinary field"),
+            )
             .and_then(|v| v.to_str().ok())
             .unwrap_or("");
         let audit_uri = self.redact_audit_uri(uri);

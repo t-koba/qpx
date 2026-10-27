@@ -2,11 +2,12 @@ use crate::runtime::RuntimeState;
 use crate::runtime::auth::AuthenticatedUser;
 use anyhow::{Result, anyhow};
 use http::header::HeaderName;
-use hyper::{HeaderMap, Uri};
+use hyper::Uri;
 use qpx_core::config::{
     IdentitySourceConfig, IdentitySourceHeadersConfig, IdentitySourceKind, MtlsIdentityMapConfig,
     PolicyContextConfig,
 };
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 use qpx_observability::access_log::RequestLogContext;
 use sha2::{Digest, Sha256};
 use std::collections::HashSet;
@@ -75,16 +76,21 @@ impl IdentityRequestContext {
     pub(crate) fn from_request_parts(
         method: &str,
         uri: &Uri,
-        headers: &HeaderMap,
+        headers: &Headers,
         default_scheme: &str,
     ) -> Option<Self> {
         let request_uri = if uri.scheme().is_some() {
             uri.to_string()
         } else {
-            let authority = uri
-                .authority()
-                .map(|value| value.as_str())
-                .or_else(|| headers.get(http::header::HOST)?.to_str().ok())?;
+            let authority = uri.authority().map(|value| value.as_str()).or_else(|| {
+                headers
+                    .get(
+                        &OrdinaryHeaderName::try_from(http::header::HOST)
+                            .expect("Host is ordinary"),
+                    )?
+                    .to_str()
+                    .ok()
+            })?;
             let path = uri
                 .path_and_query()
                 .map(|value| value.as_str())
@@ -361,7 +367,7 @@ pub(crate) fn sanitize_headers_for_policy(
     state: &RuntimeState,
     policy: &EffectivePolicyContext,
     peer_ip: IpAddr,
-    headers: &mut HeaderMap,
+    headers: &mut Headers,
 ) -> Result<()> {
     strip_untrusted_identity_headers(state, policy, peer_ip, headers)
 }
@@ -370,7 +376,7 @@ pub(crate) fn strip_untrusted_identity_headers(
     state: &RuntimeState,
     policy: &EffectivePolicyContext,
     peer_ip: IpAddr,
-    headers: &mut HeaderMap,
+    headers: &mut Headers,
 ) -> Result<()> {
     if state.security.identity_sources.sources.is_empty() {
         return Ok(());
@@ -402,7 +408,13 @@ pub(crate) fn strip_untrusted_identity_headers(
     }
 
     for name in names_to_strip {
-        headers.remove(name);
+        if name == http::header::CONTENT_LENGTH {
+            headers.remove_content_length();
+        } else {
+            headers.remove(
+                &OrdinaryHeaderName::try_from(name.clone()).expect("non-framing identity header"),
+            );
+        }
     }
     Ok(())
 }
@@ -411,7 +423,7 @@ pub(crate) async fn resolve_identity(
     state: &RuntimeState,
     policy: &EffectivePolicyContext,
     peer_ip: IpAddr,
-    headers: Option<&HeaderMap>,
+    headers: Option<&Headers>,
     peer_certificates: Option<&[Vec<u8>]>,
 ) -> Result<ResolvedIdentity> {
     resolve_identity_for_request(state, policy, peer_ip, headers, peer_certificates, None).await
@@ -421,7 +433,7 @@ pub(crate) async fn resolve_identity_for_request(
     state: &RuntimeState,
     policy: &EffectivePolicyContext,
     peer_ip: IpAddr,
-    headers: Option<&HeaderMap>,
+    headers: Option<&Headers>,
     peer_certificates: Option<&[Vec<u8>]>,
     request: Option<&IdentityRequestContext>,
 ) -> Result<ResolvedIdentity> {
@@ -449,7 +461,7 @@ pub(crate) fn resolve_identity_local(
     state: &RuntimeState,
     policy: &EffectivePolicyContext,
     peer_ip: IpAddr,
-    headers: Option<&HeaderMap>,
+    headers: Option<&Headers>,
     peer_certificates: Option<&[Vec<u8>]>,
 ) -> Result<ResolvedIdentity> {
     let mut resolved = ResolvedIdentity::default();
@@ -482,7 +494,7 @@ pub(crate) fn resolve_identity_local(
 }
 
 impl CompiledTrustedHeaders {
-    fn extract(&self, headers: &HeaderMap) -> ResolvedIdentity {
+    fn extract(&self, headers: &Headers) -> ResolvedIdentity {
         let mut identity = ResolvedIdentity {
             user: extract_first_header(headers, self.headers.user.as_ref()),
             groups: extract_list_header(headers, self.headers.groups.as_ref()),

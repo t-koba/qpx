@@ -1,9 +1,10 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use bytes::Bytes;
-use http::header::{AGE, CACHE_CONTROL, ETAG, HOST, HeaderMap, HeaderValue, IF_NONE_MATCH, VARY};
-use hyper::{Method, Request, Response, StatusCode};
+use http::header::{AGE, CACHE_CONTROL, ETAG, HOST, HeaderValue, VARY};
+use hyper::{Method, Response, StatusCode};
 use qpx_core::config::{CacheBackendConfig, CachePolicyConfig};
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use qpxd_cache::{
     CacheBackend, CacheRequestKey, CacheStoreContext, CacheStoreTiming, CacheWritebackAdmission,
@@ -216,13 +217,19 @@ fn revalidations() -> Arc<InFlightRevalidations> {
     Arc::new(InFlightRevalidations::with_default_shards())
 }
 
-fn request(path: &str) -> Request<Body> {
-    Request::builder()
-        .method(Method::GET)
-        .uri(path)
-        .header(HOST, "cache.example")
-        .body(Body::empty())
-        .expect("request")
+fn request(path: &str) -> OwnerRequest<()> {
+    OwnerRequest::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri(path)
+            .header(HOST, "cache.example")
+            .body(())
+            .expect("request"),
+    )
+}
+
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
 }
 
 fn response(body: &'static str, headers: &[(&str, &str)]) -> Response<Body> {
@@ -242,7 +249,7 @@ async fn collect_body(body: &mut Body) -> Result<Bytes> {
 }
 
 async fn store_and_drain(
-    req: &Request<Body>,
+    req: &OwnerRequest<()>,
     key: &CacheRequestKey,
     response: Response<Body>,
     policy: &CachePolicyConfig,
@@ -250,8 +257,7 @@ async fn store_and_drain(
 ) -> Result<()> {
     let writeback_admission = CacheWritebackAdmission::with_default_capacity();
     let mut stored = maybe_store(
-        req.method(),
-        req.headers(),
+        req,
         key,
         policy,
         response,
@@ -271,21 +277,13 @@ async fn store_and_drain(
 }
 
 async fn wait_for_cached_outcome(
-    req: &Request<Body>,
+    req: &OwnerRequest<()>,
     key: &CacheRequestKey,
     policy: &CachePolicyConfig,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
 ) -> Result<LookupOutcome> {
     for _ in 0..50 {
-        let outcome = lookup(
-            req.method(),
-            req.headers(),
-            key,
-            policy,
-            backends,
-            &revalidations(),
-        )
-        .await?;
+        let outcome = lookup(req, key, policy, backends, &revalidations()).await?;
         if !matches!(
             outcome,
             LookupOutcome::Miss | LookupOutcome::OnlyIfCachedMiss
@@ -294,15 +292,7 @@ async fn wait_for_cached_outcome(
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    lookup(
-        req.method(),
-        req.headers(),
-        key,
-        policy,
-        backends,
-        &revalidations(),
-    )
-    .await
+    lookup(req, key, policy, backends, &revalidations()).await
 }
 
 #[tokio::test]
@@ -345,10 +335,10 @@ async fn vary_selects_the_matching_request_variant() -> Result<()> {
         let backends = &case.backends;
         let mut en = request("/vary");
         en.headers_mut()
-            .insert("accept-language", HeaderValue::from_static("en"));
+            .insert(ord("accept-language"), HeaderValue::from_static("en"));
         let mut ja = request("/vary");
         ja.headers_mut()
-            .insert("accept-language", HeaderValue::from_static("ja"));
+            .insert(ord("accept-language"), HeaderValue::from_static("ja"));
         let en_key = CacheRequestKey::for_lookup(&en, "http")?.expect("cache key");
         let ja_key = CacheRequestKey::for_lookup(&ja, "http")?.expect("cache key");
 
@@ -471,7 +461,7 @@ async fn conditional_requests_return_not_modified_or_attach_revalidation_headers
         let mut conditional = request("/conditional");
         conditional
             .headers_mut()
-            .insert(IF_NONE_MATCH, HeaderValue::from_static("\"v1\""));
+            .insert(ord("if-none-match"), HeaderValue::from_static("\"v1\""));
         let conditional_key =
             CacheRequestKey::for_lookup(&conditional, "http")?.expect("cache key");
         let LookupOutcome::Hit(not_modified) =
@@ -509,10 +499,10 @@ async fn conditional_requests_return_not_modified_or_attach_revalidation_headers
                 case.name
             );
         };
-        let mut headers = HeaderMap::new();
+        let mut headers = qpx_core::http_message::Headers::new();
         assert!(attach_revalidation_headers(&mut headers, &state));
         assert_eq!(
-            headers.get(IF_NONE_MATCH),
+            headers.get(&ord("if-none-match")),
             Some(&HeaderValue::from_static("\"stale-v1\""))
         );
     }

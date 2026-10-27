@@ -5,7 +5,8 @@ use crate::qpack_fields::{
 };
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::{HeaderMap, Method, Uri};
+use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request};
 use std::sync::Arc;
 
 enum DecodedFieldName {
@@ -27,6 +28,7 @@ impl DecodedFieldName {
 pub(super) struct DecodedField {
     name: DecodedFieldName,
     value: Bytes,
+    sensitive: bool,
 }
 
 impl DecodedField {
@@ -34,6 +36,7 @@ impl DecodedField {
         Self {
             name: DecodedFieldName::Static(name),
             value: Bytes::from_static(value.as_bytes()),
+            sensitive: false,
         }
     }
 
@@ -41,6 +44,7 @@ impl DecodedField {
         Self {
             name: DecodedFieldName::Shared(name),
             value,
+            sensitive: false,
         }
     }
 
@@ -48,7 +52,13 @@ impl DecodedField {
         Self {
             name: DecodedFieldName::Owned(name),
             value,
+            sensitive: false,
         }
+    }
+
+    pub(super) fn with_sensitive(mut self, sensitive: bool) -> Self {
+        self.sensitive = sensitive;
+        self
     }
 }
 
@@ -143,8 +153,14 @@ impl FieldSink for RequestHeadSink {
             _ => {
                 self.regular_seen = true;
                 validate_h3_regular_field(name, field.value.as_ref())?;
-                append_header(&mut self.headers, name, field.value.as_ref())
+                // Keep every decoded occurrence until application policy has run;
+                // in particular, do not coalesce Cookie at QPACK ingress.
+                let name = HeaderName::from_bytes(name.as_bytes())
                     .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
+                let mut value = HeaderValue::from_bytes(field.value.as_ref())
+                    .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
+                value.set_sensitive(field.sensitive);
+                self.headers.append(name, value);
             }
         }
         Ok(())
@@ -178,21 +194,24 @@ impl FieldSink for RequestHeadSink {
                 return Err(HeaderDecodeError::message("missing :path"));
             }
         }
-        let uri = build_request_uri(
-            &self.headers,
-            &method,
+        let mut raw = http::Request::builder()
+            .method(method)
+            .version(http::Version::HTTP_3)
+            .body(())
+            .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
+        *raw.headers_mut() = self.headers;
+        // Import the complete field section once at decoded ingress. URI
+        // finalization (including Host fallback) validates only the owned head.
+        let mut request = Request::from_http(raw);
+        *request.uri_mut() = build_request_uri(
+            request.headers(),
+            request.method(),
             self.scheme.as_deref(),
             self.authority.as_deref(),
             self.path.as_deref(),
-            method == Method::CONNECT && self.protocol.is_none(),
+            request.method() == Method::CONNECT && self.protocol.is_none(),
         )
         .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
-        let mut request = http::Request::builder()
-            .method(method)
-            .uri(uri)
-            .body(())
-            .map_err(|err| HeaderDecodeError::message(err.to_string()))?;
-        *request.headers_mut() = self.headers;
         Ok(DecodedRequestHead {
             request,
             protocol: self.protocol,
@@ -291,7 +310,7 @@ fn pseudo_value_to_string(
 }
 
 pub(super) fn build_request_uri(
-    headers: &HeaderMap,
+    headers: &Headers,
     method: &Method,
     scheme: Option<&str>,
     authority: Option<&str>,
@@ -329,9 +348,10 @@ pub(super) fn build_request_uri(
     .map_err(|err| anyhow!("{err}"))?;
     // HTTP/3 requires the two field values themselves to match, not merely
     // identify equivalent authorities (for example, host case/default port).
-    if let (Some(pseudo_authority), Some(host)) =
-        (pseudo_authority, headers.get(http::header::HOST))
-        && host.as_bytes() != pseudo_authority.as_bytes()
+    if let (Some(pseudo_authority), Some(host)) = (
+        pseudo_authority,
+        headers.get(&OrdinaryHeaderName::try_from(http::header::HOST).expect("ordinary")),
+    ) && host.as_bytes() != pseudo_authority.as_bytes()
     {
         return Err(anyhow!("Host field does not match :authority value"));
     }

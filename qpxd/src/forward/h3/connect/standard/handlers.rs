@@ -15,7 +15,7 @@ use tokio::time::Duration;
 use tracing::warn;
 
 pub(crate) async fn handle_h3_connect(
-    req_head: ::http::Request<()>,
+    req_head: qpx_core::http_message::Request<()>,
     mut req_stream: H3ServerRequestStream,
     handler: ForwardH3Handler,
     conn: H3ConnInfo,

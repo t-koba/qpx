@@ -13,12 +13,13 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use http::header::LOCATION;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
-use hyper::{Request, Response};
+use hyper::Response;
 use qpx_core::config::{
     HeaderCaptureConfig, HttpModuleConfig, SubrequestModuleConfig, SubrequestPhase,
     SubrequestResponseMode,
 };
 use qpx_core::http_content_length::declared_content_length;
+use qpx_core::http_message::{HeaderTransferMode, HeaderTransferPatch, Request as OwnerRequest};
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -143,25 +144,25 @@ impl SubrequestModule {
         })
     }
 
-    fn build_subrequest(
+    pub(in crate::http::modules) fn build_subrequest(
         &self,
         ctx: &HttpModuleContext,
         request: &HttpModuleRequestView<'_>,
-    ) -> Result<Request<Body>> {
+    ) -> Result<OwnerRequest<Body>> {
         let url = render_template(&self.url_template, request, ctx)?;
         let uri = self.validate_url(url.as_str())?;
-        let mut builder = Request::builder().method(self.method.clone()).uri(uri);
+        let mut req = OwnerRequest::new(Body::empty());
+        *req.method_mut() = self.method.clone();
+        *req.uri_mut() = uri;
         for header in &self.pass_headers {
-            if let Some(value) = request.headers().get(header) {
-                builder = builder.header(header, value);
-            }
+            HeaderTransferPatch::from_headers(request.headers(), header.clone())
+                .apply(req.headers_mut(), HeaderTransferMode::Append);
         }
-        let mut req = builder.body(Body::empty())?;
         for (name, value_template) in &self.request_headers {
             let value = render_template(value_template, request, ctx)?;
             let value = HeaderValue::from_str(value.as_str())
                 .with_context(|| format!("invalid subrequest header value for {name}"))?;
-            req.headers_mut().insert(name.clone(), value);
+            HttpModuleRequest::new(&mut req).set_header(name.clone(), value);
         }
         Ok(req)
     }
@@ -214,7 +215,7 @@ impl SubrequestModule {
     async fn run_built_request(
         &self,
         ctx: &HttpModuleContext,
-        req: Request<Body>,
+        req: OwnerRequest<Body>,
     ) -> Result<Response<Body>> {
         let timeout_dur = self.timeout.unwrap_or_else(|| {
             Duration::from_millis(
@@ -340,9 +341,7 @@ impl SubrequestModule {
     ) {
         for (from, to) in &self.copy_to_request {
             if let Some(value) = subresponse.headers().get(from) {
-                req.as_raw_mut()
-                    .headers_mut()
-                    .insert(to.clone(), value.clone());
+                req.set_header(to.clone(), value.clone());
                 ctx.remember_request_header(to.clone(), value.clone());
             }
         }

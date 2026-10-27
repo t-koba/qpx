@@ -1,10 +1,11 @@
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response, StatusCode};
+use hyper::{Response, StatusCode};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::redaction::redact_uri_query_keys;
 use qpx_http::body::Body;
 
 pub(super) async fn collect_browser_reports(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     config: &qpx_core::config::ReportingCollectorConfig,
     request_method: &http::Method,
     request_version: http::Version,
@@ -30,7 +31,9 @@ pub(super) async fn collect_browser_reports(
             false,
         ));
     }
-    if req.headers().contains_key(http::header::CONTENT_ENCODING) {
+    if req.headers().contains_key(
+        &OrdinaryHeaderName::try_from(http::header::CONTENT_ENCODING).expect("ordinary header"),
+    ) {
         return Ok(crate::http::protocol::l7::finalize_response_with_headers(
             request_method,
             request_version,
@@ -79,7 +82,9 @@ pub(super) async fn collect_browser_reports(
             ));
         }
     };
-    let bytes = match collect_bounded_report_body(req.into_body(), config.max_body_bytes).await {
+    let bytes = match collect_bounded_report_body(req.into_head_and_body().1, config.max_body_bytes)
+        .await
+    {
         Ok(bytes) => bytes,
         Err(error) => {
             return Ok(crate::http::protocol::l7::finalize_response_with_headers(
@@ -150,8 +155,10 @@ pub(super) async fn collect_browser_reports(
     ))
 }
 
-fn single_media_type(headers: &http::HeaderMap) -> Result<String> {
-    let mut values = headers.get_all(http::header::CONTENT_TYPE).iter();
+fn single_media_type(headers: &Headers) -> Result<String> {
+    let mut values = headers.get_all(
+        &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE).expect("ordinary header"),
+    );
     let value = values
         .next()
         .ok_or_else(|| anyhow!("browser report Content-Type is missing"))?;
@@ -273,6 +280,7 @@ fn reporting_problem_response(
 #[cfg(test)]
 mod browser_report_tests {
     use super::*;
+    use hyper::Request;
 
     fn collector() -> qpx_core::config::ReportingCollectorConfig {
         qpx_core::config::ReportingCollectorConfig {
@@ -280,6 +288,29 @@ mod browser_report_tests {
             max_reports: 4,
             accept_legacy_csp_reports: false,
         }
+    }
+
+    #[test]
+    fn media_type_rejects_duplicate_and_non_ascii_fields() {
+        let mut headers = Headers::new();
+        let name = OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE).unwrap();
+        assert!(single_media_type(&headers).is_err());
+        headers.append(
+            name.clone(),
+            http::HeaderValue::from_static("application/reports+json; charset=utf-8"),
+        );
+        assert_eq!(
+            single_media_type(&headers).unwrap(),
+            "application/reports+json"
+        );
+        headers.append(
+            name.clone(),
+            http::HeaderValue::from_static("application/reports+json"),
+        );
+        assert!(single_media_type(&headers).is_err());
+        headers.remove(&name);
+        headers.append(name, http::HeaderValue::from_bytes(&[0xff]).unwrap());
+        assert!(single_media_type(&headers).is_err());
     }
 
     #[tokio::test]
@@ -293,7 +324,7 @@ mod browser_report_tests {
             ))
             .expect("request");
         let response = collect_browser_reports(
-            request,
+            OwnerRequest::from_http(request),
             &collector(),
             &http::Method::POST,
             http::Version::HTTP_2,
@@ -317,7 +348,7 @@ mod browser_report_tests {
             .body(Body::from(r#"[{"type":"csp-violation"}]"#))
             .expect("request");
         let response = collect_browser_reports(
-            invalid,
+            OwnerRequest::from_http(invalid),
             &collector(),
             &http::Method::POST,
             http::Version::HTTP_11,
@@ -338,7 +369,7 @@ mod browser_report_tests {
             .body(Body::from("[]"))
             .expect("request");
         let response = collect_browser_reports(
-            oversized,
+            OwnerRequest::from_http(oversized),
             &limits,
             &http::Method::POST,
             http::Version::HTTP_11,

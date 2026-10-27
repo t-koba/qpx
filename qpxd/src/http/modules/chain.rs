@@ -174,7 +174,7 @@ impl CompiledHttpModuleChain {
     pub(crate) fn start_for_request<'a>(
         self: &Arc<Self>,
         runtime: &Arc<RuntimeState>,
-        request: &hyper::Request<qpx_http::body::Body>,
+        request: &qpx_core::http_message::Request<qpx_http::body::Body>,
         init: impl FnOnce() -> HttpModuleSessionInit<'a>,
     ) -> HttpModuleExecution {
         if self.is_empty() || {

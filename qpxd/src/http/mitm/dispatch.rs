@@ -30,9 +30,10 @@ use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
+use hyper::Response;
 use hyper::client::conn::http1::SendRequest;
-use hyper::{Request, Response};
 use qpx_core::config::{ActionKind, LocalResponseConfig};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -47,7 +48,7 @@ enum MitmEarlyResponse {
 }
 
 pub(super) async fn dispatch_mitm_request(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: BaseRequestFields,
     runtime: Runtime,
     sender: Arc<Mutex<SendRequest<Body>>>,
@@ -69,7 +70,7 @@ pub(super) async fn dispatch_mitm_request(
 }
 
 async fn execute_mitm_request(
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     base: BaseRequestFields,
     runtime: Runtime,
     sender: Arc<Mutex<SendRequest<Body>>>,
@@ -85,7 +86,8 @@ async fn execute_mitm_request(
     let effective_policy = base_plan.policy_context.clone();
     let http_guard = base_plan.guard.as_deref();
     let websocket = is_websocket_upgrade(req.method(), req.headers())?;
-    let client_upgrade = websocket.then(|| crate::http::protocol::upgrade::on(&mut req));
+    let client_upgrade =
+        websocket.then(|| crate::http::protocol::upgrade::on(req.extensions_mut()));
     let path = base.path().unwrap_or("/");
     let engine = state.policy.rule_engine_for_listener(route.listener_name)?;
     let prefilter_ctx = MatchPrefilterContext {

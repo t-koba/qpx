@@ -9,7 +9,8 @@ use crate::{
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
-use http::{HeaderMap, Method, Request, Response, StatusCode};
+use http::{Method, Response, StatusCode};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request};
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
@@ -338,7 +339,7 @@ impl<S: WebDavStore> WebDavService<S> {
     fn put(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
         if !self.parent_collection_exists(resource)? {
@@ -349,7 +350,10 @@ impl<S: WebDavStore> WebDavService<S> {
         }
         if self.is_calendar_collection_parent(resource)? {
             let content_type = headers
-                .get(http::header::CONTENT_TYPE)
+                .get(
+                    &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                        .expect("WebDAV field is ordinary"),
+                )
                 .and_then(|value| value.to_str().ok())
                 .map(|value| value.split(';').next().unwrap_or(value).trim());
             if content_type != Some("text/calendar") {
@@ -361,7 +365,10 @@ impl<S: WebDavStore> WebDavService<S> {
             resource,
             body,
             headers
-                .get(http::header::CONTENT_TYPE)
+                .get(
+                    &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                        .expect("WebDAV field is ordinary"),
+                )
                 .and_then(|value| value.to_str().ok()),
         )?;
         response(
@@ -374,7 +381,7 @@ impl<S: WebDavStore> WebDavService<S> {
         )
     }
 
-    fn delete(&self, resource: &ResourceId, headers: &HeaderMap) -> Result<Response<Vec<u8>>> {
+    fn delete(&self, resource: &ResourceId, headers: &Headers) -> Result<Response<Vec<u8>>> {
         if self.store.metadata(resource)?.is_none() {
             return response(StatusCode::NOT_FOUND, Vec::new());
         }
@@ -389,7 +396,7 @@ impl<S: WebDavStore> WebDavService<S> {
     fn mkcol(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
         if !self.parent_collection_exists(resource)? {
@@ -405,7 +412,10 @@ impl<S: WebDavStore> WebDavService<S> {
             Vec::new()
         } else {
             let content_type = headers
-                .get(http::header::CONTENT_TYPE)
+                .get(
+                    &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                        .expect("WebDAV field is ordinary"),
+                )
                 .and_then(|value| value.to_str().ok())
                 .map(|value| value.split(';').next().unwrap_or(value).trim());
             if !matches!(content_type, Some("application/xml" | "text/xml")) {
@@ -430,7 +440,7 @@ impl<S: WebDavStore> WebDavService<S> {
     fn mkcalendar(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
         if !self.parent_collection_exists(resource)? {
@@ -442,7 +452,10 @@ impl<S: WebDavStore> WebDavService<S> {
         let mut properties = Vec::new();
         if !body.is_empty() {
             let content_type = headers
-                .get(http::header::CONTENT_TYPE)
+                .get(
+                    &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                        .expect("WebDAV field is ordinary"),
+                )
                 .and_then(|value| value.to_str().ok())
                 .map(|value| value.split(';').next().unwrap_or(value).trim());
             if !matches!(content_type, Some("application/xml" | "text/xml")) {
@@ -489,7 +502,7 @@ impl<S: WebDavStore> WebDavService<S> {
     fn propfind(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
         if !body.is_empty() && validate_propfind_body(body).is_err() {
@@ -769,12 +782,12 @@ impl<S: WebDavStore> WebDavService<S> {
     fn update_version(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         merge: bool,
     ) -> Result<Response<Vec<u8>>> {
         let header = if merge { "source" } else { "version-name" };
         let Some(version_name) = headers
-            .get(header)
+            .get(&OrdinaryHeaderName::try_from(header).expect("WebDAV field is ordinary"))
             .and_then(|value| value.to_str().ok())
             .and_then(|value| value.trim_end_matches('/').rsplit('/').next())
         else {
@@ -1004,7 +1017,7 @@ impl<S: WebDavStore> WebDavService<S> {
     fn proppatch(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
         if self.store.metadata(resource)?.is_none() {
@@ -1055,19 +1068,22 @@ impl<S: WebDavStore> WebDavService<S> {
     fn lock(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         body: &[u8],
     ) -> Result<Response<Vec<u8>>> {
         reject_unsafe_xml(body)?;
         let timeout_seconds = parse_timeout(headers, self.max_lock_timeout_seconds);
-        let depth = match headers.get("depth").and_then(|value| value.to_str().ok()) {
+        let depth = match headers
+            .get(&OrdinaryHeaderName::try_from("depth").expect("WebDAV field is ordinary"))
+            .and_then(|value| value.to_str().ok())
+        {
             Some("0") => LockDepth::Zero,
             Some("infinity") | None => LockDepth::Infinity,
             _ => return response(StatusCode::BAD_REQUEST, Vec::new()),
         };
         if body.is_empty() {
             let supplied = headers
-                .get("if")
+                .get(&OrdinaryHeaderName::try_from("if").expect("WebDAV field is ordinary"))
                 .and_then(|value| value.to_str().ok())
                 .unwrap_or_default();
             let Some(mut lock) = self
@@ -1129,9 +1145,9 @@ impl<S: WebDavStore> WebDavService<S> {
         )
     }
 
-    fn unlock(&self, resource: &ResourceId, headers: &HeaderMap) -> Result<Response<Vec<u8>>> {
+    fn unlock(&self, resource: &ResourceId, headers: &Headers) -> Result<Response<Vec<u8>>> {
         let Some(token) = headers
-            .get("lock-token")
+            .get(&OrdinaryHeaderName::try_from("lock-token").expect("WebDAV field is ordinary"))
             .and_then(|value| value.to_str().ok())
             .map(|value| value.trim().trim_start_matches('<').trim_end_matches('>'))
         else {
@@ -1151,11 +1167,11 @@ impl<S: WebDavStore> WebDavService<S> {
     fn copy_or_move(
         &self,
         source: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
         move_resource: bool,
     ) -> Result<Response<Vec<u8>>> {
         let Some(destination) = headers
-            .get("destination")
+            .get(&OrdinaryHeaderName::try_from("destination").expect("WebDAV field is ordinary"))
             .and_then(|value| value.to_str().ok())
         else {
             return response(StatusCode::BAD_REQUEST, Vec::new());
@@ -1165,7 +1181,7 @@ impl<S: WebDavStore> WebDavService<S> {
             .map_err(|_| anyhow!("WebDAV Destination is not a valid URI"))?;
         let destination = ResourceId::parse(destination_uri.path())?;
         let overwrite = match headers
-            .get("overwrite")
+            .get(&OrdinaryHeaderName::try_from("overwrite").expect("WebDAV field is ordinary"))
             .and_then(|value| value.to_str().ok())
         {
             None | Some("T" | "t") => true,
@@ -1186,7 +1202,7 @@ impl<S: WebDavStore> WebDavService<S> {
             return response(StatusCode::PRECONDITION_FAILED, Vec::new());
         }
         let depth = headers
-            .get("depth")
+            .get(&OrdinaryHeaderName::try_from("depth").expect("WebDAV field is ordinary"))
             .and_then(|value| value.to_str().ok())
             .unwrap_or("infinity");
         if (move_resource && depth != "infinity") || !matches!(depth, "0" | "infinity") {
@@ -1235,11 +1251,11 @@ impl<S: WebDavStore> WebDavService<S> {
     fn lock_failure_status(
         &self,
         resource: &ResourceId,
-        headers: &HeaderMap,
+        headers: &Headers,
     ) -> Result<Option<StatusCode>> {
         let locks = self.store.locks(resource, true)?;
         let if_header = headers
-            .get("if")
+            .get(&OrdinaryHeaderName::try_from("if").expect("WebDAV field is ordinary"))
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         if !if_header.is_empty() && !self.if_header_satisfied(resource, if_header, &locks)? {
@@ -1249,7 +1265,10 @@ impl<S: WebDavStore> WebDavService<S> {
             return Ok(None);
         }
         let if_match = headers
-            .get(http::header::IF_MATCH)
+            .get(
+                &OrdinaryHeaderName::try_from(http::header::IF_MATCH)
+                    .expect("WebDAV field is ordinary"),
+            )
             .and_then(|value| value.to_str().ok())
             .unwrap_or_default();
         if locks.iter().all(|lock| {
@@ -1257,7 +1276,9 @@ impl<S: WebDavStore> WebDavService<S> {
                 || if_match.contains(&lock.token)
         }) {
             Ok(None)
-        } else if headers.contains_key("if") {
+        } else if headers
+            .contains_key(&OrdinaryHeaderName::try_from("if").expect("WebDAV field is ordinary"))
+        {
             Ok(Some(StatusCode::PRECONDITION_FAILED))
         } else {
             Ok(Some(locked_status()))
@@ -1336,8 +1357,11 @@ impl<S: WebDavStore> WebDavService<S> {
     }
 }
 
-fn parse_depth(headers: &HeaderMap, max_depth: usize) -> Result<usize> {
-    match headers.get("depth").and_then(|value| value.to_str().ok()) {
+fn parse_depth(headers: &Headers, max_depth: usize) -> Result<usize> {
+    match headers
+        .get(&OrdinaryHeaderName::try_from("depth").expect("WebDAV field is ordinary"))
+        .and_then(|value| value.to_str().ok())
+    {
         None | Some("infinity") => Ok(max_depth),
         Some("0") => Ok(0),
         Some("1") => Ok(1),
@@ -1345,9 +1369,9 @@ fn parse_depth(headers: &HeaderMap, max_depth: usize) -> Result<usize> {
     }
 }
 
-fn parse_timeout(headers: &HeaderMap, maximum: u64) -> u64 {
+fn parse_timeout(headers: &Headers, maximum: u64) -> u64 {
     headers
-        .get("timeout")
+        .get(&OrdinaryHeaderName::try_from("timeout").expect("WebDAV field is ordinary"))
         .and_then(|value| value.to_str().ok())
         .and_then(|value| {
             value
@@ -2213,24 +2237,27 @@ mod tests {
         let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
         let context = WebDavRequestContext::default();
 
-        let mkcol = Request::builder()
+        let mkcol = http::Request::builder()
             .method("MKCOL")
             .uri("/docs")
             .body(Vec::new())
+            .map(Request::from_http)
             .unwrap();
         assert_eq!(service.handle(mkcol, &context).unwrap().status(), 201);
 
-        let put = Request::builder()
+        let put = http::Request::builder()
             .method("PUT")
             .uri("/docs/report.txt")
             .body(b"report".to_vec())
+            .map(Request::from_http)
             .unwrap();
         assert_eq!(service.handle(put, &context).unwrap().status(), 201);
 
-        let file_backed_get = Request::builder()
+        let file_backed_get = http::Request::builder()
             .method("GET")
             .uri("/docs/report.txt")
             .body(Vec::new())
+            .map(Request::from_http)
             .unwrap();
         let file_backed_response = service
             .handle_bytes_for_resource_file_backed(
@@ -2247,11 +2274,12 @@ mod tests {
                 .is_some()
         );
 
-        let propfind = Request::builder()
+        let propfind = http::Request::builder()
             .method("PROPFIND")
             .uri("/docs")
             .header("depth", "1")
             .body(Vec::new())
+            .map(Request::from_http)
             .unwrap();
         let response = service.handle(propfind, &context).unwrap();
         assert_eq!(response.status(), 207);
@@ -2260,12 +2288,12 @@ mod tests {
         assert!(body.contains("current-user-principal"));
         assert!(body.contains("calendar-home-set"));
 
-        let proppatch = Request::builder()
+        let proppatch = http::Request::builder()
             .method("PROPPATCH")
             .uri("/docs/report.txt")
             .body(
                 br#"<?xml version="1.0"?><D:propertyupdate xmlns:D="DAV:" xmlns:Q="urn:qpx:test"><D:set><D:prop><Q:classification>internal</Q:classification></D:prop></D:set></D:propertyupdate>"#.to_vec(),
-            )
+            ).map(Request::from_http)
             .unwrap();
         assert_eq!(service.handle(proppatch, &context).unwrap().status(), 207);
         assert_eq!(
@@ -2276,6 +2304,46 @@ mod tests {
                 .value_xml,
             "internal"
         );
+    }
+
+    #[test]
+    fn owned_request_headers_preserve_first_value_and_xml_body_limit() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+        let request = |first: &str, second: &str, body: Vec<u8>| {
+            Request::from_http(
+                http::Request::builder()
+                    .method("PROPFIND")
+                    .uri("/")
+                    .header("depth", first)
+                    .header("depth", second)
+                    .body(body)
+                    .unwrap(),
+            )
+        };
+        assert_eq!(
+            service
+                .handle(request("0", "invalid", Vec::new()), &context)
+                .unwrap()
+                .status(),
+            StatusCode::MULTI_STATUS
+        );
+        assert!(
+            service
+                .handle(request("invalid", "0", Vec::new()), &context)
+                .is_err()
+        );
+        assert_eq!(
+            service
+                .handle(request("0", "1", vec![b' '; 64 * 1024 + 1]), &context)
+                .unwrap()
+                .status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert!(reject_unsafe_xml(&vec![b' '; 64 * 1024]).is_ok());
     }
 
     #[test]
@@ -2296,10 +2364,11 @@ mod tests {
         let cached = service.resource_for_path("/report.txt").unwrap();
         assert!(resource.is_same_resource(&cached));
 
-        let request = Request::builder()
+        let request = http::Request::builder()
             .method("GET")
             .uri("/dav/report.txt")
             .body(Vec::new())
+            .map(Request::from_http)
             .unwrap();
         let response = service
             .handle_bytes_for_resource(request, &WebDavRequestContext::default(), resource)
@@ -2336,10 +2405,11 @@ mod tests {
                     AclDecision::Deny
                 }
             });
-        let request = Request::builder()
+        let request = http::Request::builder()
             .method("GET")
             .uri("/secret")
             .body(Vec::new())
+            .map(Request::from_http)
             .unwrap();
         assert_eq!(
             service
@@ -2356,11 +2426,11 @@ mod tests {
         let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
         let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
         let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
-        let request = Request::builder()
+        let request = http::Request::builder()
             .method("MKCOL")
             .uri("/calendar")
             .header(http::header::CONTENT_TYPE, "application/xml")
-            .body(br#"<D:mkcol xmlns:D="DAV:" xmlns:X="urn:test"><D:set><D:prop><X:kind>calendar</X:kind></D:prop></D:set></D:mkcol>"#.to_vec())
+            .body(br#"<D:mkcol xmlns:D="DAV:" xmlns:X="urn:test"><D:set><D:prop><X:kind>calendar</X:kind></D:prop></D:set></D:mkcol>"#.to_vec()).map(Request::from_http)
             .unwrap();
         assert_eq!(
             service
@@ -2388,10 +2458,11 @@ mod tests {
         let context = WebDavRequestContext::default();
 
         for method in ["PUT", "MKCOL", "MKCALENDAR"] {
-            let request = Request::builder()
+            let request = http::Request::builder()
                 .method(method)
                 .uri(format!("/missing/{method}"))
                 .body(Vec::new())
+                .map(Request::from_http)
                 .unwrap();
             assert_eq!(
                 service.handle(request, &context).unwrap().status(),
@@ -2410,10 +2481,11 @@ mod tests {
         for path in ["/source", "/destination"] {
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("MKCOL")
                         .uri(path)
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -2421,10 +2493,11 @@ mod tests {
         }
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("PUT")
                     .uri("/source/child")
                     .body(b"child".to_vec())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2432,12 +2505,13 @@ mod tests {
 
         let conflict = service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("COPY")
                     .uri("/source")
                     .header("destination", "/destination")
                     .header("overwrite", "F")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2446,11 +2520,12 @@ mod tests {
 
         let missing_parent = service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("COPY")
                     .uri("/source")
                     .header("destination", "/missing/copy")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2459,12 +2534,13 @@ mod tests {
 
         let shallow = service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("COPY")
                     .uri("/source")
                     .header("destination", "/shallow")
                     .header("depth", "0")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2488,37 +2564,40 @@ mod tests {
         let context = WebDavRequestContext::default();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("MKCOL")
                     .uri("/source")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
             .unwrap();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("MKCOL")
                     .uri("/source/child")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
             .unwrap();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("PUT")
                     .uri("/source/file.txt")
                     .body(b"payload".to_vec())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
             .unwrap();
 
         for (method, depth) in [("COPY", None), ("COPY", Some("0")), ("MOVE", None)] {
-            let mut builder = Request::builder()
+            let mut builder = http::Request::builder()
                 .method(method)
                 .uri("/source")
                 .header("destination", "/source/child/copied");
@@ -2526,18 +2605,22 @@ mod tests {
                 builder = builder.header("depth", depth);
             }
             let response = service
-                .handle(builder.body(Vec::new()).unwrap(), &context)
+                .handle(
+                    builder.body(Vec::new()).map(Request::from_http).unwrap(),
+                    &context,
+                )
                 .unwrap();
             assert_eq!(response.status(), StatusCode::FORBIDDEN);
         }
 
         let same_target = service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("COPY")
                     .uri("/source")
                     .header("destination", "/source")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2576,30 +2659,33 @@ mod tests {
         let context = WebDavRequestContext::default();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("MKCOL")
                     .uri("/a")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
             .unwrap();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("MKCOL")
                     .uri("/a/b")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
             .unwrap();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("PUT")
                     .uri("/a/b/payload.txt")
                     .body(b"payload".to_vec())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2608,12 +2694,13 @@ mod tests {
         for method in ["COPY", "MOVE"] {
             let response = service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method(method)
                         .uri("/a/b")
                         .header("destination", "/a")
                         .header("overwrite", "T")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -2684,10 +2771,11 @@ mod tests {
         for path in ["/docs", "/private"] {
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("MKCOL")
                         .uri(path)
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -2700,10 +2788,11 @@ mod tests {
         ] {
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("PUT")
                         .uri(path)
                         .body(b"content".to_vec())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -2720,10 +2809,10 @@ mod tests {
                 }],
             )
             .unwrap();
-        let request = Request::builder()
+        let request = http::Request::builder()
             .method("SEARCH")
             .uri("/docs")
-            .body(br#"<D:searchrequest xmlns:D="DAV:" xmlns:X="urn:test"><D:basicsearch><D:select><D:allprop/></D:select><D:from><D:scope><D:href>/docs</D:href><D:depth>infinity</D:depth></D:scope></D:from><D:where><D:eq><D:prop><X:classification/></D:prop><D:literal>internal</D:literal></D:eq></D:where></D:basicsearch></D:searchrequest>"#.to_vec())
+            .body(br#"<D:searchrequest xmlns:D="DAV:" xmlns:X="urn:test"><D:basicsearch><D:select><D:allprop/></D:select><D:from><D:scope><D:href>/docs</D:href><D:depth>infinity</D:depth></D:scope></D:from><D:where><D:eq><D:prop><X:classification/></D:prop><D:literal>internal</D:literal></D:eq></D:where></D:basicsearch></D:searchrequest>"#.to_vec()).map(Request::from_http)
             .unwrap();
         let response = service.handle(request, &context).unwrap();
         assert_eq!(response.status(), StatusCode::MULTI_STATUS);
@@ -2748,18 +2837,19 @@ mod tests {
         let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("PUT")
                     .uri("/report.txt")
                     .body(b"report".to_vec())
+                    .map(Request::from_http)
                     .unwrap(),
                 &WebDavRequestContext::default(),
             )
             .unwrap();
-        let acl = Request::builder()
+        let acl = http::Request::builder()
             .method("ACL")
             .uri("/report.txt")
-            .body(br#"<D:acl xmlns:D="DAV:"><D:ace><D:principal><D:href>alice</D:href></D:principal><D:grant><D:privilege><D:read/></D:privilege></D:grant></D:ace><D:ace><D:principal><D:all/></D:principal><D:deny><D:privilege><D:write/></D:privilege></D:deny></D:ace></D:acl>"#.to_vec())
+            .body(br#"<D:acl xmlns:D="DAV:"><D:ace><D:principal><D:href>alice</D:href></D:principal><D:grant><D:privilege><D:read/></D:privilege></D:grant></D:ace><D:ace><D:principal><D:all/></D:principal><D:deny><D:privilege><D:write/></D:privilege></D:deny></D:ace></D:acl>"#.to_vec()).map(Request::from_http)
             .unwrap();
         assert_eq!(
             service
@@ -2779,10 +2869,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("GET")
                         .uri("/report.txt")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &alice,
                 )
@@ -2793,10 +2884,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("GET")
                         .uri("/report.txt")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &bob,
                 )
@@ -2807,10 +2899,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("PUT")
                         .uri("/report.txt")
                         .body(b"changed".to_vec())
+                        .map(Request::from_http)
                         .unwrap(),
                     &alice,
                 )
@@ -2832,10 +2925,11 @@ mod tests {
         };
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("PUT")
                     .uri("/versioned.txt")
                     .body(b"version one".to_vec())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2843,10 +2937,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("VERSION-CONTROL")
                         .uri("/versioned.txt")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -2862,20 +2957,22 @@ mod tests {
             .clone();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("CHECKOUT")
                     .uri("/versioned.txt")
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
             .unwrap();
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("PUT")
                     .uri("/versioned.txt")
                     .body(b"version two".to_vec())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2883,10 +2980,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("CHECKIN")
                         .uri("/versioned.txt")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -2904,11 +3002,12 @@ mod tests {
         );
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("UPDATE")
                     .uri("/versioned.txt")
                     .header("version-name", first)
                     .body(Vec::new())
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -2916,10 +3015,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("GET")
                         .uri("/versioned.txt")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -2936,40 +3036,43 @@ mod tests {
         let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
         let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
         let context = WebDavRequestContext::default();
-        let calendar = Request::builder()
+        let calendar = http::Request::builder()
             .method("MKCALENDAR")
             .uri("/events")
             .body(Vec::new())
+            .map(Request::from_http)
             .unwrap();
         assert_eq!(
             service.handle(calendar, &context).unwrap().status(),
             StatusCode::CREATED
         );
-        let invalid = Request::builder()
+        let invalid = http::Request::builder()
             .method("PUT")
             .uri("/events/wrong.ics")
             .header(http::header::CONTENT_TYPE, "application/octet-stream")
             .body(b"invalid".to_vec())
+            .map(Request::from_http)
             .unwrap();
         assert_eq!(
             service.handle(invalid, &context).unwrap().status(),
             StatusCode::UNSUPPORTED_MEDIA_TYPE
         );
         let event = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDTSTART:20260711T010000Z\r\nDTEND:20260711T020000Z\r\nCATEGORIES:Hands,Feet\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
-        let put = Request::builder()
+        let put = http::Request::builder()
             .method("PUT")
             .uri("/events/meeting.ics")
             .header(http::header::CONTENT_TYPE, "text/calendar; charset=utf-8")
             .body(event.to_vec())
+            .map(Request::from_http)
             .unwrap();
         assert_eq!(
             service.handle(put, &context).unwrap().status(),
             StatusCode::CREATED
         );
-        let query = Request::builder()
+        let query = http::Request::builder()
             .method("REPORT")
             .uri("/events")
-            .body(br#"<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260711T000000Z" end="20260712T000000Z"/><C:prop-filter name="CATEGORIES"><C:text-match collation="i;octet">hands</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>"#.to_vec())
+            .body(br#"<C:calendar-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:filter><C:comp-filter name="VCALENDAR"><C:comp-filter name="VEVENT"><C:time-range start="20260711T000000Z" end="20260712T000000Z"/><C:prop-filter name="CATEGORIES"><C:text-match collation="i;octet">hands</C:text-match></C:prop-filter></C:comp-filter></C:comp-filter></C:filter></C:calendar-query>"#.to_vec()).map(Request::from_http)
             .unwrap();
         let response = service.handle(query, &context).unwrap();
         assert_eq!(response.status(), StatusCode::MULTI_STATUS);
@@ -2977,10 +3080,10 @@ mod tests {
         assert!(query_body.contains("meeting.ics"), "{query_body}");
         assert!(query_body.contains("C:calendar-data"), "{query_body}");
         assert!(query_body.contains("BEGIN:VCALENDAR"), "{query_body}");
-        let free_busy = Request::builder()
+        let free_busy = http::Request::builder()
             .method("REPORT")
             .uri("/events")
-            .body(br#"<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:time-range start="20260711T000000Z" end="20260712T000000Z"/></C:free-busy-query>"#.to_vec())
+            .body(br#"<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav"><C:time-range start="20260711T000000Z" end="20260712T000000Z"/></C:free-busy-query>"#.to_vec()).map(Request::from_http)
             .unwrap();
         let response = service.handle(free_busy, &context).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -2998,10 +3101,11 @@ mod tests {
         for path in ["/links", "/targets"] {
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("MKCOL")
                         .uri(path)
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -3013,10 +3117,11 @@ mod tests {
         ] {
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("PUT")
                         .uri(path)
                         .body(body.to_vec())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -3031,10 +3136,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("BIND")
                         .uri("/links")
                         .body(bind_body("bind", "/targets/one"))
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -3045,10 +3151,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("GET")
                         .uri("/links/current")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -3058,10 +3165,11 @@ mod tests {
         );
         service
             .handle(
-                Request::builder()
+                http::Request::builder()
                     .method("REBIND")
                     .uri("/links")
                     .body(bind_body("rebind", "/targets/two"))
+                    .map(Request::from_http)
                     .unwrap(),
                 &context,
             )
@@ -3069,10 +3177,11 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("GET")
                         .uri("/links/current")
                         .body(Vec::new())
+                        .map(Request::from_http)
                         .unwrap(),
                     &context,
                 )
@@ -3083,10 +3192,10 @@ mod tests {
         assert_eq!(
             service
                 .handle(
-                    Request::builder()
+                    http::Request::builder()
                         .method("UNBIND")
                         .uri("/links")
-                        .body(br#"<D:unbind xmlns:D="DAV:"><D:segment>current</D:segment></D:unbind>"#.to_vec())
+                        .body(br#"<D:unbind xmlns:D="DAV:"><D:segment>current</D:segment></D:unbind>"#.to_vec()).map(Request::from_http)
                         .unwrap(),
                     &context,
                 )

@@ -33,7 +33,7 @@ mod udp;
 use self::prepare::{PrepareQpxConnectInput, PreparedQpxConnect, prepare_qpx_connect_request};
 pub(super) async fn handle_qpx_connect_stream(
     handler: &ForwardQpxHandler,
-    req_head: http::Request<()>,
+    req_head: qpx_core::http_message::Request<()>,
     mut req_stream: qpx_h3::RequestStream,
     conn: qpx_h3::ConnectionInfo,
     protocol: qpx_h3::Protocol,
@@ -97,7 +97,7 @@ pub(super) async fn handle_qpx_connect_stream(
 
 pub(super) async fn handle_qpx_traditional_connect_stream(
     handler: &ForwardQpxHandler,
-    req_head: http::Request<()>,
+    req_head: qpx_core::http_message::Request<()>,
     mut req_stream: qpx_h3::RequestStream,
     conn: qpx_h3::ConnectionInfo,
 ) -> Result<()> {
@@ -298,7 +298,7 @@ async fn run_qpx_traditional_connect_tunnel(
 async fn handle_qpx_extended_connect_stream(
     handler: &ForwardQpxHandler,
     prepared: PreparedQpxConnect,
-    req_head: http::Request<()>,
+    req_head: qpx_core::http_message::Request<()>,
     mut req_stream: qpx_h3::RequestStream,
     conn: qpx_h3::ConnectionInfo,
     protocol_name: String,

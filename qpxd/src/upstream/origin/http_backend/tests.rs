@@ -1,4 +1,5 @@
 use super::*;
+use qpx_core::http_message::Request as OwnerRequest;
 
 use bytes::Bytes;
 use http_body_util::{BodyExt as _, Full};
@@ -102,9 +103,11 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
 
     let first = proxy_http_with_interim(
         &pools,
-        Request::builder()
-            .uri("http://reverse_edges.test/one")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("http://reverse_edges.test/one")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         None,
@@ -115,9 +118,11 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
 
     let second = proxy_http_with_interim(
         &pools,
-        Request::builder()
-            .uri("http://reverse_edges.test/two")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("http://reverse_edges.test/two")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         None,
@@ -145,13 +150,16 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
         (&first_connection, "/third"),
     ] {
         let request = prepare_proxy_http1_request(
-            Request::builder()
-                .method(http::Method::GET)
-                .uri(path)
-                .body(Body::empty())?,
+            OwnerRequest::from_http(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(path)
+                    .body(Body::empty())?,
+            ),
             host_authority.as_ref(),
             "qpx-test",
         )?;
+        let request = request.into_http_for_codec()?;
         let response = proxy_direct_plain_http1_raw_response_with_interim_on_connection(
             &pools,
             request,
@@ -186,9 +194,11 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
 
     let first = proxy_http_with_interim(
         &pools,
-        Request::builder()
-            .uri("http://reverse_edges.test/one")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("http://reverse_edges.test/one")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         None,
@@ -204,9 +214,11 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
 
     let second = proxy_http_with_interim(
         &pools,
-        Request::builder()
-            .uri("http://reverse_edges.test/two")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("http://reverse_edges.test/two")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         None,
@@ -227,13 +239,16 @@ async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<
     let host_authority = origin.host_header_authority_ref(default_port)?;
 
     let first = prepare_proxy_http1_request(
-        Request::builder()
-            .method(http::Method::GET)
-            .uri("/one")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/one")
+                .body(Body::empty())?,
+        ),
         host_authority.as_ref(),
         "qpx-test",
     )?;
+    let first = first.into_http_for_codec()?;
     let first = proxy_direct_plain_http1_raw_response_with_interim(
         &pools,
         first,
@@ -252,13 +267,16 @@ async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<
     }
 
     let second = prepare_proxy_http1_request(
-        Request::builder()
-            .method(http::Method::GET)
-            .uri("/two")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .method(http::Method::GET)
+                .uri("/two")
+                .body(Body::empty())?,
+        ),
         host_authority.as_ref(),
         "qpx-test",
     )?;
+    let second = second.into_http_for_codec()?;
     let second = proxy_direct_plain_http1_raw_response_with_interim(
         &pools,
         second,
@@ -477,9 +495,11 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
 
     let first = proxy_https_with_options(
         &pools,
-        Request::builder()
-            .uri("https://reverse_edges.test/one")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("https://reverse_edges.test/one")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         Some(trust.as_ref()),
@@ -499,9 +519,11 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
 
     let second = proxy_https_with_options(
         &pools,
-        Request::builder()
-            .uri("https://reverse_edges.test/two")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("https://reverse_edges.test/two")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         Some(trust.as_ref()),
@@ -531,9 +553,11 @@ async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
 
     let first = proxy_https_with_options(
         &pools,
-        Request::builder()
-            .uri("https://reverse_edges.test/one")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("https://reverse_edges.test/one")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         Some(trust.as_ref()),
@@ -552,9 +576,11 @@ async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
 
     let second = proxy_https_with_options(
         &pools,
-        Request::builder()
-            .uri("https://reverse_edges.test/two")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("https://reverse_edges.test/two")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         Some(trust.as_ref()),
@@ -585,9 +611,11 @@ async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_
 
     let first = proxy_https_with_options(
         &pools,
-        Request::builder()
-            .uri("https://reverse_edges.test/one")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("https://reverse_edges.test/one")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         Some(trust.as_ref()),
@@ -605,9 +633,11 @@ async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_
 
     let second = proxy_https_with_options(
         &pools,
-        Request::builder()
-            .uri("https://reverse_edges.test/two")
-            .body(Body::empty())?,
+        OwnerRequest::from_http(
+            Request::builder()
+                .uri("https://reverse_edges.test/two")
+                .body(Body::empty())?,
+        ),
         &origin,
         "qpx-test",
         Some(trust.as_ref()),

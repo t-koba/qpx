@@ -2,14 +2,12 @@ use crate::http::codec::h2::{
     h1_headers_to_http, http_headers_to_h1, http_uri_to_http1_uri, tuned_h2_client_builder,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
-use ::http::{
-    HeaderMap as Http1HeaderMap, Method, Request, Request as Http1Request,
-    Response as Http1Response, StatusCode, Uri,
-};
+use ::http::{Method, Response as Http1Response, StatusCode, Uri};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use h2::ext::Protocol as H2Protocol;
 use h2::{Reason as H2Reason, RecvStream as H2RecvStream};
+use qpx_core::http_message::{Headers, Request};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
@@ -83,7 +81,7 @@ pub(super) async fn recv_upstream_h2_response_with_interim(
 
 pub(super) async fn open_upstream_h2_extended_connect_stream(
     uri: &Uri,
-    sanitized_headers: &http::HeaderMap,
+    sanitized_headers: &Headers,
     protocol: H2Protocol,
     proxy_name: &str,
     upstream: Option<&str>,
@@ -155,18 +153,10 @@ pub(super) async fn open_upstream_h2_extended_connect_stream(
         ));
     }
 
-    let normalized_headers =
-        normalize_h2_upstream_connect_headers(uri, sanitized_headers, proxy_name)?;
-    let mut request = Http1Request::builder()
-        .method(::http::Method::CONNECT)
-        .uri(http_uri_to_http1_uri(
-            uri,
-            "invalid HTTP/2 extended CONNECT uri",
-        )?)
-        .body(())?;
-    *request.version_mut() = ::http::Version::HTTP_2;
-    *request.headers_mut() = normalized_headers;
+    let mut request = prepare_h2_upstream_connect_request(uri, sanitized_headers, proxy_name)?;
     request.extensions_mut().insert(protocol);
+    // Actual h2 client/codec egress: framing validation and export happen once.
+    let request = request.map_body(|_| ()).into_http_for_codec()?;
 
     let (mut response, send_stream) = sender.send_request(request, false)?;
     let (interim, response) = recv_upstream_h2_response_with_interim(
@@ -182,19 +172,18 @@ pub(super) async fn open_upstream_h2_extended_connect_stream(
     })
 }
 
-pub(super) fn normalize_h2_upstream_connect_headers(
+pub(super) fn prepare_h2_upstream_connect_request(
     uri: &Uri,
-    headers: &http::HeaderMap,
+    headers: &Headers,
     proxy_name: &str,
-) -> Result<Http1HeaderMap> {
-    let mut request = Request::builder()
-        .method(Method::CONNECT)
-        .uri(uri.clone())
-        .body(Body::empty())?;
+) -> Result<Request<Body>> {
+    let mut request = Request::new(Body::empty());
+    *request.method_mut() = Method::CONNECT;
+    *request.uri_mut() = http_uri_to_http1_uri(uri, "invalid HTTP/2 extended CONNECT uri")?;
     *request.version_mut() = http::Version::HTTP_2;
     *request.headers_mut() = headers.clone();
     prepare_request_with_headers_in_place(&mut request, proxy_name, None, false);
-    http_headers_to_h1(request.headers())
+    Ok(request)
 }
 
 fn parse_h2_extended_connect_upstream(

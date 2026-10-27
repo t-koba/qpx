@@ -1,5 +1,5 @@
 use super::{LoadBalanceStrategy, RoutePolicy};
-use hyper::Request;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::net::IpAddr;
 use std::sync::Arc;
@@ -366,36 +366,41 @@ pub(super) fn feed_ip(hash: u64, ip: IpAddr) -> u64 {
 
 pub(super) fn header_affinity_seed(
     hash: u64,
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
     name: &str,
     fallback: &str,
 ) -> u64 {
-    req.headers()
-        .get(name)
+    let value = qpx_core::http_message::OrdinaryHeaderName::try_from(name)
+        .ok()
+        .and_then(|ordinary| req.headers().get(&ordinary))
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty());
+    value
         .map(|value| feed(hash, value.as_bytes()))
         .unwrap_or_else(|| feed(hash, fallback.as_bytes()))
 }
 
 pub(super) fn cookie_affinity_seed(
     hash: u64,
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
     name: &str,
     fallback: &str,
 ) -> u64 {
-    let cookie = req
-        .headers()
-        .get(http::header::COOKIE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| {
-            value.split(';').find_map(|part| {
-                let (cookie_name, cookie_value) = part.trim().split_once('=')?;
-                (cookie_name.trim() == name)
-                    .then_some(cookie_value.trim())
-                    .filter(|value| !value.is_empty())
-            })
+    let cookie = qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::COOKIE)
+        .ok()
+        .and_then(|cookie_name| {
+            req.headers()
+                .get_all(&cookie_name)
+                .filter_map(|value| value.to_str().ok())
+                .find_map(|value| {
+                    value.split(';').find_map(|part| {
+                        let (cookie_name, cookie_value) = part.trim().split_once('=')?;
+                        (cookie_name.trim() == name)
+                            .then_some(cookie_value.trim())
+                            .filter(|value| !value.is_empty())
+                    })
+                })
         });
     cookie
         .map(|value| feed(hash, value.as_bytes()))
@@ -404,7 +409,7 @@ pub(super) fn cookie_affinity_seed(
 
 pub(super) fn query_affinity_seed(
     hash: u64,
-    req: &Request<Body>,
+    req: &OwnerRequest<Body>,
     name: &str,
     fallback: &str,
 ) -> u64 {
@@ -417,4 +422,44 @@ pub(super) fn query_affinity_seed(
         .as_deref()
         .map(|value| feed(hash, value.as_bytes()))
         .unwrap_or_else(|| feed(hash, fallback.as_bytes()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn request_with_cookies(values: &[&'static str]) -> OwnerRequest<Body> {
+        let mut request = http::Request::builder()
+            .version(http::Version::HTTP_3)
+            .body(Body::empty())
+            .expect("valid request");
+        for value in values {
+            request
+                .headers_mut()
+                .append(http::header::COOKIE, http::HeaderValue::from_static(value));
+        }
+        OwnerRequest::from_http(request)
+    }
+
+    #[test]
+    fn cookie_affinity_finds_later_field_in_wire_order_without_coalescing() {
+        let split = request_with_cookies(&["a=1", "session=xyz", "session=later"]);
+        let joined = request_with_cookies(&["a=1; session=xyz; session=later"]);
+
+        let seed = cookie_affinity_seed(fnv_offset(), &split, "session", "host.example");
+        let joined_seed = cookie_affinity_seed(fnv_offset(), &joined, "session", "host.example");
+
+        assert_eq!(seed, joined_seed);
+        assert_eq!(seed, feed(fnv_offset(), b"xyz"));
+
+        let cookie_name =
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::COOKIE)
+                .expect("cookie is ordinary");
+        let fields = split
+            .headers()
+            .get_all(&cookie_name)
+            .map(|value| value.to_str().expect("cookie value is text"))
+            .collect::<Vec<_>>();
+        assert_eq!(fields, ["a=1", "session=xyz", "session=later"]);
+    }
 }

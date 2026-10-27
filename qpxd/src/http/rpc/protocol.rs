@@ -3,11 +3,38 @@ use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName};
 use percent_encoding::percent_decode_str;
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 
 use crate::http::media_type::raw_media_type;
 
 pub(super) fn response_content_type(headers: &HeaderMap) -> Option<String> {
     raw_media_type(headers).map(|media| media.to_ascii_lowercase())
+}
+
+pub(super) fn request_content_type(headers: &Headers) -> Option<String> {
+    headers
+        .get(
+            &OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                .expect("Content-Type is ordinary"),
+        )
+        .and_then(|value| value.to_str().ok())
+        .map(crate::http::media_type::media_type_without_parameters)
+        .map(str::to_ascii_lowercase)
+}
+
+pub(super) fn request_rpc_protocol(headers: &Headers) -> Option<String> {
+    request_content_type(headers)
+        .as_deref()
+        .and_then(rpc_protocol_from_content_type)
+        .map(str::to_string)
+        .or_else(|| {
+            headers
+                .contains_key(
+                    &OrdinaryHeaderName::try_from("connect-protocol-version")
+                        .expect("ordinary Connect header"),
+                )
+                .then(|| "connect".to_string())
+        })
 }
 
 pub(super) fn rpc_protocol_from_content_type(raw: &str) -> Option<&'static str> {
@@ -327,6 +354,45 @@ pub(super) fn infer_response_streaming(
 #[cfg(test)]
 mod tests {
     use super::is_grpc_web_text_content_type;
+
+    #[test]
+    fn owned_request_protocol_preserves_first_field_priority_and_connect_fallback() {
+        use http::HeaderValue;
+        use qpx_core::http_message::{Headers, OrdinaryHeaderName};
+        let mut headers = Headers::new();
+        let content_type = OrdinaryHeaderName::try_from("content-type").unwrap();
+        headers.append(
+            content_type.clone(),
+            HeaderValue::from_static(" Application/GRPC-Web-Text+proto ; charset=utf-8"),
+        );
+        headers.append(
+            content_type.clone(),
+            HeaderValue::from_static("application/connect+proto"),
+        );
+        headers.insert(
+            OrdinaryHeaderName::try_from("connect-protocol-version").unwrap(),
+            HeaderValue::from_static("1"),
+        );
+        assert_eq!(
+            super::request_content_type(&headers).as_deref(),
+            Some("application/grpc-web-text+proto")
+        );
+        assert_eq!(
+            super::request_rpc_protocol(&headers).as_deref(),
+            Some("grpc_web")
+        );
+        headers.insert(
+            content_type.clone(),
+            HeaderValue::from_bytes(b"\xff").unwrap(),
+        );
+        assert_eq!(super::request_content_type(&headers), None);
+        assert_eq!(
+            super::request_rpc_protocol(&headers).as_deref(),
+            Some("connect")
+        );
+        headers.remove(&OrdinaryHeaderName::try_from("connect-protocol-version").unwrap());
+        assert_eq!(super::request_rpc_protocol(&headers), None);
+    }
 
     #[test]
     fn grpc_web_text_content_type_preserves_prefix_and_case_sensitive_semantics() {

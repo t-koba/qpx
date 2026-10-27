@@ -6,7 +6,8 @@ use crate::upstream::health::PassiveFailureKind;
 use crate::upstream::origin::proxy_http;
 use anyhow::Error;
 use http::header::TRANSFER_ENCODING;
-use hyper::{Request, StatusCode};
+use hyper::StatusCode;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use std::collections::HashMap;
@@ -28,7 +29,7 @@ pub(in crate::reverse) fn prune_mirror_permits(active_targets: &[String]) {
     permits.retain(|target, _| active.contains(target));
 }
 
-pub(super) fn request_seed(conn: &ReverseConnInfo, host: &str, req: &Request<Body>) -> u64 {
+pub(super) fn request_seed(conn: &ReverseConnInfo, host: &str, req: &OwnerRequest<Body>) -> u64 {
     // Deterministic hashing for stable canary/mirror sampling.
     const FNV_OFFSET: u64 = 14695981039346656037;
     const FNV_PRIME: u64 = 1099511628211;
@@ -118,12 +119,15 @@ pub(super) fn record_reverse_upstream_timeout(upstream: &UpstreamEndpoint, polic
     }
 }
 
-pub(super) fn request_is_templateable(req: &Request<Body>, max_body_bytes: usize) -> bool {
+pub(super) fn request_is_templateable(req: &OwnerRequest<Body>, max_body_bytes: usize) -> bool {
     // We only attempt to clone/mirror requests that can be safely buffered.
-    if req.headers().contains_key(TRANSFER_ENCODING) {
+    if req.headers().contains_key(
+        &qpx_core::http_message::OrdinaryHeaderName::try_from(TRANSFER_ENCODING)
+            .expect("ordinary header"),
+    ) {
         return false;
     }
-    match qpx_core::http_content_length::declared_content_length(req.headers()) {
+    match req.headers().declared_content_length() {
         Ok(Some(length)) => usize::try_from(length).is_ok_and(|length| length <= max_body_bytes),
         // HTTP/1.1 without Content-Length/Transfer-Encoding cannot have a body.
         Ok(None) => req.version() == http::Version::HTTP_11,
@@ -292,13 +296,15 @@ mod tests {
     use super::*;
     use http::header::CONTENT_LENGTH;
 
-    fn request_with_content_length(value: &str) -> Request<Body> {
-        Request::builder()
-            .method(http::Method::GET)
-            .uri("http://example.test/")
-            .header(CONTENT_LENGTH, value)
-            .body(Body::empty())
-            .expect("request")
+    fn request_with_content_length(value: &str) -> OwnerRequest<Body> {
+        OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("http://example.test/")
+                .header(CONTENT_LENGTH, value)
+                .body(Body::empty())
+                .expect("request"),
+        )
     }
 
     #[test]
@@ -317,11 +323,13 @@ mod tests {
         assert!(!request_is_templateable(&beyond, 16));
 
         // A request without a declaration is one without a body on HTTP/1.1.
-        let plain = Request::builder()
-            .method(http::Method::GET)
-            .uri("http://example.test/")
-            .body(Body::empty())
-            .expect("request");
+        let plain = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::GET)
+                .uri("http://example.test/")
+                .body(Body::empty())
+                .expect("request"),
+        );
         assert!(request_is_templateable(&plain, 16));
     }
 

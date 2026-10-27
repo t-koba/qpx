@@ -1,6 +1,6 @@
 use super::super::ConnectTarget;
 use crate::http::policy::EvaluatedAction;
-use hyper::Request;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -14,7 +14,7 @@ pub(super) struct TransparentPreparedPolicy {
     pub(super) effective_policy: crate::policy_context::EffectivePolicyContext,
     pub(super) destination: crate::destination::DestinationMetadata,
     pub(super) identity: crate::policy_context::ResolvedIdentity,
-    pub(super) sanitized_headers: http::HeaderMap,
+    pub(super) sanitized_headers: qpx_core::http_message::Headers,
     pub(super) response_engine:
         Option<Arc<crate::http::policy::response_policy::HttpResponseRuleEngine>>,
     pub(super) selected_plan: crate::runtime::ExecutionPlan,
@@ -39,7 +39,7 @@ pub(super) struct TransparentPolicyInput<'a> {
     pub(super) engine: &'a qpx_core::rules::RuleEngine,
     pub(super) req: &'a Request<Body>,
     pub(super) base: &'a crate::http::protocol::base_fields::BaseRequestFields,
-    pub(super) sanitized_headers: &'a http::HeaderMap,
+    pub(super) sanitized_headers: &'a qpx_core::http_message::Headers,
     pub(super) destination: &'a crate::destination::DestinationMetadata,
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
     pub(super) request_rpc: Option<&'a crate::http::rpc::RpcMatchContext>,

@@ -4,23 +4,16 @@ use super::*;
 async fn lookup_only_if_cached_miss() {
     let mut req = make_get_request("/a");
     req.headers_mut().insert(
-        CACHE_CONTROL,
+        ord("cache-control"),
         http::HeaderValue::from_static("only-if-cached"),
     );
     let key = CacheRequestKey::for_lookup(&req, "http")
         .expect("key")
         .expect("some key");
     let backends = backend_map();
-    let out = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out, LookupOutcome::OnlyIfCachedMiss));
 }
 
@@ -28,7 +21,7 @@ async fn lookup_only_if_cached_miss() {
 async fn lookup_fetches_body_only_for_matching_vary_variant() {
     let mut req = make_get_request("/vary-body-fetch");
     req.headers_mut()
-        .insert("accept-language", http::HeaderValue::from_static("ja"));
+        .insert(ord("accept-language"), http::HeaderValue::from_static("ja"));
     let key = CacheRequestKey::for_lookup(&req, "http")
         .expect("key")
         .expect("some key");
@@ -106,16 +99,9 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
 
     let mut backends = HashMap::new();
     backends.insert("b".to_string(), backend.clone() as Arc<dyn CacheBackend>);
-    let out = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy,
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req, &key, &policy, &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let response = match out {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
@@ -149,8 +135,7 @@ async fn head_lookup_reuses_get_cache_entry_without_body() {
         .expect("some key");
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         make_response(StatusCode::OK, "public, max-age=60", "hello"),
@@ -164,18 +149,19 @@ async fn head_lookup_reuses_get_cache_entry_without_body() {
     .await
     .expect("store");
 
-    let head_req = Request::builder()
-        .method(Method::HEAD)
-        .uri("http://example.com/head-shared")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("head request");
+    let head_req = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::HEAD)
+            .uri("http://example.com/head-shared")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("head request"),
+    );
     let head_key = CacheRequestKey::for_lookup(&head_req, "http")
         .expect("key")
         .expect("some key");
     let out = lookup(
-        head_req.method(),
-        head_req.headers(),
+        &head_req,
         &head_key,
         &policy(),
         &backends,
@@ -203,12 +189,14 @@ async fn head_lookup_reuses_get_cache_entry_without_body() {
 
 #[tokio::test]
 async fn cached_head_hit_preserves_stored_representation_length() {
-    let head_req = Request::builder()
-        .method(Method::HEAD)
-        .uri("http://example.com/head-length")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("head request");
+    let head_req = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::HEAD)
+            .uri("http://example.com/head-length")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("head request"),
+    );
     let head_key = CacheRequestKey::for_lookup(&head_req, "http")
         .expect("key")
         .expect("some key");
@@ -220,8 +208,7 @@ async fn cached_head_hit_preserves_stored_representation_length() {
         .expect("response");
     let backends = backend_map();
     let _ = store_and_drain(
-        head_req.method(),
-        head_req.headers(),
+        &head_req,
         &head_key,
         &policy(),
         response,
@@ -236,8 +223,7 @@ async fn cached_head_hit_preserves_stored_representation_length() {
     .expect("store");
 
     let out = lookup(
-        head_req.method(),
-        head_req.headers(),
+        &head_req,
         &head_key,
         &policy(),
         &backends,
@@ -264,19 +250,20 @@ async fn cached_head_hit_preserves_stored_representation_length() {
 
 #[tokio::test]
 async fn head_response_does_not_poison_get_cache_entry() {
-    let head_req = Request::builder()
-        .method(Method::HEAD)
-        .uri("http://example.com/head-only")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("head request");
+    let head_req = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::HEAD)
+            .uri("http://example.com/head-only")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("head request"),
+    );
     let head_key = CacheRequestKey::for_lookup(&head_req, "http")
         .expect("key")
         .expect("some key");
     let backends = backend_map();
     let _ = store_and_drain(
-        head_req.method(),
-        head_req.headers(),
+        &head_req,
         &head_key,
         &policy(),
         make_response(StatusCode::OK, "public, max-age=60", ""),
@@ -291,8 +278,7 @@ async fn head_response_does_not_poison_get_cache_entry() {
     .expect("store");
 
     let head_out = lookup(
-        head_req.method(),
-        head_req.headers(),
+        &head_req,
         &head_key,
         &policy(),
         &backends,
@@ -307,8 +293,7 @@ async fn head_response_does_not_poison_get_cache_entry() {
         .expect("key")
         .expect("some key");
     let get_out = lookup(
-        get_req.method(),
-        get_req.headers(),
+        &get_req,
         &get_key,
         &policy(),
         &backends,
@@ -321,12 +306,14 @@ async fn head_response_does_not_poison_get_cache_entry() {
 
 #[tokio::test]
 async fn post_response_is_write_through_but_can_seed_get_when_content_location_matches() {
-    let post_req = Request::builder()
-        .method(Method::POST)
-        .uri("http://example.com/post-cache")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let post_req = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("http://example.com/post-cache")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("request"),
+    );
     let post_key = CacheRequestKey::for_lookup(&post_req, "http")
         .expect("key")
         .expect("some key");
@@ -337,8 +324,7 @@ async fn post_response_is_write_through_but_can_seed_get_when_content_location_m
         http::HeaderValue::from_static("/post-cache"),
     );
     let _ = store_and_drain(
-        post_req.method(),
-        post_req.headers(),
+        &post_req,
         &post_key,
         &policy(),
         response,
@@ -353,8 +339,7 @@ async fn post_response_is_write_through_but_can_seed_get_when_content_location_m
     .expect("store");
 
     let post_out = lookup(
-        post_req.method(),
-        post_req.headers(),
+        &post_req,
         &post_key,
         &policy(),
         &backends,
@@ -369,8 +354,7 @@ async fn post_response_is_write_through_but_can_seed_get_when_content_location_m
         .expect("key")
         .expect("some key");
     let out = lookup(
-        get_req.method(),
-        get_req.headers(),
+        &get_req,
         &get_key,
         &policy(),
         &backends,
@@ -390,19 +374,20 @@ async fn post_response_is_write_through_but_can_seed_get_when_content_location_m
 
 #[tokio::test]
 async fn post_response_without_matching_content_location_is_not_stored() {
-    let post_req = Request::builder()
-        .method(Method::POST)
-        .uri("http://example.com/post-no-location")
-        .header(HOST, "example.com")
-        .body(Body::empty())
-        .expect("request");
+    let post_req = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("http://example.com/post-no-location")
+            .header(HOST, "example.com")
+            .body(())
+            .expect("request"),
+    );
     let post_key = CacheRequestKey::for_lookup(&post_req, "http")
         .expect("key")
         .expect("some key");
     let backends = backend_map();
     let _ = store_and_drain(
-        post_req.method(),
-        post_req.headers(),
+        &post_req,
         &post_key,
         &policy(),
         make_response(StatusCode::OK, "public, max-age=60", "posted"),
@@ -421,8 +406,7 @@ async fn post_response_without_matching_content_location_is_not_stored() {
         .expect("key")
         .expect("some key");
     let out = lookup(
-        get_req.method(),
-        get_req.headers(),
+        &get_req,
         &get_key,
         &policy(),
         &backends,

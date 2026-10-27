@@ -309,11 +309,12 @@ pub mod fuzz_support {
             .method(method)
             .uri(if path.starts_with('/') { path } else { "/" })
             .header(http::header::HOST, host)
-            .body(qpx_http::body::Body::empty())
+            .body(())
         else {
             return;
         };
-        if let Ok(Some(key)) = qpxd_cache::CacheRequestKey::for_lookup(&request, "http") {
+        let owner = qpx_core::http_message::Request::from_http(request);
+        if let Ok(Some(key)) = qpxd_cache::CacheRequestKey::for_lookup(&owner, "http") {
             let _ = key.primary_hash();
             let _ = key.absolute_url();
             let _ = key.with_method_group("GET").primary_hash();

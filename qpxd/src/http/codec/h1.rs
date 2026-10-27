@@ -501,10 +501,24 @@ fn finish_parsed_http1_request(
     let body_kind = determine_request_body_kind(&headers, version)?;
     let keep_alive = request_keep_alive(version, &headers);
     let upgrade = request_has_upgrade(&headers);
+    // Owner validation at the genuine H1 codec boundary: snapshot the parsed
+    // head once via `from_http` so the shared Expect policy sees the same
+    // bytes the codec parsed, without exposing a raw map in-domain.
+    let expect_valid = {
+        let mut snapshot = Request::builder()
+            .method(method.clone())
+            .uri(uri.clone())
+            .version(version)
+            .body(())
+            .expect("codec snapshot request");
+        *snapshot.headers_mut() = headers.clone();
+        let owner = qpx_core::http_message::Request::from_http(snapshot);
+        qpx_http::protocol::semantics::validate_expect_header(owner.headers()).is_ok()
+    };
     let send_continue = version == Version::HTTP_11
         && body_kind != RequestBodyKind::Empty
         && expect_continue(&headers)
-        && qpx_http::protocol::semantics::validate_expect_header(&headers).is_ok();
+        && expect_valid;
     Ok(ParsedRequestHead {
         method,
         uri,

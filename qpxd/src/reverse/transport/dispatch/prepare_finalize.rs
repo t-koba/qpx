@@ -6,7 +6,8 @@ use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::destination::classify_reverse_destination;
 use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use anyhow::{Result, anyhow};
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -15,7 +16,7 @@ use std::sync::Arc;
     reason = "route finalize assembles the prepared request from explicit selection outputs"
 )]
 pub(super) fn finalize_reverse_route_selection(
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     base: &BaseRequestFields,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,
@@ -23,7 +24,7 @@ pub(super) fn finalize_reverse_route_selection(
     cors_request: Option<&qpx_core::cors::CorsRequest>,
     host: &str,
     mut selection: ReverseRouteSelection,
-    owned_sanitized_headers: Option<http::HeaderMap>,
+    owned_sanitized_headers: Option<qpx_core::http_message::Headers>,
     request_rpc: Option<crate::http::rpc::RpcMatchContext>,
 ) -> Result<std::result::Result<PreparedReverseRequest, (InterimList, Response<Body>)>> {
     let router = &compiled.router;

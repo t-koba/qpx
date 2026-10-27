@@ -12,6 +12,7 @@ use crate::server::control::SidecarControl;
 use anyhow::{Result, anyhow};
 use hyper::{Response, StatusCode};
 use qpx_core::config::ReverseEdgeConfig;
+use qpx_core::http_message::OrdinaryHeaderName;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use tokio::sync::watch;
@@ -149,9 +150,9 @@ impl ReverseQpxHandler {
         if crate::http::protocol::sse::is_sse_reconnect(&request_headers) {
             crate::http::protocol::sse::emit_sse_reconnect(self.reverse.name.as_ref(), "unknown");
         }
-        let grpc_protocol = crate::http::rpc::streaming_rpc_protocol(&request_headers, None);
+        let grpc_protocol = crate::http::rpc::request_streaming_rpc_protocol(&request_headers);
         let grpc_request_content_type = request_headers
-            .get(http::header::CONTENT_TYPE)
+            .get(&OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE).expect("ordinary"))
             .and_then(|value| value.to_str().ok())
             .map(str::to_string);
         let grpc_started = Instant::now();
@@ -171,8 +172,7 @@ impl ReverseQpxHandler {
             )
         });
         let request_method = request.head.method().clone();
-        let declared_content_length =
-            crate::http::codec::h2::parse_declared_content_length(request.head.headers())?;
+        let declared_content_length = request.head.headers().declared_content_length()?;
         if let Some(content_length) = declared_content_length
             && content_length > request_streaming.max_request_body_bytes as u64
         {
@@ -189,7 +189,12 @@ impl ReverseQpxHandler {
         }
 
         let (sender, body) = Body::channel_with_capacity(request_streaming.body_channel_capacity);
-        let mut req = crate::http3::codec::h3_request_to_hyper(request.head, body)?;
+        if request.head.headers().field_count() > crate::http3::codec::H3_MAX_HEADER_COUNT {
+            return Err(anyhow!(
+                "HTTP/3 request header fields exceeded configured limits"
+            ));
+        }
+        let mut req = request.head.map_body(|()| body);
         if let Some(content_length) = declared_content_length {
             set_observed_request_size(&mut req, content_length);
         }
@@ -236,9 +241,8 @@ impl ReverseQpxHandler {
         let grpc_observer = request_streaming
             .observe_grpc_messages
             .then(|| {
-                crate::http::rpc::streaming_rpc_observer(
+                crate::http::rpc::request_streaming_rpc_observer(
                     &request_headers,
-                    None,
                     Some(request_streaming.max_grpc_message_bytes),
                     Some(request_streaming.max_grpc_web_trailer_bytes),
                 )

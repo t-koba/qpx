@@ -15,7 +15,8 @@ use crate::runtime;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::{Result, anyhow};
-use hyper::{Method, Request, Response};
+use hyper::{Method, Response};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -167,11 +168,11 @@ enum ReverseCacheLookupOutcome {
 
 struct ReverseCacheContinuation {
     revalidation_state: Option<qpxd_cache::RevalidationState>,
-    request_headers_snapshot: http::HeaderMap,
+    request_headers_snapshot: OwnerRequest<()>,
 }
 
 async fn reverse_cache_lookup(
-    req: &mut Request<Body>,
+    req: &mut OwnerRequest<Body>,
     input: ReverseCacheLookupInput<'_>,
 ) -> Result<ReverseCacheLookupOutcome> {
     let ReverseCacheLookupInput {
@@ -209,7 +210,7 @@ async fn reverse_cache_lookup(
     let lookup_result = lookup_result?;
     let lookup_decision = lookup_result.decision;
     let revalidation_state = lookup_result.revalidation_state;
-    let request_headers_snapshot = lookup_result.request_headers_snapshot;
+    let request_headers_snapshot = lookup_result.request_head_snapshot;
     if !http_modules.is_empty() {
         http_modules
             .on_cache_lookup(cache_decision_is_hit(&lookup_decision))
@@ -281,7 +282,7 @@ struct ReverseRevalidationInput<'a> {
     route: &'a HttpRoute,
     request_method: &'a Method,
     policy: &'a qpx_core::config::CachePolicyConfig,
-    snapshot: &'a http::HeaderMap,
+    snapshot: &'a OwnerRequest<()>,
     lookup_key: Option<&'a CacheRequestKey>,
     target_key: Option<&'a CacheRequestKey>,
     override_upstream: Option<&'a str>,
@@ -292,7 +293,7 @@ struct ReverseRevalidationInput<'a> {
     state: qpxd_cache::RevalidationState,
 }
 
-fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidationInput<'_>) {
+fn maybe_spawn_reverse_revalidation(req: &OwnerRequest<Body>, input: ReverseRevalidationInput<'_>) {
     let ReverseRevalidationInput {
         runtime,
         route,
@@ -333,11 +334,11 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
     let runtime_state = runtime.state();
     let proxy_name = proxy_name.to_string();
     let policy = policy.clone();
-    let snapshot = snapshot.clone();
+    let snapshot = clone_request_head_for_revalidation(snapshot);
     let lookup_key = lookup_key.clone();
     let target_key = target_key.clone();
     let upstream_trust = route.upstream_trust.clone();
-    let bg_req = clone_request_head_for_revalidation(req);
+    let bg_req = clone_request_head_for_revalidation(req).map_body(|()| Body::empty());
     let pools = runtime_state.pools.clone();
     tokio::spawn(async move {
         let _guard = guard;
@@ -357,16 +358,14 @@ fn maybe_spawn_reverse_revalidation(req: &Request<Body>, input: ReverseRevalidat
             return;
         };
         let response_delay_secs = started.elapsed().as_secs();
-        let method = Method::GET;
         let _ = process_upstream_response_for_cache(
             resp,
             CacheWritebackContext {
-                request_method: &method,
+                request_snapshot: &snapshot,
                 response_delay_secs,
                 cache_target_key: Some(&target_key),
                 cache_lookup_key: Some(&lookup_key),
                 cache_policy: Some(&policy),
-                request_headers_snapshot: &snapshot,
                 revalidation_state: Some(state),
                 request_collapse_guard: None,
                 body_read_timeout: runtime_state
@@ -390,7 +389,7 @@ struct ReverseCacheCollapseInput<'a> {
     route_headers: Option<&'a CompiledHeaderControl>,
     plan: &'a crate::runtime::ExecutionPlan,
     request_cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
-    request_headers_snapshot: Option<&'a http::HeaderMap>,
+    request_headers_snapshot: Option<&'a OwnerRequest<()>>,
     cache_lookup_key: Option<&'a CacheRequestKey>,
     route_timeout: Duration,
     http_modules: &'a mut crate::http::modules::HttpModuleExecution,
@@ -399,7 +398,7 @@ struct ReverseCacheCollapseInput<'a> {
 }
 
 async fn reverse_cache_collapse(
-    req: &mut Request<Body>,
+    req: &mut OwnerRequest<Body>,
     input: ReverseCacheCollapseInput<'_>,
 ) -> Result<DispatchCacheCollapseOutcome> {
     let ReverseCacheCollapseInput {
@@ -503,14 +502,18 @@ mod query_cache_tests {
     use super::*;
     use crate::http::dispatch::cache::buffer_query_for_cache_key;
     use http::header::CONTENT_TYPE;
+    use hyper::Request;
+    use qpx_core::http_message::Request as OwnerRequest;
 
     async fn digest(content_type: &str, body: &'static str) -> String {
-        let request = Request::builder()
-            .method(Method::QUERY)
-            .uri("https://example.com/search")
-            .header(CONTENT_TYPE, content_type)
-            .body(Body::from(body))
-            .unwrap();
+        let request = OwnerRequest::from_http(
+            Request::builder()
+                .method(Method::QUERY)
+                .uri("https://example.com/search")
+                .header(CONTENT_TYPE, content_type)
+                .body(Body::from(body))
+                .unwrap(),
+        );
         buffer_query_for_cache_key(request, 1024, std::time::Duration::from_secs(1))
             .await
             .unwrap()
@@ -526,21 +529,23 @@ mod query_cache_tests {
             "content-digest",
             "sha-512=:probe:".parse().expect("trailer value"),
         );
-        let request = Request::builder()
-            .method(Method::QUERY)
-            .uri("https://example.com/search")
-            .header(CONTENT_TYPE, "application/sql")
-            .header("trailer", "content-digest")
-            .body(Body::replay(
-                bytes::Bytes::from_static(b"select 1"),
-                Some(trailer_map),
-            ))
-            .unwrap();
+        let request = OwnerRequest::from_http(
+            Request::builder()
+                .method(Method::QUERY)
+                .uri("https://example.com/search")
+                .header(CONTENT_TYPE, "application/sql")
+                .header("trailer", "content-digest")
+                .body(Body::replay(
+                    bytes::Bytes::from_static(b"select 1"),
+                    Some(trailer_map),
+                ))
+                .unwrap(),
+        );
         let (replayed, _) =
             buffer_query_for_cache_key(request, 1024, std::time::Duration::from_secs(1))
                 .await
                 .unwrap();
-        let mut replayed = replayed.into_body();
+        let (_, mut replayed) = replayed.into_head_and_body();
         let mut content = Vec::new();
         while let Some(chunk) = replayed.data().await {
             content.extend_from_slice(&chunk.unwrap());
@@ -560,12 +565,14 @@ mod query_cache_tests {
         // A stalled QUERY body must fail closed on the selected read timeout
         // instead of waiting for the ingress-layer bound.
         let (_sender, body) = Body::channel();
-        let request = Request::builder()
-            .method(Method::QUERY)
-            .uri("https://example.com/search")
-            .header(CONTENT_TYPE, "application/sql")
-            .body(body)
-            .unwrap();
+        let request = OwnerRequest::from_http(
+            Request::builder()
+                .method(Method::QUERY)
+                .uri("https://example.com/search")
+                .header(CONTENT_TYPE, "application/sql")
+                .body(body)
+                .unwrap(),
+        );
         let err = buffer_query_for_cache_key(request, 1024, std::time::Duration::from_millis(50))
             .await
             .expect_err("stalled body must time out");

@@ -5,7 +5,7 @@ use crate::http::policy::rule_context::{
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::policy_context::sanitize_headers_for_policy;
 use crate::runtime::{ResolvedStreamingLimits, Runtime};
-use http::Request;
+use qpx_core::http_message::Request;
 use std::net::SocketAddr;
 
 pub(super) fn request_streaming_limits_for_head(

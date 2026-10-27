@@ -15,7 +15,8 @@ use crate::http::policy::rule_context::{
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::runtime::Runtime;
 use anyhow::anyhow;
-use hyper::{Request, Response};
+use hyper::Response;
+use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
 mod http_execute;
@@ -568,8 +569,9 @@ async fn complete_forward_request(
         headers.as_deref(),
         &audit,
     )? {
+        let (_, request_body) = req.into_head_and_body();
         spawn_drain_local_response_request_body(
-            req.into_body(),
+            request_body,
             body_read_timeout,
             selected_plan.streaming.max_request_body_bytes,
         );

@@ -12,8 +12,7 @@ async fn only_if_cached_does_not_trigger_revalidation() {
         .insert(ETAG, http::HeaderValue::from_static("\"v1\""));
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -29,12 +28,11 @@ async fn only_if_cached_does_not_trigger_revalidation() {
 
     let mut only_cached = make_get_request("/revalidate-only-if-cached");
     only_cached.headers_mut().insert(
-        CACHE_CONTROL,
+        ord("cache-control"),
         http::HeaderValue::from_static("only-if-cached"),
     );
     let out = lookup(
-        only_cached.method(),
-        only_cached.headers(),
+        &only_cached,
         &key,
         &policy(),
         &backends,
@@ -49,25 +47,20 @@ async fn only_if_cached_does_not_trigger_revalidation() {
 async fn only_if_cached_conditional_request_returns_miss_without_network() {
     let mut req = make_get_request("/conditional-only-if-cached");
     req.headers_mut().insert(
-        CACHE_CONTROL,
+        ord("cache-control"),
         http::HeaderValue::from_static("only-if-cached"),
     );
-    req.headers_mut()
-        .insert(IF_NONE_MATCH, http::HeaderValue::from_static("\"etag\""));
+    req.headers_mut().insert(
+        ord("if-none-match"),
+        http::HeaderValue::from_static("\"etag\""),
+    );
     let key = CacheRequestKey::for_lookup(&req, "http")
         .expect("key")
         .expect("some key");
     let backends = backend_map();
-    let out = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out, LookupOutcome::OnlyIfCachedMiss));
 }
 
@@ -75,7 +68,7 @@ async fn only_if_cached_conditional_request_returns_miss_without_network() {
 async fn vary_controls_cache_hits() {
     let mut req = make_get_request("/vary");
     req.headers_mut()
-        .insert("accept-language", http::HeaderValue::from_static("ja"));
+        .insert(ord("accept-language"), http::HeaderValue::from_static("ja"));
     let key = CacheRequestKey::for_lookup(&req, "http")
         .expect("key")
         .expect("some key");
@@ -86,8 +79,7 @@ async fn vary_controls_cache_hits() {
     let backends = backend_map();
 
     let stored = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -108,16 +100,9 @@ async fn vary_controls_cache_hits() {
         Some("qpx; fwd=miss")
     );
 
-    let out = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     if !matches!(out, LookupOutcome::Hit(_)) {
         eprintln!("OUTCOME_DEBUG {:?}", out);
     }
@@ -126,13 +111,12 @@ async fn vary_controls_cache_hits() {
     let mut miss_req = make_get_request("/vary");
     miss_req
         .headers_mut()
-        .insert("accept-language", http::HeaderValue::from_static("en"));
+        .insert(ord("accept-language"), http::HeaderValue::from_static("en"));
     let miss_key = CacheRequestKey::for_lookup(&miss_req, "http")
         .expect("key")
         .expect("some key");
     let out = lookup(
-        miss_req.method(),
-        miss_req.headers(),
+        &miss_req,
         &miss_key,
         &policy(),
         &backends,
@@ -162,8 +146,7 @@ async fn set_cookie_is_not_stored_by_default() {
     p.allow_set_cookie_store = false;
 
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &p,
         response,
@@ -176,16 +159,9 @@ async fn set_cookie_is_not_stored_by_default() {
     )
     .await
     .expect("store");
-    let out = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &p,
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req, &key, &p, &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out, LookupOutcome::Miss));
 }
 
@@ -208,8 +184,7 @@ async fn set_cookie_requires_explicit_opt_in_with_public_and_vary_cookie() {
     p.allow_set_cookie_store = true;
 
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &p,
         response,
@@ -222,16 +197,9 @@ async fn set_cookie_requires_explicit_opt_in_with_public_and_vary_cookie() {
     )
     .await
     .expect("store");
-    let out = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &p,
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req, &key, &p, &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out, LookupOutcome::Hit(_)));
 }
 
@@ -248,8 +216,7 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
 
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -263,39 +230,24 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
     .await
     .expect("store");
 
-    let outcome = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let outcome = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     let state = match outcome {
         LookupOutcome::Revalidate(state) => state,
         _ => panic!("expected revalidation"),
     };
     attach_revalidation_headers(req.headers_mut(), &state);
-    assert!(req.headers().contains_key(IF_NONE_MATCH));
+    assert!(req.headers().contains_key(&ord("if-none-match")));
 
     let not_modified = Response::builder()
         .status(StatusCode::NOT_MODIFIED)
         .header(DATE, "Tue, 02 Jan 2024 00:00:00 GMT")
         .body(Body::empty())
         .expect("304");
-    let refreshed = revalidate_not_modified(
-        req.method(),
-        req.headers(),
-        &policy(),
-        not_modified,
-        state,
-        0,
-        &backends,
-    )
-    .await
-    .expect("revalidate");
+    let refreshed = revalidate_not_modified(&req, &policy(), not_modified, state, 0, &backends)
+        .await
+        .expect("revalidate");
     assert_eq!(
         refreshed
             .headers()
@@ -317,8 +269,7 @@ async fn zero_max_age_entry_revalidates_on_immediate_lookup() {
 
     let backends = backend_map();
     let _ = store_and_drain(
-        req.method(),
-        req.headers(),
+        &req,
         &key,
         &policy(),
         response,
@@ -332,16 +283,9 @@ async fn zero_max_age_entry_revalidates_on_immediate_lookup() {
     .await
     .expect("store");
 
-    let outcome = lookup(
-        req.method(),
-        req.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let outcome = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(outcome, LookupOutcome::Revalidate(_)));
 }
 
@@ -349,7 +293,7 @@ async fn zero_max_age_entry_revalidates_on_immediate_lookup() {
 async fn authorization_public_without_vary_is_not_shared_across_credentials() {
     let mut req_a = make_get_request("/auth-no-vary");
     req_a.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer A"),
     );
     let key = CacheRequestKey::for_lookup(&req_a, "http")
@@ -358,8 +302,7 @@ async fn authorization_public_without_vary_is_not_shared_across_credentials() {
     let response = make_response(StatusCode::OK, "public, max-age=60", "private-a");
     let backends = backend_map();
     let _ = store_and_drain(
-        req_a.method(),
-        req_a.headers(),
+        &req_a,
         &key,
         &policy(),
         response,
@@ -374,19 +317,12 @@ async fn authorization_public_without_vary_is_not_shared_across_credentials() {
     .expect("store");
     let mut req_b = make_get_request("/auth-no-vary");
     req_b.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer B"),
     );
-    let out = lookup(
-        req_b.method(),
-        req_b.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req_b, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(
         !matches!(out, LookupOutcome::Hit(_)),
         "public Authorization response without Vary: Authorization must not be served across credentials"
@@ -397,7 +333,7 @@ async fn authorization_public_without_vary_is_not_shared_across_credentials() {
 async fn authorization_public_with_vary_authorization_is_partitioned() {
     let mut req_a = make_get_request("/auth-vary");
     req_a.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer A"),
     );
     let key = CacheRequestKey::for_lookup(&req_a, "http")
@@ -409,8 +345,7 @@ async fn authorization_public_with_vary_authorization_is_partitioned() {
         .insert(VARY, http::HeaderValue::from_static("Authorization"));
     let backends = backend_map();
     let _ = store_and_drain(
-        req_a.method(),
-        req_a.headers(),
+        &req_a,
         &key,
         &policy(),
         response,
@@ -423,32 +358,18 @@ async fn authorization_public_with_vary_authorization_is_partitioned() {
     )
     .await
     .expect("store");
-    let out_same = lookup(
-        req_a.method(),
-        req_a.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out_same = lookup(&req_a, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out_same, LookupOutcome::Hit(_)));
     let mut req_b = make_get_request("/auth-vary");
     req_b.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer B"),
     );
-    let out_other = lookup(
-        req_b.method(),
-        req_b.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out_other = lookup(&req_b, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out_other, LookupOutcome::Miss));
 }
 
@@ -456,7 +377,7 @@ async fn authorization_public_with_vary_authorization_is_partitioned() {
 async fn authorization_without_vary_opt_out_restores_shared_storage() {
     let mut req_a = make_get_request("/auth-opt-out");
     req_a.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer A"),
     );
     let key = CacheRequestKey::for_lookup(&req_a, "http")
@@ -467,8 +388,7 @@ async fn authorization_without_vary_opt_out_restores_shared_storage() {
     let mut p = policy();
     p.allow_authorization_without_vary_store = true;
     let _ = store_and_drain(
-        req_a.method(),
-        req_a.headers(),
+        &req_a,
         &key,
         &p,
         response,
@@ -483,19 +403,12 @@ async fn authorization_without_vary_opt_out_restores_shared_storage() {
     .expect("store");
     let mut req_b = make_get_request("/auth-opt-out");
     req_b.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer B"),
     );
-    let out = lookup(
-        req_b.method(),
-        req_b.headers(),
-        &key,
-        &p,
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req_b, &key, &p, &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out, LookupOutcome::Hit(_)));
 }
 
@@ -506,7 +419,7 @@ async fn authorization_proxy_revalidate_alone_is_not_storable() {
     // credential must miss.
     let mut req_a = make_get_request("/auth-proxy-revalidate");
     req_a.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer A"),
     );
     let key = CacheRequestKey::for_lookup(&req_a, "http")
@@ -518,8 +431,7 @@ async fn authorization_proxy_revalidate_alone_is_not_storable() {
         .insert(VARY, http::HeaderValue::from_static("Authorization"));
     let backends = backend_map();
     let _ = store_and_drain(
-        req_a.method(),
-        req_a.headers(),
+        &req_a,
         &key,
         &policy(),
         response,
@@ -532,16 +444,9 @@ async fn authorization_proxy_revalidate_alone_is_not_storable() {
     )
     .await
     .expect("store");
-    let out_same = lookup(
-        req_a.method(),
-        req_a.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out_same = lookup(&req_a, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(
         !matches!(out_same, LookupOutcome::Hit(_)),
         "proxy-revalidate alone must not unlock Authorization shared storage"
@@ -553,7 +458,7 @@ async fn authorization_proxy_revalidate_alone_opt_out_still_misses() {
     // The no-Vary opt-out cannot bypass the RFC 9111 §3.5 storage gate.
     let mut req_a = make_get_request("/auth-proxy-revalidate-opt-out");
     req_a.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer A"),
     );
     let key = CacheRequestKey::for_lookup(&req_a, "http")
@@ -564,8 +469,7 @@ async fn authorization_proxy_revalidate_alone_opt_out_still_misses() {
     let mut p = policy();
     p.allow_authorization_without_vary_store = true;
     let _ = store_and_drain(
-        req_a.method(),
-        req_a.headers(),
+        &req_a,
         &key,
         &p,
         response,
@@ -578,16 +482,9 @@ async fn authorization_proxy_revalidate_alone_opt_out_still_misses() {
     )
     .await
     .expect("store");
-    let out = lookup(
-        req_a.method(),
-        req_a.headers(),
-        &key,
-        &p,
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out = lookup(&req_a, &key, &p, &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(
         !matches!(out, LookupOutcome::Hit(_)),
         "opt-out must not bypass the RFC 9111 §3.5 Authorization storage gate"
@@ -599,7 +496,7 @@ async fn authorization_must_revalidate_with_vary_is_partitioned_hit() {
     // Positive control: must-revalidate grants §3.5 permission; Vary partitions.
     let mut req_a = make_get_request("/auth-must-revalidate");
     req_a.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer A"),
     );
     let key = CacheRequestKey::for_lookup(&req_a, "http")
@@ -611,8 +508,7 @@ async fn authorization_must_revalidate_with_vary_is_partitioned_hit() {
         .insert(VARY, http::HeaderValue::from_static("Authorization"));
     let backends = backend_map();
     let _ = store_and_drain(
-        req_a.method(),
-        req_a.headers(),
+        &req_a,
         &key,
         &policy(),
         response,
@@ -625,16 +521,9 @@ async fn authorization_must_revalidate_with_vary_is_partitioned_hit() {
     )
     .await
     .expect("store");
-    let out_same = lookup(
-        req_a.method(),
-        req_a.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out_same = lookup(&req_a, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out_same, LookupOutcome::Hit(_)));
 }
 
@@ -643,7 +532,7 @@ async fn authorization_s_maxage_with_vary_is_partitioned_hit() {
     // Positive control: s-maxage grants §3.5 permission; Vary partitions.
     let mut req_a = make_get_request("/auth-s-maxage");
     req_a.headers_mut().insert(
-        http::header::AUTHORIZATION,
+        ord("authorization"),
         http::HeaderValue::from_static("Bearer A"),
     );
     let key = CacheRequestKey::for_lookup(&req_a, "http")
@@ -655,8 +544,7 @@ async fn authorization_s_maxage_with_vary_is_partitioned_hit() {
         .insert(VARY, http::HeaderValue::from_static("Authorization"));
     let backends = backend_map();
     let _ = store_and_drain(
-        req_a.method(),
-        req_a.headers(),
+        &req_a,
         &key,
         &policy(),
         response,
@@ -669,15 +557,8 @@ async fn authorization_s_maxage_with_vary_is_partitioned_hit() {
     )
     .await
     .expect("store");
-    let out_same = lookup(
-        req_a.method(),
-        req_a.headers(),
-        &key,
-        &policy(),
-        &backends,
-        &test_revalidations(),
-    )
-    .await
-    .expect("lookup");
+    let out_same = lookup(&req_a, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
     assert!(matches!(out_same, LookupOutcome::Hit(_)));
 }

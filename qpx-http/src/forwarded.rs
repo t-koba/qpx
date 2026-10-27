@@ -1,6 +1,6 @@
 //! RFC 7239 `Forwarded` field codec.
 
-use http::{HeaderMap, HeaderValue, header::HeaderName};
+use http::{HeaderValue, header::HeaderName};
 use qpx_core::http_token::is_http_token;
 use std::collections::HashSet;
 use thiserror::Error;
@@ -51,9 +51,11 @@ pub enum ForwardedError {
     InvalidHeaderValue,
 }
 
-pub fn parse_forwarded(headers: &HeaderMap) -> Result<Vec<ForwardedElement>, ForwardedError> {
+pub fn parse_forwarded<'a>(
+    values: impl IntoIterator<Item = &'a HeaderValue>,
+) -> Result<Vec<ForwardedElement>, ForwardedError> {
     let mut elements = Vec::new();
-    for value in headers.get_all(&FORWARDED) {
+    for value in values {
         let value = value.to_str().map_err(|_| ForwardedError::NonAscii)?;
         for raw_element in split_quoted(value, b',')? {
             let raw_element = raw_element.trim();
@@ -204,6 +206,7 @@ fn split_quoted(value: &str, separator: u8) -> Result<Vec<&str>, ForwardedError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::HeaderMap;
 
     #[test]
     fn parses_multiple_field_lines_and_quoted_nodes() {
@@ -216,7 +219,7 @@ mod tests {
             "forwarded",
             HeaderValue::from_static("for=\"[2001:db8:cafe::17]:4711\";host=example.com"),
         );
-        let parsed = parse_forwarded(&headers).expect("valid Forwarded field");
+        let parsed = parse_forwarded(headers.get_all(&FORWARDED)).expect("valid Forwarded field");
         assert_eq!(parsed.len(), 2);
         assert_eq!(parsed[0].get("proto"), Some("https"));
         assert_eq!(parsed[1].get("for"), Some("[2001:db8:cafe::17]:4711"));
@@ -241,11 +244,14 @@ mod tests {
             HeaderValue::from_static("for=192.0.2.1;For=192.0.2.2"),
         );
         assert!(matches!(
-            parse_forwarded(&headers),
+            parse_forwarded(headers.get_all(&FORWARDED)),
             Err(ForwardedError::DuplicateParameter(_))
         ));
 
         headers.insert("forwarded", HeaderValue::from_static("for=\"192.0.2.1"));
-        assert_eq!(parse_forwarded(&headers), Err(ForwardedError::InvalidValue));
+        assert_eq!(
+            parse_forwarded(headers.get_all(&FORWARDED)),
+            Err(ForwardedError::InvalidValue)
+        );
     }
 }

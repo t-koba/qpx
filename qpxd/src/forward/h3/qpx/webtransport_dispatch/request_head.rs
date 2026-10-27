@@ -2,15 +2,14 @@ use super::super::super::connect::parse::{
     default_connect_port_for_scheme, parse_connect_authority_with_default,
 };
 use super::super::connect_upstream::validate_qpx_connect_head;
-use crate::http3::codec::h1_headers_to_http;
-use http::HeaderMap;
+use qpx_core::http_message::Headers;
 use tracing::warn;
 
 pub(super) struct PreparedWebTransportHead {
     pub(super) req_authority: String,
     pub(super) host: String,
     pub(super) port: u16,
-    pub(super) headers: HeaderMap,
+    pub(super) headers: Headers,
 }
 
 pub(super) struct WebTransportHeadRejection {
@@ -18,7 +17,7 @@ pub(super) struct WebTransportHeadRejection {
 }
 
 pub(super) fn prepare_webtransport_connect_head(
-    req_head: &http::Request<()>,
+    req_head: &qpx_core::http_message::Request<()>,
 ) -> Result<PreparedWebTransportHead, WebTransportHeadRejection> {
     let req_authority = req_head
         .uri()
@@ -34,10 +33,7 @@ pub(super) fn prepare_webtransport_connect_head(
                 body: b"invalid CONNECT authority",
             }
         })?;
-    let headers =
-        h1_headers_to_http(req_head.headers()).map_err(|_| WebTransportHeadRejection {
-            body: b"invalid CONNECT headers",
-        })?;
+    let headers = req_head.headers().clone();
     if let Err(err) = validate_qpx_connect_head(
         req_head,
         &headers,
