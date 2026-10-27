@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Method, Request, Response, StatusCode, Uri, Version};
 use hyper::header::{EXPECT, HeaderMap, TRANSFER_ENCODING};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
@@ -41,7 +42,7 @@ pub(crate) async fn send_http1_response_with_interim_tcp(
     writer: &mut TcpStream,
     request_version: Version,
     request_method: &Method,
-    response: Response<Body>,
+    response: OwnerResponse<Body>,
     interim: &[InterimResponseHead],
     request_keep_alive: bool,
     body_read_timeout: Duration,
@@ -278,7 +279,7 @@ where
                 &mut write_half,
                 parsed.version,
                 &parsed.method,
-                response,
+                OwnerResponse::from_http(response),
                 &interim,
                 parsed.keep_alive,
                 header_read_timeout,
@@ -329,7 +330,7 @@ where
             &mut write_half,
             parsed.version,
             &parsed.method,
-            response,
+            OwnerResponse::from_http(response),
             &interim,
             parsed.keep_alive,
             header_read_timeout,

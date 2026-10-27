@@ -613,7 +613,7 @@ mod tests {
             &mut server,
             Version::HTTP_11,
             &Method::GET,
-            response,
+            qpx_core::http_message::Response::from_http(response),
             &[],
             false,
             std::time::Duration::from_secs(1),

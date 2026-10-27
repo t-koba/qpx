@@ -2,6 +2,7 @@ use super::*;
 use bytes::Bytes;
 use http_body::Frame;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderValue, TRAILER, TRANSFER_ENCODING};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_observability::RequestHandler;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -380,7 +381,7 @@ async fn send_http1_response_with_interim_preserves_upgrade_connection_header() 
         &mut write_half,
         Version::HTTP_11,
         &Method::GET,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -415,7 +416,7 @@ async fn content_length_response_does_not_repoll_completed_body() {
         &mut write_half,
         Version::HTTP_11,
         &Method::GET,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -558,7 +559,7 @@ async fn finalized_raw_response_head_uses_direct_http1_serialization() {
         &mut write_half,
         Version::HTTP_11,
         &Method::GET,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -734,7 +735,7 @@ async fn rejected_connect_closes_http1_connection() {
         &mut write_half,
         Version::HTTP_11,
         &Method::CONNECT,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -769,7 +770,7 @@ async fn send_http1_head_preserves_content_length_and_removes_trailer() {
         &mut write_half,
         Version::HTTP_11,
         &Method::HEAD,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -807,7 +808,7 @@ async fn send_http1_no_body_status_removes_trailer_metadata() {
         &mut write_half,
         Version::HTTP_11,
         &Method::GET,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -842,7 +843,7 @@ async fn send_http1_response_stops_when_response_body_limit_is_exceeded() {
         &mut write_half,
         Version::HTTP_11,
         &Method::GET,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -876,7 +877,7 @@ async fn response_data_pending_does_not_trigger_destructive_trailer_poll() {
         &mut write_half,
         Version::HTTP_11,
         &Method::GET,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -1006,7 +1007,7 @@ async fn raw_response_via_uses_upstream_version_for_http11_downstream() {
         &mut writer,
         Version::HTTP_11,
         &Method::GET,
-        response,
+        OwnerResponse::from_http(response),
         &[],
         true,
         Duration::from_secs(30),
@@ -1272,7 +1273,7 @@ async fn interim_heads_keep_order_and_bytes_at_http1_egress() {
             &mut server,
             version,
             &Method::GET,
-            response,
+            OwnerResponse::from_http(response),
             &ordered_interim_heads(),
             false,
             Duration::from_secs(1),
@@ -1304,7 +1305,7 @@ async fn interim_egress_rejects_101_and_final_status_before_writing() {
                 &mut server,
                 Version::HTTP_11,
                 &Method::GET,
-                Response::new(Body::empty()),
+                OwnerResponse::from_http(Response::new(Body::empty())),
                 &interim,
                 false,
                 Duration::from_secs(1),
@@ -1318,4 +1319,182 @@ async fn interim_egress_rejects_101_and_final_status_before_writing() {
         client.read_to_end(&mut wire).await.unwrap();
         assert!(wire.is_empty());
     }
+}
+
+async fn send_owned_h1_response(
+    method: Method,
+    response: Response<Body>,
+    interim: &[InterimResponseHead],
+) -> Vec<u8> {
+    let (mut client, mut server) = tokio::io::duplex(8192);
+    send_http1_response_with_interim(
+        &mut server,
+        Version::HTTP_11,
+        &method,
+        OwnerResponse::from_http(response),
+        interim,
+        true,
+        Duration::from_secs(1),
+        &mut BytesMut::new(),
+    )
+    .await
+    .expect("send owned response");
+    drop(server);
+    let mut wire = Vec::new();
+    client.read_to_end(&mut wire).await.expect("read response");
+    wire
+}
+
+#[tokio::test]
+async fn h1_owner_conversion_preserves_ordinary_framing() {
+    let wire = send_owned_h1_response(
+        Method::GET,
+        Response::builder()
+            .header(CONTENT_LENGTH, "2")
+            .body(Body::from("OK"))
+            .unwrap(),
+        &[],
+    )
+    .await;
+    let text = String::from_utf8(wire).expect("UTF-8 response");
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(text.to_ascii_lowercase().contains("content-length: 2"));
+    assert!(text.ends_with("\r\n\r\nOK"));
+
+    let wire = send_owned_h1_response(
+        Method::HEAD,
+        Response::builder()
+            .header(CONTENT_LENGTH, "123")
+            .header(TRAILER, "x-end")
+            .body(Body::from("not serialized"))
+            .unwrap(),
+        &[],
+    )
+    .await;
+    let text = String::from_utf8(wire).expect("UTF-8 response");
+    assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
+    assert!(text.to_ascii_lowercase().contains("content-length: 123"));
+    assert!(!text.to_ascii_lowercase().contains("trailer:"));
+    assert!(text.ends_with("\r\n\r\n"));
+
+    let wire = send_owned_h1_response(
+        Method::GET,
+        Response::builder()
+            .status(StatusCode::RESET_CONTENT)
+            .header(CONTENT_LENGTH, "7")
+            .body(Body::empty())
+            .unwrap(),
+        &[],
+    )
+    .await;
+    let text = String::from_utf8(wire).expect("UTF-8 response");
+    assert!(text.starts_with("HTTP/1.1 205"));
+    assert!(!text.contains("Content-Length:"));
+    assert!(text.ends_with("\r\n\r\n"));
+
+    let wire = send_owned_h1_response(
+        Method::GET,
+        Response::builder()
+            .header(TRANSFER_ENCODING, "chunked")
+            .body(Body::from("chunked-body"))
+            .unwrap(),
+        &[],
+    )
+    .await;
+    let text = String::from_utf8(wire).expect("UTF-8 response");
+    assert!(
+        text.to_ascii_lowercase()
+            .contains("transfer-encoding: chunked")
+    );
+    assert!(text.contains("chunked-body"));
+    assert!(text.ends_with("0\r\n\r\n"));
+}
+
+#[tokio::test]
+async fn h1_owner_invalid_length_fails_after_interim() {
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let interim = [InterimResponseHead::new(
+        StatusCode::CONTINUE,
+        HeaderMap::new(),
+    )];
+    let response = Response::builder()
+        .header(CONTENT_LENGTH, "invalid")
+        .body(Body::empty())
+        .unwrap();
+    let err = send_http1_response_with_interim(
+        &mut server,
+        Version::HTTP_11,
+        &Method::GET,
+        OwnerResponse::from_http(response),
+        &interim,
+        true,
+        Duration::from_secs(1),
+        &mut BytesMut::new(),
+    )
+    .await
+    .expect_err("invalid content-length must fail the owner export");
+    assert!(err.to_string().contains("content-length"));
+    drop(server);
+    let mut wire = Vec::new();
+    client.read_to_end(&mut wire).await.unwrap();
+    assert_eq!(wire, b"HTTP/1.1 100 Continue\r\n\r\n");
+}
+
+#[tokio::test]
+async fn h1_owner_raw_head_keeps_interim_order_and_bytes() {
+    let (mut client, server) = tokio::io::duplex(8192);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let parsed = [
+        httparse::Header {
+            name: "Content-Length",
+            value: b"4",
+        },
+        httparse::Header {
+            name: "Connection",
+            value: b"X-Hop",
+        },
+        httparse::Header {
+            name: "X-Hop",
+            value: b"discard",
+        },
+        httparse::Header {
+            name: "Content-Type",
+            value: b"text/plain",
+        },
+    ];
+    let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+        &parsed,
+        &Method::GET,
+        StatusCode::OK,
+        Version::HTTP_11,
+    )
+    .expect("raw response head");
+    raw_head.finalize("qpx");
+    let mut response = Response::new(Body::from("body"));
+    response.extensions_mut().insert(Arc::new(raw_head));
+    let keep_alive = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        OwnerResponse::from_http(response),
+        &ordered_interim_heads(),
+        true,
+        Duration::from_secs(1),
+        &mut BytesMut::new(),
+    )
+    .await
+    .expect("send owned raw-head response");
+    assert!(keep_alive);
+    drop(write_half);
+    drop(read_half);
+    let mut wire = Vec::new();
+    client.read_to_end(&mut wire).await.unwrap();
+    assert_ordered_interim_wire(&wire);
+    let text = String::from_utf8_lossy(&wire);
+    assert!(text.contains("Content-Length: 4\r\n"));
+    assert!(text.contains("Content-Type: text/plain\r\n"));
+    assert!(text.contains("Proxy-Status: qpx\r\n"));
+    assert!(text.contains("Via: 1.1 qpx\r\n"));
+    assert!(!text.contains("X-Hop:"));
+    assert!(text.ends_with("\r\n\r\nbody"));
 }

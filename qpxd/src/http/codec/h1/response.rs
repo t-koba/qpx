@@ -12,10 +12,11 @@ use crate::upstream::raw_http1::{
 use anyhow::{Result, anyhow};
 use bytes::BufMut;
 use bytes::{Buf, Bytes, BytesMut};
-use http::{Method, Response, StatusCode, Version};
+use http::{Method, StatusCode, Version};
 use hyper::header::{
     CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderValue, TRAILER, TRANSFER_ENCODING,
 };
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::response_status_has_no_body;
 #[cfg(not(target_os = "linux"))]
@@ -53,7 +54,7 @@ pub(crate) async fn send_http1_response_with_interim<W>(
     writer: &mut W,
     request_version: Version,
     request_method: &Method,
-    response: Response<Body>,
+    response: OwnerResponse<Body>,
     interim: &[InterimResponseHead],
     request_keep_alive: bool,
     body_read_timeout: Duration,
@@ -176,7 +177,7 @@ pub(super) async fn send_http1_response_with_interim_zero_copy<W>(
     writer: &mut W,
     request_version: Version,
     request_method: &Method,
-    response: Response<Body>,
+    response: OwnerResponse<Body>,
     interim: &[InterimResponseHead],
     request_keep_alive: bool,
     body_read_timeout: Duration,
@@ -210,6 +211,7 @@ where
         }
     }
 
+    let response = response.into_http_for_codec()?;
     let (mut parts, mut body) = response.into_parts();
     let raw_head = parts.extensions.remove::<Arc<RawHttp1ResponseHead>>();
     let mut headers = parts.headers;

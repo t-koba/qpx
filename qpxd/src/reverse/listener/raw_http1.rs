@@ -16,6 +16,7 @@ use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Response, StatusCode};
 use qpx_core::http_content_length::declared_content_length;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use qpx_observability::access_log::{
@@ -260,7 +261,7 @@ pub(super) async fn serve_raw_or_fallback(
                                 &mut stream,
                                 http::Version::HTTP_11,
                                 request_method,
-                                response,
+                                OwnerResponse::from_http(response),
                                 &interim,
                                 request_keep_alive,
                                 header_read_timeout,
