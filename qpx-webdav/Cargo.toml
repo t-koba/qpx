@@ -14,7 +14,7 @@ cap-fs-ext = { version = "4.0.3", default-features = false }
 http.workspace = true
 parking_lot.workspace = true
 percent-encoding.workspace = true
-qpx-core = { path = "../qpx-core" }
+qpx-core = { path = "../qpx-core", default-features = false }
 quick-xml.workspace = true
 redb.workspace = true
 serde.workspace = true
