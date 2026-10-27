@@ -1233,14 +1233,13 @@ fn h2_owned_framing_matches_map_rules() {
                 }
                 Ok(None)
             } else {
-                parse_declared_content_length(&expected).map(|length| {
+                parse_declared_content_length(&expected).inspect(|&length| {
                     if let Some(length) = length {
                         expected.insert(
                             http::header::CONTENT_LENGTH,
                             qpx_core::http_content_length::canonical_content_length_value(length),
                         );
                     }
-                    length
                 })
             };
             let mut standard = Response::new(());
