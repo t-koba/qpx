@@ -45,11 +45,10 @@ check_crate() {
   fi
 }
 
-# qpx-core exposes opaque owner-backed headers, policy/Vary operations and closed
-# configured transfer/expansion effects;
-# Content-Length text projection remains closed, so keep the fingerprint gate strict.
-check_crate qpx-core 9adbd7c0b6aba06e956f8882b53ef4553be890b98681bb2f97dfa7c9ef4eab3a
-check_crate qpx-auth c17be9a9eb26c0587c0425b1d2088ebe1ad09d5c7f43a00dc8677938ecf842c5
-check_crate qpx-h3 410b9670db15527f87dd91afd6629a76bf7dfcd3b404fe859c8bf2d42ac3062d
+# qpx-core exposes opaque owner-backed request/header carriers, policy/Vary operations
+# and closed configured transfer/expansion effects; keep the fingerprint gate strict.
+check_crate qpx-core 2e07159b628ca74564c471cc60f914cbd7eff3dc861d961d1877b4e3016996dc
+check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
+check_crate qpx-h3 01aecfccd1ef9f622ca8a78e2a6859d06b73060d2e18159ec59a4305523f0d61
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
-check_crate qpx-observability ab5e618b4d29eb699f82a26513cd33476ddef6e588568b5b440fcd47d2a82ea7
+check_crate qpx-observability baa66d20c029936bb98c25b9d2925d50eebfa6bba9e2698bb18c19454f1610a2
