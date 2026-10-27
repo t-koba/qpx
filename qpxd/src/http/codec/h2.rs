@@ -441,8 +441,7 @@ fn prepare_h2_response_content_length(
 ) -> Result<Option<u64>> {
     if no_body {
         for name in [http::header::TRANSFER_ENCODING, http::header::TRAILER] {
-            headers
-                .remove(&OrdinaryHeaderName::try_from(name).expect("framing header is ordinary"));
+            headers.remove(&OrdinaryHeaderName::try_from(name)?);
         }
         if request_method == hyper::Method::HEAD {
             match headers.declared_content_length() {
