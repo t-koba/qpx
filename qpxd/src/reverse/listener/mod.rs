@@ -12,7 +12,8 @@ use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
-use http::{Request, Response};
+use http::Request;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use qpx_observability::access_log::{
@@ -102,13 +103,13 @@ impl ReverseInterimService {
 }
 
 impl RequestHandler<Request<Body>> for ReverseInterimService {
-    type Response = Response<Body>;
+    type Response = OwnerResponse<Body>;
     type Error = Infallible;
 
     fn call(
         &self,
         req: Request<Body>,
-    ) -> impl Future<Output = Result<Response<Body>, Infallible>> + Send {
+    ) -> impl Future<Output = Result<OwnerResponse<Body>, Infallible>> + Send {
         let reverse = &self.reverse;
         let conn = &self.conn;
         let origin_pool = &self.origin_pool;
@@ -125,14 +126,14 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
             if !interim.is_empty() {
                 response.extensions_mut().insert(interim);
             }
-            Ok(response)
+            Ok(OwnerResponse::from_http(response))
         }
     }
 
     fn call_pinned<'a>(
         &'a self,
         req: Request<Body>,
-    ) -> BoxRequestFuture<'a, Response<Body>, Infallible>
+    ) -> BoxRequestFuture<'a, OwnerResponse<Body>, Infallible>
     where
         Request<Body>: 'a,
     {
@@ -150,7 +151,7 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
             if !interim.is_empty() {
                 response.extensions_mut().insert(interim);
             }
-            Ok(response)
+            Ok(OwnerResponse::from_http(response))
         }))
     }
 }

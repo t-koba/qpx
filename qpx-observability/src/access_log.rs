@@ -1,8 +1,8 @@
 use crate::handler::RequestHandler;
 use arc_swap::ArcSwapOption;
-use http::{Request, Response, StatusCode};
+use http::{Request, StatusCode};
 use qpx_core::config::AccessLogConfig;
-use qpx_core::http_content_length::declared_content_length;
+use qpx_core::http_message::{Headers, Response};
 use qpx_core::redaction::{
     redact_authority_userinfo, redact_request_target, redact_uri_query_keys,
 };
@@ -522,8 +522,12 @@ fn http_version_label(version: http::Version) -> &'static str {
 /// The declaration is read through the owner, so a comma list of equal
 /// members is one length and a declaration the owner refuses names no
 /// length, which the access log records as no bytes.
-fn declared_response_bytes(headers: &http::HeaderMap) -> u64 {
-    declared_content_length(headers).ok().flatten().unwrap_or(0)
+fn declared_response_bytes(headers: &Headers) -> u64 {
+    headers
+        .declared_content_length()
+        .ok()
+        .flatten()
+        .unwrap_or(0)
 }
 
 struct TimestampPrefixCache {
@@ -1035,17 +1039,25 @@ mod tests {
             String::from_utf8(line).expect("ASCII log primitives"),
             r#"0 18446744073709551615 000042 "a\"b\\c""#
         );
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_LENGTH,
-            http::HeaderValue::from_static(" 1048576\t"),
-        );
-        assert_eq!(declared_response_bytes(&headers), 1_048_576);
-        headers.insert(
-            http::header::CONTENT_LENGTH,
-            http::HeaderValue::from_static("12 34"),
-        );
-        assert_eq!(declared_response_bytes(&headers), 0);
+        for (values, expected) in [
+            (vec![], 0),
+            (vec!["0"], 0),
+            (vec![" 1048576\t"], 1_048_576),
+            (vec!["16, 16", "16"], 16),
+            (vec!["12 34"], 0),
+            (vec!["+16"], 0),
+            (vec!["16", "17"], 0),
+        ] {
+            let mut response = http::Response::new(());
+            for value in values {
+                response.headers_mut().append(
+                    http::header::CONTENT_LENGTH,
+                    http::HeaderValue::from_static(value),
+                );
+            }
+            let response = Response::from_http(response);
+            assert_eq!(declared_response_bytes(response.headers()), expected);
+        }
     }
 
     #[test]
@@ -1131,6 +1143,98 @@ mod access_log_regression_tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn service_observes_only_completion_and_preserves_opaque_response() {
+        let _guard = tracing_subscriber::fmt()
+            .with_test_writer()
+            .with_max_level(Level::TRACE)
+            .set_default();
+        // A body with no HTTP body implementation proves observation needs neither
+        // polling nor size hints. Keep its identity through every service mode.
+        for enabled in [false, true] {
+            for format in ["combined", "json"] {
+                for trace in [false, true] {
+                    for fail in [false, true] {
+                        let body = Arc::new(());
+                        let expected_body = body.clone();
+                        let inner = crate::handler_fn(move |_: Request<()>| {
+                            let body = body.clone();
+                            async move {
+                                tokio::task::yield_now().await;
+                                if fail {
+                                    return Err("handler failure");
+                                }
+                                let mut response = http::Response::builder()
+                                    .status(StatusCode::TOO_MANY_REQUESTS)
+                                    .version(http::Version::HTTP_2)
+                                    .header("content-length", " 16, 16\t")
+                                    .header("set-cookie", "a=1")
+                                    .header("set-cookie", "b=2")
+                                    .body(body)
+                                    .unwrap();
+                                response.extensions_mut().insert(RequestLogContext {
+                                    matched_rule: Some("rate-limit".into()),
+                                    ..Default::default()
+                                });
+                                Ok(Response::from_http(response))
+                            }
+                        });
+                        let mut config = AccessLogConfig::default();
+                        config.output.enabled = enabled;
+                        config.output.format = format.into();
+                        let service = AccessLogService::new(
+                            inner,
+                            "127.0.0.1:12345".parse().unwrap(),
+                            AccessLogContext {
+                                kind: "forward",
+                                name: Arc::from("test"),
+                            },
+                            &config,
+                        );
+                        let future = service.call_with_otel_enabled(Request::new(()), trace);
+                        let mut future = std::pin::pin!(future);
+                        let waker = std::task::Waker::noop();
+                        assert!(
+                            future
+                                .as_mut()
+                                .poll(&mut Context::from_waker(waker))
+                                .is_pending()
+                        );
+                        let result = future.await;
+                        if fail {
+                            assert_eq!(result.unwrap_err(), "handler failure");
+                        } else {
+                            let response = result.unwrap();
+                            assert!(Arc::ptr_eq(response.body(), &expected_body));
+                            assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
+                            assert_eq!(response.version(), http::Version::HTTP_2);
+                            assert_eq!(declared_response_bytes(response.headers()), 16);
+                            let cookies: Vec<_> = response
+                                .headers()
+                                .get_all(
+                                    &qpx_core::http_message::OrdinaryHeaderName::try_from(
+                                        http::header::SET_COOKIE,
+                                    )
+                                    .unwrap(),
+                                )
+                                .collect();
+                            assert_eq!(cookies, ["a=1", "b=2"]);
+                            assert_eq!(
+                                response
+                                    .extensions()
+                                    .get::<RequestLogContext>()
+                                    .unwrap()
+                                    .matched_rule
+                                    .as_deref(),
+                                Some("rate-limit")
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn access_log_future_polls_inner_inside_request_span() {
         let _guard = tracing_subscriber::fmt()
             .with_test_writer()
@@ -1149,9 +1253,10 @@ mod access_log_regression_tests {
                 let under_span =
                     tracing::Span::current().id() == expected.id() && expected.id().is_some();
                 *seen_inner.lock().expect("lock") = Some(under_span);
-                let mut response = Response::builder()
+                let mut response = http::Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
                     .body(())
+                    .map(Response::from_http)
                     .expect("response");
                 response.extensions_mut().insert(RequestLogContext {
                     subject: Some("user-1".to_string()),
@@ -1308,9 +1413,10 @@ mod userinfo_output_tests {
                     config.redact.query_keys.clear();
                     let inner = crate::handler_fn(|_: Request<()>| async {
                         Ok::<_, ()>(
-                            Response::builder()
+                            http::Response::builder()
                                 .status(StatusCode::BAD_REQUEST)
                                 .body(())
+                                .map(Response::from_http)
                                 .unwrap(),
                         )
                     });
@@ -1422,9 +1528,10 @@ mod userinfo_output_tests {
                         // The logging sanitizer must not change routing inputs.
                         assert!(req.uri().path().contains("synthetic-user"));
                         Ok::<_, ()>(
-                            Response::builder()
+                            http::Response::builder()
                                 .status(StatusCode::BAD_REQUEST)
                                 .body(())
+                                .map(Response::from_http)
                                 .unwrap(),
                         )
                     });
@@ -1527,9 +1634,10 @@ mod userinfo_output_tests {
                     "synthetic-user:synthetic-pass@host:443"
                 );
                 Ok::<_, ()>(
-                    Response::builder()
+                    http::Response::builder()
                         .status(StatusCode::BAD_REQUEST)
                         .body(())
+                        .map(Response::from_http)
                         .unwrap(),
                 )
             });

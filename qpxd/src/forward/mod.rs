@@ -21,6 +21,7 @@ use anyhow::anyhow;
 use hyper::{Request, Response, StatusCode};
 use qpx_core::config::IngressEdgeConfig;
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
@@ -249,7 +250,7 @@ async fn handle_request(
     runtime: Runtime,
     listener_name: String,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>, Infallible> {
+) -> Result<OwnerResponse<Body>, Infallible> {
     let started = Instant::now();
     let state = runtime.state();
     // Single decoded-ingress import for the H1/H2 codec path; H3 callers migrate separately.
@@ -264,12 +265,12 @@ async fn handle_request(
                 "ok",
                 started.elapsed(),
             );
-            Ok(response)
+            Ok(OwnerResponse::from_http(response))
         }
         Err(err) => {
             http_metrics::forward_request(&state.observability.metric_names, "error");
             error!(error = ?err, "request handling failed");
-            Ok(finalize_response_for_request(
+            Ok(OwnerResponse::from_http(finalize_response_for_request(
                 &request_method,
                 request_version,
                 state.plan.identity.proxy_name.as_ref(),
@@ -278,7 +279,7 @@ async fn handle_request(
                     .body(Body::from(state.messages.proxy_error.clone()))
                     .unwrap_or_else(|_| Response::new(Body::empty())),
                 false,
-            ))
+            )))
         }
     }
 }

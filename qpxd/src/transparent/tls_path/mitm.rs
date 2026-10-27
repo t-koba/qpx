@@ -5,6 +5,7 @@ use crate::runtime::Runtime;
 use crate::tls::mitm::{accept_mitm_client, connect_mitm_upstream, prewarm_mitm_cert};
 use anyhow::{Context, Result};
 use hyper::Request;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
@@ -105,18 +106,22 @@ where
                 upstream_cert: Some(upstream_cert),
             };
             match proxy_mitm_request(req, runtime, sender, route).await {
-                Ok(response) => Ok::<_, Infallible>(response),
+                Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
                 Err(err) => {
                     warn!(error = ?err, "transparent MITM request failed");
-                    Ok(crate::http::protocol::l7::finalize_response_for_request(
-                        &request_method,
-                        request_version,
-                        proxy_name.as_str(),
-                        hyper::Response::builder()
-                            .status(hyper::StatusCode::BAD_GATEWAY)
-                            .body(Body::from(proxy_error))
-                            .unwrap_or_else(|_| hyper::Response::new(Body::from("proxy error"))),
-                        false,
+                    Ok(OwnerResponse::from_http(
+                        crate::http::protocol::l7::finalize_response_for_request(
+                            &request_method,
+                            request_version,
+                            proxy_name.as_str(),
+                            hyper::Response::builder()
+                                .status(hyper::StatusCode::BAD_GATEWAY)
+                                .body(Body::from(proxy_error))
+                                .unwrap_or_else(|_| {
+                                    hyper::Response::new(Body::from("proxy error"))
+                                }),
+                            false,
+                        ),
                     ))
                 }
             }

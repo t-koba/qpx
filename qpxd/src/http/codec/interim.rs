@@ -6,7 +6,8 @@ use anyhow::Result;
 use bytes::Bytes;
 use futures_util::stream::{FuturesUnordered, StreamExt};
 use h2::Reason;
-use http::{Request, Response};
+use http::Request;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use std::convert::Infallible;
@@ -46,7 +47,7 @@ pub(crate) async fn serve_h2_with_interim<I, S>(
 ) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -64,7 +65,7 @@ pub(crate) async fn serve_h2_with_interim_and_capacity<I, S>(
 ) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -90,7 +91,7 @@ pub(crate) async fn serve_h2_with_interim_and_capacity_and_tuning<I, S>(
 ) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -279,7 +280,7 @@ async fn serve_h2_stream<S>(
     idle_timeout: Duration,
     active_stream: ActiveH2Stream<'_>,
 ) where
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -320,10 +321,10 @@ async fn serve_h2_stream<S>(
             return;
         }
     };
-    let interim = take_interim_response_heads(&mut response);
+    let interim = take_interim_response_heads(response.extensions_mut());
     if let Err(err) = send_h2_response_with_interim(
         respond,
-        qpx_core::http_message::Response::from_http(response),
+        response,
         &interim,
         &request_method,
         allow_successful_connect_body,
@@ -389,10 +390,9 @@ where
 }
 
 pub(crate) fn take_interim_response_heads(
-    response: &mut Response<Body>,
+    extensions: &mut http::Extensions,
 ) -> Vec<InterimResponseHead> {
-    response
-        .extensions_mut()
+    extensions
         .remove::<Vec<InterimResponseHead>>()
         .unwrap_or_default()
 }
@@ -402,6 +402,7 @@ mod tests {
     use super::{H2_COMPLETION_BURST, H2_PREFACE, prioritize_h2_admission, serve_h2_with_interim};
     use h2::Reason;
     use http::{Request, Response};
+    use qpx_core::http_message::Response as OwnerResponse;
     use qpx_http::body::Body;
     use qpx_observability::handler_fn;
     use std::convert::Infallible;
@@ -420,6 +421,41 @@ mod tests {
         assert!(prioritize_h2_admission(H2_COMPLETION_BURST + 1));
     }
 
+    #[test]
+    fn interim_extraction_preserves_order_and_unrelated_extensions_for_both_carriers() {
+        let mut response = Response::new(Body::empty());
+        response.extensions_mut().insert(42_u32);
+        response.extensions_mut().insert(vec![
+            crate::upstream::raw_http1::InterimResponseHead::new(
+                http::StatusCode::EARLY_HINTS,
+                http::HeaderMap::new(),
+            ),
+            crate::upstream::raw_http1::InterimResponseHead::new(
+                http::StatusCode::CONTINUE,
+                http::HeaderMap::new(),
+            ),
+        ]);
+        let mut owner = OwnerResponse::from_http(response);
+        let interim = super::take_interim_response_heads(owner.extensions_mut());
+        assert_eq!(
+            interim
+                .iter()
+                .map(|head| head.status.as_u16())
+                .collect::<Vec<_>>(),
+            [103, 100]
+        );
+        assert_eq!(owner.extensions().get::<u32>(), Some(&42));
+        assert!(super::take_interim_response_heads(owner.extensions_mut()).is_empty());
+        // H3 still carries a standard response; extraction only consumes the extension.
+        let mut standard = Response::new(Body::empty());
+        standard.extensions_mut().insert(interim);
+        assert_eq!(
+            super::take_interim_response_heads(standard.extensions_mut()).len(),
+            2
+        );
+        assert!(super::take_interim_response_heads(standard.extensions_mut()).is_empty());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn h2_server_advertises_extended_connect_when_enabled() {
         let (client_io, server_io) = duplex(1024);
@@ -428,6 +464,7 @@ mod tests {
                 Response::builder()
                     .status(200)
                     .body(Body::from(""))
+                    .map(OwnerResponse::from_http)
                     .expect("static response"),
             )
         });
@@ -460,6 +497,7 @@ mod tests {
                 Response::builder()
                     .status(200)
                     .body(Body::from(""))
+                    .map(OwnerResponse::from_http)
                     .expect("static response"),
             )
         });
@@ -490,6 +528,7 @@ mod tests {
                 Response::builder()
                     .status(200)
                     .body(Body::from(""))
+                    .map(OwnerResponse::from_http)
                     .expect("static response"),
             )
         });
@@ -512,6 +551,7 @@ mod tests {
                 Response::builder()
                     .status(200)
                     .body(Body::empty())
+                    .map(OwnerResponse::from_http)
                     .expect("response"),
             )
         });
@@ -583,7 +623,7 @@ mod tests {
                         }
                         _ => {}
                     }
-                    Ok::<_, Infallible>(Response::new(Body::empty()))
+                    Ok::<_, Infallible>(OwnerResponse::new(Body::empty()))
                 }
             }
         });
@@ -666,6 +706,7 @@ mod tests {
                     Response::builder()
                         .status(200)
                         .body(Body::from(req.uri().path().to_owned()))
+                        .map(OwnerResponse::from_http)
                         .expect("response"),
                 )
             }
@@ -715,7 +756,7 @@ mod tests {
         const REQUESTS: usize = 128;
         let (client_io, server_io) = duplex(1024 * 1024);
         let service = handler_fn(|_req: Request<Body>| async move {
-            Ok::<_, Infallible>(Response::new(Body::from("ok")))
+            Ok::<_, Infallible>(OwnerResponse::new(Body::from("ok")))
         });
         tokio::spawn(async move {
             serve_h2_with_interim(server_io, service, false, Duration::from_secs(5))
@@ -779,7 +820,7 @@ mod tests {
                 let _drop_signal = DropSignal(dropped);
                 started.notify_one();
                 pending::<()>().await;
-                Ok::<_, Infallible>(Response::new(Body::empty()))
+                Ok::<_, Infallible>(OwnerResponse::new(Body::empty()))
             }
         });
         tokio::spawn(async move {
@@ -821,7 +862,7 @@ mod tests {
                     sender.closed().await;
                     body_closed.notify_one();
                 });
-                Ok::<_, Infallible>(Response::new(body))
+                Ok::<_, Infallible>(OwnerResponse::new(body))
             }
         });
         tokio::spawn(async move {
@@ -873,7 +914,7 @@ mod tests {
                 let _drop_signal = DropSignal(dropped);
                 started.notify_one();
                 pending::<()>().await;
-                Ok::<_, Infallible>(Response::new(Body::empty()))
+                Ok::<_, Infallible>(OwnerResponse::new(Body::empty()))
             }
         });
         tokio::spawn(async move {

@@ -9,7 +9,7 @@ use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
-use http::{Method, Request, Response, StatusCode, Uri, Version};
+use http::{Method, Request, StatusCode, Uri, Version};
 use hyper::header::{EXPECT, HeaderMap, TRANSFER_ENCODING};
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
@@ -109,7 +109,7 @@ pub(crate) async fn serve_http1_with_interim<I, S>(
 ) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -125,7 +125,7 @@ pub(crate) async fn serve_http1_with_interim_and_capacity<I, S>(
 ) -> Result<()>
 where
     I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -156,7 +156,7 @@ pub(crate) async fn serve_http1_tcp_with_interim_and_capacity<S>(
     body_channel_capacity: usize,
 ) -> Result<()>
 where
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -196,7 +196,7 @@ async fn serve_http1_parts<R, W, S, U, I>(
 where
     R: AsyncRead + Unpin + Send + 'static,
     W: AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Send
         + Sync
         + 'static,
@@ -279,7 +279,7 @@ where
                 &mut write_half,
                 parsed.version,
                 &parsed.method,
-                OwnerResponse::from_http(response),
+                response,
                 &interim,
                 parsed.keep_alive,
                 header_read_timeout,
@@ -330,7 +330,7 @@ where
             &mut write_half,
             parsed.version,
             &parsed.method,
-            OwnerResponse::from_http(response),
+            response,
             &interim,
             parsed.keep_alive,
             header_read_timeout,

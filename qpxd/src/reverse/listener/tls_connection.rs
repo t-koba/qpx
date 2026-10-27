@@ -16,7 +16,8 @@ use crate::tcp_bindings::filter::ConnectionFilterStage;
 use crate::tls::{extract_client_hello_info_with_fingerprints, read_client_hello_with_timeout};
 use anyhow::Result;
 use bytes::Bytes;
-use http::{Request, Response};
+use http::Request;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
 use qpx_observability::access_log::{
@@ -60,7 +61,7 @@ async fn serve_terminated_http<I, S>(
 ) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = Response<Body>, Error = Infallible>
+    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
         + Clone
         + Send
         + Sync

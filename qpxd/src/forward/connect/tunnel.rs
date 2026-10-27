@@ -30,6 +30,8 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::config::{ActionConfig, ActionKind};
+#[cfg(feature = "mitm")]
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::http_message::{Headers, Request as OwnerRequest};
 use qpx_http::body::Body;
 #[cfg(feature = "mitm")]
@@ -179,10 +181,10 @@ pub(super) async fn tunnel_connect(
                             upstream_cert: Some(upstream_cert),
                         };
                         match proxy_mitm_request(inner_req, runtime, sender, route).await {
-                            Ok(response) => Ok::<_, Infallible>(response),
+                            Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
                             Err(err) => {
                                 warn!(error = ?err, "forward CONNECT MITM request failed");
-                                Ok(finalize_response_for_request(
+                                Ok(OwnerResponse::from_http(finalize_response_for_request(
                                     &request_method,
                                     request_version,
                                     proxy_name.as_str(),
@@ -191,7 +193,7 @@ pub(super) async fn tunnel_connect(
                                         .body(Body::from(proxy_error))
                                         .unwrap_or_else(|_| blocked("proxy error")),
                                     false,
-                                ))
+                                )))
                             }
                         }
                     }

@@ -170,17 +170,18 @@ impl H3RequestHandler for ForwardH3Handler {
         .await
         {
             Ok(mut response) => {
-                let interim =
-                    crate::http::codec::interim::take_interim_response_heads(&mut response)
-                        .into_iter()
-                        .filter(|head| {
-                            qpx_http::protocol::semantics::validate_http_status_class(
-                                head.status,
-                                "HTTP/3 interim response",
-                            )
-                            .is_ok()
-                        })
-                        .collect();
+                let interim = crate::http::codec::interim::take_interim_response_heads(
+                    response.extensions_mut(),
+                )
+                .into_iter()
+                .filter(|head| {
+                    qpx_http::protocol::semantics::validate_http_status_class(
+                        head.status,
+                        "HTTP/3 interim response",
+                    )
+                    .is_ok()
+                })
+                .collect();
                 H3HttpResponse { interim, response }
             }
             Err(err) => {

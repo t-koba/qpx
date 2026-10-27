@@ -19,6 +19,8 @@ use bytes::Bytes;
 use hyper::Request;
 use qpx_core::config::{ActionConfig, ActionKind};
 #[cfg(feature = "mitm")]
+use qpx_core::http_message::Response as OwnerResponse;
+#[cfg(feature = "mitm")]
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 #[cfg(feature = "mitm")]
 use qpx_http::body::Body;
@@ -228,20 +230,22 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
                     upstream_cert: Some(upstream_cert),
                 };
                 match proxy_mitm_request(inner_req, runtime, sender, route).await {
-                    Ok(response) => Ok::<_, Infallible>(response),
+                    Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
                     Err(err) => {
                         tracing::warn!(error = ?err, "forward HTTP/3 MITM request failed");
-                        Ok(crate::http::protocol::l7::finalize_response_for_request(
-                            &request_method,
-                            request_version,
-                            proxy_name.as_str(),
-                            hyper::Response::builder()
-                                .status(hyper::StatusCode::BAD_GATEWAY)
-                                .body(Body::from(proxy_error))
-                                .unwrap_or_else(|_| {
-                                    hyper::Response::new(Body::from("proxy error"))
-                                }),
-                            false,
+                        Ok(OwnerResponse::from_http(
+                            crate::http::protocol::l7::finalize_response_for_request(
+                                &request_method,
+                                request_version,
+                                proxy_name.as_str(),
+                                hyper::Response::builder()
+                                    .status(hyper::StatusCode::BAD_GATEWAY)
+                                    .body(Body::from(proxy_error))
+                                    .unwrap_or_else(|_| {
+                                        hyper::Response::new(Body::from("proxy error"))
+                                    }),
+                                false,
+                            ),
                         ))
                     }
                 }

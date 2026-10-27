@@ -15,6 +15,7 @@ use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::uri::{Authority, Uri};
 use http::{HeaderMap, Method, Request, Response, StatusCode, Version};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -82,7 +83,7 @@ pub(in crate::reverse) enum PreparedRawHttp1Response {
         headers: HeaderMap,
         body: Bytes,
     },
-    Generic(InterimList, Response<Body>),
+    Generic(InterimList, OwnerResponse<Body>),
 }
 
 impl PreparedRawHttp1Request {
@@ -604,7 +605,10 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
                 body,
             });
         }
-        return Ok(PreparedRawHttp1Response::Generic(interim, response));
+        return Ok(PreparedRawHttp1Response::Generic(
+            interim,
+            OwnerResponse::from_http(response),
+        ));
     }
     if matches!(&prepared.target, PreparedRawHttp1Target::LocalResponse) {
         session.release();
@@ -633,7 +637,10 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
                 body,
             });
         }
-        return Ok(PreparedRawHttp1Response::Generic(Vec::new(), response));
+        return Ok(PreparedRawHttp1Response::Generic(
+            Vec::new(),
+            OwnerResponse::from_http(response),
+        ));
     }
     let route = prepared
         .compiled
@@ -711,7 +718,10 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
             body,
         });
     }
-    Ok(PreparedRawHttp1Response::Generic(proxied.interim, response))
+    Ok(PreparedRawHttp1Response::Generic(
+        proxied.interim,
+        OwnerResponse::from_http(response),
+    ))
 }
 
 /// Serves a cache-qualified request outside the generic chain when the cache
@@ -751,7 +761,7 @@ async fn dispatch_raw_cache_miss(
     };
     Ok(Some(PreparedRawHttp1Response::Generic(
         Vec::new(),
-        response,
+        OwnerResponse::from_http(response),
     )))
 }
 
@@ -848,7 +858,7 @@ async fn serve_raw_cache_miss(
     }
     Ok(Some(PreparedRawHttp1Response::Generic(
         proxied.interim,
-        response,
+        OwnerResponse::from_http(response),
     )))
 }
 
@@ -1524,9 +1534,10 @@ mod tests {
                 (status, Bytes::copy_from_slice(body.as_ref()))
             }
             PreparedRawHttp1Response::Generic(_, response) => {
-                let (parts, body) = response.into_parts();
+                let status = response.status();
+                let (_, body) = response.into_head_and_body();
                 let body = qpx_http::body::to_bytes(body).await.expect("miss body");
-                (parts.status, body)
+                (status, body)
             }
             PreparedRawHttp1Response::Direct(_) => {
                 panic!("cache MISS must not take the direct relay path")

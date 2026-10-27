@@ -1,5 +1,6 @@
 use super::*;
 use bytes::Bytes;
+use http::Response;
 use http_body::Frame;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderValue, TRAILER, TRANSFER_ENCODING};
 use qpx_core::http_message::Response as OwnerResponse;
@@ -141,10 +142,10 @@ impl http_body::Body for CompleteAfterDataBody {
 struct StaticInterimService;
 
 impl RequestHandler<Request<Body>> for StaticInterimService {
-    type Response = Response<Body>;
+    type Response = OwnerResponse<Body>;
     type Error = Infallible;
 
-    async fn call(&self, _req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    async fn call(&self, _req: Request<Body>) -> Result<OwnerResponse<Body>, Infallible> {
         let interim = vec![InterimResponseHead::new(
             StatusCode::from_u16(103).expect("103"),
             {
@@ -168,7 +169,7 @@ impl RequestHandler<Request<Body>> for StaticInterimService {
             .body(Body::from("OK"))
             .expect("response");
         response.extensions_mut().insert(interim);
-        Ok(response)
+        Ok(OwnerResponse::from_http(response))
     }
 }
 
@@ -1073,16 +1074,18 @@ struct CountingService {
 }
 
 impl RequestHandler<Request<Body>> for CountingService {
-    type Response = Response<Body>;
+    type Response = OwnerResponse<Body>;
     type Error = Infallible;
 
-    async fn call(&self, _req: Request<Body>) -> Result<Response<Body>, Infallible> {
+    async fn call(&self, _req: Request<Body>) -> Result<OwnerResponse<Body>, Infallible> {
         self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_LENGTH, "2")
-            .body(Body::from("OK"))
-            .expect("response"))
+        Ok(OwnerResponse::from_http(
+            Response::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_LENGTH, "2")
+                .body(Body::from("OK"))
+                .expect("response"),
+        ))
     }
 }
 

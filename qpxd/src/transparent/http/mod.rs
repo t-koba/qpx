@@ -8,6 +8,7 @@ use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 use anyhow::{Context, Result};
 use hyper::{Request, StatusCode};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::access_log::{AccessLogContext, AccessLogService};
 use qpx_observability::handler_fn;
@@ -57,10 +58,10 @@ where
             )
             .await
             {
-                Ok(response) => Ok::<_, Infallible>(response),
+                Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
                 Err(err) => {
                     error!(error = ?err, "transparent request handling failed");
-                    Ok(finalize_response_for_request(
+                    Ok(OwnerResponse::from_http(finalize_response_for_request(
                         &request_method,
                         request_version,
                         error_state.plan.identity.proxy_name.as_ref(),
@@ -69,7 +70,7 @@ where
                             .body(Body::from(error_state.messages.proxy_error.clone()))
                             .unwrap_or_else(|_| bad_request("proxy error")),
                         false,
-                    ))
+                    )))
                 }
             }
         }

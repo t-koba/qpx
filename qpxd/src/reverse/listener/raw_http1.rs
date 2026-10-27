@@ -15,7 +15,6 @@ use crate::upstream::origin::PreparedPlainHttp1Session;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
 use http::{Response, StatusCode};
-use qpx_core::http_content_length::declared_content_length;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
@@ -168,7 +167,10 @@ pub(super) async fn serve_raw_or_fallback(
                             response,
                             false,
                         );
-                        PreparedRawHttp1Response::Generic(Vec::new(), response)
+                        PreparedRawHttp1Response::Generic(
+                            Vec::new(),
+                            OwnerResponse::from_http(response),
+                        )
                     }
                 };
                 if let (Some(service), Some(log_request), Some(started)) = (
@@ -240,35 +242,17 @@ pub(super) async fn serve_raw_or_fallback(
                         )
                         .await?
                     }
-                    PreparedRawHttp1Response::Generic(interim, mut response) => {
-                        if interim.is_empty()
-                            && let Some(body) =
-                                response.body_mut().take_single_frame_without_trailers()
-                        {
-                            let (parts, _) = response.into_parts();
-                            send_static_http1_response(
-                                &mut stream,
-                                request_method,
-                                parts.status,
-                                parts.headers,
-                                body,
-                                request_keep_alive,
-                                &mut response_head,
-                            )
-                            .await?
-                        } else {
-                            send_http1_response_with_interim_tcp(
-                                &mut stream,
-                                http::Version::HTTP_11,
-                                request_method,
-                                OwnerResponse::from_http(response),
-                                &interim,
-                                request_keep_alive,
-                                header_read_timeout,
-                                &mut response_head,
-                            )
-                            .await?
-                        }
+                    PreparedRawHttp1Response::Generic(interim, response) => {
+                        send_generic_response(
+                            &mut stream,
+                            request_method,
+                            response,
+                            &interim,
+                            request_keep_alive,
+                            header_read_timeout,
+                            &mut response_head,
+                        )
+                        .await?
                     }
                 };
                 if !keep_alive {
@@ -399,13 +383,56 @@ fn prepare_complete_request<'a>(
     FastParse::Prepared { consumed, request }
 }
 
+// Keep the Generic fallback's static decision before codec export. In particular,
+// a nonempty interim list or trailers must continue through the streaming sender.
+async fn send_generic_response(
+    stream: &mut tokio::net::TcpStream,
+    request_method: &http::Method,
+    mut response: OwnerResponse<Body>,
+    interim: &[crate::upstream::raw_http1::InterimResponseHead],
+    request_keep_alive: bool,
+    header_read_timeout: tokio::time::Duration,
+    response_head: &mut BytesMut,
+) -> Result<bool> {
+    if interim.is_empty()
+        && let Some(body) = response.body_mut().take_single_frame_without_trailers()
+    {
+        // Actual network serialization boundary, after the unchanged fast-path decision.
+        let (parts, _) = response.into_http_for_codec()?.into_parts();
+        send_static_http1_response(
+            stream,
+            request_method,
+            parts.status,
+            parts.headers,
+            body,
+            request_keep_alive,
+            response_head,
+        )
+        .await
+    } else {
+        send_http1_response_with_interim_tcp(
+            stream,
+            http::Version::HTTP_11,
+            request_method,
+            response,
+            interim,
+            request_keep_alive,
+            header_read_timeout,
+            response_head,
+        )
+        .await
+    }
+}
+
 /// The number of bytes the response declares it carries.
 ///
 /// The declaration is read through the owner, so a comma list of equal
 /// members is one length and a declaration the owner refuses names no
 /// length, which the access log records as no bytes.
-fn declared_response_bytes(response: &Response<Body>) -> u64 {
-    declared_content_length(response.headers())
+fn declared_response_bytes(response: &OwnerResponse<Body>) -> u64 {
+    response
+        .headers()
+        .declared_content_length()
         .ok()
         .flatten()
         .unwrap_or(0)
@@ -415,6 +442,144 @@ fn declared_response_bytes(response: &Response<Body>) -> u64 {
 mod tests {
     use super::*;
 
+    async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let client = tokio::net::TcpStream::connect(listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        let (server, _) = listener.accept().await.unwrap();
+        (server, client)
+    }
+
+    #[tokio::test]
+    async fn generic_single_frame_reaches_static_writer_and_preserves_wire_output() {
+        use http::Method;
+        // Compare the migrated branch against the original static codec call, including
+        // no-body/CONNECT behavior, canonical lengths and duplicate non-framing fields.
+        for (method, status) in [
+            (Method::GET, StatusCode::OK),
+            (Method::HEAD, StatusCode::OK),
+            (Method::GET, StatusCode::NO_CONTENT),
+            (Method::GET, StatusCode::NOT_MODIFIED),
+            (Method::CONNECT, StatusCode::OK),
+        ] {
+            let make_response = || {
+                Response::builder()
+                    .status(status)
+                    .version(http::Version::HTTP_10)
+                    .header("content-length", " 2, 2\t")
+                    .header("set-cookie", "a=1")
+                    .header("set-cookie", "b=2")
+                    .body(Body::from("OK"))
+                    .unwrap()
+            };
+            let mut wires = Vec::new();
+            let mut keep_alives = Vec::new();
+            for owned in [false, true] {
+                let (mut server, mut client) = socket_pair().await;
+                let response = make_response();
+                let mut head = BytesMut::new();
+                let keep_alive = if owned {
+                    send_generic_response(
+                        &mut server,
+                        &method,
+                        OwnerResponse::from_http(response),
+                        &[],
+                        true,
+                        tokio::time::Duration::from_secs(1),
+                        &mut head,
+                    )
+                    .await
+                    .unwrap()
+                } else {
+                    let (parts, _) = response.into_parts();
+                    send_static_http1_response(
+                        &mut server,
+                        &method,
+                        parts.status,
+                        parts.headers,
+                        Bytes::from_static(b"OK"),
+                        true,
+                        &mut head,
+                    )
+                    .await
+                    .unwrap()
+                };
+                server.shutdown().await.unwrap();
+                let mut wire = Vec::new();
+                client.read_to_end(&mut wire).await.unwrap();
+                wires.push(wire);
+                keep_alives.push(keep_alive);
+            }
+            assert_eq!(wires[0], wires[1], "{method} {status}");
+            assert_eq!(keep_alives[0], keep_alives[1]);
+        }
+        // This diagnostic is unique to the static writer: successful output alone
+        // could also pass if this fast branch were accidentally replaced by streaming.
+        let (mut server, _client) = socket_pair().await;
+        let response = Response::builder()
+            .header("content-length", "3")
+            .body(Body::from("OK"))
+            .unwrap();
+        let error = send_generic_response(
+            &mut server,
+            &Method::GET,
+            OwnerResponse::from_http(response),
+            &[],
+            true,
+            tokio::time::Duration::from_secs(1),
+            &mut BytesMut::new(),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "static response body length 2 does not match declared content-length 3"
+        );
+    }
+
+    #[tokio::test]
+    async fn generic_interim_and_trailers_still_stream_in_order() {
+        let (mut server, mut client) = socket_pair().await;
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("x-end", http::HeaderValue::from_static("done"));
+        let response = Response::builder()
+            .header("trailer", "x-end")
+            .body(Body::replay(Bytes::from_static(b"OK"), Some(trailers)))
+            .unwrap();
+        let interim = [103, 102].map(|code| {
+            crate::upstream::raw_http1::InterimResponseHead::new(
+                StatusCode::from_u16(code).unwrap(),
+                http::HeaderMap::new(),
+            )
+        });
+        send_generic_response(
+            &mut server,
+            &http::Method::GET,
+            OwnerResponse::from_http(response),
+            &interim,
+            false,
+            tokio::time::Duration::from_secs(1),
+            &mut BytesMut::new(),
+        )
+        .await
+        .unwrap();
+        server.shutdown().await.unwrap();
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).await.unwrap();
+        let wire = String::from_utf8(wire).unwrap();
+        assert!(
+            wire.starts_with(
+                "HTTP/1.1 103 Early Hints\r\n\r\nHTTP/1.1 102 Processing\r\n\r\nHTTP/1.1 200 OK\r\n"
+            ),
+            "{wire}"
+        );
+        assert!(
+            wire.ends_with("2\r\nOK\r\n0\r\nx-end: done\r\n\r\n"),
+            "{wire}"
+        );
+    }
+
     #[test]
     fn the_access_log_counts_the_declared_length_through_the_owner() {
         // A comma list of equal members is one length, so the count is that
@@ -423,7 +588,10 @@ mod tests {
             .header(http::header::CONTENT_LENGTH, "16, 16")
             .body(Body::empty())
             .expect("response");
-        assert_eq!(declared_response_bytes(&response), 16);
+        assert_eq!(
+            declared_response_bytes(&OwnerResponse::from_http(response)),
+            16
+        );
 
         // A declaration the owner refuses names no length, so the count is
         // no bytes.
@@ -431,10 +599,16 @@ mod tests {
             .header(http::header::CONTENT_LENGTH, "+16")
             .body(Body::empty())
             .expect("response");
-        assert_eq!(declared_response_bytes(&response), 0);
+        assert_eq!(
+            declared_response_bytes(&OwnerResponse::from_http(response)),
+            0
+        );
 
         // A response that declares no length counts no bytes either.
         let response = Response::builder().body(Body::empty()).expect("response");
-        assert_eq!(declared_response_bytes(&response), 0);
+        assert_eq!(
+            declared_response_bytes(&OwnerResponse::from_http(response)),
+            0
+        );
     }
 }
