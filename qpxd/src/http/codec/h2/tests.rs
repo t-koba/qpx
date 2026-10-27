@@ -96,7 +96,7 @@ async fn serve_one_h2(socket: TcpStream) -> Result<()> {
                 .unwrap_or_default();
             send_h2_response_with_interim(
                 respond,
-                response,
+                OwnerResponse::from_http(response),
                 &interim,
                 &request_method,
                 false,
@@ -215,7 +215,7 @@ async fn send_h2_response_waits_for_peer_flow_control_capacity() {
                 .expect("response");
             send_h2_response_with_interim(
                 respond,
-                response,
+                OwnerResponse::from_http(response),
                 &[],
                 &hyper::Method::GET,
                 false,
@@ -286,7 +286,7 @@ async fn send_h2_response_strips_body_framing_for_no_body_status() {
                     .expect("response");
                 send_h2_response_with_interim(
                     respond,
-                    response,
+                    OwnerResponse::from_http(response),
                     &[],
                     &hyper::Method::GET,
                     false,
@@ -351,7 +351,7 @@ async fn received_h2_content_length_fields(headers: http::HeaderMap) -> Vec<Stri
                 *response.headers_mut() = headers;
                 send_h2_response_with_interim(
                     respond,
-                    response,
+                    OwnerResponse::from_http(response),
                     &[],
                     &hyper::Method::GET,
                     false,
@@ -588,7 +588,7 @@ async fn send_h2_response_sanitizes_response_trailers() {
                     .expect("response");
                 send_h2_response_with_interim(
                     respond,
-                    response,
+                    OwnerResponse::from_http(response),
                     &[],
                     &hyper::Method::GET,
                     false,
@@ -664,7 +664,7 @@ async fn early_h2_response_drains_abandoned_request_body() {
                     .expect("response");
                 send_h2_response_with_interim(
                     respond,
-                    response,
+                    OwnerResponse::from_http(response),
                     &[],
                     &hyper::Method::POST,
                     false,
@@ -731,7 +731,7 @@ async fn send_h2_response_with_interim_rejects_content_length_mismatch() {
                     .expect("response");
                 let err = send_h2_response_with_interim(
                     respond,
-                    response,
+                    OwnerResponse::from_http(response),
                     &[],
                     &hyper::Method::GET,
                     false,
@@ -782,7 +782,7 @@ async fn send_h2_response_resets_when_response_body_limit_is_exceeded() {
                 .expect("response");
             let err = send_h2_response_with_interim(
                 respond,
-                response,
+                OwnerResponse::from_http(response),
                 &[],
                 &hyper::Method::GET,
                 false,
@@ -849,7 +849,7 @@ async fn send_h2_response_with_interim_preserves_successful_extended_connect_bod
                     .expect("response");
                 send_h2_response_with_interim(
                     respond,
-                    response,
+                    OwnerResponse::from_http(response),
                     &[],
                     &hyper::Method::CONNECT,
                     true,
@@ -1184,4 +1184,182 @@ fn invalid_content_length_diagnostic_does_not_echo_userinfo() {
     let error = parse_declared_content_length(&headers).unwrap_err();
     assert_eq!(error.to_string(), "invalid content-length value");
     assert!(!format!("{error:?}").contains("synthetic-"));
+}
+
+#[test]
+fn h2_owned_framing_matches_map_rules() {
+    for (method, no_body) in [
+        (hyper::Method::HEAD, true),
+        (hyper::Method::GET, true),
+        (hyper::Method::GET, false),
+    ] {
+        for values in [
+            vec![],
+            vec!["0"],
+            vec!["007", "7"],
+            vec!["bad"],
+            vec!["1", "2"],
+        ] {
+            let mut original = http::HeaderMap::new();
+            for value in values {
+                original.append(http::header::CONTENT_LENGTH, value.parse().unwrap());
+            }
+            original.insert(http::header::TRANSFER_ENCODING, "chunked".parse().unwrap());
+            original.insert(http::header::TRAILER, "x-end".parse().unwrap());
+            original.append("x-test", "one".parse().unwrap());
+            original.append("x-test", "two".parse().unwrap());
+            let mut expected = original.clone();
+            let expected_length = if no_body {
+                if method == hyper::Method::HEAD {
+                    qpx_http::protocol::semantics::strip_message_body_framing_headers(
+                        &mut expected,
+                    );
+                    match parse_declared_content_length(&expected) {
+                        Ok(Some(length)) => {
+                            expected.insert(
+                                http::header::CONTENT_LENGTH,
+                                qpx_core::http_content_length::canonical_content_length_value(
+                                    length,
+                                ),
+                            );
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            expected.remove(http::header::CONTENT_LENGTH);
+                        }
+                    }
+                } else {
+                    qpx_http::protocol::semantics::strip_message_body_headers(&mut expected);
+                }
+                Ok(None)
+            } else {
+                parse_declared_content_length(&expected).map(|length| {
+                    if let Some(length) = length {
+                        expected.insert(
+                            http::header::CONTENT_LENGTH,
+                            qpx_core::http_content_length::canonical_content_length_value(length),
+                        );
+                    }
+                    length
+                })
+            };
+            let mut standard = Response::new(());
+            *standard.headers_mut() = original;
+            let mut owned = OwnerResponse::from_http(standard);
+            let actual_length =
+                prepare_h2_response_content_length(owned.headers_mut(), no_body, &method);
+            assert_eq!(actual_length.as_ref().ok(), expected_length.as_ref().ok());
+            if let (Err(actual), Err(expected)) = (&actual_length, &expected_length) {
+                assert_eq!(actual.to_string(), expected.to_string());
+            } else {
+                assert!(actual_length.is_ok() && expected_length.is_ok());
+                assert_eq!(owned.into_http_for_codec().unwrap().headers(), &expected);
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn h2_invalid_head_length_and_raw_placeholder_keep_interim_order() {
+    for (raw_head, is_head) in [(false, true), (true, true), (true, false)] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let mut conn = h2::server::handshake(socket).await.unwrap();
+            if let Some(result) = conn.accept().await {
+                let (_, respond) = result.unwrap();
+                tokio::spawn(async move {
+                    let mut response = Response::new(Body::empty());
+                    response
+                        .headers_mut()
+                        .insert(http::header::CONTENT_LENGTH, "invalid".parse().unwrap());
+                    if raw_head {
+                        let fields = [
+                            httparse::Header {
+                                name: "content-length",
+                                value: if is_head { b"7" } else { b"0" },
+                            },
+                            httparse::Header {
+                                name: "x-raw",
+                                value: b"present",
+                            },
+                        ];
+                        let mut raw = RawHttp1ResponseHead::from_parsed(
+                            &fields,
+                            if is_head {
+                                &hyper::Method::HEAD
+                            } else {
+                                &hyper::Method::GET
+                            },
+                            StatusCode::OK,
+                            http::Version::HTTP_11,
+                        )
+                        .unwrap();
+                        raw.finalize("test");
+                        response.extensions_mut().insert(Arc::new(raw));
+                    }
+                    let interim = [InterimResponseHead::new(
+                        StatusCode::EARLY_HINTS,
+                        http::HeaderMap::new(),
+                    )];
+                    let result = send_h2_response_with_interim(
+                        respond,
+                        OwnerResponse::from_http(response),
+                        &interim,
+                        if is_head {
+                            &hyper::Method::HEAD
+                        } else {
+                            &hyper::Method::GET
+                        },
+                        false,
+                        H2_BODY_IDLE_TIMEOUT,
+                        1,
+                    )
+                    .await;
+                    let _ = result_tx.send(result);
+                });
+            }
+            let _ = poll_fn(|cx| conn.poll_closed(cx)).await;
+        });
+        let socket = TcpStream::connect(addr).await.unwrap();
+        let (client, connection) = h2::client::handshake(socket).await.unwrap();
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+        let mut client = client.ready().await.unwrap();
+        let request = http::Request::builder()
+            .method(if is_head { "HEAD" } else { "GET" })
+            .uri("https://example.test/")
+            .body(())
+            .unwrap();
+        let (mut future, _) = client.send_request(request, true).unwrap();
+        assert_eq!(
+            poll_fn(|cx| future.poll_informational(cx))
+                .await
+                .unwrap()
+                .unwrap()
+                .status(),
+            StatusCode::EARLY_HINTS
+        );
+        let response = future.await.unwrap();
+        if raw_head {
+            assert_eq!(
+                response
+                    .headers()
+                    .get(http::header::CONTENT_LENGTH)
+                    .unwrap(),
+                if is_head { "7" } else { "0" }
+            );
+            assert_eq!(response.headers().get("x-raw").unwrap(), "present");
+        } else {
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(http::header::CONTENT_LENGTH)
+            );
+        }
+        result_rx.await.unwrap().unwrap();
+    }
 }

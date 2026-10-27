@@ -9,6 +9,7 @@ use h2::server::SendResponse;
 use http_body::Frame;
 use hyper::header::COOKIE;
 use hyper::{Request, Response};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Response as OwnerResponse};
 use qpx_http::body::{Body, BodyError};
 use qpx_http::protocol::semantics::response_status_has_no_body;
 use std::future::poll_fn;
@@ -141,7 +142,7 @@ pub(crate) fn h2_request_to_hyper_with_capacity(
 
 pub(crate) async fn send_h2_response_with_interim(
     mut respond: SendResponse<Bytes>,
-    response: Response<Body>,
+    response: OwnerResponse<Body>,
     interim: &[InterimResponseHead],
     request_method: &http::Method,
     allow_successful_connect_body: bool,
@@ -169,21 +170,26 @@ pub(crate) async fn send_h2_response_with_interim(
         respond.send_informational(informational)?;
     }
 
-    let (mut parts, mut body) = response.into_parts();
-    let status =
-        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
+    let (mut head, mut body) = response.into_head_and_body();
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
+        head.status(),
+        "HTTP/2 response",
+    )?;
     let no_body = request_method == hyper::Method::HEAD
-        || response_status_has_no_body(parts.status, false)
+        || response_status_has_no_body(head.status(), false)
         || (request_method == hyper::Method::CONNECT
-            && parts.status.is_success()
+            && head.status().is_success()
             && !allow_successful_connect_body);
-    let mut headers = if let Some(raw) = parts.extensions.remove::<Arc<RawHttp1ResponseHead>>() {
-        raw.materialized_headers()?
-    } else {
-        parts.headers
-    };
+    if let Some(raw) = head.extensions_mut().remove::<Arc<RawHttp1ResponseHead>>() {
+        let mut raw_response = Http1Response::new(());
+        *raw_response.headers_mut() = raw.materialized_headers()?;
+        // The raw head supplies the egress headers; the ordinary head is only
+        // a placeholder and must not be validated.
+        head = OwnerResponse::from_http(raw_response);
+    }
     let declared_length =
-        prepare_h2_response_content_length(&mut headers, no_body, request_method)?;
+        prepare_h2_response_content_length(head.headers_mut(), no_body, request_method)?;
+    let headers = head.into_http_for_codec()?.into_parts().0.headers;
     let flow_control_body =
         declared_length.is_none_or(|length| length > H2_DIRECT_SEND_BODY_MAX_BYTES);
     let mut scheduler_buffer_budget = if flow_control_body {
@@ -429,36 +435,29 @@ pub(crate) async fn send_h2_response_with_interim(
 /// GET response would have. A declaration the owner refuses names no
 /// length, so the field is dropped rather than sent as it was received.
 fn prepare_h2_response_content_length(
-    headers: &mut http::HeaderMap,
+    headers: &mut Headers,
     no_body: bool,
     request_method: &hyper::Method,
 ) -> Result<Option<u64>> {
     if no_body {
+        for name in [http::header::TRANSFER_ENCODING, http::header::TRAILER] {
+            headers
+                .remove(&OrdinaryHeaderName::try_from(name).expect("framing header is ordinary"));
+        }
         if request_method == hyper::Method::HEAD {
-            qpx_http::protocol::semantics::strip_message_body_framing_headers(headers);
-            match parse_declared_content_length(headers) {
-                Ok(Some(length)) => {
-                    headers.insert(
-                        http::header::CONTENT_LENGTH,
-                        qpx_core::http_content_length::canonical_content_length_value(length),
-                    );
-                }
+            match headers.declared_content_length() {
+                Ok(Some(length)) => headers.set_content_length(length),
                 Ok(None) => {}
-                Err(_) => {
-                    headers.remove(http::header::CONTENT_LENGTH);
-                }
+                Err(_) => headers.remove_content_length(),
             }
         } else {
-            qpx_http::protocol::semantics::strip_message_body_headers(headers);
+            headers.remove_content_length();
         }
         return Ok(None);
     }
-    let declared_length = parse_declared_content_length(headers)?;
+    let declared_length = headers.declared_content_length()?;
     if let Some(length) = declared_length {
-        headers.insert(
-            http::header::CONTENT_LENGTH,
-            qpx_core::http_content_length::canonical_content_length_value(length),
-        );
+        headers.set_content_length(length);
     }
     Ok(declared_length)
 }

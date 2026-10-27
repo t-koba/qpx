@@ -323,7 +323,7 @@ async fn serve_h2_stream<S>(
     let interim = take_interim_response_heads(&mut response);
     if let Err(err) = send_h2_response_with_interim(
         respond,
-        response,
+        qpx_core::http_message::Response::from_http(response),
         &interim,
         &request_method,
         allow_successful_connect_body,
