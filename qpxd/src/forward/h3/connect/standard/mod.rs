@@ -128,7 +128,7 @@ pub(super) async fn send_h3_policy_response(
         log_context,
     );
     send_h3_response(
-        response,
+        qpx_core::http_message::Response::from_http(response),
         request_method,
         req_stream,
         state.plan.limits.body.max_h3_response_body_bytes,

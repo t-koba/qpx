@@ -229,7 +229,7 @@ async fn finish_h3_extended_connect_stream(
             Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
         )?;
         send_h3_response(
-            response,
+            qpx_core::http_message::Response::from_http(response),
             &http::Method::CONNECT,
             &mut req_stream,
             state.plan.limits.body.max_h3_response_body_bytes,

@@ -6,11 +6,12 @@ use crate::http3::stream_limits::{response_stream_timeouts, timeout_or_deadline}
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use hyper::Response;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use tokio::time::{Duration, Instant};
 
 pub(crate) async fn send_h3_response<S>(
-    response: Response<Body>,
+    response: OwnerResponse<Body>,
     request_method: &http::Method,
     req_stream: &mut ::h3::server::RequestStream<S, Bytes>,
     max_h3_response_body_bytes: usize,
@@ -34,7 +35,7 @@ where
 }
 
 pub(crate) async fn send_h3_response_observed<S>(
-    response: Response<Body>,
+    response: OwnerResponse<Body>,
     request_method: &http::Method,
     req_stream: &mut ::h3::server::RequestStream<S, Bytes>,
     options: H3ResponseSendOptions<'_>,
@@ -42,7 +43,7 @@ pub(crate) async fn send_h3_response_observed<S>(
 where
     S: ::h3::quic::SendStream<Bytes>,
 {
-    let (parts, mut body) = response.into_parts();
+    let (parts, mut body) = export_h3_response_for_codec(response)?.into_parts();
     let mut grpc_observer = crate::http3::response_rpc::H3ResponseRpcObserver::new(
         &parts.headers,
         options.fallback_grpc_protocol,
@@ -285,7 +286,7 @@ where
         false,
     );
     send_h3_response(
-        response,
+        OwnerResponse::from_http(response),
         request_method,
         req_stream,
         max_h3_response_body_bytes,
@@ -293,3 +294,20 @@ where
     )
     .await
 }
+
+// Keep H3's existing malformed/conflicting Content-Length policy: head
+// preparation discards an unusable declaration rather than rejecting the
+// response. Apply that policy before the owner's validating codec export.
+fn export_h3_response_for_codec(
+    mut response: OwnerResponse<Body>,
+) -> std::result::Result<Response<Body>, H3ResponseSendError> {
+    if response.headers().declared_content_length().is_err() {
+        response.headers_mut().remove_content_length();
+    }
+    response
+        .into_http_for_codec()
+        .map_err(H3ResponseSendError::before_response_head)
+}
+
+#[cfg(test)]
+mod tests;
