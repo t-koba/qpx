@@ -67,8 +67,14 @@ impl ResponseCarrier for OwnerResponse<Body> {
     }
     #[cfg(feature = "http3-backend-qpx")]
     fn into_qpx_codec_response(
-        self,
+        mut self,
     ) -> Result<http::Response<Body>, qpx_core::http_content_length::ContentLengthError> {
+        // The qpx H3 codec's established head preparation removes malformed or
+        // conflicting Content-Length values. Do that at this codec boundary
+        // before the owner's otherwise-strict export validates the field.
+        if self.headers().declared_content_length().is_err() {
+            self.headers_mut().remove_content_length();
+        }
         self.into_http_for_codec()
     }
 }
@@ -103,5 +109,38 @@ impl ResponseCarrier for http::Response<Body> {
         self,
     ) -> Result<http::Response<Body>, qpx_core::http_content_length::ContentLengthError> {
         Ok(self)
+    }
+}
+
+#[cfg(all(test, feature = "http3-backend-qpx"))]
+mod qpx_codec_tests {
+    use super::*;
+    use http::Method;
+    use http::header::CONTENT_LENGTH;
+
+    #[test]
+    fn owner_qpx_codec_export_preserves_h3_content_length_sanitizer_for_get_and_head() {
+        for values in [vec!["invalid"], vec!["3", "4"]] {
+            for request_method in [Method::GET, Method::HEAD] {
+                let mut response = http::Response::new(Body::empty());
+                for value in &values {
+                    response
+                        .headers_mut()
+                        .append(CONTENT_LENGTH, value.parse().expect("header value"));
+                }
+                let owner = OwnerResponse::from_http(response);
+                let response = owner
+                    .into_qpx_codec_response()
+                    .expect("H3 codec boundary sanitizes malformed framing");
+                let (parts, _) = response.into_parts();
+                let prepared =
+                    crate::http3::codec::prepare_h3_response_head(&parts, &request_method)
+                        .expect("prepare response head");
+
+                assert_eq!(prepared.body_allowed, request_method != Method::HEAD);
+                assert_eq!(prepared.content_length, None);
+                assert!(!prepared.head.headers().contains_key(CONTENT_LENGTH));
+            }
+        }
     }
 }

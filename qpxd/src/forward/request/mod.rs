@@ -5,9 +5,9 @@ use crate::http::protocol::common::resolve_named_upstream;
 use crate::http::protocol::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
+use hyper::Method;
 #[cfg(feature = "auth-basic")]
-use hyper::StatusCode;
-use hyper::{Method, Response};
+use hyper::{Response, StatusCode};
 use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::sync::Arc;
