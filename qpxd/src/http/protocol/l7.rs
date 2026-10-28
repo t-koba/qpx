@@ -1,10 +1,13 @@
 use crate::http::protocol::common::trim_http_ows;
-use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
+use crate::http::protocol::header_control::{
+    ResponseHeaderControl, apply_request_headers, apply_response_headers,
+};
 use crate::http::protocol::trailer_body;
 use hyper::{Method, Response, StatusCode};
-use qpx_core::http_message::{OrdinaryHeaderName, Request};
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName, Request};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
+use qpx_http::protocol::finalization::FinalizeResponse;
 use qpx_http::protocol::semantics::{
     append_via_for_version, normalize_response_for_request_with_options,
     sanitize_hop_by_hop_headers,
@@ -33,11 +36,11 @@ pub(crate) fn finalize_response_for_request(
     response
 }
 
-pub(crate) fn finalize_response_in_place(
+pub(crate) fn finalize_response_in_place<R: FinalizeResponse<Body = Body>>(
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-    response: &mut Response<Body>,
+    response: &mut R,
     preserve_upgrade: bool,
 ) {
     if response
@@ -65,10 +68,10 @@ pub(crate) fn finalize_response_in_place(
     wrap_body_sanitizing_response_trailers(response);
 }
 
-fn finalize_response_headers_common(
+fn finalize_response_headers_common<R: FinalizeResponse<Body = Body>>(
     request_version: http::Version,
     proxy_name: &str,
-    response: &mut Response<Body>,
+    response: &mut R,
     preserve_upgrade: bool,
 ) {
     let preserve_proxy_auth = response.status() == StatusCode::PROXY_AUTHENTICATION_REQUIRED;
@@ -101,7 +104,9 @@ fn finalize_response_headers_common(
         qpx_http::proxy_status::append_proxy_status(response.headers_mut(), proxy_name)
     {
         warn!(error = %error, "discarding invalid inbound Proxy-Status field");
-        response.headers_mut().remove("proxy-status");
+        response
+            .headers_mut()
+            .ordinary_remove(&OrdinaryHeaderName::try_from("proxy-status").expect("ordinary"));
         if let Err(error) =
             qpx_http::proxy_status::append_proxy_status(response.headers_mut(), proxy_name)
         {
@@ -111,24 +116,30 @@ fn finalize_response_headers_common(
     append_via_for_version(response.headers_mut(), request_version, proxy_name);
 }
 
-fn collect_header_values(headers: &http::HeaderMap, name: &str) -> Vec<http::HeaderValue> {
-    headers.get_all(name).iter().cloned().collect()
+fn collect_header_values(headers: &impl OrdinaryHeaderMut, name: &str) -> Vec<http::HeaderValue> {
+    let name = OrdinaryHeaderName::try_from(name).expect("ordinary");
+    headers.ordinary_values(&name).cloned().collect()
 }
 
-fn restore_header_values(headers: &mut http::HeaderMap, name: &str, values: &[http::HeaderValue]) {
-    let Ok(name) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
+fn restore_header_values(
+    headers: &mut impl OrdinaryHeaderMut,
+    name: &str,
+    values: &[http::HeaderValue],
+) {
+    let Ok(name) = OrdinaryHeaderName::try_from(name) else {
         return;
     };
     for value in values {
-        headers.append(name.clone(), value.clone());
+        headers.ordinary_append(name.clone(), value.clone());
     }
 }
 
-fn ensure_date_header(headers: &mut http::HeaderMap) {
-    if headers.contains_key(http::header::DATE) {
+fn ensure_date_header(headers: &mut impl OrdinaryHeaderMut) {
+    let date = OrdinaryHeaderName::try_from(http::header::DATE).expect("ordinary");
+    if headers.ordinary_values(&date).next().is_some() {
         return;
     }
-    headers.insert(http::header::DATE, cached_date_header_value());
+    headers.ordinary_insert(date, cached_date_header_value());
 }
 
 pub(crate) fn cached_date_header_value() -> http::HeaderValue {
@@ -222,14 +233,17 @@ pub(crate) fn finalize_response_with_headers(
     response
 }
 
-pub(crate) fn finalize_response_with_headers_in_place(
+pub(crate) fn finalize_response_with_headers_in_place<R>(
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-    response: &mut Response<Body>,
+    response: &mut R,
     header_control: Option<&CompiledHeaderControl>,
     preserve_upgrade: bool,
-) {
+) where
+    R: FinalizeResponse<Body = Body>,
+    R::Headers: ResponseHeaderControl,
+{
     apply_response_headers(response.headers_mut(), header_control);
     finalize_response_in_place(
         request_method,
@@ -631,7 +645,7 @@ fn wrap_body_validating_request_trailers(request: &mut Request<Body>) {
     *request.body_mut() = trailer_body::validating_request(inner);
 }
 
-fn wrap_body_sanitizing_response_trailers(response: &mut Response<Body>) {
+fn wrap_body_sanitizing_response_trailers<R: FinalizeResponse<Body = Body>>(response: &mut R) {
     if response.body().trailers_are_sanitized() {
         return;
     }

@@ -1,5 +1,7 @@
 //! RFC 9651 Structured Field Values shared by all HTTP versions.
 
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName};
+
 pub use sfv::{
     BareItem, Date, DictSerializer, Dictionary, FieldType, InnerList, Integer, Item,
     ItemSerializer, Key, KeyRef, List, ListEntry, ListSerializer, Parser, String as SfvString,
@@ -43,9 +45,24 @@ pub fn parse_list_fields(
     parse_list(&value).map(Some)
 }
 
+/// Parse repeated ordinary List fields without exposing an owner's raw map.
+pub fn parse_ordinary_list_fields(
+    headers: &impl OrdinaryHeaderMut,
+    name: &OrdinaryHeaderName,
+) -> Result<Option<List>, sfv::Error> {
+    let Some(value) = combine_values(headers.ordinary_values(name)) else {
+        return Ok(None);
+    };
+    parse_list(&value).map(Some)
+}
+
 fn combine_field_lines(headers: &http::HeaderMap, name: &http::HeaderName) -> Option<Vec<u8>> {
+    combine_values(headers.get_all(name).iter())
+}
+
+fn combine_values<'a>(values: impl Iterator<Item = &'a http::HeaderValue>) -> Option<Vec<u8>> {
     let mut combined = Vec::new();
-    for value in headers.get_all(name) {
+    for value in values {
         if !combined.is_empty() {
             combined.extend_from_slice(b", ");
         }

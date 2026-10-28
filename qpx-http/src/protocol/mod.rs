@@ -3,5 +3,6 @@
 
 pub mod address;
 pub mod common;
+pub mod finalization;
 pub mod method;
 pub mod semantics;

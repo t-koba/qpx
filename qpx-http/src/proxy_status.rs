@@ -1,9 +1,10 @@
 //! RFC 9209 `Proxy-Status` field handling.
 
 use crate::structured_fields::{
-    BareItem, Item, ListEntry, ListSerializer, SfvString, Token, parse_list_fields,
+    BareItem, Item, ListEntry, ListSerializer, SfvString, Token, parse_ordinary_list_fields,
 };
-use http::{HeaderMap, HeaderName, HeaderValue};
+use http::{HeaderName, HeaderValue};
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName};
 use std::cell::RefCell;
 use thiserror::Error;
 
@@ -22,15 +23,17 @@ pub enum ProxyStatusError {
 }
 
 pub fn append_proxy_status(
-    headers: &mut HeaderMap,
+    headers: &mut impl OrdinaryHeaderMut,
     proxy_identifier: &str,
 ) -> Result<(), ProxyStatusError> {
-    if !headers.contains_key(&PROXY_STATUS) && is_sfv_token(proxy_identifier.as_bytes()) {
+    let name = OrdinaryHeaderName::try_from(PROXY_STATUS.clone()).expect("ordinary");
+    if headers.ordinary_values(&name).next().is_none() && is_sfv_token(proxy_identifier.as_bytes())
+    {
         let value = proxy_identifier_value(proxy_identifier)?;
-        headers.insert(PROXY_STATUS.clone(), value);
+        headers.ordinary_insert(name, value);
         return Ok(());
     }
-    let mut list = parse_list_fields(headers, &PROXY_STATUS)
+    let mut list = parse_ordinary_list_fields(headers, &name)
         .map_err(|error| ProxyStatusError::StructuredField(error.to_string()))?
         .unwrap_or_default();
     for entry in &list {
@@ -54,9 +57,9 @@ pub fn append_proxy_status(
     let value = serializer
         .finish()
         .ok_or(ProxyStatusError::InvalidHeaderValue)?;
-    headers.remove(&PROXY_STATUS);
-    headers.insert(
-        PROXY_STATUS.clone(),
+    headers.ordinary_remove(&name);
+    headers.ordinary_insert(
+        name,
         HeaderValue::from_str(&value).map_err(|_| ProxyStatusError::InvalidHeaderValue)?,
     );
     Ok(())
@@ -136,6 +139,7 @@ fn is_sfv_token(value: &[u8]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http::HeaderMap;
 
     #[test]
     fn appends_current_proxy_after_existing_chain() {

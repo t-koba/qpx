@@ -292,3 +292,81 @@ edges:
     assert!(!head.contains("\r\nkeep-alive:"), "{head}");
     assert!(!head.contains("\r\nconnection:"), "{head}");
 }
+
+#[tokio::test]
+async fn forward_success_keeps_owner_through_finalization_observation_and_codec() {
+    use qpx_core::http_message::{OrdinaryHeaderName, Response as OwnerResponse};
+    use qpx_observability::access_log::RequestLogContext;
+    use std::time::Duration;
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let upstream_addr = upstream.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut raw = Vec::new();
+            crate::test_util::read_request_head(&mut stream, &mut raw, &mut [0; 1024]).await;
+            stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: x-upstream-hop, close\r\nX-Upstream-Hop: drop\r\nSet-Cookie: a=1\r\nSet-Cookie: b=2\r\nVia: 1.0 upstream\r\nProxy-Status: upstream\r\n\r\nabc").await.unwrap();
+        });
+        let config: Config = serde_yaml::from_str(r#"
+telemetry:
+  access_log: { enabled: true }
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:0
+  default_action: { type: direct }
+  rules:
+  - name: suffix
+    headers:
+      response_set:
+        content-length: '3, 3'
+        connection: x-configured-hop
+        x-configured-hop: drop
+        x-finalized: yes
+      response_add:
+        set-cookie: c=3
+"#).unwrap();
+        let runtime = Runtime::new(config).unwrap();
+        let request = http::Request::builder()
+            .uri(format!("http://{upstream_addr}/asset"))
+            .header("host", upstream_addr.to_string())
+            .body(Body::empty()).unwrap();
+        // The actual successful dispatch runs cache write/module preparation,
+        // owner finalization, optional export limiting, logging and annotation.
+        let response: OwnerResponse<Body> = handle_request_inner(
+            OwnerRequest::from_http(request), runtime, "forward",
+            "127.0.0.1:12345".parse().unwrap(),
+        ).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers().declared_content_length(), Ok(Some(3)));
+        let name = |n| OrdinaryHeaderName::try_from(n).unwrap();
+        assert_eq!(response.headers().get(&name("x-finalized")).unwrap(), "yes");
+        assert!(response.headers().get(&name("x-configured-hop")).is_none());
+        assert!(response.headers().get(&name("connection")).is_none());
+        assert_eq!(response.headers().get_all(&name("set-cookie")).map(|v| v.to_str().unwrap()).collect::<Vec<_>>(), ["a=1", "b=2", "c=3"]);
+        assert_eq!(response.headers().get(&name("proxy-status")).unwrap(), "upstream, qpx");
+        let log = response.extensions().get::<RequestLogContext>().expect("suffix audit annotation");
+        assert_eq!(log.matched_rule.as_deref(), Some("suffix"));
+
+        // Genuine downstream codec egress: the owner reaches serialization,
+        // where the duplicate declaration is canonicalized, not unwrapped by
+        // any intervening policy/finalization/observation facade.
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        crate::http::codec::h1::send_http1_response_with_interim(
+            &mut writer, http::Version::HTTP_11, &Method::GET, response, &[],
+            false, Duration::from_secs(2), &mut bytes::BytesMut::new(),
+        ).await.unwrap();
+        drop(writer);
+        let mut wire = String::new();
+        reader.read_to_string(&mut wire).await.unwrap();
+        let wire = wire.to_ascii_lowercase();
+        assert!(wire.contains("\r\ncontent-length: 3\r\n"), "{wire}");
+        assert!(!wire.contains("content-length: 3, 3"), "{wire}");
+        assert!(wire.contains("\r\nx-finalized: yes\r\n"), "{wire}");
+        assert!(wire.contains("\r\nvia: 1.1 qpx\r\n"), "{wire}");
+        assert!(wire.contains("\r\ndate: "), "{wire}");
+        assert!(wire.ends_with("\r\n\r\nabc"), "{wire}");
+        server.await.unwrap();
+    }).await.expect("bounded forward success suffix");
+}

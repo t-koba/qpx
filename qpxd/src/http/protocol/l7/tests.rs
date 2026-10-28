@@ -524,3 +524,5 @@ async fn consume_hop_headers_keeps_h1_trailer_validation() {
     assert_eq!(request.body_mut().data().await.unwrap().unwrap(), "ok");
     assert!(request.body_mut().trailers().await.is_err());
 }
+
+mod response_finalization;

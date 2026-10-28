@@ -1,7 +1,10 @@
+use super::finalization::{FinalizationHeaders, FinalizeResponse};
 use crate::structured_fields::{BareItem, parse_item};
 use http::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HOST, TRAILER, TRANSFER_ENCODING, VIA};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
-use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    Headers, OrdinaryHeaderMut, OrdinaryHeaderName, Request as OwnerRequest,
+};
 use std::cell::RefCell;
 use std::fmt;
 
@@ -50,30 +53,25 @@ fn capsule_protocol_values_enabled<'a>(mut values: impl Iterator<Item = &'a Head
 
 /// Iterate valid header names nominated by all parseable `Connection` field values.
 pub fn connection_nominated_header_names(
-    headers: &HeaderMap,
+    headers: &impl OrdinaryHeaderMut,
 ) -> impl Iterator<Item = HeaderName> + '_ {
-    qpx_core::http_token::header_value_members(headers, &CONNECTION)
+    static NAME: std::sync::LazyLock<OrdinaryHeaderName> =
+        std::sync::LazyLock::new(|| OrdinaryHeaderName::try_from(CONNECTION).expect("ordinary"));
+    qpx_core::http_token::value_members(headers.ordinary_values(&NAME))
         .filter(|token| !token.is_empty())
         .filter_map(|token| HeaderName::from_bytes(token.as_bytes()).ok())
 }
 
-pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bool) {
-    let mut connection_present = false;
-    let mut upgrade_present = false;
+pub fn sanitize_hop_by_hop_headers(headers: &mut impl FinalizationHeaders, preserve_upgrade: bool) {
+    let connection = OrdinaryHeaderName::try_from(CONNECTION).expect("ordinary");
+    let upgrade = OrdinaryHeaderName::try_from("upgrade").expect("ordinary");
+    let connection_present = headers.ordinary_values(&connection).next().is_some();
+    let upgrade_present = headers.ordinary_values(&upgrade).next().is_some();
     let mut well_known_present = 0_u8;
-    for name in headers.keys() {
-        match name.as_str() {
-            "connection" => connection_present = true,
-            "upgrade" => upgrade_present = true,
-            "proxy-connection" => well_known_present |= 1 << 0,
-            "proxy-authorization" => well_known_present |= 1 << 1,
-            "proxy-authenticate" => well_known_present |= 1 << 2,
-            "proxy-authentication-info" => well_known_present |= 1 << 3,
-            "keep-alive" => well_known_present |= 1 << 4,
-            "te" => well_known_present |= 1 << 5,
-            "trailer" => well_known_present |= 1 << 6,
-            "transfer-encoding" => well_known_present |= 1 << 7,
-            _ => {}
+    for (index, name) in WELL_KNOWN_HOP_HEADERS.iter().enumerate() {
+        let name = OrdinaryHeaderName::try_from(name.clone()).expect("ordinary");
+        if headers.ordinary_values(&name).next().is_some() {
+            well_known_present |= 1 << index;
         }
     }
     if !connection_present && !upgrade_present && well_known_present == 0 {
@@ -94,23 +92,28 @@ pub fn sanitize_hop_by_hop_headers(headers: &mut HeaderMap, preserve_upgrade: bo
     }
 
     for name in extension_headers {
-        headers.remove(name);
+        if name == CONTENT_LENGTH {
+            headers.remove_content_length();
+        } else {
+            headers.ordinary_remove(&OrdinaryHeaderName::try_from(name).expect("ordinary"));
+        }
     }
 
     for (index, header) in WELL_KNOWN_HOP_HEADERS.iter().enumerate() {
         if well_known_present & (1 << index) != 0 {
-            headers.remove(header);
+            headers
+                .ordinary_remove(&OrdinaryHeaderName::try_from(header.clone()).expect("ordinary"));
         }
     }
 
     if preserve_upgrade && keep_upgrade {
-        headers.insert(CONNECTION, HeaderValue::from_static("upgrade"));
+        headers.ordinary_insert(connection.clone(), HeaderValue::from_static("upgrade"));
     } else {
         if connection_present {
-            headers.remove(CONNECTION);
+            headers.ordinary_remove(&connection);
         }
         if upgrade_present {
-            headers.remove("upgrade");
+            headers.ordinary_remove(&upgrade);
         }
     }
 }
@@ -164,9 +167,13 @@ fn is_well_known_hop_token(token: &str) -> bool {
         || token.eq_ignore_ascii_case("transfer-encoding")
 }
 
-pub fn append_via_for_version(headers: &mut HeaderMap, version: Version, proxy_name: &str) {
+pub fn append_via_for_version(
+    headers: &mut impl OrdinaryHeaderMut,
+    version: Version,
+    proxy_name: &str,
+) {
     if let Some(value) = via_header_value(version, proxy_name) {
-        headers.append(VIA, value);
+        headers.ordinary_append(OrdinaryHeaderName::try_from(VIA).expect("ordinary"), value);
     }
 }
 
@@ -605,28 +612,22 @@ pub fn response_status_has_no_body(status: StatusCode, allow_switching_protocols
         || status == StatusCode::NOT_MODIFIED
 }
 
-pub fn normalize_response_for_request<B>(
+pub fn normalize_response_for_request<R: FinalizeResponse>(
     request_method: &Method,
-    response: &mut http::Response<B>,
-) -> bool
-where
-    B: Default,
-{
+    response: &mut R,
+) -> bool {
     normalize_response_for_request_with_options(request_method, response, false)
 }
 
-pub fn normalize_response_for_request_with_options<B>(
+pub fn normalize_response_for_request_with_options<R: FinalizeResponse>(
     request_method: &Method,
-    response: &mut http::Response<B>,
+    response: &mut R,
     allow_switching_protocols: bool,
-) -> bool
-where
-    B: Default,
-{
+) -> bool {
     let status = response.status();
     if status.is_informational() && response_status_has_no_body(status, allow_switching_protocols) {
         *response.status_mut() = StatusCode::BAD_GATEWAY;
-        *response.body_mut() = B::default();
+        *response.body_mut() = R::Body::default();
         strip_message_body_headers(response.headers_mut());
         return true;
     }
@@ -634,7 +635,7 @@ where
         || response_status_has_no_body(status, allow_switching_protocols)
         || (request_method == Method::CONNECT && status.is_success());
     if no_body {
-        *response.body_mut() = B::default();
+        *response.body_mut() = R::Body::default();
         if request_method == Method::HEAD {
             strip_message_body_framing_headers(response.headers_mut());
         } else {
@@ -644,15 +645,14 @@ where
     no_body
 }
 
-pub fn strip_message_body_headers(headers: &mut HeaderMap) {
-    headers.remove(CONTENT_LENGTH);
-    headers.remove(TRANSFER_ENCODING);
-    headers.remove(TRAILER);
+pub fn strip_message_body_headers(headers: &mut impl FinalizationHeaders) {
+    headers.remove_content_length();
+    strip_message_body_framing_headers(headers);
 }
 
-pub fn strip_message_body_framing_headers(headers: &mut HeaderMap) {
-    headers.remove(TRANSFER_ENCODING);
-    headers.remove(TRAILER);
+pub fn strip_message_body_framing_headers(headers: &mut impl OrdinaryHeaderMut) {
+    headers.ordinary_remove(&OrdinaryHeaderName::try_from(TRANSFER_ENCODING).expect("ordinary"));
+    headers.ordinary_remove(&OrdinaryHeaderName::try_from(TRAILER).expect("ordinary"));
 }
 
 pub fn sanitize_interim_response_headers(headers: &mut HeaderMap) {

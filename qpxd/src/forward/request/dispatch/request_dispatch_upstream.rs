@@ -212,6 +212,9 @@ pub(super) async fn execute_forward_upstream(
     })
     .await?;
     response = http_modules.prepare_downstream_response(response).await?;
+    // The last standard-only stage is module preparation. Keep the owner from
+    // common finalization through capture, audit and downstream serialization.
+    let mut response = OwnerResponse::from_http(response);
     finalize_response_with_headers_in_place(
         request_method,
         response.version(),
@@ -220,14 +223,8 @@ pub(super) async fn execute_forward_upstream(
         headers.as_deref(),
         false,
     );
-    // Last standard-only stage above; retain the owner through capture, audit
-    // and the service/H3 suffix to the actual downstream serializer.
-    let mut response = emit_optional_response_for_export(
-        OwnerResponse::from_http(response),
-        selected_plan,
-        export_session,
-    )
-    .await;
+    let mut response =
+        emit_optional_response_for_export(response, selected_plan, export_session).await;
     http_modules.on_logging(Some(response.status()), None).await;
     annotate_dispatch_response(
         &mut response,

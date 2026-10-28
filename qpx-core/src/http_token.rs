@@ -46,7 +46,7 @@ pub fn header_value_members<'a>(
 }
 
 /// Trimmed comma members of borrowed occurrences; non-text values are skipped.
-pub(crate) fn value_members<'a>(
+pub fn value_members<'a>(
     values: impl Iterator<Item = &'a HeaderValue>,
 ) -> impl Iterator<Item = &'a str> {
     values
