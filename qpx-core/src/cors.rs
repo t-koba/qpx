@@ -1,9 +1,11 @@
 //! Compiled Cross-Origin Resource Sharing policy and request semantics.
 
 use crate::config::CorsConfig;
+use crate::http_message::OrdinaryHeaderMut;
 use crate::http_message::{Headers, OrdinaryHeaderName};
+use http::HeaderMap;
+use http::Method;
 use http::header::{HeaderName, HeaderValue, ORIGIN, VARY};
-use http::{HeaderMap, Method};
 use std::collections::HashSet;
 use thiserror::Error;
 use url::Url;
@@ -199,7 +201,7 @@ impl CorsPolicy {
     pub fn apply_actual_response(
         &self,
         request: Option<&CorsRequest>,
-        response_headers: &mut HeaderMap,
+        response_headers: &mut impl OrdinaryHeaderMut,
     ) {
         remove_cors_response_fields(response_headers);
         if !request.is_some_and(|request| request.is_preflight()) {
@@ -219,7 +221,10 @@ impl CorsPolicy {
         }
         self.apply_origin_and_credentials(request, response_headers);
         if let Some(expose_headers) = self.expose_headers.as_ref() {
-            response_headers.insert(EXPOSE_HEADERS, expose_headers.clone());
+            response_headers.ordinary_insert(
+                OrdinaryHeaderName::try_from(EXPOSE_HEADERS).expect("ordinary"),
+                expose_headers.clone(),
+            );
         }
     }
 
@@ -266,19 +271,28 @@ impl CorsPolicy {
     fn apply_origin_and_credentials(
         &self,
         request: &CorsRequest,
-        response_headers: &mut HeaderMap,
+        response_headers: &mut impl OrdinaryHeaderMut,
     ) {
         match &self.origins {
             AllowedOrigins::Any => {
-                response_headers.insert(ALLOW_ORIGIN, HeaderValue::from_static("*"));
+                response_headers.ordinary_insert(
+                    OrdinaryHeaderName::try_from(ALLOW_ORIGIN).expect("ordinary"),
+                    HeaderValue::from_static("*"),
+                );
             }
             AllowedOrigins::Exact(_) => {
-                response_headers.insert(ALLOW_ORIGIN, request.origin_header().clone());
+                response_headers.ordinary_insert(
+                    OrdinaryHeaderName::try_from(ALLOW_ORIGIN).expect("ordinary"),
+                    request.origin_header().clone(),
+                );
                 append_vary(response_headers, "Origin");
             }
         }
         if self.allow_credentials {
-            response_headers.insert(ALLOW_CREDENTIALS, HeaderValue::from_static("true"));
+            response_headers.ordinary_insert(
+                OrdinaryHeaderName::try_from(ALLOW_CREDENTIALS).expect("ordinary"),
+                HeaderValue::from_static("true"),
+            );
         }
     }
 
@@ -615,7 +629,7 @@ fn parse_private_network(headers: &Headers) -> Result<bool, CorsRequestError> {
     Ok(true)
 }
 
-fn remove_cors_response_fields(headers: &mut HeaderMap) {
+fn remove_cors_response_fields(headers: &mut impl OrdinaryHeaderMut) {
     for name in [
         ALLOW_ORIGIN,
         ALLOW_CREDENTIALS,
@@ -625,17 +639,22 @@ fn remove_cors_response_fields(headers: &mut HeaderMap) {
         MAX_AGE,
         ALLOW_PRIVATE_NETWORK,
     ] {
-        headers.remove(name);
+        headers.ordinary_remove(&OrdinaryHeaderName::try_from(name).expect("ordinary"));
     }
 }
 
-fn append_vary(headers: &mut HeaderMap, token: &'static str) {
+fn append_vary(headers: &mut impl OrdinaryHeaderMut, token: &'static str) {
     // The wildcard member forbids reuse without revalidation, so it counts as
     // present as well as the token itself.
-    let present = crate::http_token::header_values_contain_token(headers, &VARY, token)
-        || crate::http_token::header_value_members(headers, &VARY).any(|member| member == "*");
+    let present = crate::http_token::value_members(
+        headers.ordinary_values(&OrdinaryHeaderName::try_from(VARY).expect("ordinary")),
+    )
+    .any(|member| member.eq_ignore_ascii_case(token) || member == "*");
     if !present {
-        headers.append(VARY, HeaderValue::from_static(token));
+        headers.ordinary_append(
+            OrdinaryHeaderName::try_from(VARY).expect("ordinary"),
+            HeaderValue::from_static(token),
+        );
     }
 }
 

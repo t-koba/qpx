@@ -8,7 +8,7 @@ use crate::runtime::Runtime;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use anyhow::Result;
 use hyper::{Response, StatusCode};
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Headers, OrdinaryHeaderMut, Request, Response as OwnerResponse};
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::convert::Infallible;
@@ -79,6 +79,35 @@ impl ReverseConnInfo {
     }
 }
 
+// The raw-H1 dispatcher still owns its standard head until its InMemory
+// decision. Select the terminal carrier once, before shared route effects;
+// ordinary services select the opaque owner, with no owner-to-standard bridge.
+pub(super) trait ReverseTerminalResponse {
+    type Headers: OrdinaryHeaderMut;
+    fn from_finalized_http(response: Response<Body>) -> Self;
+    fn terminal_headers_mut(&mut self) -> &mut Self::Headers;
+}
+
+impl ReverseTerminalResponse for Response<Body> {
+    type Headers = http::HeaderMap;
+    fn from_finalized_http(response: Response<Body>) -> Self {
+        response
+    }
+    fn terminal_headers_mut(&mut self) -> &mut Self::Headers {
+        self.headers_mut()
+    }
+}
+
+impl ReverseTerminalResponse for OwnerResponse<Body> {
+    type Headers = Headers;
+    fn from_finalized_http(response: Response<Body>) -> Self {
+        Self::from_http(response)
+    }
+    fn terminal_headers_mut(&mut self) -> &mut Self::Headers {
+        self.headers_mut()
+    }
+}
+
 fn empty_interim_response(response: Response<Body>) -> (InterimList, Response<Body>) {
     (Vec::new(), response)
 }
@@ -92,7 +121,7 @@ pub(super) async fn handle_request(
     req: Request<Body>,
     reverse: super::ReloadableReverse,
     conn: ReverseConnInfo,
-) -> Result<Response<Body>, Infallible> {
+) -> Result<OwnerResponse<Body>, Infallible> {
     let (_, response) = handle_request_with_interim(req, reverse, conn).await?;
     Ok(response)
 }
@@ -102,24 +131,24 @@ pub(super) async fn handle_request_with_interim(
     req: Request<Body>,
     reverse: super::ReloadableReverse,
     conn: ReverseConnInfo,
-) -> Result<(InterimList, Response<Body>), Infallible> {
+) -> Result<(InterimList, OwnerResponse<Body>), Infallible> {
     handle_request_with_interim_ref(req, &reverse, &conn).await
 }
 
-pub(super) async fn handle_request_with_interim_ref(
+pub(super) async fn handle_request_with_interim_ref<R: ReverseTerminalResponse>(
     req: Request<Body>,
     reverse: &super::ReloadableReverse,
     conn: &ReverseConnInfo,
-) -> Result<(InterimList, Response<Body>), Infallible> {
+) -> Result<(InterimList, R), Infallible> {
     handle_request_with_interim_and_origin_pool_ref(req, reverse, conn, None).await
 }
 
-pub(super) async fn handle_request_with_interim_and_origin_pool_ref(
+pub(super) async fn handle_request_with_interim_and_origin_pool_ref<R: ReverseTerminalResponse>(
     req: Request<Body>,
     reverse: &super::ReloadableReverse,
     conn: &ReverseConnInfo,
     origin_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<(InterimList, Response<Body>), Infallible> {
+) -> Result<(InterimList, R), Infallible> {
     let runtime = &reverse.runtime;
     let state = runtime.state();
     let request_method = req.method().clone();
@@ -131,26 +160,27 @@ pub(super) async fn handle_request_with_interim_and_origin_pool_ref(
         Err(err) => {
             warn!(error = ?err, "reverse handling failed");
             let state = runtime.state();
-            Ok(empty_interim_response(
-                response_rules::reverse_gateway_error_response(
+            Ok((
+                Vec::new(),
+                R::from_finalized_http(response_rules::reverse_gateway_error_response(
                     &request_method,
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
                     state.messages.reverse_error.as_str(),
-                ),
+                )),
             ))
         }
     }
 }
 
-async fn handle_request_inner_with_origin_pool(
+async fn handle_request_inner_with_origin_pool<R: ReverseTerminalResponse>(
     mut req: Request<Body>,
     reverse: &super::ReloadableReverse,
     runtime: &Runtime,
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
     origin_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let common_h2_request =
         qpx_http::protocol::semantics::is_intrinsically_valid_common_h2_request(&req);
@@ -164,7 +194,7 @@ async fn handle_request_inner_with_origin_pool(
         )
         .await?
         {
-            Ok(response) => return Ok(response),
+            Ok((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
             Err(req) => req,
         };
     }
@@ -182,7 +212,9 @@ async fn handle_request_inner_with_origin_pool(
         None,
     ) {
         PreflightOutcome::Continue(validated) => validated,
-        PreflightOutcome::Reject(response) => return Ok(empty_interim_response(*response)),
+        PreflightOutcome::Reject(response) => {
+            return Ok((Vec::new(), R::from_finalized_http(*response)));
+        }
     };
     if !common_h2_request {
         req = match try_dispatch_unconditional_plain_reverse_request(
@@ -194,7 +226,7 @@ async fn handle_request_inner_with_origin_pool(
         )
         .await?
         {
-            Ok(response) => return Ok(response),
+            Ok((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
             Err(req) => req,
         };
     }

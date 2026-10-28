@@ -1,5 +1,5 @@
 use super::mirrors::request_seed;
-use super::{InterimList, ReverseConnInfo, empty_interim_response};
+use super::{InterimList, ReverseConnInfo, ReverseTerminalResponse, empty_interim_response};
 use crate::http::dispatch::annotated_max_forwards_response;
 use crate::http::policy::guard::request_body_observation_limit;
 use crate::http::protocol::base_fields::BaseRequestFields;
@@ -10,7 +10,7 @@ use crate::runtime::Runtime;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use anyhow::{Result, anyhow};
 use hyper::Response;
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -86,7 +86,7 @@ use self::webdav::{
     prepare_direct_webdav_resource,
 };
 
-pub(super) async fn dispatch_reverse_request(
+pub(super) async fn dispatch_reverse_request<R: ReverseTerminalResponse>(
     req: OwnerRequest<Body>,
     base: BaseRequestFields,
     reverse: &ReloadableReverse,
@@ -94,7 +94,7 @@ pub(super) async fn dispatch_reverse_request(
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
         let span = tracing::info_span!(
@@ -103,14 +103,22 @@ pub(super) async fn dispatch_reverse_request(
             host = %qpx_core::redaction::redact_authority_userinfo(base.host().unwrap_or("")),
             method = %base.method,
         );
-        return execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool)
-            .instrument(span)
-            .await;
+        return execute_reverse_dispatch::<R>(
+            req,
+            base,
+            reverse,
+            runtime,
+            conn,
+            state,
+            connection_pool,
+        )
+        .instrument(span)
+        .await;
     }
-    execute_reverse_dispatch(req, base, reverse, runtime, conn, state, connection_pool).await
+    execute_reverse_dispatch::<R>(req, base, reverse, runtime, conn, state, connection_pool).await
 }
 
-async fn execute_reverse_dispatch(
+async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
     req: OwnerRequest<Body>,
     base: BaseRequestFields,
     reverse: &ReloadableReverse,
@@ -118,7 +126,7 @@ async fn execute_reverse_dispatch(
     conn: &ReverseConnInfo,
     state: Arc<crate::runtime::RuntimeState>,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     let (state, compiled) = reverse.compiled_snapshot(state).await;
     let request_version = req.version();
     let cors_request = match qpx_core::cors::CorsRequest::parse(req.method(), req.headers()) {
@@ -140,7 +148,7 @@ async fn execute_reverse_dispatch(
                 None,
                 false,
             );
-            return Ok(empty_interim_response(response));
+            return Ok((Vec::new(), R::from_finalized_http(response)));
         }
     };
     if !state.destination_trace_enabled()
@@ -174,12 +182,12 @@ async fn execute_reverse_dispatch(
                 )
                 .await?;
                 apply_reverse_route_metadata(route, secure_transport, &mut response)?;
-                return Ok((interim, response));
+                return Ok((interim, R::from_finalized_http(response)));
             }
             Ok(None) => {
                 return Err(anyhow!("no route matched"));
             }
-            Err(response) => return Ok(response),
+            Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
         }
     }
     if !state.destination_trace_enabled()
@@ -210,10 +218,10 @@ async fn execute_reverse_dispatch(
                     None,
                 )?;
                 apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
-                return Ok(empty_interim_response(response));
+                return Ok((Vec::new(), R::from_finalized_http(response)));
             }
             Ok(None) => return Err(anyhow!("no route matched")),
-            Err(response) => return Ok(response),
+            Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
         }
     }
     if !state.destination_trace_enabled()
@@ -261,10 +269,10 @@ async fn execute_reverse_dispatch(
                     false,
                 );
                 apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
-                return Ok(empty_interim_response(response));
+                return Ok((Vec::new(), R::from_finalized_http(response)));
             }
             Ok(None) => return Err(anyhow!("no route matched")),
-            Err(response) => return Ok(response),
+            Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
         }
     }
     // Keep slow-path-only futures out of the enclosing single-route fast-path
@@ -284,7 +292,7 @@ async fn execute_reverse_dispatch(
     .await?
     {
         Ok(prepared) => prepared,
-        Err(response) => return Ok(response),
+        Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
     };
     let route = prepared
         .context
@@ -301,7 +309,7 @@ async fn execute_reverse_dispatch(
     let reverse_error = prepared.context.state.messages.reverse_error.clone();
     let request_method = base.method.clone();
     let secure_transport = conn.tls_terminated;
-    let (interim, mut response) = match Box::pin(execute_reverse_request(
+    let (interim, response) = match Box::pin(execute_reverse_request(
         prepared,
         base,
         reverse,
@@ -322,26 +330,31 @@ async fn execute_reverse_dispatch(
             ))
         }
     };
+    // Capture and standard-only finalization are complete. Keep this head owned
+    // through route effects, observation and codec egress. Raw-H1 selects its
+    // existing standard carrier until its later static-body decision.
+    let mut response = R::from_finalized_http(response);
     if let Some(metadata) = api_metadata {
-        metadata.apply(response.headers_mut());
+        metadata.apply(response.terminal_headers_mut());
     }
     if secure_transport && let Some(hsts) = hsts {
-        response.headers_mut().insert(
-            http::header::STRICT_TRANSPORT_SECURITY,
+        response.terminal_headers_mut().ordinary_insert(
+            OrdinaryHeaderName::try_from(http::header::STRICT_TRANSPORT_SECURITY)
+                .expect("ordinary"),
             hsts.to_header_value()?,
         );
     }
     if let Some(cors) = cors {
-        cors.apply_actual_response(cors_request.as_ref(), response.headers_mut());
+        cors.apply_actual_response(cors_request.as_ref(), response.terminal_headers_mut());
     }
     if let Some(cookies) = cookies {
-        cookies.apply_response(response.headers_mut(), secure_transport)?;
+        cookies.apply_response(response.terminal_headers_mut(), secure_transport)?;
     }
     if let Some(fetch_metadata) = fetch_metadata {
-        fetch_metadata.apply_response_vary(response.headers_mut());
+        fetch_metadata.apply_response_vary(response.terminal_headers_mut());
     }
     if let Some(browser_security) = browser_security {
-        browser_security.apply(response.headers_mut());
+        browser_security.apply(response.terminal_headers_mut());
     }
     Ok((interim, response))
 }

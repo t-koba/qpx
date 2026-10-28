@@ -116,17 +116,18 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
         // H1 awaits this state machine in place. Multiplexed transports choose
         // their own allocation boundary rather than imposing it on every caller.
         async move {
-            let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
-                qpx_core::http_message::Request::from_http(req),
-                reverse,
-                conn,
-                Some(origin_pool),
-            )
-            .await?;
+            let (interim, mut response) =
+                handle_request_with_interim_and_origin_pool_ref::<OwnerResponse<Body>>(
+                    qpx_core::http_message::Request::from_http(req),
+                    reverse,
+                    conn,
+                    Some(origin_pool),
+                )
+                .await?;
             if !interim.is_empty() {
                 response.extensions_mut().insert(interim);
             }
-            Ok(OwnerResponse::from_http(response))
+            Ok(response)
         }
     }
 
@@ -141,17 +142,18 @@ impl RequestHandler<Request<Body>> for ReverseInterimService {
         let conn = &self.conn;
         let origin_pool = &self.origin_pool;
         Box::into_pin(Box::write(Box::new_uninit(), async move {
-            let (interim, mut response) = handle_request_with_interim_and_origin_pool_ref(
-                qpx_core::http_message::Request::from_http(req),
-                reverse,
-                conn,
-                Some(origin_pool),
-            )
-            .await?;
+            let (interim, mut response) =
+                handle_request_with_interim_and_origin_pool_ref::<OwnerResponse<Body>>(
+                    qpx_core::http_message::Request::from_http(req),
+                    reverse,
+                    conn,
+                    Some(origin_pool),
+                )
+                .await?;
             if !interim.is_empty() {
                 response.extensions_mut().insert(interim);
             }
-            Ok(OwnerResponse::from_http(response))
+            Ok(response)
         }))
     }
 }

@@ -7,7 +7,7 @@
 //! browser-policy Vary dimensions and the DPoP method claim cannot drift
 //! apart.
 
-use http::header::{HeaderMap, HeaderName};
+use http::header::{HeaderMap, HeaderName, HeaderValue};
 
 /// Whether `value` is an RFC 9110 token.
 pub fn is_http_token(value: &str) -> bool {
@@ -42,9 +42,14 @@ pub fn header_value_members<'a>(
     headers: &'a HeaderMap,
     name: &HeaderName,
 ) -> impl Iterator<Item = &'a str> + 'a {
-    headers
-        .get_all(name)
-        .iter()
+    value_members(headers.get_all(name).iter())
+}
+
+/// Trimmed comma members of borrowed occurrences; non-text values are skipped.
+pub fn value_members<'a>(
+    values: impl Iterator<Item = &'a HeaderValue>,
+) -> impl Iterator<Item = &'a str> {
+    values
         .filter_map(|value| value.to_str().ok())
         .flat_map(|raw| raw.split(','))
         .map(str::trim)

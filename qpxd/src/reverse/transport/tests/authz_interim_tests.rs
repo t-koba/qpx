@@ -280,7 +280,9 @@ async fn handle_request_with_interim_returns_early_hints_for_h3_downstream() {
     );
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        to_bytes(response.into_body()).await.expect("body bytes"),
+        to_bytes(response.into_head_and_body().1)
+            .await
+            .expect("body bytes"),
         bytes::Bytes::from_static(b"OK")
     );
 }

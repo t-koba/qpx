@@ -71,6 +71,73 @@ impl OrdinaryHeaderName {
     }
 }
 
+/// Ordinary-field effects shared by standard boundary heads and owned heads.
+///
+/// All names exclude Content-Length. Reads borrow occurrences in order,
+/// retaining bytes and sensitivity; no map or message parts escape.
+///
+/// ```compile_fail
+/// use qpx_core::http_message::{Headers, OrdinaryHeaderMut};
+/// OrdinaryHeaderMut::ordinary_remove(&mut Headers::new(), &http::header::CONTENT_LENGTH);
+/// ```
+pub trait OrdinaryHeaderMut {
+    /// Borrow every occurrence of an ordinary field in order.
+    fn ordinary_values<'a>(
+        &'a self,
+        name: &OrdinaryHeaderName,
+    ) -> impl Iterator<Item = &'a HeaderValue>;
+    /// Replace all occurrences with one value.
+    fn ordinary_insert(&mut self, name: OrdinaryHeaderName, value: HeaderValue);
+    /// Append an occurrence without replacing earlier values.
+    fn ordinary_append(&mut self, name: OrdinaryHeaderName, value: HeaderValue);
+    /// Remove every occurrence of an ordinary field.
+    fn ordinary_remove(&mut self, name: &OrdinaryHeaderName);
+    /// Reserve room for additional field lines, as for `HeaderMap::reserve`.
+    fn ordinary_reserve(&mut self, additional: usize);
+}
+
+impl OrdinaryHeaderMut for HeaderMap {
+    fn ordinary_values<'a>(
+        &'a self,
+        name: &OrdinaryHeaderName,
+    ) -> impl Iterator<Item = &'a HeaderValue> {
+        self.get_all(&name.0).iter()
+    }
+    fn ordinary_insert(&mut self, name: OrdinaryHeaderName, value: HeaderValue) {
+        self.insert(name.0, value);
+    }
+    fn ordinary_append(&mut self, name: OrdinaryHeaderName, value: HeaderValue) {
+        self.append(name.0, value);
+    }
+    fn ordinary_remove(&mut self, name: &OrdinaryHeaderName) {
+        self.remove(&name.0);
+    }
+    fn ordinary_reserve(&mut self, additional: usize) {
+        self.reserve(additional);
+    }
+}
+
+impl OrdinaryHeaderMut for Headers {
+    fn ordinary_values<'a>(
+        &'a self,
+        name: &OrdinaryHeaderName,
+    ) -> impl Iterator<Item = &'a HeaderValue> {
+        self.get_all(name)
+    }
+    fn ordinary_insert(&mut self, name: OrdinaryHeaderName, value: HeaderValue) {
+        self.insert(name, value);
+    }
+    fn ordinary_append(&mut self, name: OrdinaryHeaderName, value: HeaderValue) {
+        self.append(name, value);
+    }
+    fn ordinary_remove(&mut self, name: &OrdinaryHeaderName) {
+        self.remove(name);
+    }
+    fn ordinary_reserve(&mut self, additional: usize) {
+        self.inner.reserve(additional);
+    }
+}
+
 /// An owner-scoped header view with redacted Content-Length diagnostics.
 ///
 /// This wraps the closed [`HeaderView`] policy API for [`Headers`] only. Predicate

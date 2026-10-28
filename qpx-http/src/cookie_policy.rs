@@ -1,5 +1,8 @@
 use anyhow::{Result, anyhow};
-use http::header::{HeaderMap, HeaderValue, SET_COOKIE};
+#[cfg(test)]
+use http::HeaderMap;
+use http::header::{HeaderValue, SET_COOKIE};
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName};
 use std::collections::HashSet;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,8 +49,16 @@ pub struct CookieSecurityPolicy {
 }
 
 impl CookieSecurityPolicy {
-    pub fn apply_response(&self, headers: &mut HeaderMap, secure_transport: bool) -> Result<()> {
-        if headers.get_all(SET_COOKIE).iter().next().is_none() {
+    pub fn apply_response(
+        &self,
+        headers: &mut impl OrdinaryHeaderMut,
+        secure_transport: bool,
+    ) -> Result<()> {
+        if headers
+            .ordinary_values(&OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"))
+            .next()
+            .is_none()
+        {
             return Ok(());
         }
         if (self.require_secure || self.require_partitioned) && !secure_transport {
@@ -56,8 +67,7 @@ impl CookieSecurityPolicy {
             ));
         }
         let values = headers
-            .get_all(SET_COOKIE)
-            .iter()
+            .ordinary_values(&OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"))
             .map(|value| {
                 if value.as_bytes().len() > self.max_field_bytes {
                     return Err(anyhow!("Set-Cookie field exceeds configured limit"));
@@ -79,9 +89,12 @@ impl CookieSecurityPolicy {
         if values.is_empty() {
             return Ok(());
         }
-        headers.remove(SET_COOKIE);
+        headers.ordinary_remove(&OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"));
         for value in values {
-            headers.append(SET_COOKIE, value);
+            headers.ordinary_append(
+                OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"),
+                value,
+            );
         }
         Ok(())
     }
@@ -380,8 +393,14 @@ mod tests {
     #[test]
     fn response_policy_hardens_every_set_cookie_field() {
         let mut headers = HeaderMap::new();
-        headers.append(SET_COOKIE, HeaderValue::from_static("a=1"));
-        headers.append(SET_COOKIE, HeaderValue::from_static("b=2; Priority=High"));
+        headers.ordinary_append(
+            OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"),
+            HeaderValue::from_static("a=1"),
+        );
+        headers.ordinary_append(
+            OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"),
+            HeaderValue::from_static("b=2; Priority=High"),
+        );
         CookieSecurityPolicy {
             require_secure: true,
             require_http_only: true,
@@ -392,8 +411,7 @@ mod tests {
         .apply_response(&mut headers, true)
         .expect("cookie hardening");
         let values = headers
-            .get_all(SET_COOKIE)
-            .iter()
+            .ordinary_values(&OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"))
             .map(|value| value.to_str().expect("Set-Cookie"))
             .collect::<Vec<_>>();
         assert_eq!(

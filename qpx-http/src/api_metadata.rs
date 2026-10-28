@@ -1,8 +1,10 @@
 //! HTTP API lifecycle metadata for RFC 8594 and RFC 9745.
 
 use crate::structured_fields::{BareItem, Date, Integer, ItemSerializer, parse_item};
+use http::HeaderMap;
+use http::HeaderValue;
 use http::header::{HeaderName, LINK};
-use http::{HeaderMap, HeaderValue};
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName};
 use std::time::{SystemTime, UNIX_EPOCH};
 use thiserror::Error;
 
@@ -164,16 +166,25 @@ impl PreparedApiMetadata {
             + self.links.len()
     }
 
-    pub fn apply(&self, headers: &mut HeaderMap) {
-        headers.reserve(self.field_line_count());
+    pub fn apply(&self, headers: &mut impl OrdinaryHeaderMut) {
+        headers.ordinary_reserve(self.field_line_count());
         if let Some(value) = self.deprecation.as_ref() {
-            headers.insert(DEPRECATION.clone(), value.clone());
+            headers.ordinary_insert(
+                OrdinaryHeaderName::try_from(DEPRECATION.clone()).expect("ordinary"),
+                value.clone(),
+            );
         }
         if let Some(value) = self.sunset.as_ref() {
-            headers.insert(SUNSET.clone(), value.clone());
+            headers.ordinary_insert(
+                OrdinaryHeaderName::try_from(SUNSET.clone()).expect("ordinary"),
+                value.clone(),
+            );
         }
         for value in &self.links {
-            headers.append(LINK, value.clone());
+            headers.ordinary_append(
+                OrdinaryHeaderName::try_from(LINK).expect("ordinary"),
+                value.clone(),
+            );
         }
     }
 }
@@ -225,6 +236,232 @@ fn quote(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Exercise the reverse terminal mutation order through the same APIs for
+    // both containers, including fields whose duplicate/Vary rules differ.
+    fn terminal_effects(headers: &mut impl OrdinaryHeaderMut, origin: Option<&str>) {
+        use crate::cookie_policy::{CookieSecurityPolicy, SameSite};
+        use qpx_core::browser_policy::{
+            BrowserResponsePolicy, BrowserResponsePolicyConfig, FetchMetadataPolicy,
+            FetchMetadataPolicyConfig, FetchSite,
+        };
+        use qpx_core::cors::{CorsPolicy, CorsRequest};
+        let metadata = ApiMetadata {
+            deprecation: Some(UNIX_EPOCH),
+            sunset: Some(UNIX_EPOCH + std::time::Duration::from_secs(86400)),
+            links: vec![LinkValue::new("/docs", "deprecation").unwrap()],
+        }
+        .prepare()
+        .unwrap();
+        metadata.apply(headers);
+        headers.ordinary_insert(
+            OrdinaryHeaderName::try_from("strict-transport-security").unwrap(),
+            HeaderValue::from_static("max-age=60"),
+        );
+        let cors = CorsPolicy::compile(&qpx_core::config::CorsConfig {
+            allowed_origins: vec!["https://app.example".into()],
+            allowed_methods: vec!["GET".into()],
+            allow_credentials: true,
+            allowed_headers: vec![],
+            expose_headers: vec![],
+            max_age_seconds: None,
+            allow_private_network: false,
+        })
+        .unwrap();
+        let mut request = qpx_core::http_message::Request::new(());
+        if let Some(origin) = origin {
+            request.headers_mut().insert(
+                OrdinaryHeaderName::try_from("origin").unwrap(),
+                HeaderValue::from_str(origin).unwrap(),
+            );
+        }
+        let request = CorsRequest::parse(request.method(), request.headers()).unwrap();
+        cors.apply_actual_response(request.as_ref(), headers);
+        CookieSecurityPolicy {
+            require_secure: true,
+            require_http_only: true,
+            same_site: Some(SameSite::Lax),
+            require_partitioned: false,
+            max_field_bytes: 4096,
+        }
+        .apply_response(headers, true)
+        .unwrap();
+        FetchMetadataPolicy::compile(&FetchMetadataPolicyConfig {
+            allowed_sites: vec![FetchSite::SameOrigin],
+            allowed_modes: vec![],
+            allowed_destinations: vec![],
+            allow_missing: true,
+            require_user_activation_for_navigation: true,
+        })
+        .unwrap()
+        .apply_response_vary(headers);
+        BrowserResponsePolicy::compile(&BrowserResponsePolicyConfig {
+            referrer_policy: Some("same-origin".into()),
+            x_content_type_options: Some("nosniff".into()),
+            ..Default::default()
+        })
+        .unwrap()
+        .apply(headers);
+    }
+
+    #[test]
+    fn terminal_metadata_has_identical_map_and_owner_effects() {
+        use qpx_core::http_message::Response;
+        for origin in [
+            None,
+            Some("https://app.example"),
+            Some("https://denied.example"),
+        ] {
+            for vary in ["ORIGIN, Cookie", "*", "Sec-Fetch-Site"] {
+                let mut raw = http::Response::new(());
+                for (name, value) in [
+                    ("link", "</first>; rel=alternate"),
+                    ("link", "</second>; rel=next"),
+                    ("set-cookie", "first=1; Path=/"),
+                    ("set-cookie", "second=2; HttpOnly"),
+                    ("vary", "Accept-Encoding"),
+                    ("vary", vary),
+                    ("referrer-policy", "origin"),
+                    ("referrer-policy", "unsafe-url"),
+                    ("access-control-allow-origin", "upstream"),
+                    ("deprecation", "upstream"),
+                    ("deprecation", "duplicate"),
+                    ("content-length", "0"),
+                ] {
+                    raw.headers_mut()
+                        .append(name, HeaderValue::from_str(value).unwrap());
+                }
+                let mut opaque = HeaderValue::from_bytes(b"opaque\xff").unwrap();
+                opaque.set_sensitive(true);
+                raw.headers_mut().append("x-opaque", opaque);
+                let mut owner = Response::from_http(raw.clone());
+                terminal_effects(raw.headers_mut(), origin);
+                terminal_effects(owner.headers_mut(), origin);
+                let exported = owner.into_http_for_codec().unwrap();
+                assert_eq!(raw.headers(), exported.headers());
+                // HeaderMap equality alone does not prove occurrence order or sensitivity.
+                for name in raw.headers().keys() {
+                    let snapshot = |map: &HeaderMap| {
+                        map.get_all(name)
+                            .iter()
+                            .map(|v| (v.as_bytes().to_vec(), v.is_sensitive()))
+                            .collect::<Vec<_>>()
+                    };
+                    assert_eq!(
+                        snapshot(raw.headers()),
+                        snapshot(exported.headers()),
+                        "{name}"
+                    );
+                }
+                assert_eq!(
+                    raw.headers()
+                        .get_all("link")
+                        .iter()
+                        .map(|v| v.to_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    [
+                        "</first>; rel=alternate",
+                        "</second>; rel=next",
+                        "</docs>; rel=\"deprecation\""
+                    ]
+                );
+                assert_eq!(
+                    raw.headers()
+                        .get_all("set-cookie")
+                        .iter()
+                        .map(|v| v.to_str().unwrap())
+                        .collect::<Vec<_>>(),
+                    [
+                        "first=1; Path=/; Secure; HttpOnly; SameSite=Lax",
+                        "second=2; Secure; HttpOnly; SameSite=Lax"
+                    ]
+                );
+                assert_eq!(raw.headers()["referrer-policy"], "same-origin");
+                assert_eq!(raw.headers()["x-content-type-options"], "nosniff");
+                assert_eq!(raw.headers()["content-length"], "0");
+                assert_eq!(
+                    raw.headers().contains_key("access-control-allow-origin"),
+                    origin == Some("https://app.example")
+                );
+                let members =
+                    qpx_core::http_token::header_value_members(raw.headers(), &http::header::VARY)
+                        .collect::<Vec<_>>();
+                assert_eq!(members[0], "Accept-Encoding");
+                for dimension in [
+                    "sec-fetch-site",
+                    "sec-fetch-mode",
+                    "sec-fetch-dest",
+                    "sec-fetch-user",
+                ] {
+                    assert_eq!(
+                        members
+                            .iter()
+                            .filter(|v| v.eq_ignore_ascii_case(dimension))
+                            .count(),
+                        1
+                    );
+                }
+                if vary == "*" {
+                    assert!(members.contains(&"*"));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ordinary_metadata_effects_do_not_touch_framing_distinctions() {
+        use qpx_core::http_content_length::declared_content_length;
+        use qpx_core::http_message::Response;
+        for declarations in [vec![], vec!["0"], vec!["invalid"], vec!["1", "2"]] {
+            let mut raw = http::Response::new(());
+            for value in declarations {
+                raw.headers_mut()
+                    .append("content-length", HeaderValue::from_str(value).unwrap());
+            }
+            let before = declared_content_length(raw.headers());
+            let mut owner = Response::from_http(raw.clone());
+            terminal_effects(raw.headers_mut(), None);
+            terminal_effects(owner.headers_mut(), None);
+            assert_eq!(declared_content_length(raw.headers()), before);
+            assert_eq!(owner.headers().declared_content_length(), before);
+        }
+    }
+
+    #[test]
+    fn cookie_errors_leave_both_containers_unchanged() {
+        use crate::cookie_policy::CookieSecurityPolicy;
+        use qpx_core::http_message::Response;
+        let policy = CookieSecurityPolicy {
+            require_secure: true,
+            require_http_only: false,
+            same_site: None,
+            require_partitioned: false,
+            max_field_bytes: 16,
+        };
+        for (value, secure) in [
+            (HeaderValue::from_static("a=1"), false),
+            (HeaderValue::from_static("a=too-long-for-the-limit"), true),
+            (HeaderValue::from_bytes(b"a=\xff").unwrap(), true),
+        ] {
+            let mut raw = http::Response::new(());
+            raw.headers_mut()
+                .append("set-cookie", HeaderValue::from_static("first=1"));
+            raw.headers_mut().append("set-cookie", value);
+            let before = raw.headers().clone();
+            let mut owner = Response::from_http(raw.clone());
+            let raw_error = policy
+                .apply_response(raw.headers_mut(), secure)
+                .unwrap_err()
+                .to_string();
+            let owner_error = policy
+                .apply_response(owner.headers_mut(), secure)
+                .unwrap_err()
+                .to_string();
+            assert_eq!(raw_error, owner_error);
+            assert_eq!(raw.headers(), &before);
+            assert_eq!(owner.into_http_for_codec().unwrap().headers(), &before);
+        }
+    }
 
     #[test]
     fn emits_deprecation_sunset_and_documentation_link() {

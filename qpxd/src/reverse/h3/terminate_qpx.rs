@@ -221,10 +221,12 @@ impl ReverseQpxHandler {
                             );
                             return Ok::<_, anyhow::Error>((
                                 Vec::new(),
-                                crate::http::rpc::build_grpc_deadline_exceeded_response(
-                                    protocol,
-                                    grpc_request_content_type.as_deref(),
-                                )?,
+                                qpx_core::http_message::Response::from_http(
+                                    crate::http::rpc::build_grpc_deadline_exceeded_response(
+                                        protocol,
+                                        grpc_request_content_type.as_deref(),
+                                    )?,
+                                ),
                             ));
                         }
                         return Err(anyhow!(

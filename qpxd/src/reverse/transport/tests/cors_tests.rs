@@ -2,6 +2,20 @@ use super::*;
 use http::{StatusCode, Version};
 use std::io::Write as _;
 
+fn ordinary(name: &str) -> qpx_core::http_message::OrdinaryHeaderName {
+    qpx_core::http_message::OrdinaryHeaderName::try_from(name).expect("ordinary field")
+}
+
+fn field(
+    response: &qpx_core::http_message::Response<Body>,
+    name: impl AsRef<str>,
+) -> &http::HeaderValue {
+    response
+        .headers()
+        .get(&ordinary(name.as_ref()))
+        .expect("field")
+}
+
 const ALLOWED_ORIGIN: &str = "https://app.example";
 
 fn build_reverse(config: &[u8]) -> crate::reverse::ReloadableReverse {
@@ -94,34 +108,35 @@ async fn cors_preflight_selects_actual_method_route_for_all_http_versions() {
 
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert_eq!(
-            response.headers()["access-control-allow-origin"],
+            field(&response, "access-control-allow-origin"),
             ALLOWED_ORIGIN
         );
+        assert_eq!(field(&response, "access-control-allow-credentials"), "true");
+        assert_eq!(field(&response, "access-control-allow-methods"), "PUT");
         assert_eq!(
-            response.headers()["access-control-allow-credentials"],
-            "true"
-        );
-        assert_eq!(response.headers()["access-control-allow-methods"], "PUT");
-        assert_eq!(
-            response.headers()["access-control-allow-headers"],
+            field(&response, "access-control-allow-headers"),
             "content-type, x-request-id"
         );
-        assert_eq!(response.headers()["access-control-max-age"], "600");
+        assert_eq!(field(&response, "access-control-max-age"), "600");
         assert_eq!(
-            response.headers()["access-control-allow-private-network"],
+            field(&response, "access-control-allow-private-network"),
             "true"
         );
         let vary = response
             .headers()
-            .get_all(http::header::VARY)
-            .iter()
+            .get_all(&ordinary("vary"))
             .map(|value| value.to_str().expect("Vary field"))
             .collect::<Vec<_>>();
         assert!(vary.contains(&"Origin"));
         assert!(vary.contains(&"access-control-request-method"));
         assert!(vary.contains(&"access-control-request-headers"));
         assert!(vary.contains(&"access-control-request-private-network"));
-        assert_eq!(to_bytes(response.into_body()).await.expect("body"), "");
+        assert_eq!(
+            to_bytes(response.into_head_and_body().1)
+                .await
+                .expect("body"),
+            ""
+        );
     }
 }
 
@@ -142,17 +157,16 @@ async fn cors_actual_response_overrides_target_and_route_cors_fields() {
 
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response.headers()["access-control-allow-origin"],
+        field(&response, "access-control-allow-origin"),
         ALLOWED_ORIGIN
     );
+    assert_eq!(field(&response, "access-control-allow-credentials"), "true");
+    assert_eq!(field(&response, "access-control-expose-headers"), "etag");
+    assert_eq!(field(&response, http::header::ETAG), "\"qpx\"");
     assert_eq!(
-        response.headers()["access-control-allow-credentials"],
-        "true"
-    );
-    assert_eq!(response.headers()["access-control-expose-headers"], "etag");
-    assert_eq!(response.headers()[http::header::ETAG], "\"qpx\"");
-    assert_eq!(
-        to_bytes(response.into_body()).await.expect("response body"),
+        to_bytes(response.into_head_and_body().1)
+            .await
+            .expect("response body"),
         "origin"
     );
 }
@@ -169,15 +183,17 @@ async fn cors_denial_returns_problem_without_allow_fields() {
 
     assert_eq!(response.status(), StatusCode::FORBIDDEN);
     assert_eq!(
-        response.headers()[http::header::CONTENT_TYPE],
+        field(&response, http::header::CONTENT_TYPE),
         qpx_http::problem::PROBLEM_JSON
     );
     assert!(
         !response
             .headers()
-            .contains_key("access-control-allow-origin")
+            .contains_key(&ordinary("access-control-allow-origin"))
     );
-    let body = to_bytes(response.into_body()).await.expect("problem body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("problem body");
     assert!(
         body.windows("CORS origin is not allowed".len())
             .any(|window| { window == "CORS origin is not allowed".as_bytes() })
@@ -203,17 +219,20 @@ async fn cors_disallowed_actual_origin_strips_target_allow_fields() {
     assert!(
         !response
             .headers()
-            .contains_key("access-control-allow-origin")
+            .contains_key(&ordinary("access-control-allow-origin"))
+    );
+    assert!(
+        !response.headers().contains_key(
+            &qpx_core::http_message::OrdinaryHeaderName::try_from(
+                "access-control-allow-credentials"
+            )
+            .unwrap()
+        )
     );
     assert!(
         !response
             .headers()
-            .contains_key("access-control-allow-credentials")
-    );
-    assert!(
-        !response
-            .headers()
-            .contains_key("access-control-expose-headers")
+            .contains_key(&ordinary("access-control-expose-headers"))
     );
 }
 
@@ -235,7 +254,7 @@ async fn malformed_cors_request_is_rejected_explicitly() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
     assert_eq!(
-        response.headers()[http::header::CONTENT_TYPE],
+        field(&response, http::header::CONTENT_TYPE),
         qpx_http::problem::PROBLEM_JSON
     );
 }
@@ -274,13 +293,10 @@ async fn cors_is_applied_to_generated_upstream_failure_response() {
 
     assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(
-        response.headers()["access-control-allow-origin"],
+        field(&response, "access-control-allow-origin"),
         ALLOWED_ORIGIN
     );
-    assert_eq!(
-        response.headers()["access-control-allow-credentials"],
-        "true"
-    );
+    assert_eq!(field(&response, "access-control-allow-credentials"), "true");
 }
 
 #[tokio::test]
@@ -340,7 +356,7 @@ async fn cors_preflight_does_not_grant_later_route_permission_for_earlier_owner(
     assert!(
         !preflight_response
             .headers()
-            .contains_key("access-control-allow-origin"),
+            .contains_key(&ordinary("access-control-allow-origin")),
         "later route permission must not authorize the earlier owner's request"
     );
 
@@ -361,12 +377,131 @@ async fn cors_preflight_does_not_grant_later_route_permission_for_earlier_owner(
     assert!(
         !actual_response
             .headers()
-            .contains_key("access-control-allow-origin")
+            .contains_key(&ordinary("access-control-allow-origin"))
     );
     assert_eq!(
-        to_bytes(actual_response.into_body())
+        to_bytes(actual_response.into_head_and_body().1)
             .await
             .expect("response body"),
         "ordinary"
     );
+}
+
+#[tokio::test]
+async fn reverse_terminal_metadata_preserves_policy_effects_for_h1_and_h2() {
+    let reverse = build_reverse(
+        br#"edges:
+- kind: reverse
+  name: terminal-metadata
+  listen: 127.0.0.1:19080
+  routes:
+  - match:
+      path: [/api/**]
+    headers:
+      response_set:
+        Referrer-Policy: unsafe-url
+        Access-Control-Allow-Origin: https://route.example
+    http:
+      api_metadata:
+        deprecation_unix_seconds: 0
+        links:
+        - target: /docs
+          relation: deprecation
+      hsts:
+        max_age_seconds: 60
+        include_subdomains: true
+      cors:
+        allowed_origins: [https://app.example]
+        allowed_methods: [GET]
+        allow_credentials: true
+      cookies:
+        require_secure: false
+        require_http_only: true
+        same_site: lax
+      fetch_metadata:
+        allowed_sites: [same-origin]
+        allow_missing: true
+      browser_security:
+        referrer_policy: same-origin
+        x_content_type_options: nosniff
+    target:
+      type: local_response
+      response:
+        status: 201
+        content_type: text/plain
+        body: terminal
+        headers:
+          Link: '</first>; rel=alternate'
+          Set-Cookie: 'session=1; Path=/'
+          Vary: Accept-Encoding
+"#,
+    );
+    for version in [Version::HTTP_11, Version::HTTP_2] {
+        for secure in [false, true] {
+            let mut conn = connection();
+            conn.tls_terminated = secure;
+            conn.tls_sni = secure.then(|| StdArc::from("api.example"));
+            let req = Request::from_http(
+                http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/api/item")
+                    .version(version)
+                    .header("host", "api.example")
+                    .header("origin", ALLOWED_ORIGIN)
+                    .body(Body::empty())
+                    .unwrap(),
+            );
+            let (interim, response) = handle_request_with_interim(req, reverse.clone(), conn)
+                .await
+                .unwrap();
+            assert!(interim.is_empty());
+            // The successful response reaches the service boundary already owned.
+            let response: qpx_core::http_message::Response<Body> = response;
+            assert_eq!(response.status(), StatusCode::CREATED);
+            // Local response heads retain their constructed version; the codec
+            // selects the actual downstream protocol, as before adoption.
+            assert_eq!(response.version(), Version::HTTP_11);
+            assert_eq!(response.headers().declared_content_length().unwrap(), None);
+            assert_eq!(field(&response, "deprecation"), "@0");
+            assert_eq!(
+                field(&response, "access-control-allow-origin"),
+                ALLOWED_ORIGIN
+            );
+            assert_eq!(field(&response, "access-control-allow-credentials"), "true");
+            assert_eq!(
+                field(&response, "set-cookie"),
+                "session=1; Path=/; HttpOnly; SameSite=Lax"
+            );
+            assert_eq!(field(&response, "referrer-policy"), "same-origin");
+            assert_eq!(field(&response, "x-content-type-options"), "nosniff");
+            assert_eq!(
+                response
+                    .headers()
+                    .contains_key(&ordinary("strict-transport-security")),
+                secure
+            );
+            if secure {
+                assert_eq!(
+                    field(&response, "strict-transport-security"),
+                    "max-age=60; includeSubDomains"
+                );
+            }
+            assert_eq!(
+                response
+                    .headers()
+                    .get_all(&ordinary("link"))
+                    .map(|v| v.to_str().unwrap())
+                    .collect::<Vec<_>>(),
+                ["</first>; rel=alternate", "</docs>; rel=\"deprecation\""]
+            );
+            assert_eq!(
+                field(&response, "vary"),
+                "Accept-Encoding, Origin, sec-fetch-site, sec-fetch-mode, sec-fetch-dest"
+            );
+            assert_eq!(
+                to_bytes(response.into_head_and_body().1).await.unwrap(),
+                "terminal"
+            );
+        }
+    }
 }

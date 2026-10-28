@@ -324,7 +324,9 @@ async fn assert_reverse_response_rule_matches_streaming(
         response.status(),
         StatusCode::from_u16(status).expect("custom status")
     );
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(body.as_ref(), b"reverse streaming matched");
 }
 

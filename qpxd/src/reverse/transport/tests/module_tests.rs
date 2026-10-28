@@ -137,11 +137,18 @@ settings:
     assert_eq!(
         response
             .headers()
-            .get(http::header::CONTENT_ENCODING)
+            .get(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from(
+                    http::header::CONTENT_ENCODING
+                )
+                .unwrap()
+            )
             .and_then(|value| value.to_str().ok()),
         Some("gzip")
     );
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(decode_gzip(body.as_ref()), "reverse compression");
 }
 
@@ -290,12 +297,16 @@ settings:
     assert_eq!(
         response
             .headers()
-            .get("x-module-decision")
+            .get(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from("x-module-decision").unwrap()
+            )
             .and_then(|value| value.to_str().ok()),
         Some("allow")
     );
     assert_eq!(
-        to_bytes(response.into_body()).await.expect("body"),
+        to_bytes(response.into_head_and_body().1)
+            .await
+            .expect("body"),
         bytes::Bytes::from_static(b"origin")
     );
 }
@@ -354,7 +365,9 @@ edges:
     .expect("dispatch timeout")
     .expect("response");
     assert_eq!(response.status(), http::StatusCode::OK);
-    let body = to_bytes(response.into_body()).await.expect("echo");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("echo");
     let head = std::str::from_utf8(&body)
         .expect("UTF-8")
         .to_ascii_lowercase();

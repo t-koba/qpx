@@ -13,7 +13,6 @@ use crate::reverse::transport::{self, ReverseConnInfo};
 use crate::server::control::SidecarControl;
 use anyhow::Result;
 use async_trait::async_trait;
-use hyper::Response;
 use qpx_core::config::ReverseEdgeConfig;
 use qpx_core::http_message::Request;
 use qpx_http::body::Body;
@@ -150,7 +149,7 @@ struct ReverseH3Handler {
 
 #[async_trait]
 impl H3RequestHandler for ReverseH3Handler {
-    type Response = Response<Body>;
+    type Response = qpx_core::http_message::Response<Body>;
     fn limits(&self) -> H3Limits {
         let state = self.reverse.runtime.state();
         let limits = state.plan.limits;
@@ -199,7 +198,7 @@ impl H3RequestHandler for ReverseH3Handler {
         )
     }
 
-    async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Response<Body> {
+    async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Self::Response {
         let reverse_conn = ReverseConnInfo::terminated(
             conn.remote_addr,
             conn.dst_port,
@@ -216,7 +215,7 @@ impl H3RequestHandler for ReverseH3Handler {
         &self,
         req: Request<Body>,
         conn: H3ConnInfo,
-    ) -> H3HttpResponse {
+    ) -> H3HttpResponse<Self::Response> {
         let reverse_conn = ReverseConnInfo::terminated(
             conn.remote_addr,
             conn.dst_port,

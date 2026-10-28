@@ -7,6 +7,7 @@
 //! therefore parses each policy before it reaches a response and applies the
 //! compiled value authoritatively, removing upstream copies first.
 
+use crate::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName};
 use http::HeaderMap;
 use http::header::{HeaderName, HeaderValue};
 use serde::{Deserialize, Serialize};
@@ -75,24 +76,25 @@ fn invalid(field: &'static str, detail: impl Into<String>) -> BrowserPolicyError
     }
 }
 
-fn insert_header(headers: &mut HeaderMap, name: &'static str, value: &str) {
+fn insert_header(headers: &mut impl OrdinaryHeaderMut, name: &'static str, value: &str) {
     let name = HeaderName::from_static(name);
     if let Ok(value) = HeaderValue::from_str(value) {
-        headers.insert(name, value);
+        headers.ordinary_insert(OrdinaryHeaderName::try_from(name).expect("ordinary"), value);
     }
 }
 
-fn remove_header(headers: &mut HeaderMap, name: &'static str) {
-    headers.remove(HeaderName::from_static(name));
+fn remove_header(headers: &mut impl OrdinaryHeaderMut, name: &'static str) {
+    headers.ordinary_remove(&OrdinaryHeaderName::try_from(name).expect("ordinary"));
 }
 
-fn append_vary(headers: &mut HeaderMap, field: &'static str) {
+fn append_vary(headers: &mut impl OrdinaryHeaderMut, field: &'static str) {
     // Collect every Vary line before replacing: insert drops all but the
     // written line, so reading only the first line deletes later upstream
     // dimensions (including `*`, which forbids reuse without revalidation).
-    let vary = HeaderName::from_static("vary");
-    let present = crate::http_token::header_values_contain_token(headers, &vary, field);
-    let mut tokens = crate::http_token::header_value_members(headers, &vary)
+    let vary = OrdinaryHeaderName::try_from("vary").expect("ordinary");
+    let present = crate::http_token::value_members(headers.ordinary_values(&vary))
+        .any(|member| member.eq_ignore_ascii_case(field));
+    let mut tokens = crate::http_token::value_members(headers.ordinary_values(&vary))
         .filter(|member| !member.is_empty())
         .map(str::to_owned)
         .collect::<Vec<_>>();
@@ -702,7 +704,7 @@ impl FetchMetadataPolicy {
     }
 
     /// Adds the Fetch Metadata fields that can affect this decision to `Vary`.
-    pub fn apply_response_vary(&self, headers: &mut HeaderMap) {
+    pub fn apply_response_vary(&self, headers: &mut impl OrdinaryHeaderMut) {
         append_vary(headers, SEC_FETCH_SITE);
         append_vary(headers, SEC_FETCH_MODE);
         append_vary(headers, SEC_FETCH_DEST);
@@ -2351,7 +2353,7 @@ impl BrowserResponsePolicy {
     }
 
     /// Applies all configured response fields after removing upstream copies.
-    pub fn apply(&self, headers: &mut HeaderMap) {
+    pub fn apply(&self, headers: &mut impl OrdinaryHeaderMut) {
         for name in MANAGED_RESPONSE_HEADERS {
             remove_header(headers, name);
         }
