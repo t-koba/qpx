@@ -3,13 +3,18 @@ use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::http::capture::cache_flow::{
     CacheWritebackContext, process_upstream_response_for_cache,
 };
+use crate::http::protocol::header_control::ResponseHeaderControl;
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
+use crate::http::response_carrier::ResponseCarrier;
 use anyhow::{Result, anyhow};
 use http::header::{CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE};
 use hyper::{Method, Response};
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
+use qpx_http::protocol::finalization::FinalizeResponse;
 use qpxd_cache::CacheRequestKey;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -175,9 +180,32 @@ pub(crate) struct DispatchCachedResponseInput<'a> {
     pub(crate) audit: &'a DispatchAuditContext,
 }
 
-pub(crate) async fn finalize_dispatch_cached_response(
+/// Select the terminal representation only after standard-only module preparation
+/// and capacity reservation. The shared suffix never exports an adopted owner.
+pub(crate) trait CachedResponseCarrier:
+    ResponseCarrier + FinalizeResponse<Body = Body>
+{
+    fn from_prepared_cache_response(response: Response<Body>) -> Self;
+}
+
+impl CachedResponseCarrier for Response<Body> {
+    fn from_prepared_cache_response(response: Response<Body>) -> Self {
+        response
+    }
+}
+
+impl CachedResponseCarrier for OwnerResponse<Body> {
+    fn from_prepared_cache_response(response: Response<Body>) -> Self {
+        Self::from_http(response)
+    }
+}
+
+pub(crate) async fn finalize_dispatch_cached_response<R: CachedResponseCarrier>(
     input: DispatchCachedResponseInput<'_>,
-) -> Result<Response<Body>> {
+) -> Result<R>
+where
+    R::Headers: ResponseHeaderControl,
+{
     let DispatchCachedResponseInput {
         response,
         outcome,
@@ -211,7 +239,8 @@ pub(crate) async fn finalize_dispatch_cached_response(
                 .saturating_add(3),
         );
     }
-    let version = response_version.unwrap_or_else(|| response.version());
+    let mut response = R::from_prepared_cache_response(response);
+    let version = response_version.unwrap_or_else(|| ResponseCarrier::version(&response));
     finalize_response_with_headers_in_place(
         request_method,
         version,
@@ -221,7 +250,9 @@ pub(crate) async fn finalize_dispatch_cached_response(
         false,
     );
     if !modules_empty {
-        http_modules.on_logging(Some(response.status()), None).await;
+        http_modules
+            .on_logging(Some(ResponseCarrier::status(&response)), None)
+            .await;
     }
     annotate_dispatch_response(&mut response, audit, outcome, &[]);
     Ok(crate::http::capture::stream::limit_response_body_for_plan(
@@ -229,7 +260,7 @@ pub(crate) async fn finalize_dispatch_cached_response(
     ))
 }
 
-pub(crate) async fn finalize_dispatch_stale_if_error_response(
+pub(crate) async fn finalize_dispatch_stale_if_error_response<R: CachedResponseCarrier>(
     revalidation_state: Option<&qpxd_cache::RevalidationState>,
     plan: &crate::runtime::ExecutionPlan,
     request_method: &Method,
@@ -237,7 +268,10 @@ pub(crate) async fn finalize_dispatch_stale_if_error_response(
     headers: Option<&CompiledHeaderControl>,
     http_modules: &mut crate::http::modules::HttpModuleExecution,
     audit: &DispatchAuditContext,
-) -> Result<Option<Response<Body>>> {
+) -> Result<Option<R>>
+where
+    R::Headers: ResponseHeaderControl,
+{
     let Some(state) = revalidation_state else {
         return Ok(None);
     };

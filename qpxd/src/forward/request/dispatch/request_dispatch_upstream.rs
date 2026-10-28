@@ -118,12 +118,9 @@ pub(super) async fn execute_forward_upstream(
             )
             .await?
             {
-                return Ok(emit_optional_response_for_export(
-                    OwnerResponse::from_http(stale),
-                    selected_plan,
-                    export_session,
-                )
-                .await);
+                return Ok(
+                    emit_optional_response_for_export(stale, selected_plan, export_session).await,
+                );
             }
             return Err(err);
         }
@@ -190,12 +187,7 @@ pub(super) async fn execute_forward_upstream(
         )
         .await?
     {
-        return Ok(emit_optional_response_for_export(
-            OwnerResponse::from_http(stale),
-            selected_plan,
-            export_session,
-        )
-        .await);
+        return Ok(emit_optional_response_for_export(stale, selected_plan, export_session).await);
     }
     response = write_dispatch_cache_result(DispatchCacheWriteInput {
         response,
@@ -324,7 +316,7 @@ async fn finalize_forward_stale_if_error(
     proxy_name: &str,
     headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     audit: &DispatchAuditContext,
-) -> Result<Option<Response<Body>>> {
+) -> Result<Option<OwnerResponse<Body>>> {
     finalize_dispatch_stale_if_error_response(
         revalidation_state.as_ref(),
         selected_plan,
@@ -336,3 +328,7 @@ async fn finalize_forward_stale_if_error(
     )
     .await
 }
+
+#[cfg(test)]
+#[path = "request_dispatch_upstream_tests.rs"]
+mod tests;
