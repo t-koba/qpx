@@ -20,34 +20,32 @@ use sha2::{Digest, Sha256};
 use std::time::Duration;
 
 pub(crate) enum DispatchCacheLookupOutcome {
-    // Both payloads are large (`Response<Body>` and a `RevalidationState` embedding a
+    // Both payloads are large (`OwnerResponse<Body>` and a `RevalidationState` embedding a
     // `CachedResponseEnvelope`); box them so the variants stay balanced, matching
     // `DispatchCacheCollapseOutcome` below.
-    Response(Box<Response<Body>>),
+    Response(Box<OwnerResponse<Body>>),
     Continue(Option<Box<qpxd_cache::RevalidationState>>),
 }
 
-pub(crate) enum DispatchCacheCollapseOutcome {
-    Response(Box<Response<Body>>),
+pub(crate) enum DispatchCacheCollapseOutcome<R = Response<Body>> {
+    Response(Box<R>),
     Continue {
         revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
         guard: Option<qpxd_cache::RequestCollapseGuard>,
     },
 }
 
-pub(crate) fn dispatch_cache_collapse_continue(
+pub(crate) fn dispatch_cache_collapse_continue<R>(
     revalidation_state: Option<qpxd_cache::RevalidationState>,
     guard: Option<qpxd_cache::RequestCollapseGuard>,
-) -> DispatchCacheCollapseOutcome {
+) -> DispatchCacheCollapseOutcome<R> {
     DispatchCacheCollapseOutcome::Continue {
         revalidation_state: revalidation_state.map(Box::new),
         guard,
     }
 }
 
-pub(crate) fn dispatch_cache_collapse_response(
-    response: Response<Body>,
-) -> DispatchCacheCollapseOutcome {
+pub(crate) fn dispatch_cache_collapse_response<R>(response: R) -> DispatchCacheCollapseOutcome<R> {
     DispatchCacheCollapseOutcome::Response(Box::new(response))
 }
 

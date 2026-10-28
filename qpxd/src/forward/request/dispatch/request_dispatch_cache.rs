@@ -13,9 +13,9 @@ use crate::http::dispatch::{
 use crate::runtime::Runtime;
 use crate::upstream::http1::proxy_http1_request;
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::config::ActionKind;
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
 use std::time::Duration;
@@ -81,19 +81,20 @@ pub(super) async fn try_forward_cache_lookup(
             ));
         }
     }
-    let response = finalize_dispatch_cache_decision(DispatchCacheDecisionInput {
-        decision: lookup_decision,
-        hit_outcome: DispatchOutcome::CacheHit,
-        stale_outcome: DispatchOutcome::CacheStale,
-        plan: input.selected_plan,
-        request_method: input.request_method,
-        response_version,
-        proxy_name: input.proxy_name,
-        headers: input.headers,
-        http_modules: input.http_modules,
-        audit: input.audit,
-    })
-    .await?;
+    let response =
+        finalize_dispatch_cache_decision::<OwnerResponse<Body>>(DispatchCacheDecisionInput {
+            decision: lookup_decision,
+            hit_outcome: DispatchOutcome::CacheHit,
+            stale_outcome: DispatchOutcome::CacheStale,
+            plan: input.selected_plan,
+            request_method: input.request_method,
+            response_version,
+            proxy_name: input.proxy_name,
+            headers: input.headers,
+            http_modules: input.http_modules,
+            audit: input.audit,
+        })
+        .await?;
     Ok(match response {
         Some(response) => DispatchCacheLookupOutcome::Response(Box::new(response)),
         None => DispatchCacheLookupOutcome::Continue(lookup_revalidation_state.map(Box::new)),
@@ -192,7 +193,7 @@ pub(super) struct ForwardCacheCollapseInput<'a> {
 
 pub(super) async fn try_forward_cache_collapse(
     input: ForwardCacheCollapseInput<'_>,
-) -> Result<DispatchCacheCollapseOutcome> {
+) -> Result<DispatchCacheCollapseOutcome<OwnerResponse<Body>>> {
     let mut revalidation_state = input.revalidation_state.clone();
     let mut guard = None;
     if input.request_method != Method::GET {
@@ -238,19 +239,21 @@ pub(super) async fn try_forward_cache_collapse(
 async fn finalize_forward_collapsed_cache_decision(
     input: ForwardCacheCollapseInput<'_>,
     lookup_decision: CacheLookupDecision,
-) -> Result<Option<Response<Body>>> {
+) -> Result<Option<OwnerResponse<Body>>> {
     let response_version = matches!(lookup_decision, CacheLookupDecision::OnlyIfCachedMiss(_))
         .then_some(input.client_version);
-    finalize_dispatch_collapsed_cache_decision(DispatchCollapsedCacheDecisionInput {
-        decision: lookup_decision,
-        plan: input.selected_plan,
-        request_method: input.request_method,
-        response_version,
-        proxy_name: input.proxy_name,
-        headers: input.headers,
-        http_modules: input.http_modules,
-        audit: input.audit,
-    })
+    finalize_dispatch_collapsed_cache_decision::<OwnerResponse<Body>>(
+        DispatchCollapsedCacheDecisionInput {
+            decision: lookup_decision,
+            plan: input.selected_plan,
+            request_method: input.request_method,
+            response_version,
+            proxy_name: input.proxy_name,
+            headers: input.headers,
+            http_modules: input.http_modules,
+            audit: input.audit,
+        },
+    )
     .await
 }
 

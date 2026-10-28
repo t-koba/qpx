@@ -1,6 +1,8 @@
 use super::*;
 use crate::http::dispatch::{
-    DispatchCachedResponseInput, ProxyKind, finalize_dispatch_cached_response,
+    DispatchCacheDecisionInput, DispatchCachedResponseInput, DispatchCollapsedCacheDecisionInput,
+    ProxyKind, finalize_dispatch_cache_decision, finalize_dispatch_cached_response,
+    finalize_dispatch_collapsed_cache_decision,
 };
 use crate::http::modules::{self, HttpModuleEvent, HttpModuleStage, ModuleStages};
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
@@ -508,6 +510,126 @@ async fn cached_terminal_carriers_preserve_extensions_framing_trailers_and_error
                 producer.await.unwrap();
             }
             assert_eq!(observed[0], observed[1]);
+        }
+    }
+}
+
+// The decision wrappers must select the owner before the shared terminal suffix,
+// including the local miss response; a real miss must not finalize or log.
+#[tokio::test]
+async fn forward_cache_decisions_return_owners_for_lookup_and_collapsed_terminals() {
+    use crate::http::capture::cache_flow::CacheLookupDecision;
+
+    for active in [false, true] {
+        let fixture = Fixture::new(active);
+        let stale = fixture.stale(&Method::GET, true).await;
+        let state = fixture.runtime.state();
+        let plan = state
+            .plan
+            .ingress_edge_execution_plan("forward", None)
+            .unwrap();
+        for collapsed in [false, true] {
+            for branch in ["hit", "stale", "only-if-cached", "miss"] {
+                fixture.probe.0.lock().unwrap().clear();
+                let status = if branch == "only-if-cached" {
+                    StatusCode::GATEWAY_TIMEOUT
+                } else {
+                    StatusCode::OK
+                };
+                let mut response = Response::builder()
+                    .status(status)
+                    .header("content-length", "6")
+                    .body(Body::from("cached"))
+                    .unwrap();
+                response.extensions_mut().insert(42usize);
+                let decision = match branch {
+                    "hit" => CacheLookupDecision::Hit(response),
+                    "stale" => CacheLookupDecision::StaleWhileRevalidate(
+                        Box::new(response),
+                        Box::new(stale.clone()),
+                    ),
+                    "only-if-cached" => CacheLookupDecision::OnlyIfCachedMiss(response),
+                    "miss" => CacheLookupDecision::Miss,
+                    _ => unreachable!(),
+                };
+                let mut modules = fixture.modules();
+                let audit = audit(&Method::GET);
+                let response_version =
+                    (branch == "only-if-cached").then_some(http::Version::HTTP_10);
+                let response: Option<OwnerResponse<Body>> = if collapsed {
+                    finalize_dispatch_collapsed_cache_decision(
+                        DispatchCollapsedCacheDecisionInput {
+                            decision,
+                            plan,
+                            request_method: &Method::GET,
+                            response_version,
+                            proxy_name: "forward",
+                            headers: None,
+                            http_modules: &mut modules,
+                            audit: &audit,
+                        },
+                    )
+                    .await
+                    .unwrap()
+                } else {
+                    finalize_dispatch_cache_decision(DispatchCacheDecisionInput {
+                        decision,
+                        hit_outcome: DispatchOutcome::CacheHit,
+                        stale_outcome: DispatchOutcome::CacheStale,
+                        plan,
+                        request_method: &Method::GET,
+                        response_version,
+                        proxy_name: "forward",
+                        headers: None,
+                        http_modules: &mut modules,
+                        audit: &audit,
+                    })
+                    .await
+                    .unwrap()
+                };
+                if branch == "miss" {
+                    assert!(response.is_none());
+                } else {
+                    let mut response: OwnerResponse<Body> =
+                        crate::http::capture::stream::emit_optional_response_for_export(
+                            response.unwrap(),
+                            plan,
+                            None,
+                        )
+                        .await;
+                    assert_eq!(response.status(), status);
+                    // The request-version override selects Via, not the
+                    // cached response's own protocol version.
+                    assert_eq!(response.version(), http::Version::HTTP_11);
+                    assert_eq!(
+                        response.headers().get(&ord("via")).unwrap(),
+                        if branch == "only-if-cached" {
+                            "1.0 forward"
+                        } else {
+                            "1.1 forward"
+                        }
+                    );
+                    assert_eq!(response.extensions().get::<usize>(), Some(&42));
+                    assert_eq!(
+                        response.headers().declared_content_length().unwrap(),
+                        Some(6)
+                    );
+                    assert!(response.headers().contains_key(&ord("via")));
+                    assert!(!response.headers().contains_key(&ord("x-remove")));
+                    assert!(!response.headers().contains_key(&ord("connection")));
+                    assert_eq!(response.headers().contains_key(&ord("x-module")), active);
+                    assert_eq!(
+                        qpx_http::body::to_bytes(response.body_mut()).await.unwrap(),
+                        "cached"
+                    );
+                }
+                let expected = if active && branch != "miss" {
+                    vec![HttpModuleStage::DownstreamResponse, HttpModuleStage::Log]
+                } else {
+                    vec![]
+                };
+                assert_eq!(*fixture.probe.0.lock().unwrap(), expected);
+            }
         }
     }
 }

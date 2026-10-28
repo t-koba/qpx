@@ -78,10 +78,9 @@ pub(super) async fn execute_forward_http_after_prepare(
     .await?
     {
         DispatchCacheLookupOutcome::Response(response) => {
-            let response = OwnerResponse::from_http(*response);
             return Ok(
                 crate::http::capture::stream::emit_optional_response_for_export(
-                    response,
+                    *response,
                     input.selected_plan,
                     export_session.as_ref(),
                 )
@@ -109,10 +108,9 @@ pub(super) async fn execute_forward_http_after_prepare(
     .await?
     {
         DispatchCacheCollapseOutcome::Response(response) => {
-            let response = OwnerResponse::from_http(*response);
             return Ok(
                 crate::http::capture::stream::emit_optional_response_for_export(
-                    response,
+                    *response,
                     input.selected_plan,
                     export_session.as_ref(),
                 )
