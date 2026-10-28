@@ -203,10 +203,10 @@ pub(super) async fn execute_forward_upstream(
         state,
     })
     .await?;
-    response = http_modules.prepare_downstream_response(response).await?;
-    // The last standard-only stage is module preparation. Keep the owner from
-    // common finalization through capture, audit and downstream serialization.
-    let mut response = OwnerResponse::from_http(response);
+    // Cache writeback is the last standard-only stage. Keep the owner across
+    // downstream module preparation, finalization, capture and serialization.
+    let response = OwnerResponse::from_http(response);
+    let mut response = http_modules.prepare_downstream_response(response).await?;
     finalize_response_with_headers_in_place(
         request_method,
         response.version(),

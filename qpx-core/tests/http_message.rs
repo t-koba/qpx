@@ -889,3 +889,64 @@ fn request_policy_cookie_view_matches_legacy_decoder_without_mutation() {
         }
     }
 }
+
+#[test]
+fn response_library_export_is_lossless_even_for_invalid_framing() {
+    use http::{HeaderMap, HeaderValue, StatusCode, Version};
+    use std::sync::Arc;
+
+    fn fields(headers: &HeaderMap) -> Vec<(String, Vec<u8>, bool)> {
+        headers
+            .iter()
+            .map(|(name, value)| {
+                (
+                    name.to_string(),
+                    value.as_bytes().to_vec(),
+                    value.is_sensitive(),
+                )
+            })
+            .collect()
+    }
+
+    for declarations in [
+        vec![],
+        vec!["0"],
+        vec!["0003", "3"],
+        vec!["3, 3"],
+        vec!["invalid"],
+        vec!["3", "4"],
+        vec![""],
+    ] {
+        let body = Box::new([1, 2, 3]);
+        let body_ptr = body.as_ptr();
+        let extension = Arc::new(String::from("extension"));
+        let mut wire = http::Response::new(body);
+        *wire.status_mut() = StatusCode::PARTIAL_CONTENT;
+        *wire.version_mut() = Version::HTTP_2;
+        wire.extensions_mut().insert(extension.clone());
+        for declaration in declarations {
+            let mut value = HeaderValue::from_str(declaration).unwrap();
+            value.set_sensitive(true);
+            wire.headers_mut().append(CONTENT_LENGTH, value);
+        }
+        for value in [b"first".as_slice(), b"\x80last".as_slice()] {
+            let mut value = HeaderValue::from_bytes(value).unwrap();
+            value.set_sensitive(true);
+            wire.headers_mut().append("x-duplicate", value);
+        }
+        let expected = fields(wire.headers());
+        // Repeated crossings must neither parse framing nor reconstruct fields.
+        for _ in 0..2 {
+            wire = Response::from_http(wire).into_http_for_library();
+            assert_eq!(fields(wire.headers()), expected);
+            assert_eq!(wire.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(wire.version(), Version::HTTP_2);
+            assert!(Arc::ptr_eq(
+                wire.extensions().get::<Arc<String>>().unwrap(),
+                &extension
+            ));
+            assert_eq!(wire.body().as_ptr(), body_ptr);
+            assert_eq!(**wire.body(), [1, 2, 3]);
+        }
+    }
+}

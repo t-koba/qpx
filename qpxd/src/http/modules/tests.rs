@@ -1984,3 +1984,306 @@ fn owned_subrequest_passes_only_first_occurrence_then_applies_configured_replace
     // Construction does not mutate or resolve the source's conflicting declaration.
     assert!(req.headers().declared_content_length().is_err());
 }
+
+struct DownstreamBoundaryFactory {
+    phase: u8,
+    framing: Vec<&'static str>,
+}
+
+impl HttpModuleFactory for DownstreamBoundaryFactory {
+    fn build(&self, _: &HttpModuleConfig) -> anyhow::Result<Arc<dyn HttpModule>> {
+        Ok(Arc::new(Self {
+            phase: self.phase,
+            framing: self.framing.clone(),
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl HttpModule for DownstreamBoundaryFactory {
+    fn capabilities(&self) -> HttpModuleCapabilities {
+        HttpModuleCapabilities {
+            stages: ModuleStages::DOWNSTREAM_RESPONSE,
+            body_access: BodyAccess::Streaming,
+            ..HttpModuleCapabilities::default()
+        }
+    }
+
+    fn applies_to_downstream_response(
+        &self,
+        _: &HttpModuleContext,
+        response: &HttpModuleResponseView<'_>,
+    ) -> bool {
+        assert!(response.has_header(&HeaderName::from_static("x-duplicate")));
+        assert_eq!(
+            response.has_header(&http::header::CONTENT_LENGTH),
+            !self.framing.is_empty() || self.phase != 1
+        );
+        if self.phase != 1 {
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(response.version(), http::Version::HTTP_2);
+        }
+        self.phase != 0 // Check the owned predicate path without crossing the library boundary.
+    }
+
+    async fn call<'a>(
+        &self,
+        _: HttpModuleStage,
+        context: &mut HttpModuleContext,
+        event: HttpModuleEvent<'a>,
+    ) -> anyhow::Result<HttpModuleEvent<'a>> {
+        let HttpModuleEvent::DownstreamResponse(mut response) = event else {
+            panic!("unexpected event");
+        };
+        assert_ne!(self.phase, 0, "inapplicable module must not run");
+        let raw = response.as_inner_mut();
+        let mut expected = self.framing.clone();
+        if self.phase == 2 {
+            expected.push("module-invalid");
+        }
+        assert_eq!(
+            raw.headers()
+                .get_all(http::header::CONTENT_LENGTH)
+                .iter()
+                .map(|value| (value.as_bytes(), value.is_sensitive()))
+                .collect::<Vec<_>>(),
+            expected
+                .iter()
+                .map(|value| (value.as_bytes(), true))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            raw.headers()
+                .get_all("x-duplicate")
+                .iter()
+                .map(|value| (value.as_bytes(), value.is_sensitive()))
+                .collect::<Vec<_>>(),
+            vec![(b"first".as_slice(), false), (b"\x80last".as_slice(), true)]
+        );
+        assert_eq!(
+            raw.headers()["x-pending"],
+            if self.phase == 1 {
+                "initial-last"
+            } else {
+                "between"
+            }
+        );
+        assert_eq!(
+            raw.extensions().get::<usize>(),
+            Some(&usize::from(self.phase - 1))
+        );
+        if self.phase == 1 {
+            assert_eq!(raw.status(), StatusCode::PARTIAL_CONTENT);
+            assert_eq!(raw.version(), http::Version::HTTP_11);
+            let mut value = HeaderValue::from_static("module-invalid");
+            value.set_sensitive(true);
+            response.append_header(http::header::CONTENT_LENGTH, value);
+            response.set_status(StatusCode::ACCEPTED);
+            response.set_version(http::Version::HTTP_2);
+            response.as_inner_mut().extensions_mut().insert(1_usize);
+            context.queue_response_header(
+                HeaderName::from_static("x-pending"),
+                HeaderValue::from_static("between"),
+            );
+        } else {
+            let mut value = HeaderValue::from_static("final-invalid");
+            value.set_sensitive(true);
+            context.queue_response_header(http::header::CONTENT_LENGTH, value);
+        }
+        Ok(HttpModuleEvent::DownstreamResponse(response))
+    }
+}
+
+async fn check_downstream_library_boundary<R: super::execution::DownstreamResponse>(
+    framing: Vec<&'static str>,
+    abort_body: bool,
+) {
+    use http_body_util::BodyExt as _;
+
+    let mut registry = HttpModuleRegistryBuilder::new();
+    for (name, phase) in [
+        ("boundary_first", 1),
+        ("boundary_skip", 0),
+        ("boundary_second", 2),
+    ] {
+        registry
+            .register_factory(
+                name,
+                DownstreamBoundaryFactory {
+                    phase,
+                    framing: framing.clone(),
+                },
+            )
+            .unwrap();
+    }
+    let configs: Vec<HttpModuleConfig> = serde_yaml::from_str(
+        "- type: boundary_first\n- type: boundary_skip\n- type: boundary_second",
+    )
+    .unwrap();
+    let chain = compile_http_modules(&configs, &registry.build()).unwrap();
+    let mut context = module_test_context();
+    for value in ["initial", "initial-last"] {
+        context.queue_response_header(
+            HeaderName::from_static("x-pending"),
+            HeaderValue::from_static(value),
+        );
+    }
+    let mut execution = HttpModuleExecution::new(chain, context);
+    let body = if abort_body {
+        let (mut sender, body) = Body::channel();
+        sender.abort();
+        body
+    } else {
+        let mut trailers = http::HeaderMap::new();
+        trailers.append("x-trailer", HeaderValue::from_static("one"));
+        trailers.append("x-trailer", HeaderValue::from_static("two"));
+        Body::replay_chunks(vec![Bytes::from_static(b"payload")], Some(trailers))
+    };
+    let mut response = Response::new(body);
+    *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+    response.extensions_mut().insert(0_usize);
+    for declaration in framing {
+        let mut value = HeaderValue::from_static(declaration);
+        value.set_sensitive(true);
+        response
+            .headers_mut()
+            .append(http::header::CONTENT_LENGTH, value);
+    }
+    response
+        .headers_mut()
+        .append("x-duplicate", HeaderValue::from_static("first"));
+    let mut value = HeaderValue::from_bytes(b"\x80last").unwrap();
+    value.set_sensitive(true);
+    response.headers_mut().append("x-duplicate", value);
+    let response = execution
+        .prepare_downstream_response(R::from_module_response(response))
+        .await
+        .unwrap();
+    let mut response = response.into_module_response();
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    assert_eq!(response.extensions().get::<usize>(), Some(&1));
+    let lengths = response
+        .headers()
+        .get_all(http::header::CONTENT_LENGTH)
+        .iter()
+        .collect::<Vec<_>>();
+    assert_eq!(lengths.len(), 1);
+    assert_eq!(lengths[0], "final-invalid");
+    assert!(lengths[0].is_sensitive());
+    if abort_body {
+        assert_eq!(
+            response
+                .body_mut()
+                .frame()
+                .await
+                .unwrap()
+                .unwrap_err()
+                .to_string(),
+            "body aborted"
+        );
+    } else {
+        assert_eq!(
+            response
+                .body_mut()
+                .frame()
+                .await
+                .unwrap()
+                .unwrap()
+                .into_data()
+                .unwrap(),
+            "payload"
+        );
+        let trailers = response
+            .body_mut()
+            .frame()
+            .await
+            .unwrap()
+            .unwrap()
+            .into_trailers()
+            .unwrap();
+        assert_eq!(
+            trailers
+                .get_all("x-trailer")
+                .iter()
+                .map(|v| v.to_str().unwrap())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
+        );
+    }
+    if !abort_body {
+        assert!(response.body_mut().frame().await.is_none());
+    }
+}
+
+#[tokio::test]
+async fn downstream_module_library_boundary_preserves_and_mutates_both_carriers() {
+    use qpx_core::http_message::Response as OwnerResponse;
+    for framing in [
+        vec![],
+        vec!["0"],
+        vec!["0007", "7"],
+        vec!["malformed"],
+        vec!["7", "8"],
+    ] {
+        for abort_body in [false, true] {
+            check_downstream_library_boundary::<Response<Body>>(framing.clone(), abort_body).await;
+            check_downstream_library_boundary::<OwnerResponse<Body>>(framing.clone(), abort_body)
+                .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn downstream_owner_without_module_calls_keeps_exact_framing_and_applies_pending_headers() {
+    use qpx_core::http_message::Response as OwnerResponse;
+    for active in [false, true] {
+        let mut context = module_test_context();
+        let mut value = HeaderValue::from_static("pending-invalid");
+        value.set_sensitive(true);
+        context.queue_response_header(http::header::CONTENT_LENGTH, value);
+        let mut execution = if active {
+            HttpModuleExecution::new(Arc::new(CompiledHttpModuleChain::default()), context)
+        } else {
+            HttpModuleExecution::empty()
+        };
+        let mut response = Response::new(Body::from("untouched"));
+        for value in ["invalid", "7"] {
+            response.headers_mut().append(
+                http::header::CONTENT_LENGTH,
+                HeaderValue::from_static(value),
+            );
+        }
+        let response = execution
+            .prepare_downstream_response(OwnerResponse::from_http(response))
+            .await
+            .unwrap()
+            .into_http_for_library();
+        let values = response
+            .headers()
+            .get_all(http::header::CONTENT_LENGTH)
+            .iter()
+            .collect::<Vec<_>>();
+        if active {
+            assert_eq!(values.len(), 1);
+            assert_eq!(values[0], "pending-invalid");
+            assert!(values[0].is_sensitive());
+        } else {
+            assert_eq!(
+                values,
+                [
+                    HeaderValue::from_static("invalid"),
+                    HeaderValue::from_static("7")
+                ]
+                .iter()
+                .collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(
+            qpx_http::body::to_bytes(response.into_body())
+                .await
+                .unwrap(),
+            "untouched"
+        );
+    }
+}

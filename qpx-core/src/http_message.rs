@@ -9,6 +9,8 @@
 //! serializer boundary. In particular, an upstream preparation facade is not a
 //! serializer boundary. Export validates and canonicalizes the declaration; it
 //! does not choose transfer coding or implement method/status body policy.
+//! Responses may also cross a genuine library hook with
+//! [`Response::into_http_for_library`](crate::http_message::Response::into_http_for_library), a lossless transfer without framing checks.
 //!
 //! This is the ownership primitive, not a claim that all workspace HTTP paths
 //! have migrated. Existing raw-H1 and interim head owners remain independent.
@@ -1211,6 +1213,23 @@ impl<B> Response<B> {
         *response.headers_mut() = headers;
         *response.extensions_mut() = self.extensions;
         Ok(response)
+    }
+
+    /// Transfer to a genuine library consumer that requires `http::Response`.
+    ///
+    /// Unlike [`Self::into_http_for_codec`], this moves the complete message
+    /// without validating, filtering or canonicalizing Content-Length. Field
+    /// bytes, duplicate order and sensitivity, status, version, extensions and
+    /// the body are unchanged, including malformed or conflicting declarations.
+    /// Use this only across an actual library hook, importing its result with
+    /// [`Self::from_http`]; it is not an in-domain processing or serializer API.
+    pub fn into_http_for_library(self) -> http::Response<B> {
+        let mut response = http::Response::new(self.body);
+        *response.status_mut() = self.status;
+        *response.version_mut() = self.version;
+        *response.headers_mut() = self.headers.inner;
+        *response.extensions_mut() = self.extensions;
+        response
     }
 
     /// The response status.

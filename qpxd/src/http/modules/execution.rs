@@ -9,14 +9,17 @@ use super::{
     RequestHeadersOutcome, RetryEvent,
 };
 use crate::http::dispatch::ProxyKind;
+use crate::http::response_carrier::ResponseCarrier;
 use crate::runtime::RuntimeState;
 use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::{Context, Result, anyhow};
 use http::header::HOST;
-use http::{Extensions, HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
+use http::{Extensions, HeaderName, HeaderValue, Method, StatusCode, Version};
 use hyper::Response;
 use qpx_core::config::CachePolicyConfig;
-use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    Headers, OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_http::body::Body;
 use qpxd_cache::{CacheRequestKey, purge_cache_key};
 use std::borrow::Cow;
@@ -151,27 +154,94 @@ impl<'a> HttpModuleRequestView<'a> {
 /// }
 /// ```
 pub struct HttpModuleResponseView<'a> {
-    response: &'a Response<Body>,
+    response: ResponseViewInner<'a>,
+}
+
+enum ResponseViewInner<'a> {
+    Standard(&'a Response<Body>),
+    Owned(&'a OwnerResponse<Body>),
 }
 
 impl<'a> HttpModuleResponseView<'a> {
     pub(super) fn from_response(response: &'a Response<Body>) -> Self {
-        Self { response }
+        Self {
+            response: ResponseViewInner::Standard(response),
+        }
     }
 
     /// Returns the response status.
     pub fn status(&self) -> StatusCode {
-        self.response.status()
+        match self.response {
+            ResponseViewInner::Standard(response) => response.status(),
+            ResponseViewInner::Owned(response) => response.status(),
+        }
     }
 
     /// Returns the response HTTP version.
     pub fn version(&self) -> Version {
-        self.response.version()
+        match self.response {
+            ResponseViewInner::Standard(response) => response.version(),
+            ResponseViewInner::Owned(response) => response.version(),
+        }
     }
 
     /// Returns whether this response contains the named header.
     pub fn has_header(&self, name: &HeaderName) -> bool {
-        self.response.headers().contains_key(name)
+        match self.response {
+            ResponseViewInner::Standard(response) => response.headers().contains_key(name),
+            ResponseViewInner::Owned(response) => {
+                match OrdinaryHeaderName::try_from(name.clone()) {
+                    Ok(name) => response.headers().contains_key(&name),
+                    Err(_) => response.headers().contains_content_length(),
+                }
+            }
+        }
+    }
+}
+
+/// Private bridge for the single downstream hook. Conversions happen only
+/// when an applicable module is actually called, never for predicate checks.
+pub(crate) trait DownstreamResponse: ResponseCarrier {
+    fn module_view(&self) -> HttpModuleResponseView<'_>;
+    fn insert_pending_header(&mut self, name: HeaderName, value: HeaderValue);
+    fn into_module_response(self) -> Response<Body>;
+    fn from_module_response(response: Response<Body>) -> Self;
+}
+
+impl DownstreamResponse for Response<Body> {
+    fn module_view(&self) -> HttpModuleResponseView<'_> {
+        HttpModuleResponseView::from_response(self)
+    }
+    fn insert_pending_header(&mut self, name: HeaderName, value: HeaderValue) {
+        self.headers_mut().insert(name, value);
+    }
+    fn into_module_response(self) -> Response<Body> {
+        self
+    }
+    fn from_module_response(response: Response<Body>) -> Self {
+        response
+    }
+}
+
+impl DownstreamResponse for OwnerResponse<Body> {
+    fn module_view(&self) -> HttpModuleResponseView<'_> {
+        HttpModuleResponseView {
+            response: ResponseViewInner::Owned(self),
+        }
+    }
+    fn insert_pending_header(&mut self, name: HeaderName, value: HeaderValue) {
+        match OrdinaryHeaderName::try_from(name) {
+            Ok(name) => {
+                self.headers_mut().insert(name, value);
+            }
+            Err(_) => self.headers_mut().set_content_length_value(value),
+        }
+    }
+    fn into_module_response(self) -> Response<Body> {
+        self.into_http_for_library()
+    }
+    fn from_module_response(response: Response<Body>) -> Self {
+        Self::from_http(response)
     }
 }
 
@@ -530,9 +600,9 @@ impl HttpModuleContext {
         self.session.response_status = Some(status);
     }
 
-    fn apply_pending_response_headers(&mut self, headers: &mut HeaderMap) {
+    fn apply_pending_response_headers<R: DownstreamResponse>(&mut self, response: &mut R) {
         for (name, value) in self.session.pending_response_headers.drain(..) {
-            headers.insert(name, value);
+            response.insert_pending_header(name, value);
         }
     }
 
@@ -885,7 +955,7 @@ impl HttpModuleExecution {
             return Ok(response);
         };
         context.set_response_status(response.status());
-        context.apply_pending_response_headers(response.headers_mut());
+        context.apply_pending_response_headers(&mut response);
         for module in chain.upstream_response.iter() {
             let label = module.label();
             let wrapped = module
@@ -900,24 +970,24 @@ impl HttpModuleExecution {
                 .upstream_response(label)?;
             context.set_response_status(wrapped.status());
             let mut wrapped = wrapped;
-            context.apply_pending_response_headers(wrapped.as_inner_mut().headers_mut());
+            context.apply_pending_response_headers(wrapped.as_inner_mut());
             response = wrapped.into_inner();
         }
         Ok(response)
     }
 
-    pub(crate) async fn prepare_downstream_response(
+    pub(crate) async fn prepare_downstream_response<R: DownstreamResponse>(
         &mut self,
-        mut response: Response<Body>,
-    ) -> Result<Response<Body>> {
+        mut response: R,
+    ) -> Result<R> {
         let Some((chain, context)) = self.active_mut() else {
             return Ok(response);
         };
         context.set_response_status(response.status());
-        context.apply_pending_response_headers(response.headers_mut());
+        context.apply_pending_response_headers(&mut response);
         for module in chain.downstream_response.iter() {
             let applies = {
-                let response_view = HttpModuleResponseView::from_response(&response);
+                let response_view = response.module_view();
                 module
                     .module
                     .applies_to_downstream_response(context, &response_view)
@@ -931,15 +1001,17 @@ impl HttpModuleExecution {
                 .call(
                     HttpModuleStage::DownstreamResponse,
                     context,
-                    HttpModuleEvent::DownstreamResponse(HttpModuleResponse::from_inner(response)),
+                    HttpModuleEvent::DownstreamResponse(HttpModuleResponse::from_inner(
+                        response.into_module_response(),
+                    )),
                 )
                 .await
                 .with_context(|| format!("http module {label} downstream_response failed"))?
                 .downstream_response(label)?;
             context.set_response_status(wrapped.status());
             let mut wrapped = wrapped;
-            context.apply_pending_response_headers(wrapped.as_inner_mut().headers_mut());
-            response = wrapped.into_inner();
+            context.apply_pending_response_headers(wrapped.as_inner_mut());
+            response = R::from_module_response(wrapped.into_inner());
         }
         Ok(response)
     }
