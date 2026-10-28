@@ -1,6 +1,6 @@
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::{HeaderMap, Method, StatusCode};
+use http::{Method, StatusCode};
 use hyper::body::{Body as HttpBody, Frame};
 use qpx_http::body::{Body, BodyError};
 use std::pin::Pin;
@@ -9,9 +9,10 @@ use std::task::{Context, Poll};
 pub(super) fn expected_body_length(
     method: &Method,
     status: StatusCode,
-    headers: &HeaderMap,
+    headers: &qpx_core::http_message::Headers,
 ) -> Result<Option<u64>> {
-    let declared = qpx_core::http_content_length::declared_content_length(headers)
+    let declared = headers
+        .declared_content_length()
         .map_err(|err| anyhow!("cache response Content-Length: {err}"))?;
     // Match qpx_http's no-body response normalization. HEAD's length describes
     // the corresponding GET representation, not bytes in this stream.

@@ -181,7 +181,7 @@ pub(super) async fn tunnel_connect(
                             upstream_cert: Some(upstream_cert),
                         };
                         match proxy_mitm_request(inner_req, runtime, sender, route).await {
-                            Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
+                            Ok(response) => Ok::<_, Infallible>(response),
                             Err(err) => {
                                 warn!(error = ?err, "forward CONNECT MITM request failed");
                                 Ok(OwnerResponse::from_http(finalize_response_for_request(

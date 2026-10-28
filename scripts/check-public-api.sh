@@ -48,8 +48,10 @@ check_crate() {
 # qpx-core exposes opaque owner-backed request/header carriers, owner-safe ordinary-field
 # mutation, policy/Vary operations, and `value_members` for parsing borrowed values without
 # projecting an owner-backed header map. Response library-hook transfer is lossless,
-# separate from the validating codec export; keep the fingerprint gate strict.
-check_crate qpx-core b9b85a0805376e6da93d43877edcd4acdf1aa920fe3ec89ef7b45c8df815dfd1
+# separate from the validating codec export. The closed opaque cache-field carrier is the
+# fixed-format cache persistence boundary; no generic serde or arbitrary field-pair
+# projection is public. Revalidation merging stays within the owner.
+check_crate qpx-core f1de77593bfea6160a92816e42e8a2a1fe09d5c50e268247ed4166d1534952a7
 check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
 check_crate qpx-h3 01aecfccd1ef9f622ca8a78e2a6859d06b73060d2e18159ec59a4305523f0d61
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a

@@ -81,20 +81,19 @@ pub(super) async fn try_forward_cache_lookup(
             ));
         }
     }
-    let response =
-        finalize_dispatch_cache_decision::<OwnerResponse<Body>>(DispatchCacheDecisionInput {
-            decision: lookup_decision,
-            hit_outcome: DispatchOutcome::CacheHit,
-            stale_outcome: DispatchOutcome::CacheStale,
-            plan: input.selected_plan,
-            request_method: input.request_method,
-            response_version,
-            proxy_name: input.proxy_name,
-            headers: input.headers,
-            http_modules: input.http_modules,
-            audit: input.audit,
-        })
-        .await?;
+    let response = finalize_dispatch_cache_decision(DispatchCacheDecisionInput {
+        decision: lookup_decision,
+        hit_outcome: DispatchOutcome::CacheHit,
+        stale_outcome: DispatchOutcome::CacheStale,
+        plan: input.selected_plan,
+        request_method: input.request_method,
+        response_version,
+        proxy_name: input.proxy_name,
+        headers: input.headers,
+        http_modules: input.http_modules,
+        audit: input.audit,
+    })
+    .await?;
     Ok(match response {
         Some(response) => DispatchCacheLookupOutcome::Response(Box::new(response)),
         None => DispatchCacheLookupOutcome::Continue(lookup_revalidation_state.map(Box::new)),
@@ -152,7 +151,7 @@ fn maybe_spawn_forward_background_revalidation(
         let response_delay_secs = started.elapsed().as_secs();
         let backends = &runtime_state.cache.backends;
         let _ = process_upstream_response_for_cache(
-            resp,
+            OwnerResponse::from_http(resp),
             CacheWritebackContext {
                 request_snapshot: &snapshot,
                 response_delay_secs,
@@ -242,18 +241,16 @@ async fn finalize_forward_collapsed_cache_decision(
 ) -> Result<Option<OwnerResponse<Body>>> {
     let response_version = matches!(lookup_decision, CacheLookupDecision::OnlyIfCachedMiss(_))
         .then_some(input.client_version);
-    finalize_dispatch_collapsed_cache_decision::<OwnerResponse<Body>>(
-        DispatchCollapsedCacheDecisionInput {
-            decision: lookup_decision,
-            plan: input.selected_plan,
-            request_method: input.request_method,
-            response_version,
-            proxy_name: input.proxy_name,
-            headers: input.headers,
-            http_modules: input.http_modules,
-            audit: input.audit,
-        },
-    )
+    finalize_dispatch_collapsed_cache_decision(DispatchCollapsedCacheDecisionInput {
+        decision: lookup_decision,
+        plan: input.selected_plan,
+        request_method: input.request_method,
+        response_version,
+        proxy_name: input.proxy_name,
+        headers: input.headers,
+        http_modules: input.http_modules,
+        audit: input.audit,
+    })
     .await
 }
 

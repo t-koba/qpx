@@ -1,5 +1,4 @@
 use super::super::ReverseTerminalResponse;
-use super::super::empty_interim_response;
 use super::super::mirrors::record_reverse_upstream_status;
 use super::super::response_rules::{
     DispatchResponseRuleInput, ResponseRuleInput, apply_dispatch_response_rules,
@@ -106,12 +105,16 @@ pub(super) async fn handle_reverse_success<R: ReverseTerminalResponse>(
         if let Some(upstream) = selected_upstream {
             record_reverse_upstream_status(upstream, &route.policy, resp.status(), started);
         }
-        return Ok(capture_reverse_response_outcome(
-            ReverseAttemptOutcome::Response(Box::new(empty_interim_response(stale))),
-            route,
+        let stale = crate::http::capture::stream::emit_optional_response_for_export(
+            R::from_finalized_owner(stale),
+            &route.plan,
             export_session,
         )
-        .await);
+        .await;
+        return Ok(ReverseAttemptOutcome::Response(Box::new((
+            Vec::new(),
+            stale,
+        ))));
     }
     if let Some(upstream) = selected_upstream {
         record_reverse_upstream_status(upstream, &route.policy, resp.status(), started);
@@ -248,16 +251,18 @@ edges:
                     &request,
                     &key,
                     &policy,
-                    Response::builder()
-                        .header(
-                            "cache-control",
-                            if case == "cache" {
-                                "max-age=60"
-                            } else {
-                                "max-age=0, stale-if-error=60"
-                            },
-                        )
-                        .body(Body::from("cached"))?,
+                    qpx_core::http_message::Response::from_http(
+                        Response::builder()
+                            .header(
+                                "cache-control",
+                                if case == "cache" {
+                                    "max-age=60"
+                                } else {
+                                    "max-age=0, stale-if-error=60"
+                                },
+                            )
+                            .body(Body::from("cached"))?,
+                    ),
                     CacheStoreContext {
                         timing: CacheStoreTiming {
                             response_delay_secs: 0,
@@ -269,7 +274,7 @@ edges:
                     },
                 )
                 .await?;
-                assert_eq!(to_bytes(cached.into_body()).await?, "cached");
+                assert_eq!(to_bytes(cached.into_head_and_body().1).await?, "cached");
                 assert!(wait.await, "cache writeback completed");
                 let lookup = qpxd_cache::lookup(
                     &request,
@@ -387,10 +392,12 @@ edges:
                         upstream_cert: None,
                         interim,
                         started: Some(tokio::time::Instant::now()),
-                        response: Response::builder()
-                            .status(if is_error { 503 } else { 200 })
-                            .header("connection", "keep-alive")
-                            .body(Body::from("origin"))?,
+                        response: qpx_core::http_message::Response::from_http(
+                            Response::builder()
+                                .status(if is_error { 503 } else { 200 })
+                                .header("connection", "keep-alive")
+                                .body(Body::from("origin"))?,
+                        ),
                         export_session: Some(&session),
                     })
                     .await?

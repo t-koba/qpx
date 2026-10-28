@@ -1,13 +1,14 @@
-//! Stored response heads. Only this module can project the historical wire pairs
-//! or hydrate a raw map; consumers see typed length and non-framing operations.
+//! Stored response heads. Historical wire pairs keep their persistence schema;
+//! hydration and live responses use opaque headers with owner-backed framing.
 use super::*;
 use http::header::{AGE, CONTENT_LENGTH, CONTENT_RANGE};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_message::{CacheFields, OrdinaryHeaderName};
 
 #[derive(Clone, Default)]
 pub(crate) struct CachedHeaders {
-    pairs: Vec<(String, String)>,
-    map: OnceLock<Box<http::HeaderMap>>,
+    fields: CacheFields,
+    map: OnceLock<Box<qpx_core::http_message::Headers>>,
 }
 
 impl std::fmt::Debug for CachedHeaders {
@@ -17,25 +18,20 @@ impl std::fmt::Debug for CachedHeaders {
 }
 
 impl CachedHeaders {
-    // Ingress only: no inverse projection is available to cache consumers.
+    #[cfg(test)]
     pub(crate) fn from_pairs(pairs: Vec<(String, String)>) -> Self {
         Self {
-            pairs,
+            fields: CacheFields::from_cache_json(&serde_json::to_string(&pairs).unwrap()).unwrap(),
             map: OnceLock::new(),
         }
     }
 
-    fn map(&self) -> &http::HeaderMap {
-        self.map
-            .get_or_init(|| Box::new(header_map_from_vec(&self.pairs)))
+    fn map(&self) -> &qpx_core::http_message::Headers {
+        self.map.get_or_init(|| Box::new(self.fields.hydrate()))
     }
 
     pub(crate) fn declared_content_length(&self) -> Option<u64> {
-        qpx_core::http_content_length::declared_content_length_in_named_values(
-            self.pairs.iter().map(|(name, value)| (name, value)),
-        )
-        .ok()
-        .flatten()
+        self.fields.declared_content_length()
     }
 
     /// Lookup cannot expose a stored framing declaration, even for dynamic names.
@@ -43,7 +39,7 @@ impl CachedHeaders {
         if name == CONTENT_LENGTH {
             return None;
         }
-        self.map().get(name)
+        self.map().get(&ord(name.as_str()))
     }
 
     pub(crate) fn directives(&self) -> ResponseDirectives {
@@ -63,15 +59,36 @@ impl CachedHeaders {
         crate::freshness::initial_age_secs(self.map(), now, response_delay_secs)
     }
 
-    pub(crate) fn merge_after_304(&self, headers: &http::HeaderMap) -> Self {
-        Self::from_pairs(merge_headers_after_304(&self.pairs, headers))
+    pub(crate) fn merge_after_304(&self, headers: &qpx_core::http_message::Headers) -> Self {
+        let connection_nominated = connection_nominated_headers(headers);
+        Self {
+            fields: self.fields.merge_after_304(
+                headers,
+                qpx_http::protocol::semantics::is_hop_by_hop_header_name,
+                |name| is_304_excluded_header(name, &connection_nominated),
+            ),
+            map: OnceLock::new(),
+        }
+    }
+
+    /// Hot admission without a JSON round trip: direct textual capture with
+    /// cache no-cache/private filtering. No raw pairs escape this adapter,
+    /// and live operations use `map()`.
+    pub(crate) fn from_live(
+        headers: &qpx_core::http_message::Headers,
+        directives: &ResponseDirectives,
+    ) -> Self {
+        let mut excluded = HashSet::new();
+        excluded.extend(directives.no_cache_fields.iter().cloned());
+        excluded.extend(directives.private_fields.iter().cloned());
+        Self {
+            fields: headers.cache_fields(&excluded),
+            map: OnceLock::new(),
+        }
     }
 
     pub(crate) fn sanitized(&self, directives: &ResponseDirectives) -> Self {
-        Self::from_pairs(crate::util::sanitize_cached_headers_for_storage(
-            self.map(),
-            directives,
-        ))
+        Self::from_live(self.map(), directives)
     }
 
     pub(crate) fn is_revalidation_storable(
@@ -87,11 +104,8 @@ impl CachedHeaders {
         let mut response = Response::new(Body::empty());
         *response.status_mut() = status;
         *response.headers_mut() = self.map().clone();
-        response.headers_mut().remove(CONTENT_LENGTH);
-        response.headers_mut().insert(
-            CONTENT_LENGTH,
-            qpx_core::http_content_length::canonical_content_length_value(0),
-        );
+        response.headers_mut().remove_content_length();
+        response.headers_mut().set_content_length(0);
         crate::store::is_response_storable(
             request_headers,
             request_method,
@@ -103,8 +117,8 @@ impl CachedHeaders {
         )
     }
 
-    /// Egress is the only map projection: discard stored framing text before
-    /// writing the computed (or HEAD/range override) length as one decimal.
+    /// Discard stored framing text before writing the computed (or HEAD/range
+    /// override) length through the live owner. No raw map leaves persistence.
     pub(crate) fn build_response(
         &self,
         status: StatusCode,
@@ -113,16 +127,14 @@ impl CachedHeaders {
         age: http::HeaderValue,
         cache_status: http::HeaderValue,
     ) -> Response<Body> {
-        let mut headers = qpx_http::header_pool::clone_map_with_additional_capacity(self.map(), 5);
-        headers.remove(AGE);
-        headers.remove(CONTENT_LENGTH);
-        headers.remove(CONTENT_RANGE);
-        headers.insert(AGE, age);
-        headers.insert(CACHE_HEADER, cache_status);
-        headers.insert(
-            CONTENT_LENGTH,
-            qpx_core::http_content_length::canonical_content_length_value(length),
-        );
+        let mut headers = self.map().clone();
+        qpx_core::http_message::OrdinaryHeaderMut::ordinary_reserve(&mut headers, 5);
+        headers.remove(&ord(AGE.as_str()));
+        headers.remove_content_length();
+        headers.remove(&ord(CONTENT_RANGE.as_str()));
+        headers.insert(ord(AGE.as_str()), age);
+        headers.insert(ord(CACHE_HEADER), cache_status);
+        headers.set_content_length(length);
         let mut response = Response::new(body);
         *response.status_mut() = status;
         *response.headers_mut() = headers;
@@ -132,80 +144,16 @@ impl CachedHeaders {
     #[cfg(test)]
     pub(crate) fn from_hydrated_for_test(headers: http::HeaderMap) -> Self {
         Self {
-            pairs: Vec::new(),
-            map: OnceLock::from(Box::new(headers)),
-        }
-    }
-}
-
-fn header_map_from_vec(headers: &[(String, String)]) -> http::HeaderMap {
-    let mut out = http::HeaderMap::new();
-    for (name, value) in headers {
-        let Ok(name) = http::HeaderName::from_bytes(name.as_bytes()) else {
-            continue;
-        };
-        let Ok(value) = http::HeaderValue::from_str(value.as_str()) else {
-            continue;
-        };
-        out.append(name, value);
-    }
-    out
-}
-
-fn merge_headers_after_304(
-    cached_headers: &[(String, String)],
-    not_modified_headers: &http::HeaderMap,
-) -> Vec<(String, String)> {
-    // RFC 9111 §3.2: update the stored headers with each field provided in the
-    // 304, replacing existing values, except fields that must not be persisted
-    // for the stored representation (unchanged body bytes).
-    let connection_nominated = connection_nominated_headers(not_modified_headers);
-    let mut nm = std::collections::HashMap::<String, Vec<String>>::new();
-    for (name, value) in not_modified_headers {
-        let lower = name.as_str().to_ascii_lowercase();
-        if is_304_excluded_header(lower.as_str(), &connection_nominated) {
-            continue;
-        }
-        let Ok(value) = value.to_str() else {
-            continue;
-        };
-        nm.entry(lower).or_default().push(value.to_string());
-    }
-
-    let mut out = Vec::new();
-    let mut replaced = HashSet::new();
-    let mut saw = HashSet::new();
-
-    for (name, value) in cached_headers {
-        let lower = name.to_ascii_lowercase();
-        if qpx_http::protocol::semantics::is_hop_by_hop_header_name(lower.as_str()) {
-            continue;
-        }
-        saw.insert(lower.clone());
-
-        // Excluded 304 fields never reach `nm`, so stored framing labels and
-        // other kept fields always survive here unchanged.
-        if let Some(values) = nm.get(lower.as_str()) {
-            if replaced.insert(lower.clone()) {
-                for v in values {
-                    out.push((name.clone(), v.clone()));
-                }
-            }
-            continue;
-        }
-        out.push((name.clone(), value.clone()));
-    }
-
-    for (name, values) in nm {
-        if saw.contains(name.as_str()) {
-            continue;
-        }
-        for v in values {
-            out.push((name.clone(), v));
+            fields: CacheFields::default(),
+            map: OnceLock::from(Box::new(crate::tests::owned_headers(&headers))),
         }
     }
 
-    out
+    #[cfg(test)]
+    pub(crate) fn pairs_for_test(&self) -> Vec<(String, String)> {
+        serde_json::from_str(&self.fields.to_cache_json().expect("fields encode for test"))
+            .expect("fields hydrate to pairs for test")
+    }
 }
 
 /// Header fields that a 304 response must not merge into the stored entry.
@@ -231,12 +179,11 @@ fn is_304_excluded_header(lower_name: &str, connection_nominated: &HashSet<Strin
     )
 }
 
-fn connection_nominated_headers(not_modified_headers: &http::HeaderMap) -> HashSet<String> {
+fn connection_nominated_headers(
+    not_modified_headers: &qpx_core::http_message::Headers,
+) -> HashSet<String> {
     let mut out = HashSet::new();
-    for value in not_modified_headers
-        .get_all(http::header::CONNECTION)
-        .iter()
-    {
+    for value in not_modified_headers.get_all(&ord(http::header::CONNECTION.as_str())) {
         let Ok(value) = value.to_str() else {
             continue;
         };
@@ -253,7 +200,7 @@ fn connection_nominated_headers(not_modified_headers: &http::HeaderMap) -> HashS
 #[derive(Debug, Serialize, Deserialize)]
 struct CachedResponseMetadata {
     status: u16,
-    headers: Vec<(String, String)>,
+    headers: Box<serde_json::value::RawValue>,
     body_len: u64,
     stored_at_ms: u64,
     initial_age_secs: u64,
@@ -269,7 +216,9 @@ const CACHE_METADATA_MAGIC: &[u8] = b"QPX-CACHE-META\0\x01";
 pub fn encode_cached_response_metadata(envelope: &CachedResponseEnvelope) -> Result<Vec<u8>> {
     let metadata = CachedResponseMetadata {
         status: envelope.status,
-        headers: envelope.headers.pairs.clone(),
+        headers: serde_json::value::RawValue::from_string(
+            envelope.headers.fields.to_cache_json()?,
+        )?,
         body_len: envelope.body_len,
         stored_at_ms: envelope.stored_at_ms,
         initial_age_secs: envelope.initial_age_secs,
@@ -298,7 +247,10 @@ pub fn decode_cached_response_metadata(raw: Bytes) -> Result<CachedResponseEnvel
     )?;
     Ok(CachedResponseEnvelope {
         status: metadata.status,
-        headers: CachedHeaders::from_pairs(metadata.headers),
+        headers: CachedHeaders {
+            fields: CacheFields::from_cache_json(metadata.headers.get())?,
+            map: OnceLock::new(),
+        },
         body: CachedBody::default(),
         body_len: metadata.body_len,
         stored_at_ms: metadata.stored_at_ms,
@@ -314,3 +266,7 @@ pub fn decode_cached_response_metadata(raw: Bytes) -> Result<CachedResponseEnvel
 
 #[cfg(test)]
 mod tests;
+
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}

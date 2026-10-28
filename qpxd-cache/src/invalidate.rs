@@ -7,6 +7,7 @@ use anyhow::Result;
 use http::header::{CONTENT_LOCATION, LOCATION};
 use hyper::{Method, StatusCode};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_message::{Headers as OwnedHeaders, OrdinaryHeaderName};
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use url::Url;
@@ -14,7 +15,7 @@ use url::Url;
 pub async fn maybe_invalidate(
     request_method: &Method,
     response_status: StatusCode,
-    response_headers: &http::HeaderMap,
+    response_headers: &OwnedHeaders,
     target_key: Option<&CacheRequestKey>,
     policy: &CachePolicyConfig,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
@@ -100,14 +101,14 @@ fn is_invalidation_status(status: StatusCode) -> bool {
 
 fn collect_invalidation_targets(
     request_target: &CacheRequestKey,
-    response_headers: &http::HeaderMap,
+    response_headers: &OwnedHeaders,
 ) -> Vec<CacheRequestKey> {
     let Some(request_url) = request_target.absolute_url() else {
         return Vec::new();
     };
     let mut out = Vec::new();
     for header in [LOCATION, CONTENT_LOCATION] {
-        for value in response_headers.get_all(header).iter() {
+        for value in response_headers.get_all(&ord(header.as_str())) {
             let Ok(value) = value.to_str() else {
                 continue;
             };
@@ -166,4 +167,8 @@ fn same_authority(a: &Url, b: &Url) -> bool {
             .map(|(ah, bh)| ah.eq_ignore_ascii_case(bh))
             .unwrap_or(false)
         && a.port_or_known_default() == b.port_or_known_default()
+}
+
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
 }

@@ -245,12 +245,18 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
         .header(DATE, "Tue, 02 Jan 2024 00:00:00 GMT")
         .body(Body::empty())
         .expect("304");
-    let refreshed = revalidate_not_modified(&req, &policy(), not_modified, state, 0, &backends)
-        .await
-        .expect("revalidate");
+    let refreshed = revalidate_not_modified(
+        &req,
+        &policy(),
+        qpx_core::http_message::Response::from_http(not_modified),
+        state,
+        0,
+        &backends,
+    )
+    .await
+    .expect("revalidate");
     assert_eq!(
-        refreshed
-            .headers()
+        crate::tests::wire_headers(refreshed.headers())
             .get(CACHE_HEADER)
             .and_then(|v| v.to_str().ok()),
         Some("qpx; fwd=stale; fwd-status=304")

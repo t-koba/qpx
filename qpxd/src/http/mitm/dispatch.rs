@@ -53,7 +53,7 @@ pub(super) async fn dispatch_mitm_request(
     runtime: Runtime,
     sender: Arc<Mutex<SendRequest<Body>>>,
     route: MitmRouteContext<'_>,
-) -> Result<Response<Body>> {
+) -> Result<qpx_core::http_message::Response<Body>> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
         let span = tracing::info_span!(
@@ -75,7 +75,7 @@ async fn execute_mitm_request(
     runtime: Runtime,
     sender: Arc<Mutex<SendRequest<Body>>>,
     route: MitmRouteContext<'_>,
-) -> Result<Response<Body>> {
+) -> Result<qpx_core::http_message::Response<Body>> {
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let mitm_plan = state
@@ -135,7 +135,7 @@ async fn execute_mitm_request(
     .await?
     {
         Ok(prepared) => prepared,
-        Err(response) => return Ok(response),
+        Err(response) => return Ok(qpx_core::http_message::Response::from_http(response)),
     };
     req = prepared_req;
     let mut request_body_observed = initial_observation_plan.needs_body;
@@ -192,7 +192,7 @@ async fn execute_mitm_request(
     })
     .await?
     {
-        return Ok(response);
+        return Ok(qpx_core::http_message::Response::from_http(response));
     }
     let ctx = build_request_rule_match_context(RequestRuleContextInput {
         base: &base,
@@ -231,7 +231,8 @@ async fn execute_mitm_request(
                     request_version_for_observation,
                     proxy_name,
                     None,
-                );
+                )
+                .map(qpx_core::http_message::Response::from_http);
             }
             Err(err) => return Err(err),
         };
@@ -433,9 +434,11 @@ async fn execute_mitm_request(
                 timeout_override = allow.timeout_override;
             }
             DecisionServiceHttpAccessOutcome::Blocked(response, _) => {
-                return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                    response,
-                    selected_plan,
+                return Ok(qpx_core::http_message::Response::from_http(
+                    crate::http::capture::stream::limit_response_body_for_plan(
+                        response,
+                        selected_plan,
+                    ),
                 ));
             }
         }
@@ -449,9 +452,8 @@ async fn execute_mitm_request(
             &request_limits,
             audit.clone(),
         );
-        return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-            response,
-            selected_plan,
+        return Ok(qpx_core::http_message::Response::from_http(
+            crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan),
         ));
     }
     if let Some(early_response) = early_response {
@@ -470,9 +472,8 @@ async fn execute_mitm_request(
                 DispatchOutcome::EarlyResponse,
             )?,
         };
-        return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-            response,
-            selected_plan,
+        return Ok(qpx_core::http_message::Response::from_http(
+            crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan),
         ));
     }
 
@@ -495,7 +496,7 @@ async fn execute_mitm_request(
                     proxy_name,
                     Some(&audit),
                 )?;
-                return Ok(response);
+                return Ok(qpx_core::http_message::Response::from_http(response));
             }
             Err(err) => return Err(err),
         };
@@ -515,7 +516,7 @@ async fn execute_mitm_request(
                 proxy_name,
                 Some(&audit),
             )?;
-            return Ok(response);
+            return Ok(qpx_core::http_message::Response::from_http(response));
         }
         Err(err) => return Err(err),
     };

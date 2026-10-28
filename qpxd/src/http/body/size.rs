@@ -3,8 +3,8 @@ use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
 use http_body::{Body as _, Frame};
-use hyper::Response;
 use qpx_core::http_message::Request;
+use qpx_core::http_message::Response;
 use qpx_http::body::spool::SpoolFile;
 use qpx_http::body::{Body, BodyError};
 use std::fmt;
@@ -400,10 +400,10 @@ async fn observe_response_body(
     read_timeout: Duration,
     reason: &'static str,
 ) -> Result<Response<Body>> {
-    let (parts, body) = response.into_parts();
+    let (parts, body) = response.into_head_and_body();
     if keep_bytes {
         let rpc_summary_observer = should_precompute_rpc_summary(reason)
-            .then(|| crate::http::rpc::response_body_summary_observer(&parts.headers))
+            .then(|| crate::http::rpc::response_body_summary_observer(parts.headers()))
             .flatten();
         let (observed, trailers, rpc_summary) = collect_observed_body(
             body,
@@ -414,7 +414,7 @@ async fn observe_response_body(
             rpc_summary_observer,
         )
         .await?;
-        let mut response = Response::from_parts(parts, observed.replay_body(trailers.clone()));
+        let mut response = parts.map_body(|()| observed.replay_body(trailers.clone()));
         response
             .extensions_mut()
             .insert(ObservedBodySize(observed.len));
@@ -429,16 +429,16 @@ async fn observe_response_body(
         }
         Ok(response)
     } else {
-        if let Some(size) = declared_size_hint(&parts.headers) {
+        if let Some(size) = declared_size_hint(parts.headers()) {
             ensure_observed_size_within_limit(size, max_body_bytes)?;
-            let mut response = Response::from_parts(parts, body);
+            let mut response = parts.map_body(|()| body);
             response.extensions_mut().insert(ObservedBodySize(size));
             return Ok(response);
         }
         let (observed, trailers) =
             collect_observed_body_for_size(body, max_body_bytes, read_timeout, "response", reason)
                 .await?;
-        let mut response = Response::from_parts(parts, observed.replay_body(trailers));
+        let mut response = parts.map_body(|()| observed.replay_body(trailers));
         response
             .extensions_mut()
             .insert(ObservedBodySize(observed.len));

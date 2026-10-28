@@ -160,3 +160,9 @@ pub(crate) async fn spawn_request_head_echo_server() -> SocketAddr {
     });
     addr
 }
+
+pub(crate) fn wire_headers(headers: &qpx_core::http_message::Headers) -> http::HeaderMap {
+    let mut response = qpx_core::http_message::Response::new(());
+    *response.headers_mut() = headers.clone();
+    response.into_http_for_library().into_parts().0.headers
+}

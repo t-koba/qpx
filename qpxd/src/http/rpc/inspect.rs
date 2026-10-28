@@ -16,7 +16,7 @@ use crate::http::body::size::{
     observed_response_trailers,
 };
 use anyhow::Result;
-use http::Response;
+use qpx_core::http_message::Response;
 use qpx_core::http_message::{Headers, Request};
 use qpx_http::body::Body;
 

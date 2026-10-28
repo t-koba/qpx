@@ -52,20 +52,29 @@ async fn replay_preserves_duplicates_and_uses_typed_head_body_and_range_lengths(
     let req = RequestDirectives::default();
     let get = response_from_envelope_for_request(&Method::GET, &req, &envelope, 2000, "HIT")
         .expect("GET");
-    assert_eq!(get.headers()[CONTENT_LENGTH], "9");
-    assert_eq!(get.headers().get_all(CONTENT_LENGTH).iter().count(), 1);
     assert_eq!(
-        get.headers()
+        crate::tests::wire_headers(get.headers())[CONTENT_LENGTH],
+        "9"
+    );
+    assert_eq!(
+        crate::tests::wire_headers(get.headers())
+            .get_all(CONTENT_LENGTH)
+            .iter()
+            .count(),
+        1
+    );
+    assert_eq!(
+        crate::tests::wire_headers(get.headers())
             .get_all("x-repeat")
             .iter()
             .map(|v| v.to_str().expect("text"))
             .collect::<Vec<_>>(),
         ["first", "second"]
     );
-    assert!(!get.headers().contains_key("x-invalid"));
-    assert!(!get.headers().contains_key(CONTENT_RANGE));
+    assert!(!crate::tests::wire_headers(get.headers()).contains_key("x-invalid"));
+    assert!(!crate::tests::wire_headers(get.headers()).contains_key(CONTENT_RANGE));
     assert_eq!(
-        qpx_http::body::to_bytes(get.into_body())
+        qpx_http::body::to_bytes(get.into_head_and_body().1)
             .await
             .expect("body"),
         "123456789"
@@ -74,9 +83,12 @@ async fn replay_preserves_duplicates_and_uses_typed_head_body_and_range_lengths(
     // A stored HEAD declaration is not the number of body bytes in the cache.
     let head = response_from_envelope_for_request(&Method::HEAD, &req, &envelope, 2000, "HIT")
         .expect("HEAD");
-    assert_eq!(head.headers()[CONTENT_LENGTH], "42");
+    assert_eq!(
+        crate::tests::wire_headers(head.headers())[CONTENT_LENGTH],
+        "42"
+    );
     assert!(
-        qpx_http::body::to_bytes(head.into_body())
+        qpx_http::body::to_bytes(head.into_head_and_body().1)
             .await
             .expect("empty")
             .is_empty()
@@ -92,10 +104,16 @@ async fn replay_preserves_duplicates_and_uses_typed_head_body_and_range_lengths(
     let partial = response_from_envelope_for_request(&Method::GET, &ranged, &envelope, 2000, "HIT")
         .expect("range");
     assert_eq!(partial.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(partial.headers()[CONTENT_LENGTH], "3");
-    assert_eq!(partial.headers()[CONTENT_RANGE], "bytes 2-4/9");
     assert_eq!(
-        qpx_http::body::to_bytes(partial.into_body())
+        crate::tests::wire_headers(partial.headers())[CONTENT_LENGTH],
+        "3"
+    );
+    assert_eq!(
+        crate::tests::wire_headers(partial.headers())[CONTENT_RANGE],
+        "bytes 2-4/9"
+    );
+    assert_eq!(
+        qpx_http::body::to_bytes(partial.into_head_and_body().1)
             .await
             .expect("partial"),
         "345"
@@ -111,8 +129,14 @@ async fn replay_preserves_duplicates_and_uses_typed_head_body_and_range_lengths(
     )
     .expect("streamed range");
     assert_eq!(streamed.status(), StatusCode::PARTIAL_CONTENT);
-    assert_eq!(streamed.headers()[CONTENT_LENGTH], "3");
-    assert_eq!(streamed.headers()[CONTENT_RANGE], "bytes 2-4/9");
+    assert_eq!(
+        crate::tests::wire_headers(streamed.headers())[CONTENT_LENGTH],
+        "3"
+    );
+    assert_eq!(
+        crate::tests::wire_headers(streamed.headers())[CONTENT_RANGE],
+        "bytes 2-4/9"
+    );
 
     let outside = RequestDirectives {
         range: Some(ByteRangeSpec::From {
@@ -125,15 +149,21 @@ async fn replay_preserves_duplicates_and_uses_typed_head_body_and_range_lengths(
         response_from_envelope_for_request(&Method::GET, &outside, &envelope, 2000, "HIT")
             .expect("416");
     assert_eq!(unsatisfied.status(), StatusCode::RANGE_NOT_SATISFIABLE);
-    assert_eq!(unsatisfied.headers()[CONTENT_LENGTH], "0");
-    assert_eq!(unsatisfied.headers()[CONTENT_RANGE], "bytes */9");
+    assert_eq!(
+        crate::tests::wire_headers(unsatisfied.headers())[CONTENT_LENGTH],
+        "0"
+    );
+    assert_eq!(
+        crate::tests::wire_headers(unsatisfied.headers())[CONTENT_RANGE],
+        "bytes */9"
+    );
 
     let nm = not_modified_from_envelope(&Method::GET, &envelope, 2000, "HIT").expect("304");
     assert_eq!(nm.status(), StatusCode::NOT_MODIFIED);
-    assert!(!nm.headers().contains_key(CONTENT_LENGTH));
-    assert_eq!(nm.headers()[ETAG], "\"v1\"");
+    assert!(!crate::tests::wire_headers(nm.headers()).contains_key(CONTENT_LENGTH));
+    assert_eq!(crate::tests::wire_headers(nm.headers())[ETAG], "\"v1\"");
     assert!(
-        qpx_http::body::to_bytes(nm.into_body())
+        qpx_http::body::to_bytes(nm.into_head_and_body().1)
             .await
             .expect("empty")
             .is_empty()
@@ -164,19 +194,25 @@ fn head_falls_back_to_stored_body_length_for_absent_invalid_or_conflicting_decla
             "HIT",
         )
         .expect("HEAD");
-        assert_eq!(head.headers()[CONTENT_LENGTH], "9");
+        assert_eq!(
+            crate::tests::wire_headers(head.headers())[CONTENT_LENGTH],
+            "9"
+        );
     }
 }
 
 #[test]
 fn merge_keeps_exact_exclusions_and_replaces_duplicate_fields_in_place() {
     let mut envelope = old_envelope();
-    envelope.headers.pairs.extend([
+    let mut pairs = envelope.headers.pairs_for_test();
+    pairs.extend([
         ("content-encoding".into(), "gzip".into()),
         ("connection".into(), "old-hop".into()),
         ("transfer-encoding".into(), "chunked".into()),
         ("x-nominated".into(), "stored".into()),
+        ("x-binary-update".into(), "stored".into()),
     ]);
+    envelope.headers = CachedHeaders::from_pairs(pairs);
     let mut nm = http::HeaderMap::new();
     for (name, value) in [
         ("content-length", "0"),
@@ -195,11 +231,22 @@ fn merge_keeps_exact_exclusions_and_replaces_duplicate_fields_in_place() {
             http::HeaderValue::from_str(value).expect("value"),
         );
     }
+    nm.append(
+        "connection",
+        http::HeaderValue::from_static(" X-Other, keep-alive "),
+    );
+    nm.append("x-other", http::HeaderValue::from_static("304 only"));
+    nm.append(
+        "x-binary-update",
+        http::HeaderValue::from_bytes(b"\xff").unwrap(),
+    );
     nm.append("x-repeat", http::HeaderValue::from_static("new-first"));
     nm.append("x-repeat", http::HeaderValue::from_static("new-second"));
-    let merged = envelope.headers.merge_after_304(&nm);
+    let merged = envelope
+        .headers
+        .merge_after_304(&crate::tests::owned_headers(&nm));
     assert_eq!(
-        &merged.pairs[..3],
+        &merged.pairs_for_test()[..3],
         &[
             ("X-Repeat".into(), "new-first".into()),
             ("X-Repeat".into(), "new-second".into()),
@@ -237,5 +284,104 @@ fn merge_keeps_exact_exclusions_and_replaces_duplicate_fields_in_place() {
             .expect("policy"),
         "default-src 'none'"
     );
+    assert!(
+        merged
+            .get(http::HeaderName::from_static("x-other"))
+            .is_none()
+    );
+    assert_eq!(
+        merged
+            .get(http::HeaderName::from_static("x-binary-update"))
+            .unwrap(),
+        "stored"
+    );
     assert_eq!(merged.directives().max_age, Some(120));
+    // Encoding the merged owner uses the unchanged persistence codec, not live pairs.
+    envelope.headers = merged;
+    let encoded = encode_cached_response_metadata(&envelope).unwrap();
+    let restored = decode_cached_response_metadata(Bytes::from(encoded.clone())).unwrap();
+    assert_eq!(encode_cached_response_metadata(&restored).unwrap(), encoded);
+}
+
+mod closed_persistence_tests {
+    use super::*;
+
+    #[test]
+    fn closed_persistence_preserves_historical_bytes_and_metadata() {
+        for lengths in [
+            vec![],
+            vec!["0"],
+            vec!["005"],
+            vec!["5, 005", " 5 "],
+            vec!["invalid"],
+            vec!["5", "6"],
+        ] {
+            let mut raw = http::Response::new(());
+            for value in lengths {
+                raw.headers_mut()
+                    .append(http::header::CONTENT_LENGTH, value.parse().unwrap());
+            }
+            for value in ["one", "two"] {
+                raw.headers_mut().append("x-repeat", value.parse().unwrap());
+            }
+            raw.headers_mut()
+                .insert("x-binary", http::HeaderValue::from_bytes(b"\xff").unwrap());
+            raw.headers_mut()
+                .insert("x-private", "stripped".parse().unwrap());
+            raw.headers_mut()
+                .insert("x-no-cache", "stripped too".parse().unwrap());
+            raw.headers_mut()
+                .insert("x-text", "\"quoted\"\tvalue\\suffix".parse().unwrap());
+            let expected: Vec<_> = raw
+                .headers()
+                .iter()
+                .filter_map(|(name, value)| {
+                    (name != "x-private" && name != "x-no-cache")
+                        .then(|| {
+                            value
+                                .to_str()
+                                .ok()
+                                .map(|value| (name.as_str().to_owned(), value.to_owned()))
+                        })
+                        .flatten()
+                })
+                .collect();
+            let owned = qpx_core::http_message::Response::from_http(raw);
+            let directives = ResponseDirectives {
+                private_fields: vec!["x-private".into()],
+                no_cache_fields: vec!["x-no-cache".into()],
+                ..Default::default()
+            };
+            let mut envelope = old_envelope();
+            envelope.headers = CachedHeaders::from_live(owned.headers(), &directives);
+            assert_eq!(envelope.headers.pairs_for_test(), expected);
+            let expected_json = format!(
+                r#"{{"status":200,"headers":{},"body_len":9,"stored_at_ms":1000,"initial_age_secs":2,"response_delay_secs":1,"freshness_lifetime_secs":60,"vary_headers":[],"vary_values":[]}}"#,
+                serde_json::to_string(&expected).unwrap()
+            );
+            let mut expected_bytes = CACHE_METADATA_MAGIC.to_vec();
+            expected_bytes.extend_from_slice(expected_json.as_bytes());
+            let encoded = encode_cached_response_metadata(&envelope).unwrap();
+            assert_eq!(encoded, expected_bytes);
+            let restored = decode_cached_response_metadata(Bytes::from(encoded)).unwrap();
+            // Hydration and policy reads must not rewrite persisted spellings.
+            assert_eq!(
+                restored.headers.map().declared_content_length(),
+                owned.headers().declared_content_length()
+            );
+            assert_eq!(
+                restored
+                    .headers
+                    .get(http::HeaderName::from_static("x-repeat"))
+                    .unwrap(),
+                "one"
+            );
+            assert_eq!(restored.body_len, 9);
+            assert_eq!(restored.response_delay_secs, 1);
+            assert_eq!(
+                encode_cached_response_metadata(&restored).unwrap(),
+                expected_bytes
+            );
+        }
+    }
 }

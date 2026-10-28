@@ -2,7 +2,6 @@ use crate::destination::DestinationMetadata;
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::rpc::RpcMatchContext;
 use crate::policy_context::ResolvedIdentity;
-use http::HeaderMap;
 use qpx_core::rules::RuleMatchContext;
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_observability::access_log::RequestLogContext;
@@ -20,7 +19,7 @@ pub(crate) struct RequestRuleContextInput<'a> {
 
 pub(crate) struct ResponseRuleContextInput<'a> {
     pub(crate) base: &'a BaseRequestFields,
-    pub(crate) headers: Option<&'a HeaderMap>,
+    pub(crate) headers: Option<&'a qpx_core::http_message::Headers>,
     pub(crate) destination: &'a DestinationMetadata,
     pub(crate) identity: &'a ResolvedIdentity,
     pub(crate) response_status: u16,
@@ -72,7 +71,8 @@ pub(crate) fn build_response_rule_match_context(
         upstream_cert,
     } = input;
     let mut ctx = base.rule_match_context();
-    ctx.headers = headers.map(qpx_core::http_content_length::HeaderView::new);
+    ctx.headers = None;
+    ctx.owned_headers = headers.map(qpx_core::http_message::Headers::view);
     ctx.response_status = Some(response_status);
     ctx.response_size = response_size;
     destination.apply_to_rule_context(&mut ctx);

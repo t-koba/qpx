@@ -34,26 +34,30 @@ preparation facades are internal stages, not serializer boundaries. The carrier
 does not infer body sizes, choose transfer coding, apply HEAD/no-body status
 rules, or poll bodies/trailers; those remain protocol responsibilities.
 
-**Migration status:** these primitives and their cross-crate contract tests are
-available, but the shared live-message spine still uses standard HTTP messages.
-`CompiledHeaderControl`, qpx-http normalization, qpxd preparation/policy/modules,
-cache live-message APIs, capture/logging, and finalization must be migrated
-coherently with their forward, reverse, transparent, MITM, CONNECT and WebSocket
-consumers. No temporary raw/owned dual facades have been introduced. The distinct
-raw-H1 and interim owners and cache persistence format are unchanged. This does
-not establish global structural ownership or justify reducing the source gate.
+**Migration status:** shared request preparation/header control, response-rule
+continuation (including body/RPC observation), live cache operations, downstream
+modules, capture/logging and finalization use owner-backed carriers. Ordinary
+forward and reverse upstream responses are adopted after the actual upstream
+module hook and remain owned through policy and cache writeback to downstream
+egress. Cache hits, collapsed hits, stale fallbacks and 304 revalidation produce
+owned responses directly. MITM and transparent consumers share the same response
+policy without adding caching. Generated local responses are separate sources.
 
-The ordinary forward terminal response suffix now imports after standard-only
-policy/modules/cache/finalization and carries `Response<Body>` through export
-preview, sample/full body capture, size limiting, dispatch audit/log-context
-annotation, and H1/H2 access-log/service or H3 codec egress. Cache hit/collapse,
-response-policy replies and stale fallbacks import at their terminal capture
-calls. Early standard replies import when joining that suffix. A private carrier
-mechanism shares capture/annotation with the still-standard reverse,
-transparent, MITM and WebSocket paths; it exposes no raw heads or maps. Preview
-serialization preserves duplicate framing spellings and renders non-text header
-values as empty text. The raw-H1 direct/in-memory paths, including their existing
-size-limit-before-InMemory decision, remain unchanged.
+Cache persistence keeps its historical textual field-pair JSON schema and
+fixtures. The owner-backed `CacheFields` carrier has only fixed-format
+`to_cache_json`/`from_cache_json` persistence operations; it does not implement
+generic serde traits or hand framing values to a caller-supplied serializer. The
+qpxd-cache metadata codec embeds the fixed JSON array directly with `RawValue`,
+so hot admission captures fields without a JSON round trip and persistence bytes
+retain their prior shape. 304 revalidation merges fields inside `CacheFields`;
+no live path recovers cached pairs. Restored fields hydrate into opaque headers,
+and cache hits replace stored framing with the computed representation length.
+Raw-cache InMemory responses export only at that serializer boundary. Raw-H1/interim
+owners and direct relay algorithms are unchanged. Preview serialization still
+renders non-text values as empty text.
+These slices do not establish global structural closure or justify reducing the
+source gate; specialized raw-H1, interim and library/module boundaries remain
+explicit and must be reviewed separately.
 
 ## qpxd Runtime Shape
 

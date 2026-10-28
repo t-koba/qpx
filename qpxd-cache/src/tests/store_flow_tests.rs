@@ -72,7 +72,7 @@ async fn unsafe_method_invalidates_cached_target() {
     maybe_invalidate(
         &Method::POST,
         StatusCode::OK,
-        &http::HeaderMap::new(),
+        &crate::tests::owned_headers(&http::HeaderMap::new()),
         Some(&target_key),
         &policy(),
         &backends,
@@ -148,7 +148,7 @@ async fn ipv6_content_location_invalidates_only_same_authority_targets() {
     maybe_invalidate(
         mutation_request.method(),
         StatusCode::OK,
-        &response_headers,
+        &crate::tests::owned_headers(&response_headers),
         Some(&mutation_key),
         &policy(),
         &backends,
@@ -178,7 +178,7 @@ async fn ipv6_content_location_invalidates_only_same_authority_targets() {
     maybe_invalidate(
         mutation_request.method(),
         StatusCode::OK,
-        &response_headers,
+        &crate::tests::owned_headers(&response_headers),
         Some(&mutation_key),
         &policy(),
         &backends,
@@ -218,7 +218,7 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
             &req,
             &key,
             &policy(),
-            response,
+            qpx_core::http_message::Response::from_http(response),
             CacheStoreContext {
                 timing: CacheStoreTiming {
                     response_delay_secs: 0,
@@ -234,8 +234,7 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
     .expect("store must not wait for idle response body")
     .expect("store response");
     assert_eq!(
-        stored
-            .headers()
+        crate::tests::wire_headers(stored.headers())
             .get(CACHE_HEADER)
             .and_then(|v| v.to_str().ok()),
         Some("qpx; fwd=miss")
@@ -385,7 +384,7 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     maybe_invalidate(
         &Method::POST,
         StatusCode::OK,
-        &http::HeaderMap::new(),
+        &crate::tests::owned_headers(&http::HeaderMap::new()),
         Some(&target_key),
         &policy(),
         &backends,
@@ -413,7 +412,7 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     maybe_invalidate(
         &Method::POST,
         StatusCode::INTERNAL_SERVER_ERROR,
-        &http::HeaderMap::new(),
+        &crate::tests::owned_headers(&http::HeaderMap::new()),
         Some(&target_key),
         &policy(),
         &backends,
@@ -428,7 +427,7 @@ async fn unsafe_method_invalidates_cached_query_variants() {
     maybe_invalidate(
         &Method::POST,
         StatusCode::OK,
-        &http::HeaderMap::new(),
+        &crate::tests::owned_headers(&http::HeaderMap::new()),
         Some(&target_key),
         &policy(),
         &backends,
@@ -508,7 +507,7 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
                 .expect("revalidate request"),
         ),
         &policy(),
-        not_modified,
+        qpx_core::http_message::Response::from_http(not_modified),
         state,
         0,
         &backends,
@@ -516,7 +515,7 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
     .await
     .expect("revalidate");
     assert_eq!(response.status(), StatusCode::OK);
-    let headers = response.headers();
+    let headers = crate::tests::wire_headers(response.headers());
     let get = |name: &str| {
         headers
             .get(name)
@@ -542,7 +541,7 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
     assert!(headers.get(http::header::CONTENT_ENCODING).is_none());
     assert!(headers.get("x-hop").is_none());
     // Unchanged body bytes are served.
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"hello");

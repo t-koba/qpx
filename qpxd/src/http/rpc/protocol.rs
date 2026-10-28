@@ -5,10 +5,15 @@ use http::{HeaderMap, HeaderName};
 use percent_encoding::percent_decode_str;
 use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 
-use crate::http::media_type::raw_media_type;
+use qpx_core::http_message::OrdinaryHeaderMut;
 
-pub(super) fn response_content_type(headers: &HeaderMap) -> Option<String> {
-    raw_media_type(headers).map(|media| media.to_ascii_lowercase())
+pub(super) fn response_content_type(headers: &impl OrdinaryHeaderMut) -> Option<String> {
+    headers
+        .ordinary_values(&OrdinaryHeaderName::try_from("content-type").unwrap())
+        .next()
+        .and_then(|v| v.to_str().ok())
+        .map(crate::http::media_type::media_type_without_parameters)
+        .map(str::to_ascii_lowercase)
 }
 
 pub(super) fn request_content_type(headers: &Headers) -> Option<String> {
@@ -53,7 +58,10 @@ pub(super) fn is_grpc_web_text_content_type(raw: &str) -> bool {
     raw.starts_with("application/grpc-web-text")
 }
 
-pub(super) fn detect_rpc_protocol(headers: &HeaderMap, fallback: Option<&str>) -> Option<String> {
+pub(super) fn detect_rpc_protocol(
+    headers: &impl OrdinaryHeaderMut,
+    fallback: Option<&str>,
+) -> Option<String> {
     let content_type = response_content_type(headers);
     if let Some(protocol) = content_type
         .as_deref()
@@ -61,7 +69,11 @@ pub(super) fn detect_rpc_protocol(headers: &HeaderMap, fallback: Option<&str>) -
     {
         return Some(protocol.to_string());
     }
-    if headers.contains_key("connect-protocol-version") {
+    if headers
+        .ordinary_values(&OrdinaryHeaderName::try_from("connect-protocol-version").unwrap())
+        .next()
+        .is_some()
+    {
         return Some("connect".to_string());
     }
     fallback.map(str::to_string)
@@ -160,7 +172,7 @@ pub(super) fn parse_connect_end_stream_metadata(raw: &[u8]) -> Result<HeaderMap>
 
 pub(super) fn extract_rpc_status_and_message(
     protocol: Option<&str>,
-    headers: &HeaderMap,
+    headers: &impl OrdinaryHeaderMut,
     trailers: Option<&HeaderMap>,
     body: Option<&Bytes>,
 ) -> (Option<String>, Option<String>) {
@@ -177,18 +189,22 @@ pub(super) fn extract_rpc_status_and_message(
 }
 
 pub(super) fn extract_grpc_status_and_message(
-    headers: &HeaderMap,
+    headers: &impl OrdinaryHeaderMut,
     trailers: Option<&HeaderMap>,
 ) -> (Option<String>, Option<String>) {
-    let source = trailers.unwrap_or(headers);
-    let status = source
-        .get("grpc-status")
-        .and_then(|value| value.to_str().ok())
+    let value = |name: &str| {
+        let name = OrdinaryHeaderName::try_from(name).expect("ordinary RPC field");
+        match trailers {
+            Some(trailers) => trailers.ordinary_values(&name).next(),
+            None => headers.ordinary_values(&name).next(),
+        }
+    };
+    let status = value("grpc-status")
+        .and_then(|v| v.to_str().ok())
         .map(normalize_grpc_status);
-    let message = source
-        .get("grpc-message")
-        .and_then(|value| value.to_str().ok())
-        .map(|value| percent_decode_str(value).decode_utf8_lossy().to_string());
+    let message = value("grpc-message")
+        .and_then(|v| v.to_str().ok())
+        .map(|v| percent_decode_str(v).decode_utf8_lossy().to_string());
     (status, message)
 }
 

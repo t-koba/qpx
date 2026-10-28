@@ -47,7 +47,7 @@ pub(super) struct ResponseRuleInput<'a> {
     pub(super) identity: &'a ResolvedIdentity,
     pub(super) request_rpc: Option<&'a RpcMatchContext>,
     pub(super) route_headers: Option<Arc<CompiledHeaderControl>>,
-    pub(super) response: Response<Body>,
+    pub(super) response: qpx_core::http_message::Response<Body>,
     pub(super) max_observed_response_body_bytes: usize,
     pub(super) response_body_read_timeout: Duration,
     pub(super) force_response_body_observation: bool,

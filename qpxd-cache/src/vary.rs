@@ -1,11 +1,12 @@
 use qpx_core::http_content_length::VarySelector;
 use qpx_core::http_message::OwnedHeaderView;
+use qpx_core::http_message::{Headers as OwnedHeaders, OrdinaryHeaderName};
 
 use super::types::{CachedResponseEnvelope, VarySpec};
 
-pub fn parse_vary(headers: &http::HeaderMap) -> VarySpec {
+pub fn parse_vary(headers: &OwnedHeaders) -> VarySpec {
     let mut fields = Vec::new();
-    for value in headers.get_all(http::header::VARY) {
+    for value in headers.get_all(&ord(http::header::VARY.as_str())) {
         let Ok(v) = value.to_str() else {
             // Fail-closed: an unrepresentable Vary value cannot be negotiated
             // safely, so the response is not shareable.
@@ -88,6 +89,9 @@ pub fn index_storage_key(primary: &str) -> String {
     format!("idx:{}", primary)
 }
 
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,7 +250,7 @@ mod tests {
             http::header::VARY,
             http::HeaderValue::from_static("Content-Length"),
         );
-        let VarySpec::Fields(fields) = parse_vary(&response) else {
+        let VarySpec::Fields(fields) = parse_vary(&crate::tests::owned_headers(&response)) else {
             panic!("valid Vary")
         };
         // Neither numerically equal declarations nor conflicting duplicates
@@ -427,6 +431,9 @@ mod tests {
             http::header::VARY,
             http::HeaderValue::from_bytes(&[0x80]).unwrap(),
         );
-        assert!(matches!(parse_vary(&headers), VarySpec::Any));
+        assert!(matches!(
+            parse_vary(&crate::tests::owned_headers(&headers)),
+            VarySpec::Any
+        ));
     }
 }

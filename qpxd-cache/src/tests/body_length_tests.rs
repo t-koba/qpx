@@ -20,7 +20,7 @@ async fn store_length_case(
         request,
         &key,
         &policy(),
-        response,
+        qpx_core::http_message::Response::from_http(response),
         CacheStoreContext {
             timing: CacheStoreTiming {
                 response_delay_secs: 0,
@@ -33,7 +33,7 @@ async fn store_length_case(
     )
     .await
     .expect("client response");
-    let (parts, body) = response.into_parts();
+    let (parts, body) = response.into_http_for_library().into_parts();
     let bytes = qpx_http::body::to_bytes(body)
         .await
         .expect("client body must not be aborted by cache validation");
@@ -176,17 +176,44 @@ async fn matching_duplicate_lengths_and_unspecified_length_are_stored() {
         let backends = backend_map();
         let mut response = make_response(StatusCode::OK, "public, max-age=60", payload);
         response.headers_mut().remove(CONTENT_LENGTH);
-        for value in values {
+        for value in &values {
             response
                 .headers_mut()
                 .append(CONTENT_LENGTH, value.parse().expect("header"));
         }
-        store_length_case(&req, response, &backends).await;
+        let mut sensitive = http::HeaderValue::from_static("one");
+        sensitive.set_sensitive(true);
+        response.headers_mut().append("x-duplicate", sensitive);
+        response
+            .headers_mut()
+            .append("x-duplicate", "two".parse().unwrap());
+        response.extensions_mut().insert(42usize);
+        *response.version_mut() = http::Version::HTTP_2;
+        let client = store_length_case(&req, response, &backends).await;
+        assert_eq!(client.version(), http::Version::HTTP_2);
+        assert_eq!(client.extensions().get::<usize>(), Some(&42));
+        let lengths: Vec<_> = client
+            .headers()
+            .get_all(CONTENT_LENGTH)
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect();
+        assert_eq!(lengths, values);
+        let duplicates: Vec<_> = client
+            .headers()
+            .get_all("x-duplicate")
+            .iter()
+            .map(|v| (v.as_bytes(), v.is_sensitive()))
+            .collect();
+        assert_eq!(
+            duplicates,
+            vec![(b"one".as_slice(), true), (b"two".as_slice(), false)]
+        );
         let LookupOutcome::Hit(hit) = lookup_length_case(&req, &backends).await else {
             panic!("matching body must be stored");
         };
         assert_eq!(
-            qpx_http::body::to_bytes(hit.into_body())
+            qpx_http::body::to_bytes(hit.into_head_and_body().1)
                 .await
                 .expect("body"),
             payload

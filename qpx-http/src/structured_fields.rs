@@ -45,6 +45,17 @@ pub fn parse_list_fields(
     parse_list(&value).map(Some)
 }
 
+/// Parse repeated ordinary Dictionary fields without exposing an owner's raw map.
+pub fn parse_ordinary_dictionary_fields(
+    headers: &impl OrdinaryHeaderMut,
+    name: &OrdinaryHeaderName,
+) -> Result<Option<Dictionary>, sfv::Error> {
+    let Some(value) = combine_values(headers.ordinary_values(name)) else {
+        return Ok(None);
+    };
+    parse_dictionary(&value).map(Some)
+}
+
 /// Parse repeated ordinary List fields without exposing an owner's raw map.
 pub fn parse_ordinary_list_fields(
     headers: &impl OrdinaryHeaderMut,

@@ -292,11 +292,18 @@ async fn grpc_web_text_base64_boundary_split() -> Result<()> {
         None,
     )
     .await;
-    let (_qpxd, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
+    let (proxy, port, cert_path) = spawn_reverse_h3_proxy(backend_port, "").await?;
 
     let response = request_h3(port, &cert_path, "/grpc-web-text", &[], false).await?;
 
-    assert_eq!(response.status, http::StatusCode::OK);
+    assert_eq!(
+        response.status,
+        http::StatusCode::OK,
+        "backend {backend_port}; body={:?}; data_error={:?}{}",
+        String::from_utf8_lossy(&response.body),
+        response.data_error,
+        proxy.log_tail()
+    );
     assert_eq!(response.body, encoded.as_ref());
     assert!(
         response.data_error.is_none(),

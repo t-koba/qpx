@@ -168,7 +168,7 @@ pub(super) async fn finish_reverse_upstream_failure<R: ReverseTerminalResponse>(
     )
     .await?
     {
-        return Ok((Vec::new(), R::from_finalized_http(stale)));
+        return Ok((Vec::new(), R::from_finalized_owner(stale)));
     }
     if let Some(err) = input.last_err.as_ref() {
         input.http_modules.on_error(err).await;

@@ -14,7 +14,7 @@ use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::upstream::http1::proxy_http1_request_with_interim;
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
@@ -129,7 +129,7 @@ pub(super) async fn execute_forward_upstream(
     if !proxied.interim.is_empty() {
         response.extensions_mut().insert(proxied.interim);
     }
-    response = http_modules.on_upstream_response(response).await?;
+    let mut response = OwnerResponse::from_http(http_modules.on_upstream_response(response).await?);
     let response_policy_tags = match apply_forward_response_policy(ForwardResponsePolicyInput {
         response,
         response_engine,
@@ -203,9 +203,6 @@ pub(super) async fn execute_forward_upstream(
         state,
     })
     .await?;
-    // Cache writeback is the last standard-only stage. Keep the owner across
-    // downstream module preparation, finalization, capture and serialization.
-    let response = OwnerResponse::from_http(response);
     let mut response = http_modules.prepare_downstream_response(response).await?;
     finalize_response_with_headers_in_place(
         request_method,
@@ -228,7 +225,7 @@ pub(super) async fn execute_forward_upstream(
 }
 
 pub(super) struct ForwardResponsePolicyInput<'a> {
-    pub(super) response: Response<Body>,
+    pub(super) response: OwnerResponse<Body>,
     pub(super) response_engine:
         Option<&'a crate::http::policy::response_policy::HttpResponseRuleEngine>,
     pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,

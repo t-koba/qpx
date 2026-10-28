@@ -142,7 +142,7 @@ async fn empty_grpc_response_reports_zero_payload_size() {
         .body(Body::from(body))
         .expect("response");
     let response = crate::http::body::size::buffer_response_body_with_reason(
-        response,
+        qpx_core::http_message::Response::from_http(response),
         1024,
         Duration::from_secs(1),
         "rpc.body",
@@ -174,7 +174,7 @@ async fn trailer_only_grpc_web_response_keeps_zero_size_with_trailers() {
         .body(Body::from(body))
         .expect("response");
     let response = crate::http::body::size::buffer_response_body_with_reason(
-        response,
+        qpx_core::http_message::Response::from_http(response),
         1024,
         Duration::from_secs(1),
         "rpc.body",
@@ -245,7 +245,7 @@ async fn malformed_grpc_response_falls_back_to_observed_size() {
         .body(Body::from(body.clone()))
         .expect("response");
     let response = crate::http::body::size::buffer_response_body_with_reason(
-        response,
+        qpx_core::http_message::Response::from_http(response),
         1024,
         Duration::from_secs(1),
         "rpc.body",
@@ -980,7 +980,7 @@ mod connect_inspection_tests {
         body
     }
 
-    async fn check_framed_error_inspection(response: http::Response<Body>) {
+    async fn check_framed_error_inspection(response: qpx_core::http_message::Response<Body>) {
         let ctx = connect_request_ctx().await;
         let inspected = inspect_response(&ctx, &response).await;
         assert_eq!(inspected.protocol.as_deref(), Some("connect"));
@@ -997,10 +997,14 @@ mod connect_inspection_tests {
             .body(Body::from(framed_error_body()))
             .expect("response");
 
-        let response =
-            buffer_response_body_with_reason(response, 1024, Duration::from_secs(1), "rpc.body")
-                .await
-                .expect("buffered");
+        let response = buffer_response_body_with_reason(
+            qpx_core::http_message::Response::from_http(response),
+            1024,
+            Duration::from_secs(1),
+            "rpc.body",
+        )
+        .await
+        .expect("buffered");
         let precomputed = response
             .extensions()
             .get::<PrecomputedRpcBodySummary>()
@@ -1020,9 +1024,13 @@ mod connect_inspection_tests {
             .body(Body::from(framed_error_body()))
             .expect("response");
 
-        let response = buffer_response_body(response, 1024, Duration::from_secs(1))
-            .await
-            .expect("buffered");
+        let response = buffer_response_body(
+            qpx_core::http_message::Response::from_http(response),
+            1024,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("buffered");
         assert!(
             response
                 .extensions()
@@ -1041,9 +1049,13 @@ mod connect_inspection_tests {
             .body(Body::from(r#"{"code":"unavailable","message":"busy"}"#))
             .expect("response");
 
-        let response = buffer_response_body(response, 1024, Duration::from_secs(1))
-            .await
-            .expect("buffered");
+        let response = buffer_response_body(
+            qpx_core::http_message::Response::from_http(response),
+            1024,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("buffered");
         let ctx = connect_request_ctx().await;
         let inspected = inspect_response(&ctx, &response).await;
         assert_eq!(inspected.protocol.as_deref(), Some("connect"));
@@ -1240,7 +1252,8 @@ async fn recognized_connect_get_keeps_unary_label_on_response() {
     let response = http::Response::builder()
         .body(Body::empty())
         .expect("response");
-    let inspected = inspect_response(&ctx, &response).await;
+    let inspected =
+        inspect_response(&ctx, &qpx_core::http_message::Response::from_http(response)).await;
     assert_eq!(inspected.streaming.as_deref(), Some("unary"));
 }
 

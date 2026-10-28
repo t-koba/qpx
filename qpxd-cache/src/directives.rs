@@ -3,7 +3,7 @@ use super::types::{ByteRangeSpec, IfRangeCondition, RequestDirectives, ResponseD
 use http::HeaderName;
 use http::header::CACHE_CONTROL;
 use qpx_core::http_message::{Headers as OwnedHeaders, OrdinaryHeaderName};
-use qpx_http::structured_fields::{BareItem, ListEntry, parse_dictionary_fields};
+use qpx_http::structured_fields::{BareItem, ListEntry, parse_ordinary_dictionary_fields};
 
 fn ord(name: &str) -> OrdinaryHeaderName {
     OrdinaryHeaderName::try_from(name).expect("ordinary header name")
@@ -116,7 +116,7 @@ pub fn parse_if_match(headers: &OwnedHeaders) -> Vec<String> {
     out
 }
 
-pub fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
+pub fn parse_response_directives(headers: &OwnedHeaders) -> ResponseDirectives {
     parse_response_directives_for_targets(
         headers,
         &[QPX_CACHE_CONTROL.clone(), CDN_CACHE_CONTROL.clone()],
@@ -124,11 +124,11 @@ pub fn parse_response_directives(headers: &http::HeaderMap) -> ResponseDirective
 }
 
 pub fn parse_response_directives_for_targets(
-    headers: &http::HeaderMap,
+    headers: &OwnedHeaders,
     target_list: &[HeaderName],
 ) -> ResponseDirectives {
     for name in target_list {
-        if headers.contains_key(name) {
+        if headers.contains_key(&ord(name.as_str())) {
             return parse_targeted_response_directives(headers, name).unwrap_or_else(|()| {
                 ResponseDirectives {
                     no_store: true,
@@ -142,10 +142,10 @@ pub fn parse_response_directives_for_targets(
 }
 
 fn parse_targeted_response_directives(
-    headers: &http::HeaderMap,
+    headers: &OwnedHeaders,
     name: &HeaderName,
 ) -> Result<ResponseDirectives, ()> {
-    let dictionary = parse_dictionary_fields(headers, name)
+    let dictionary = parse_ordinary_dictionary_fields(headers, &ord(name.as_str()))
         .map_err(|_| ())?
         .ok_or(())?;
     if dictionary.is_empty() {
@@ -220,11 +220,13 @@ fn require_non_negative_integer(value: &BareItem) -> Option<u64> {
 /// Parses the standard `Cache-Control` response header only (never the
 /// cache-namespaced targeting headers); shared by caching and by modules
 /// that must honor origin directives such as `no-transform`.
-pub fn parse_cache_control_response_directives(headers: &http::HeaderMap) -> ResponseDirectives {
+pub fn parse_cache_control_response_directives(
+    headers: &impl qpx_core::http_message::OrdinaryHeaderMut,
+) -> ResponseDirectives {
     let mut out = ResponseDirectives::default();
     let mut saw_max_age = false;
     let mut saw_s_maxage = false;
-    for value in headers.get_all(CACHE_CONTROL) {
+    for value in headers.ordinary_values(&ord(CACHE_CONTROL.as_str())) {
         let Ok(value) = value.to_str() else {
             continue;
         };

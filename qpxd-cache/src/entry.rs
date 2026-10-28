@@ -5,7 +5,9 @@ use super::types::{
 };
 use anyhow::Result;
 use http::header::{ACCEPT_RANGES, CONTENT_RANGE};
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
+use qpx_core::http_message::OrdinaryHeaderName;
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 
 pub fn primary_from_variant_key(variant_key: &str) -> Option<&str> {
@@ -131,12 +133,11 @@ pub fn response_from_envelope_for_request_with_body(
 }
 
 pub fn precondition_failed_response(cache_state: &'static str) -> Result<Response<Body>> {
-    let mut response = Response::builder()
-        .status(StatusCode::PRECONDITION_FAILED)
-        .body(Body::empty())?;
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::PRECONDITION_FAILED;
     response
         .headers_mut()
-        .insert(CACHE_HEADER, cache_status_header(cache_state, None)?);
+        .insert(ord(CACHE_HEADER), cache_status_header(cache_state, None)?);
     Ok(response)
 }
 
@@ -192,11 +193,14 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
         cache_status,
     );
     if let Some(content_range) = params.content_range {
-        response
-            .headers_mut()
-            .insert(ACCEPT_RANGES, http::HeaderValue::from_static("bytes"));
+        response.headers_mut().insert(
+            ord(ACCEPT_RANGES.as_str()),
+            http::HeaderValue::from_static("bytes"),
+        );
         if let Ok(value) = http::HeaderValue::from_str(content_range) {
-            response.headers_mut().insert(CONTENT_RANGE, value);
+            response
+                .headers_mut()
+                .insert(ord(CONTENT_RANGE.as_str()), value);
         }
     }
     Ok(response)
@@ -225,6 +229,9 @@ pub fn resolve_range(range: &ByteRangeSpec, len: u64) -> Option<(u64, u64)> {
     }
 }
 
+fn ord(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary header name")
+}
 #[cfg(test)]
 mod tests {
     use super::*;

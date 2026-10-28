@@ -46,13 +46,12 @@ async fn lookup_serves_single_range_from_cache() {
     };
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
     assert_eq!(
-        response
-            .headers()
+        crate::tests::wire_headers(response.headers())
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok()),
         Some("bytes 6-10/11")
     );
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"world");
@@ -93,8 +92,12 @@ async fn lookup_ignores_range_for_head_requests() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(response.status(), StatusCode::OK);
-    assert!(response.headers().get(CONTENT_RANGE).is_none());
-    let body = qpx_http::body::to_bytes(response.into_body())
+    assert!(
+        crate::tests::wire_headers(response.headers())
+            .get(CONTENT_RANGE)
+            .is_none()
+    );
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert!(body.is_empty());
@@ -182,8 +185,7 @@ async fn lookup_returns_416_for_unsatisfiable_range() {
     };
     assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
     assert_eq!(
-        response
-            .headers()
+        crate::tests::wire_headers(response.headers())
             .get(CONTENT_RANGE)
             .and_then(|value| value.to_str().ok()),
         Some("bytes */5")
@@ -237,7 +239,7 @@ async fn if_range_mismatch_falls_back_to_full_response() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(response.status(), StatusCode::OK);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"hello");
@@ -292,7 +294,7 @@ async fn if_range_later_date_falls_back_to_full_response() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(response.status(), StatusCode::OK);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"hello");
@@ -349,7 +351,7 @@ async fn if_range_equal_date_serves_partial_response() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"he");
@@ -400,7 +402,7 @@ async fn if_range_equal_date_without_date_falls_back_to_full_response() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(response.status(), StatusCode::OK);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"hello");
@@ -455,7 +457,7 @@ async fn if_range_equal_date_with_same_date_falls_back_to_full_response() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(response.status(), StatusCode::OK);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"hello");
@@ -510,7 +512,7 @@ async fn if_range_equal_date_with_earlier_date_falls_back_to_full_response() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(response.status(), StatusCode::OK);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"hello");

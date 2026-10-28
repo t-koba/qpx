@@ -119,13 +119,14 @@ settings:
     .expect("response");
 
     assert_eq!(
-        response
-            .headers()
+        crate::test_util::wire_headers(response.headers())
             .get(http::header::CONTENT_ENCODING)
             .and_then(|value| value.to_str().ok()),
         Some("gzip")
     );
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(decode_gzip(body.as_ref()), "mitm compression");
 }
 
@@ -210,7 +211,10 @@ async fn mitm_forwards_owned_request_bytes_and_body() {
         .expect("MITM response");
         assert_eq!(response.status(), http::StatusCode::OK);
         assert_eq!(
-            to_bytes(response.into_body()).await.unwrap().as_ref(),
+            to_bytes(response.into_head_and_body().1)
+                .await
+                .unwrap()
+                .as_ref(),
             b"ok"
         );
         let (head, body) = observed_rx.await.expect("observed request");

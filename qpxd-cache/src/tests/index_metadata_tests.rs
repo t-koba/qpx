@@ -117,7 +117,7 @@ async fn request_collapse_guard_waits_for_cache_writeback() {
         &req,
         &key,
         &policy(),
-        response,
+        qpx_core::http_message::Response::from_http(response),
         CacheStoreContext {
             timing: CacheStoreTiming {
                 response_delay_secs: 0,
@@ -139,7 +139,7 @@ async fn request_collapse_guard_waits_for_cache_writeback() {
         .await
         .expect("send body");
     drop(sender);
-    let _ = qpx_http::body::to_bytes(stored.into_body())
+    let _ = qpx_http::body::to_bytes(stored.into_head_and_body().1)
         .await
         .expect("drain primary body");
     assert!(wait_task.await.expect("wait task"));

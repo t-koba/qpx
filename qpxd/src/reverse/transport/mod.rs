@@ -88,6 +88,7 @@ pub(super) trait ReverseTerminalResponse:
 {
     type Headers: OrdinaryHeaderMut;
     fn from_finalized_http(response: Response<Body>) -> Self;
+    fn from_finalized_owner(response: OwnerResponse<Body>) -> Self;
     fn terminal_headers_mut(&mut self) -> &mut Self::Headers;
 }
 
@@ -95,6 +96,9 @@ impl ReverseTerminalResponse for Response<Body> {
     type Headers = http::HeaderMap;
     fn from_finalized_http(response: Response<Body>) -> Self {
         response
+    }
+    fn from_finalized_owner(response: OwnerResponse<Body>) -> Self {
+        response.into_http_for_library()
     }
     fn terminal_headers_mut(&mut self) -> &mut Self::Headers {
         self.headers_mut()
@@ -105,6 +109,9 @@ impl ReverseTerminalResponse for OwnerResponse<Body> {
     type Headers = Headers;
     fn from_finalized_http(response: Response<Body>) -> Self {
         Self::from_http(response)
+    }
+    fn from_finalized_owner(response: OwnerResponse<Body>) -> Self {
+        response
     }
     fn terminal_headers_mut(&mut self) -> &mut Self::Headers {
         self.headers_mut()

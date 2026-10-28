@@ -1,11 +1,11 @@
-use super::cache::CachedResponseCarrier;
 use super::{DispatchAuditContext, DispatchCachedResponseInput, DispatchOutcome};
 use crate::http::capture::cache_flow::CacheLookupDecision;
 use crate::http::dispatch::finalize_dispatch_cached_response;
-use crate::http::protocol::header_control::ResponseHeaderControl;
 use anyhow::Result;
 use hyper::Method;
+use qpx_core::http_message::Response;
 use qpx_core::rules::CompiledHeaderControl;
+use qpx_http::body::Body;
 
 pub(crate) fn cache_decision_is_hit(decision: &CacheLookupDecision) -> bool {
     use CacheLookupDecision::{Hit, StaleWhileRevalidate};
@@ -36,12 +36,9 @@ pub(crate) struct DispatchCollapsedCacheDecisionInput<'a> {
     pub(crate) audit: &'a DispatchAuditContext,
 }
 
-pub(crate) async fn finalize_dispatch_cache_decision<R: CachedResponseCarrier>(
+pub(crate) async fn finalize_dispatch_cache_decision(
     input: DispatchCacheDecisionInput<'_>,
-) -> Result<Option<R>>
-where
-    R::Headers: ResponseHeaderControl,
-{
+) -> Result<Option<Response<Body>>> {
     let (response, outcome) = match input.decision {
         CacheLookupDecision::Hit(hit) => (hit, input.hit_outcome),
         CacheLookupDecision::StaleWhileRevalidate(hit, _) => (*hit, input.stale_outcome),
@@ -66,12 +63,9 @@ where
     ))
 }
 
-pub(crate) async fn finalize_dispatch_collapsed_cache_decision<R: CachedResponseCarrier>(
+pub(crate) async fn finalize_dispatch_collapsed_cache_decision(
     input: DispatchCollapsedCacheDecisionInput<'_>,
-) -> Result<Option<R>>
-where
-    R::Headers: ResponseHeaderControl,
-{
+) -> Result<Option<Response<Body>>> {
     finalize_dispatch_cache_decision(DispatchCacheDecisionInput {
         decision: input.decision,
         hit_outcome: DispatchOutcome::CacheCollapsedHit,

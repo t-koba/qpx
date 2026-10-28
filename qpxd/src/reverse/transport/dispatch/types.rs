@@ -8,7 +8,7 @@ use crate::reverse::transport::request_template::{ReverseReplayRecorder, Reverse
 use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use crate::runtime::{self, Runtime};
 use hyper::{Method, Response};
-use qpx_core::http_message::{Headers, Request as OwnerRequest};
+use qpx_core::http_message::{Headers, Request as OwnerRequest, Response as OwnerResponse};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -107,8 +107,8 @@ pub(super) struct ReverseWebsocketDispatch<'a> {
 
 /// Shared shape for reverse dispatch stages that either short-circuit with a
 /// finalized response or continue with stage-specific state.
-pub(super) enum ReverseStageOutcome<T> {
-    Response(Box<Response<Body>>),
+pub(super) enum ReverseStageOutcome<T, R = Response<Body>> {
+    Response(Box<R>),
     Continue(T),
 }
 
@@ -166,7 +166,7 @@ pub(super) struct ReverseModuleInput<'a> {
     pub(super) audit_ctx: &'a DispatchAuditContext,
 }
 
-pub(super) type ReverseCacheOutcome = ReverseStageOutcome<ReverseCacheState>;
+pub(super) type ReverseCacheOutcome = ReverseStageOutcome<ReverseCacheState, OwnerResponse<Body>>;
 
 pub(super) struct ReverseCacheState {
     pub(super) req: OwnerRequest<Body>,
@@ -326,7 +326,7 @@ pub(super) enum ReverseAttemptOutcome<R = Response<Body>> {
 }
 
 pub(super) type ReverseResponseRuleContinue = (
-    Response<Body>,
+    OwnerResponse<Body>,
     Option<Arc<CompiledHeaderControl>>,
     bool,
     Vec<String>,
@@ -374,6 +374,6 @@ pub(super) struct ReverseSuccessInput<'a> {
     pub(super) upstream_cert: Option<&'a qpx_core::tls::UpstreamCertificateInfo>,
     pub(super) interim: InterimList,
     pub(super) started: Option<Instant>,
-    pub(super) response: Response<Body>,
+    pub(super) response: OwnerResponse<Body>,
     pub(super) export_session: Option<&'a crate::exporter::ExportSession>,
 }

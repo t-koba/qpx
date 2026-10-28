@@ -364,7 +364,7 @@ pub(super) async fn proxy_transparent_http1(
     if !proxied.interim.is_empty() {
         response.extensions_mut().insert(proxied.interim);
     }
-    response = http_modules.on_upstream_response(response).await?;
+    let mut response = OwnerResponse::from_http(http_modules.on_upstream_response(response).await?);
     let response_candidates = input
         .response_engine
         .map(|engine| {
@@ -460,10 +460,5 @@ pub(super) async fn proxy_transparent_http1(
         DispatchOutcome::Allow,
         &response_policy_tags,
     );
-    Ok(emit_optional_response_for_export(
-        OwnerResponse::from_http(response),
-        input.selected_plan,
-        export_session,
-    )
-    .await)
+    Ok(emit_optional_response_for_export(response, input.selected_plan, export_session).await)
 }

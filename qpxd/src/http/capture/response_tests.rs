@@ -44,12 +44,16 @@ fn fields(response: &impl ResponseCarrier) -> String {
 async fn response_preview_owner_matches_legacy_bytes_and_observed_prefix() {
     for lengths in [&[][..], &["0"], &["+10"], &["10, 10"], &["10", "11"]] {
         let standard = crate::http::body::size::buffer_response_body(
-            response(lengths, Body::from("body-prefix")),
+            qpx_core::http_message::Response::from_http(response(
+                lengths,
+                Body::from("body-prefix"),
+            )),
             32,
             Duration::from_secs(1),
         )
         .await
         .unwrap();
+        let standard = standard.into_http_for_library();
         let expected = crate::exporter::serialize_response_preview_async(&standard).await;
         let owner = OwnerResponse::from_http(standard);
         assert_eq!(

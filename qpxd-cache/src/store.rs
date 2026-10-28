@@ -8,19 +8,17 @@ use super::types::{
     MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives, RevalidationState, VarySpec,
     cache_body_storage_key, cache_status_header, encode_cached_response_metadata,
 };
-use super::util::{
-    cache_namespace, load_variant_index, now_millis, sanitize_cached_headers_for_storage,
-    upsert_variant_with_cap,
-};
+use super::util::{cache_namespace, load_variant_index, now_millis, upsert_variant_with_cap};
 use super::vary::{
     index_storage_key, parse_vary, variant_storage_key, vary_values_from_request_headers,
 };
 use anyhow::Result;
 use http::header::{CONTENT_LOCATION, EXPIRES, SET_COOKIE};
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_content_length::VarySelector;
 use qpx_core::http_message::OwnedHeaderView;
+use qpx_core::http_message::Response;
 use qpx_core::http_message::{
     Headers as OwnedHeaders, OrdinaryHeaderName, Request as OwnerRequest,
 };
@@ -67,7 +65,7 @@ pub async fn maybe_store(
     if req.no_store {
         response
             .headers_mut()
-            .insert(CACHE_HEADER, cache_status_header("BYPASS", None)?);
+            .insert(ord(CACHE_HEADER), cache_status_header("BYPASS", None)?);
         return Ok(response);
     }
 
@@ -92,7 +90,7 @@ pub async fn maybe_store(
     if !is_storable {
         response
             .headers_mut()
-            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+            .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
         return Ok(response);
     }
     let expected_body_length =
@@ -103,7 +101,7 @@ pub async fn maybe_store(
                 // still the protocol writer's responsibility, not the cache's.
                 response
                     .headers_mut()
-                    .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+                    .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
                 return Ok(response);
             }
         };
@@ -112,7 +110,7 @@ pub async fn maybe_store(
         VarySpec::Any => {
             response
                 .headers_mut()
-                .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+                .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
             return Ok(response);
         }
         VarySpec::Fields(v) => v,
@@ -121,7 +119,7 @@ pub async fn maybe_store(
     let Some(freshness_lifetime_secs) = freshness else {
         response
             .headers_mut()
-            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+            .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
         return Ok(response);
     };
 
@@ -129,7 +127,7 @@ pub async fn maybe_store(
         super::metrics::writeback_admission_rejected();
         response
             .headers_mut()
-            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+            .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
         return Ok(response);
     };
 
@@ -147,7 +145,7 @@ pub async fn maybe_store(
         // (e.g. obs-text) must neither be stored nor served to others.
         response
             .headers_mut()
-            .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+            .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
         return Ok(response);
     };
     let variant_key = variant_storage_key(storage_primary.as_ref(), &vary_values);
@@ -159,10 +157,7 @@ pub async fn maybe_store(
         storage_primary,
         variant_key,
         status: response.status().as_u16(),
-        headers: CachedHeaders::from_pairs(sanitize_cached_headers_for_storage(
-            response.headers(),
-            &resp_directives,
-        )),
+        headers: CachedHeaders::from_live(response.headers(), &resp_directives),
         stored_at_ms: now,
         initial_age_secs,
         response_delay_secs: context.timing.response_delay_secs,
@@ -176,7 +171,7 @@ pub async fn maybe_store(
         _writeback_permit: writeback_permit,
     };
 
-    let (parts, body) = response.into_parts();
+    let (parts, body) = response.into_head_and_body();
     let (primary_body, mut mirrors) = qpx_http::body::tee::tee_body_lossy_with_metrics(
         body,
         vec![Some(max_cacheable_body_bytes)],
@@ -195,11 +190,11 @@ pub async fn maybe_store(
     } else {
         warn!("cache writeback mirror was not created");
     }
-    let mut response = Response::from_parts(parts, primary_body);
+    let mut response = parts.map_body(|()| primary_body);
 
     response
         .headers_mut()
-        .insert(CACHE_HEADER, cache_status_header("MISS", None)?);
+        .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
     Ok(response)
 }
 
@@ -485,7 +480,7 @@ pub(super) fn is_response_storable(
     {
         return false;
     }
-    if response.headers().contains_key(SET_COOKIE) {
+    if response.headers().contains_key(&ord(SET_COOKIE.as_str())) {
         if !policy.allow_set_cookie_store {
             return false;
         }
@@ -539,7 +534,7 @@ pub(super) fn is_response_storable(
 
 fn response_storage_key(
     request_method: &Method,
-    response_headers: &http::HeaderMap,
+    response_headers: &OwnedHeaders,
     key: &CacheRequestKey,
 ) -> Option<CacheRequestKey> {
     match *request_method {
@@ -552,12 +547,12 @@ fn response_storage_key(
 }
 
 fn has_explicit_freshness(
-    response_headers: &http::HeaderMap,
+    response_headers: &OwnedHeaders,
     directives: &ResponseDirectives,
 ) -> bool {
     directives.s_maxage.is_some()
         || directives.max_age.is_some()
-        || response_headers.contains_key(EXPIRES)
+        || response_headers.contains_key(&ord(EXPIRES.as_str()))
 }
 
 fn cache_vary_values(
@@ -588,12 +583,9 @@ fn refreshed_vary_values(
     values
 }
 
-fn content_location_matches_target(
-    response_headers: &http::HeaderMap,
-    key: &CacheRequestKey,
-) -> bool {
+fn content_location_matches_target(response_headers: &OwnedHeaders, key: &CacheRequestKey) -> bool {
     let Some(raw) = response_headers
-        .get(CONTENT_LOCATION)
+        .get(&ord(CONTENT_LOCATION.as_str()))
         .and_then(|value| value.to_str().ok())
         .map(str::trim)
         .filter(|value| !value.is_empty())

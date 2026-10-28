@@ -31,8 +31,6 @@ pub(crate) async fn read_body_trailers(
 /// length, and a declaration that names no length - one that is not text,
 /// one whose members are not digits, or one whose members disagree - gives
 /// no hint, so the body is observed rather than sized from the declaration.
-pub(super) fn declared_size_hint(headers: &HeaderMap) -> Option<u64> {
-    qpx_core::http_content_length::declared_content_length(headers)
-        .ok()
-        .flatten()
+pub(super) fn declared_size_hint(headers: &qpx_core::http_message::Headers) -> Option<u64> {
+    headers.declared_content_length().ok().flatten()
 }

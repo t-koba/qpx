@@ -15,17 +15,17 @@ pub fn current_age_secs(envelope: &CachedResponseEnvelope, now_ms: u64) -> u64 {
 }
 
 pub fn initial_age_secs(
-    headers: &http::HeaderMap,
+    headers: &OwnedHeaders,
     response_time_ms: u64,
     response_delay_secs: u64,
 ) -> u64 {
     let age_value = headers
-        .get(AGE)
+        .get(&ord(AGE.as_str()))
         .and_then(|v| v.to_str().ok())
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(0);
     let apparent_age = headers
-        .get(DATE)
+        .get(&ord(DATE.as_str()))
         .and_then(|v| v.to_str().ok())
         .and_then(parse_http_date_secs)
         .map(|date_secs| (response_time_ms / 1000).saturating_sub(date_secs))
@@ -35,7 +35,7 @@ pub fn initial_age_secs(
 }
 
 pub fn freshness_lifetime_secs(
-    headers: &http::HeaderMap,
+    headers: &OwnedHeaders,
     policy: &CachePolicyConfig,
     now_ms: u64,
     directives: &ResponseDirectives,
@@ -49,14 +49,17 @@ pub fn freshness_lifetime_secs(
     if let Some(ttl) = directives.max_age {
         return Some(ttl);
     }
-    if let Some(expires_raw) = headers.get(EXPIRES).and_then(|v| v.to_str().ok()) {
+    if let Some(expires_raw) = headers
+        .get(&ord(EXPIRES.as_str()))
+        .and_then(|v| v.to_str().ok())
+    {
         let Some(expires_secs) = parse_http_date_secs(expires_raw) else {
             // RFC 9111: invalid Expires must be treated as already expired (stale), not a
             // reason to fall back to heuristic/default freshness.
             return Some(0);
         };
         let date_secs = headers
-            .get(DATE)
+            .get(&ord(DATE.as_str()))
             .and_then(|v| v.to_str().ok())
             .and_then(parse_http_date_secs)
             .unwrap_or(now_ms / 1000);

@@ -14,8 +14,9 @@ use super::types::{
 use super::util::{cache_namespace, now_millis};
 use super::vary::matches_vary;
 use anyhow::Result;
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::config::CachePolicyConfig;
+use qpx_core::http_message::Response;
 use qpx_core::http_message::{
     Headers as OwnedHeaders, OrdinaryHeaderName, Request as OwnerRequest,
 };
@@ -405,12 +406,10 @@ pub fn attach_revalidation_headers(
 }
 
 pub fn build_only_if_cached_miss_response(message: &str) -> Response<Body> {
-    let mut response = Response::builder()
-        .status(StatusCode::GATEWAY_TIMEOUT)
-        .body(Body::from(message.to_owned()))
-        .unwrap_or_else(|_| Response::new(Body::from(message.to_owned())));
+    let mut response = Response::new(Body::from(message.to_owned()));
+    *response.status_mut() = StatusCode::GATEWAY_TIMEOUT;
     response.headers_mut().insert(
-        CACHE_HEADER,
+        ord(CACHE_HEADER),
         cache_status_header("BYPASS", None)
             .expect("the static bypass Cache-Status value must be valid"),
     );

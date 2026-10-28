@@ -54,7 +54,7 @@ async fn response_policy_surfaces_tags_and_retry_controls() {
             path: Some("/"),
             ..Default::default()
         },
-        response,
+        qpx_core::http_message::Response::from_http(response),
         None,
         None,
         ResponseBodyObservationLimits {
@@ -153,7 +153,7 @@ async fn response_policy_does_not_buffer_for_later_body_rule_after_header_match(
             path: Some("/"),
             ..Default::default()
         },
-        response,
+        qpx_core::http_message::Response::from_http(response),
         None,
         None,
         ResponseBodyObservationLimits {
@@ -185,7 +185,7 @@ async fn forced_body_observation_buffers_response_without_rules() {
         None,
         ResponseRuleCandidates::default(),
         RuleMatchContext::default(),
-        response,
+        qpx_core::http_message::Response::from_http(response),
         None,
         None,
         ResponseBodyObservationLimits {
@@ -247,10 +247,13 @@ async fn grpc_status_rule_matches_trailers() {
         .header(http::header::CONTENT_TYPE, "application/grpc")
         .body(body)
         .expect("response");
-    let response =
-        crate::http::body::size::buffer_response_body(response, usize::MAX, Duration::from_secs(1))
-            .await
-            .expect("buffer");
+    let response = crate::http::body::size::buffer_response_body(
+        qpx_core::http_message::Response::from_http(response),
+        usize::MAX,
+        Duration::from_secs(1),
+    )
+    .await
+    .expect("buffer");
     let request_rpc = crate::http::rpc::RpcMatchContext {
         protocol: Some("grpc".to_string()),
         service: Some("demo.Echo".to_string()),
@@ -355,7 +358,7 @@ async fn rpc_protocol_service_method_rule_uses_request_rpc_without_response_insp
             path: Some("/demo.Echo/Say"),
             ..Default::default()
         },
-        response,
+        qpx_core::http_message::Response::from_http(response),
         None,
         Some(&request_rpc),
         ResponseBodyObservationLimits {
@@ -501,4 +504,111 @@ fn response_request_observation_does_not_evaluate_response_headers_against_reque
     );
     assert!(requirements.needs_rpc);
     assert!(requirements.needs_body);
+}
+
+#[tokio::test]
+async fn owned_policy_observation_preserves_head_framing_extensions_and_trailers() {
+    use http::HeaderValue;
+    use qpx_core::config::HeaderMatch;
+    use qpx_core::http_message::{OrdinaryHeaderName, Response as OwnedResponse};
+    let engine = HttpResponseRuleEngine::new(&[HttpResponseRuleConfig {
+        name: "owner-continuation".into(),
+        r#match: Some(MatchConfig {
+            response_status: vec!["201".into()],
+            headers: vec![HeaderMatch {
+                name: "x-match".into(),
+                value: Some("yes".into()),
+                regex: None,
+            }],
+            ..Default::default()
+        }),
+        effects: HttpResponseEffectsConfig {
+            tags: vec!["observed".into()],
+            ..Default::default()
+        },
+    }])
+    .unwrap()
+    .unwrap();
+    for lengths in [
+        vec![],
+        vec!["0"],
+        vec!["2, 02", " 2 "],
+        vec!["invalid"],
+        vec!["2", "3"],
+    ] {
+        let mut trailers = http::HeaderMap::new();
+        trailers.insert("x-trailer", HeaderValue::from_static("kept"));
+        let mut raw = http::Response::builder()
+            .status(201)
+            .version(http::Version::HTTP_2)
+            .header("x-match", "yes")
+            .body(Body::replay(
+                bytes::Bytes::from_static(b"ok"),
+                Some(trailers.clone()),
+            ))
+            .unwrap();
+        for value in lengths {
+            raw.headers_mut()
+                .append(http::header::CONTENT_LENGTH, value.parse().unwrap());
+        }
+        let mut sensitive = HeaderValue::from_bytes(b"\xff").unwrap();
+        sensitive.set_sensitive(true);
+        raw.headers_mut().append("x-repeat", sensitive);
+        raw.headers_mut()
+            .append("x-repeat", HeaderValue::from_static("second"));
+        raw.extensions_mut().insert(42usize);
+        let response = OwnedResponse::from_http(raw);
+        let original = response.headers().clone();
+        let candidates = engine.candidate_profile(MatchPrefilterContext {
+            method: Some("GET"),
+            dst_port: None,
+            src_ip: None,
+            host: None,
+            sni: None,
+            path: Some("/"),
+        });
+        let decision = apply_listener_response_policy(
+            Some(&engine),
+            candidates,
+            RuleMatchContext::default(),
+            response,
+            None,
+            None,
+            ResponseBodyObservationLimits {
+                max_body_bytes: 32,
+                read_timeout: Duration::from_secs(1),
+                force_body: true,
+            },
+        )
+        .await
+        .unwrap();
+        let ListenerResponsePolicyDecision::Continue {
+            mut response,
+            policy_tags,
+            ..
+        } = decision
+        else {
+            panic!("continuation");
+        };
+        assert_eq!(policy_tags, vec!["observed"]);
+        assert_eq!(response.status(), http::StatusCode::CREATED);
+        assert_eq!(response.version(), http::Version::HTTP_2);
+        assert_eq!(response.extensions().get::<usize>(), Some(&42));
+        assert_eq!(response.headers(), &original);
+        let repeated = response
+            .headers()
+            .get_all(&OrdinaryHeaderName::try_from("x-repeat").unwrap())
+            .map(|v| (v.as_bytes(), v.is_sensitive()))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            repeated,
+            vec![(b"\xff".as_slice(), true), (b"second".as_slice(), false)]
+        );
+        assert_eq!(response.body_mut().data().await.unwrap().unwrap(), "ok");
+        assert!(response.body_mut().data().await.is_none());
+        assert_eq!(
+            response.body_mut().trailers().await.unwrap(),
+            Some(trailers)
+        );
+    }
 }

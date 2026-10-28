@@ -17,9 +17,11 @@ async fn buffer_request_body_rejects_before_exceeding_hard_cap() {
 
 #[tokio::test]
 async fn observe_response_body_size_rejects_before_exceeding_hard_cap() {
-    let response = Response::builder()
-        .body(Body::from(vec![0_u8; 5]))
-        .expect("response");
+    let response = qpx_core::http_message::Response::from_http(
+        http::Response::builder()
+            .body(Body::from(vec![0_u8; 5]))
+            .expect("response"),
+    );
     let err = observe_response_body_size(response, 4, Duration::from_secs(1))
         .await
         .expect_err("body over cap must fail");
@@ -105,10 +107,12 @@ fn observed_request_size_reads_the_declaration_through_the_owner() {
 
 #[test]
 fn observed_response_size_reads_the_declaration_through_the_owner() {
-    let response = Response::builder()
-        .header(CONTENT_LENGTH, "9, 9")
-        .body(Body::empty())
-        .expect("response");
+    let response = qpx_core::http_message::Response::from_http(
+        http::Response::builder()
+            .header(CONTENT_LENGTH, "9, 9")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert_eq!(observed_response_size(&response), Some(9));
 }
 
@@ -164,10 +168,12 @@ fn limit_request_body_keeps_empty_body_at_end_of_stream() {
 #[tokio::test]
 async fn observe_response_body_size_rejects_content_length_over_cap_without_buffering() {
     let (_sender, body) = Body::channel();
-    let response = Response::builder()
-        .header(CONTENT_LENGTH, "9")
-        .body(body)
-        .expect("response");
+    let response = qpx_core::http_message::Response::from_http(
+        http::Response::builder()
+            .header(CONTENT_LENGTH, "9")
+            .body(body)
+            .expect("response"),
+    );
 
     let err = timeout(
         Duration::from_millis(25),

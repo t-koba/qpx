@@ -106,7 +106,7 @@ where
                 upstream_cert: Some(upstream_cert),
             };
             match proxy_mitm_request(req, runtime, sender, route).await {
-                Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
+                Ok(response) => Ok::<_, Infallible>(response),
                 Err(err) => {
                     warn!(error = ?err, "transparent MITM request failed");
                     Ok(OwnerResponse::from_http(

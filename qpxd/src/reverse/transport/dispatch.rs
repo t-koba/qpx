@@ -739,7 +739,7 @@ async fn complete_reverse_after_modules<R: ReverseTerminalResponse>(
     .await?
     {
         ReverseCacheOutcome::Response(response) => {
-            let mut response = R::from_finalized_http(*response);
+            let mut response = R::from_finalized_owner(*response);
             let export_session = state.export_session_for_plan(&route.plan, conn.remote_addr, host);
             response = crate::http::capture::stream::emit_optional_response_for_export(
                 response,

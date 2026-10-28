@@ -1,43 +1,20 @@
-use super::types::{CacheBackend, MAX_VARIANTS_PER_PRIMARY, ResponseDirectives, VariantIndex};
+use super::types::{CacheBackend, MAX_VARIANTS_PER_PRIMARY, VariantIndex};
 use super::vary::index_storage_key;
 use anyhow::Result;
 #[cfg(test)]
 use http::header::TRANSFER_ENCODING;
 use qpx_core::config::CachePolicyConfig;
+#[cfg(test)]
+use qpx_core::http_message::Headers as OwnedHeaders;
 pub use qpx_http::now_millis;
-use std::collections::HashSet;
 use tracing::warn;
 
-pub fn sanitize_cached_headers_for_storage(
-    headers: &http::HeaderMap,
-    directives: &ResponseDirectives,
-) -> Vec<(String, String)> {
-    let mut stripped = HashSet::new();
-    stripped.extend(directives.no_cache_fields.iter().cloned());
-    stripped.extend(directives.private_fields.iter().cloned());
-
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            if stripped.contains(name.as_str()) {
-                return None;
-            }
-            value
-                .to_str()
-                .ok()
-                .map(|v| (name.as_str().to_string(), v.to_string()))
-        })
-        .collect()
-}
-
 #[cfg(test)]
-pub fn cacheable_content_length(headers: &http::HeaderMap) -> Option<u64> {
-    if headers.contains_key(TRANSFER_ENCODING) {
+pub fn cacheable_content_length(headers: &OwnedHeaders) -> Option<u64> {
+    if headers.contains_key(&ord(TRANSFER_ENCODING.as_str())) {
         return None;
     }
-    qpx_core::http_content_length::declared_content_length(headers)
-        .ok()
-        .flatten()
+    headers.declared_content_length().ok().flatten()
 }
 
 pub fn upsert_variant_with_cap(index: &mut VariantIndex, variant_key: &str) -> Vec<String> {
@@ -88,4 +65,9 @@ pub fn cache_namespace<'a>(policy: &'a CachePolicyConfig, fallback: &'a str) -> 
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .unwrap_or(fallback)
+}
+
+#[cfg(test)]
+fn ord(name: &str) -> qpx_core::http_message::OrdinaryHeaderName {
+    qpx_core::http_message::OrdinaryHeaderName::try_from(name).expect("ordinary header name")
 }

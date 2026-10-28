@@ -277,7 +277,7 @@ async fn store_and_drain(
         request,
         key,
         policy,
-        response,
+        qpx_core::http_message::Response::from_http(response),
         CacheStoreContext {
             timing,
             writeback_admission: &writeback_admission,
@@ -285,7 +285,7 @@ async fn store_and_drain(
         },
     )
     .await?;
-    let (parts, body) = response.into_parts();
+    let (parts, body) = response.into_http_for_library().into_parts();
     let body = qpx_http::body::to_bytes(body).await?;
     // Cache writeback runs behind the response body tee; let that task commit metadata/index.
     tokio::task::yield_now().await;
@@ -317,3 +317,17 @@ mod lookup_head_post_tests;
 mod lookup_policy_tests;
 mod lookup_range_tests;
 mod store_flow_tests;
+
+pub(crate) fn owned_headers(headers: &http::HeaderMap) -> qpx_core::http_message::Headers {
+    let mut response = http::Response::new(());
+    *response.headers_mut() = headers.clone();
+    qpx_core::http_message::Response::from_http(response)
+        .headers()
+        .clone()
+}
+
+pub(crate) fn wire_headers(headers: &qpx_core::http_message::Headers) -> http::HeaderMap {
+    let mut response = qpx_core::http_message::Response::new(());
+    *response.headers_mut() = headers.clone();
+    response.into_http_for_library().into_parts().0.headers
+}

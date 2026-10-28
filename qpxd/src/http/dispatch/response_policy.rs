@@ -6,12 +6,13 @@ use crate::http::policy::response_policy::{
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use anyhow::Result;
 use hyper::{Method, Response};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(crate) struct DispatchResponsePolicyInput<'a> {
-    pub(crate) response: Response<Body>,
+    pub(crate) response: OwnerResponse<Body>,
     pub(crate) engine: Option<&'a HttpResponseRuleEngine>,
     pub(crate) candidates: ResponseRuleCandidates,
     pub(crate) rule_context: RuleMatchContext<'a>,
@@ -28,7 +29,7 @@ pub(crate) struct DispatchResponsePolicyInput<'a> {
 
 pub(crate) enum DispatchResponsePolicyOutcome {
     Continue {
-        response: Response<Body>,
+        response: OwnerResponse<Body>,
         headers: Option<Arc<CompiledHeaderControl>>,
         cache_bypass: bool,
         suppress_retry: bool,

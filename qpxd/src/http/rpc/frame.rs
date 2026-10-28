@@ -63,7 +63,7 @@ pub(crate) fn request_body_summary_observer(headers: &Headers) -> Option<RpcBody
 }
 
 pub(crate) fn response_body_summary_observer(
-    headers: &HeaderMap,
+    headers: &impl qpx_core::http_message::OrdinaryHeaderMut,
 ) -> Option<RpcBodySummaryObserver> {
     let content_type = response_content_type(headers);
     body_summary_observer(content_type.as_deref(), content_type.as_deref()).or_else(|| {

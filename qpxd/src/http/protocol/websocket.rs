@@ -220,7 +220,7 @@ pub(crate) fn validate_websocket_switching_response(
 }
 
 pub(crate) fn spawn_upgrade_tunnel<F, I, E>(
-    response: &mut hyper::Response<Body>,
+    response: &mut impl crate::http::response_carrier::ResponseCarrier,
     client_upgrade: F,
     context: &'static str,
     upgrade_wait_timeout: Duration,
@@ -233,7 +233,10 @@ pub(crate) fn spawn_upgrade_tunnel<F, I, E>(
     if response.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
         return;
     }
-    let server_upgrade = hyper::upgrade::on(response);
+    let server_upgrade = response
+        .extensions_mut()
+        .remove::<hyper::upgrade::OnUpgrade>()
+        .unwrap_or_else(|| hyper::upgrade::on(hyper::Response::new(())));
     tokio::spawn(async move {
         let client = timeout(upgrade_wait_timeout, client_upgrade).await;
         let server = timeout(upgrade_wait_timeout, server_upgrade).await;

@@ -1,7 +1,8 @@
 use anyhow::Result;
-use hyper::{Response, StatusCode};
+use hyper::StatusCode;
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use qpxd_cache::{self as cache, CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
 use std::collections::HashMap;

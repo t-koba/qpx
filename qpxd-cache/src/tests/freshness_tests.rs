@@ -178,7 +178,11 @@ async fn stale_if_error_fallback_omits_obsolete_warning_headers() {
     let response = maybe_build_stale_if_error_response(&state)
         .await
         .expect("stale response");
-    assert!(response.headers().get("warning").is_none());
+    assert!(
+        crate::tests::wire_headers(response.headers())
+            .get("warning")
+            .is_none()
+    );
 }
 
 #[tokio::test]

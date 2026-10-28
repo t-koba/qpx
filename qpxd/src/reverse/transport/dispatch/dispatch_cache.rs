@@ -15,8 +15,9 @@ use crate::runtime;
 use crate::runtime::Runtime;
 use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::{Result, anyhow};
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -359,7 +360,7 @@ fn maybe_spawn_reverse_revalidation(req: &OwnerRequest<Body>, input: ReverseReva
         };
         let response_delay_secs = started.elapsed().as_secs();
         let _ = process_upstream_response_for_cache(
-            resp,
+            Response::from_http(resp),
             CacheWritebackContext {
                 request_snapshot: &snapshot,
                 response_delay_secs,

@@ -24,15 +24,17 @@ fn must_understand_allows_storage_when_status_requirements_are_understood() {
             .body(())
             .expect("request"),
     );
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(
-            CACHE_CONTROL,
-            "public, no-store, max-age=60, must-understand",
-        )
-        .header(CONTENT_LENGTH, "2")
-        .body(Body::from("ok"))
-        .expect("response");
+    let response = qpx_core::http_message::Response::from_http(
+        http::Response::builder()
+            .status(StatusCode::OK)
+            .header(
+                CACHE_CONTROL,
+                "public, no-store, max-age=60, must-understand",
+            )
+            .header(CONTENT_LENGTH, "2")
+            .body(Body::from("ok"))
+            .expect("response"),
+    );
     let directives = parse_response_directives(response.headers());
     assert!(directives.must_understand);
     assert!(is_response_storable(
@@ -56,15 +58,17 @@ fn must_understand_rejects_statuses_with_unimplemented_storage_requirements() {
             .body(())
             .expect("request"),
     );
-    let response = Response::builder()
-        .status(StatusCode::PARTIAL_CONTENT)
-        .header(
-            CACHE_CONTROL,
-            "public, no-store, max-age=60, must-understand",
-        )
-        .header(CONTENT_LENGTH, "2")
-        .body(Body::from("ok"))
-        .expect("response");
+    let response = qpx_core::http_message::Response::from_http(
+        http::Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .header(
+                CACHE_CONTROL,
+                "public, no-store, max-age=60, must-understand",
+            )
+            .header(CONTENT_LENGTH, "2")
+            .body(Body::from("ok"))
+            .expect("response"),
+    );
     let directives = parse_response_directives(response.headers());
     assert!(directives.must_understand);
     assert!(!is_response_storable(
@@ -88,15 +92,17 @@ fn must_understand_rejects_unknown_final_status_codes() {
             .body(())
             .expect("request"),
     );
-    let response = Response::builder()
-        .status(StatusCode::from_u16(299).expect("status"))
-        .header(
-            CACHE_CONTROL,
-            "public, no-store, max-age=60, must-understand",
-        )
-        .header(CONTENT_LENGTH, "2")
-        .body(Body::from("ok"))
-        .expect("response");
+    let response = qpx_core::http_message::Response::from_http(
+        http::Response::builder()
+            .status(StatusCode::from_u16(299).expect("status"))
+            .header(
+                CACHE_CONTROL,
+                "public, no-store, max-age=60, must-understand",
+            )
+            .header(CONTENT_LENGTH, "2")
+            .body(Body::from("ok"))
+            .expect("response"),
+    );
     let directives = parse_response_directives(response.headers());
     assert!(directives.must_understand);
     assert!(!is_response_storable(
@@ -125,16 +131,26 @@ fn body_length_expectation_matches_no_body_response_semantics() {
         (Method::CONNECT, StatusCode::CREATED),
     ] {
         assert_eq!(
-            expected_body_length(&method, status, &headers).unwrap(),
+            expected_body_length(&method, status, &crate::tests::owned_headers(&headers)).unwrap(),
             None
         );
     }
     assert_eq!(
-        expected_body_length(&Method::GET, StatusCode::OK, &headers).unwrap(),
+        expected_body_length(
+            &Method::GET,
+            StatusCode::OK,
+            &crate::tests::owned_headers(&headers)
+        )
+        .unwrap(),
         Some(123)
     );
     assert_eq!(
-        expected_body_length(&Method::CONNECT, StatusCode::FORBIDDEN, &headers).unwrap(),
+        expected_body_length(
+            &Method::CONNECT,
+            StatusCode::FORBIDDEN,
+            &crate::tests::owned_headers(&headers)
+        )
+        .unwrap(),
         Some(123)
     );
 }
@@ -144,16 +160,35 @@ fn body_length_expectation_rejects_a_declaration_the_owner_refuses() {
     let mut conflicting = http::HeaderMap::new();
     conflicting.append(CONTENT_LENGTH, http::HeaderValue::from_static("4"));
     conflicting.append(CONTENT_LENGTH, http::HeaderValue::from_static("5"));
-    assert!(expected_body_length(&Method::GET, StatusCode::OK, &conflicting).is_err());
+    assert!(
+        expected_body_length(
+            &Method::GET,
+            StatusCode::OK,
+            &crate::tests::owned_headers(&conflicting)
+        )
+        .is_err()
+    );
 
     let mut member = http::HeaderMap::new();
     member.insert(CONTENT_LENGTH, http::HeaderValue::from_static("+4"));
-    assert!(expected_body_length(&Method::GET, StatusCode::OK, &member).is_err());
+    assert!(
+        expected_body_length(
+            &Method::GET,
+            StatusCode::OK,
+            &crate::tests::owned_headers(&member)
+        )
+        .is_err()
+    );
 
     let mut list = http::HeaderMap::new();
     list.insert(CONTENT_LENGTH, http::HeaderValue::from_static("4, 4"));
     assert_eq!(
-        expected_body_length(&Method::GET, StatusCode::OK, &list).unwrap(),
+        expected_body_length(
+            &Method::GET,
+            StatusCode::OK,
+            &crate::tests::owned_headers(&list)
+        )
+        .unwrap(),
         Some(4)
     );
 }

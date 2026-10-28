@@ -148,7 +148,7 @@ caches:
         let key = CacheRequestKey::for_lookup(&request, "http")
             .unwrap()
             .unwrap();
-        let response = Response::builder()
+        let response = http::Response::builder()
             .header(
                 "cache-control",
                 if eligible {
@@ -167,7 +167,7 @@ caches:
             &request,
             &key,
             policy,
-            response,
+            OwnerResponse::from_http(response),
             CacheStoreContext {
                 timing: CacheStoreTiming {
                     response_delay_secs: 0,
@@ -180,7 +180,7 @@ caches:
         )
         .await
         .unwrap();
-        qpx_http::body::to_bytes(response.into_body())
+        qpx_http::body::to_bytes(response.into_head_and_body().1)
             .await
             .unwrap();
         *request.method_mut() = method.clone();
@@ -423,7 +423,7 @@ async fn cached_terminal_carriers_preserve_extensions_framing_trailers_and_error
                         sender.send_trailers(trailers).await.unwrap();
                     }
                 });
-                let mut response = Response::builder()
+                let mut response = http::Response::builder()
                     .status(201)
                     .header("x-duplicate", "one")
                     .header("x-duplicate", "two")
@@ -438,7 +438,7 @@ async fn cached_terminal_carriers_preserve_extensions_framing_trailers_and_error
                 let mut modules = fixture.modules();
                 let audit = audit(&Method::GET);
                 let input = DispatchCachedResponseInput {
-                    response,
+                    response: OwnerResponse::from_http(response),
                     outcome: DispatchOutcome::StaleIfError,
                     plan,
                     request_method: &Method::GET,
@@ -448,18 +448,12 @@ async fn cached_terminal_carriers_preserve_extensions_framing_trailers_and_error
                     http_modules: &mut modules,
                     audit: &audit,
                 };
+                let response = finalize_dispatch_cached_response(input).await.unwrap();
+                // Observe the same final head at the library serializer boundary.
                 let mut response = if owned {
-                    finalize_dispatch_cached_response::<OwnerResponse<Body>>(input)
-                        .await
-                        .unwrap()
+                    response
                 } else {
-                    // Test observation imports the legacy output; production does
-                    // not round-trip or export an adopted owner.
-                    OwnerResponse::from_http(
-                        finalize_dispatch_cached_response::<Response<Body>>(input)
-                            .await
-                            .unwrap(),
-                    )
+                    OwnerResponse::from_http(response.into_http_for_library())
                 };
                 assert_eq!(response.extensions().get::<usize>(), Some(&42));
                 assert!(
@@ -536,19 +530,21 @@ async fn forward_cache_decisions_return_owners_for_lookup_and_collapsed_terminal
                 } else {
                     StatusCode::OK
                 };
-                let mut response = Response::builder()
+                let mut response = http::Response::builder()
                     .status(status)
                     .header("content-length", "6")
                     .body(Body::from("cached"))
                     .unwrap();
                 response.extensions_mut().insert(42usize);
                 let decision = match branch {
-                    "hit" => CacheLookupDecision::Hit(response),
+                    "hit" => CacheLookupDecision::Hit(OwnerResponse::from_http(response)),
                     "stale" => CacheLookupDecision::StaleWhileRevalidate(
-                        Box::new(response),
+                        Box::new(OwnerResponse::from_http(response)),
                         Box::new(stale.clone()),
                     ),
-                    "only-if-cached" => CacheLookupDecision::OnlyIfCachedMiss(response),
+                    "only-if-cached" => {
+                        CacheLookupDecision::OnlyIfCachedMiss(OwnerResponse::from_http(response))
+                    }
                     "miss" => CacheLookupDecision::Miss,
                     _ => unreachable!(),
                 };

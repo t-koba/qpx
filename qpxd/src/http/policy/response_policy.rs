@@ -6,6 +6,7 @@ use crate::policy_context::merge_header_controls;
 use anyhow::Result;
 use hyper::Response;
 use qpx_core::config::HttpResponseRuleConfig;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterIndex, StringInterner};
 use qpx_core::rules::{
     CandidateRequestObservationRequirements, CompiledHeaderControl, RuleMatchContext,
@@ -23,7 +24,7 @@ pub(crate) struct ResponseBodyObservationLimits {
 
 pub(crate) enum ListenerResponsePolicyDecision {
     Continue {
-        response: Response<Body>,
+        response: OwnerResponse<Body>,
         headers: Option<Arc<CompiledHeaderControl>>,
         cache_bypass: bool,
         suppress_retry: bool,
@@ -248,7 +249,7 @@ pub(crate) async fn apply_listener_response_policy(
     engine: Option<&HttpResponseRuleEngine>,
     candidates: ResponseRuleCandidates,
     mut ctx: RuleMatchContext<'_>,
-    mut response: Response<Body>,
+    mut response: OwnerResponse<Body>,
     headers: Option<Arc<CompiledHeaderControl>>,
     request_rpc: Option<&RpcMatchContext>,
     body_observation: ResponseBodyObservationLimits,
@@ -289,9 +290,8 @@ pub(crate) async fn apply_listener_response_policy(
     if !body_observation.force_body {
         let mut early_ctx = ctx;
         early_ctx.response_status = Some(response.status().as_u16());
-        early_ctx.headers = Some(qpx_core::http_content_length::HeaderView::new(
-            response.headers(),
-        ));
+        early_ctx.headers = None;
+        early_ctx.owned_headers = Some(response.headers().view());
         if let Some(request_rpc) = request_rpc {
             early_ctx.rpc_protocol = request_rpc.protocol.as_deref();
             early_ctx.rpc_service = request_rpc.service.as_deref();
@@ -373,9 +373,8 @@ pub(crate) async fn apply_listener_response_policy(
     }
     ctx.response_status = Some(response.status().as_u16());
     ctx.response_size = observed_response_size(&response);
-    ctx.headers = Some(qpx_core::http_content_length::HeaderView::new(
-        response.headers(),
-    ));
+    ctx.headers = None;
+    ctx.owned_headers = Some(response.headers().view());
 
     for idx in candidates.indices {
         let Some(rule) = engine.rule_at(idx) else {
@@ -399,7 +398,7 @@ pub(crate) async fn apply_listener_response_policy(
 
 pub(crate) fn apply_compiled_response_rule(
     rule: &CompiledHttpResponseRule,
-    response: Response<Body>,
+    response: OwnerResponse<Body>,
     headers: Option<Arc<CompiledHeaderControl>>,
 ) -> Result<ListenerResponsePolicyDecision> {
     let merged_headers = merge_header_controls(headers, rule.headers.clone());

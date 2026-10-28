@@ -3,18 +3,16 @@ use super::{DispatchAuditContext, DispatchOutcome, annotate_dispatch_response};
 use crate::http::capture::cache_flow::{
     CacheWritebackContext, process_upstream_response_for_cache,
 };
-use crate::http::protocol::header_control::ResponseHeaderControl;
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::http::response_carrier::ResponseCarrier;
 use anyhow::{Result, anyhow};
 use http::header::{CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_TYPE};
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::http_message::{
     OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
 };
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
-use qpx_http::protocol::finalization::FinalizeResponse;
 use qpxd_cache::CacheRequestKey;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -27,7 +25,7 @@ pub(crate) enum DispatchCacheLookupOutcome {
     Continue(Option<Box<qpxd_cache::RevalidationState>>),
 }
 
-pub(crate) enum DispatchCacheCollapseOutcome<R = Response<Body>> {
+pub(crate) enum DispatchCacheCollapseOutcome<R = OwnerResponse<Body>> {
     Response(Box<R>),
     Continue {
         revalidation_state: Option<Box<qpxd_cache::RevalidationState>>,
@@ -153,7 +151,7 @@ fn prepare_dispatch_cache_key_pair(
 }
 
 pub(crate) struct DispatchCacheWriteInput<'a> {
-    pub(crate) response: Response<Body>,
+    pub(crate) response: OwnerResponse<Body>,
     pub(crate) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(crate) response_cache_bypass: bool,
     pub(crate) request_headers_snapshot: Option<&'a OwnerRequest<()>>,
@@ -167,7 +165,7 @@ pub(crate) struct DispatchCacheWriteInput<'a> {
 }
 
 pub(crate) struct DispatchCachedResponseInput<'a> {
-    pub(crate) response: Response<Body>,
+    pub(crate) response: OwnerResponse<Body>,
     pub(crate) outcome: DispatchOutcome,
     pub(crate) plan: &'a crate::runtime::ExecutionPlan,
     pub(crate) request_method: &'a Method,
@@ -178,32 +176,10 @@ pub(crate) struct DispatchCachedResponseInput<'a> {
     pub(crate) audit: &'a DispatchAuditContext,
 }
 
-/// Select the terminal representation only after standard-only module preparation
-/// and capacity reservation. The shared suffix never exports an adopted owner.
-pub(crate) trait CachedResponseCarrier:
-    ResponseCarrier + FinalizeResponse<Body = Body>
-{
-    fn from_prepared_cache_response(response: Response<Body>) -> Self;
-}
-
-impl CachedResponseCarrier for Response<Body> {
-    fn from_prepared_cache_response(response: Response<Body>) -> Self {
-        response
-    }
-}
-
-impl CachedResponseCarrier for OwnerResponse<Body> {
-    fn from_prepared_cache_response(response: Response<Body>) -> Self {
-        Self::from_http(response)
-    }
-}
-
-pub(crate) async fn finalize_dispatch_cached_response<R: CachedResponseCarrier>(
+/// Cache responses remain owner-backed through modules and finalization.
+pub(crate) async fn finalize_dispatch_cached_response(
     input: DispatchCachedResponseInput<'_>,
-) -> Result<R>
-where
-    R::Headers: ResponseHeaderControl,
-{
+) -> Result<OwnerResponse<Body>> {
     let DispatchCachedResponseInput {
         response,
         outcome,
@@ -231,13 +207,13 @@ where
         )
         .saturating_add(usize::from(plan.hsts.is_some()));
     if route_response_fields != 0 || route_metadata_fields != 0 {
-        response.headers_mut().reserve(
+        qpx_core::http_message::OrdinaryHeaderMut::ordinary_reserve(
+            response.headers_mut(),
             route_response_fields
                 .saturating_add(route_metadata_fields)
                 .saturating_add(3),
         );
     }
-    let mut response = R::from_prepared_cache_response(response);
     let version = response_version.unwrap_or_else(|| ResponseCarrier::version(&response));
     finalize_response_with_headers_in_place(
         request_method,
@@ -258,7 +234,7 @@ where
     ))
 }
 
-pub(crate) async fn finalize_dispatch_stale_if_error_response<R: CachedResponseCarrier>(
+pub(crate) async fn finalize_dispatch_stale_if_error_response(
     revalidation_state: Option<&qpxd_cache::RevalidationState>,
     plan: &crate::runtime::ExecutionPlan,
     request_method: &Method,
@@ -266,10 +242,7 @@ pub(crate) async fn finalize_dispatch_stale_if_error_response<R: CachedResponseC
     headers: Option<&CompiledHeaderControl>,
     http_modules: &mut crate::http::modules::HttpModuleExecution,
     audit: &DispatchAuditContext,
-) -> Result<Option<R>>
-where
-    R::Headers: ResponseHeaderControl,
-{
+) -> Result<Option<OwnerResponse<Body>>> {
     let Some(state) = revalidation_state else {
         return Ok(None);
     };
@@ -294,7 +267,7 @@ where
 
 pub(crate) async fn write_dispatch_cache_result(
     input: DispatchCacheWriteInput<'_>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let Some(policy) = input.cache_policy.filter(|_| !input.response_cache_bypass) else {
         return Ok(input.response);
     };

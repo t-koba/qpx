@@ -260,7 +260,7 @@ async fn store_and_drain(
         req,
         key,
         policy,
-        response,
+        qpx_core::http_message::Response::from_http(response),
         CacheStoreContext {
             timing: CacheStoreTiming {
                 response_delay_secs: 0,

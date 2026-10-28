@@ -8,7 +8,8 @@ use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::reverse::router::{HttpRoute, SelectedMirrorTarget};
 use crate::reverse::transport::request_template::{ReverseReplayRecorder, ReverseRequestTemplate};
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
+use qpx_core::http_message::Response;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -95,7 +96,7 @@ pub(super) async fn finalize_reverse_dispatch_response<R: ReverseTerminalRespons
         false,
     );
     let mut resp = crate::http::capture::stream::emit_optional_response_for_export(
-        R::from_finalized_http(resp),
+        R::from_finalized_owner(resp),
         &route.plan,
         export_session,
     )

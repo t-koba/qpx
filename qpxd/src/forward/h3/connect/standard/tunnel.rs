@@ -230,7 +230,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
                     upstream_cert: Some(upstream_cert),
                 };
                 match proxy_mitm_request(inner_req, runtime, sender, route).await {
-                    Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
+                    Ok(response) => Ok::<_, Infallible>(response),
                     Err(err) => {
                         tracing::warn!(error = ?err, "forward HTTP/3 MITM request failed");
                         Ok(OwnerResponse::from_http(

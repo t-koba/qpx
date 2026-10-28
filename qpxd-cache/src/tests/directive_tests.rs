@@ -59,7 +59,7 @@ fn parse_response_directives_private_with_field_names() {
         CACHE_CONTROL,
         http::HeaderValue::from_static("private=\"authorization\", max-age=60"),
     );
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert!(!parsed.private);
     assert_eq!(parsed.private_fields, vec!["authorization".to_string()]);
     assert_eq!(parsed.max_age, Some(60));
@@ -72,7 +72,7 @@ fn parse_response_directives_no_cache_with_field_names() {
         CACHE_CONTROL,
         http::HeaderValue::from_static("no-cache=\"set-cookie\""),
     );
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert!(!parsed.no_cache);
     assert_eq!(parsed.no_cache_fields, vec!["set-cookie".to_string()]);
 }
@@ -84,7 +84,7 @@ fn parse_response_directives_must_understand() {
         CACHE_CONTROL,
         http::HeaderValue::from_static("public, max-age=60, must-understand"),
     );
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert!(parsed.must_understand);
     assert_eq!(parsed.max_age, Some(60));
 }
@@ -96,7 +96,7 @@ fn parse_response_directives_rfc5861_extensions() {
         CACHE_CONTROL,
         http::HeaderValue::from_static("max-age=60, stale-while-revalidate=30, stale-if-error=120"),
     );
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert_eq!(parsed.max_age, Some(60));
     assert_eq!(parsed.stale_while_revalidate, Some(30));
     assert_eq!(parsed.stale_if_error, Some(120));
@@ -109,7 +109,7 @@ fn parse_response_directives_supports_immutable() {
         CACHE_CONTROL,
         http::HeaderValue::from_static("public, max-age=60, immutable"),
     );
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert!(parsed.immutable);
     assert_eq!(parsed.max_age, Some(60));
 }
@@ -127,7 +127,7 @@ fn qpx_targeted_cache_control_takes_precedence() {
         http::HeaderValue::from_static("max-age=600, immutable"),
     );
 
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert_eq!(parsed.max_age, Some(600));
     assert!(parsed.immutable);
     assert!(!parsed.no_store);
@@ -142,7 +142,7 @@ fn cdn_targeted_cache_control_takes_precedence_over_cache_control() {
         http::HeaderValue::from_static("max-age=120"),
     );
 
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert_eq!(parsed.max_age, Some(120));
     assert!(!parsed.no_store);
 }
@@ -156,7 +156,7 @@ fn invalid_targeted_cache_control_fails_closed() {
         http::HeaderValue::from_static("max-age=1.5"),
     );
 
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert!(parsed.no_store);
     assert!(parsed.invalid_freshness);
 }
@@ -165,14 +165,14 @@ fn invalid_targeted_cache_control_fails_closed() {
 fn parse_response_directives_marks_invalid_or_duplicate_freshness_stale() {
     let mut headers = http::HeaderMap::new();
     headers.insert(CACHE_CONTROL, http::HeaderValue::from_static("max-age=abc"));
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert!(parsed.invalid_freshness);
 
     headers.insert(
         CACHE_CONTROL,
         http::HeaderValue::from_static("max-age=60, max-age=30"),
     );
-    let parsed = parse_response_directives(&headers);
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&headers));
     assert!(parsed.invalid_freshness);
 }
 
@@ -180,7 +180,10 @@ fn parse_response_directives_marks_invalid_or_duplicate_freshness_stale() {
 fn parse_vary_star_is_uncacheable() {
     let mut headers = http::HeaderMap::new();
     headers.insert(VARY, http::HeaderValue::from_static("*"));
-    assert!(matches!(parse_vary(&headers), VarySpec::Any));
+    assert!(matches!(
+        parse_vary(&crate::tests::owned_headers(&headers)),
+        VarySpec::Any
+    ));
 }
 
 #[test]
@@ -188,26 +191,38 @@ fn cacheable_content_length_rejects_chunked_transfer() {
     let mut headers = http::HeaderMap::new();
     headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("10"));
     headers.insert(TRANSFER_ENCODING, http::HeaderValue::from_static("chunked"));
-    assert_eq!(cacheable_content_length(&headers), None);
+    assert_eq!(
+        cacheable_content_length(&crate::tests::owned_headers(&headers)),
+        None
+    );
 }
 
 #[test]
 fn cacheable_content_length_rejects_inconsistent_values() {
     let mut headers = http::HeaderMap::new();
     headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("10, 11"));
-    assert_eq!(cacheable_content_length(&headers), None);
+    assert_eq!(
+        cacheable_content_length(&crate::tests::owned_headers(&headers)),
+        None
+    );
 }
 
 #[test]
 fn cacheable_content_length_reads_a_list_of_equal_members() {
     let mut headers = http::HeaderMap::new();
     headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("10, 10"));
-    assert_eq!(cacheable_content_length(&headers), Some(10));
+    assert_eq!(
+        cacheable_content_length(&crate::tests::owned_headers(&headers)),
+        Some(10)
+    );
 }
 
 #[test]
 fn cacheable_content_length_rejects_a_signed_member() {
     let mut headers = http::HeaderMap::new();
     headers.insert(CONTENT_LENGTH, http::HeaderValue::from_static("+10"));
-    assert_eq!(cacheable_content_length(&headers), None);
+    assert_eq!(
+        cacheable_content_length(&crate::tests::owned_headers(&headers)),
+        None
+    );
 }

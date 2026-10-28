@@ -2,8 +2,9 @@ use anyhow::{Result, anyhow};
 use arc_swap::ArcSwapOption;
 use async_trait::async_trait;
 use bytes::Bytes;
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::http_content_length::VarySelector;
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -287,6 +288,26 @@ pub struct CacheRequestKey {
 }
 
 #[derive(Debug)]
+/// Live cache results retain the opaque response head.
+///
+/// ```compile_fail
+/// use qpxd_cache::LookupOutcome;
+/// fn raw_parts(outcome: LookupOutcome) {
+///     if let LookupOutcome::Hit(response) = outcome {
+///         let _ = response.into_parts();
+///     }
+/// }
+/// ```
+///
+/// ```compile_fail
+/// use qpxd_cache::LookupOutcome;
+/// fn raw_framing(outcome: LookupOutcome) {
+///     if let LookupOutcome::Hit(mut response) = outcome {
+///         response.headers_mut().insert(
+///             http::header::CONTENT_LENGTH, http::HeaderValue::from_static("7"));
+///     }
+/// }
+/// ```
 pub enum LookupOutcome {
     Hit(Response<Body>),
     StaleWhileRevalidate(Box<Response<Body>>, RevalidationState),

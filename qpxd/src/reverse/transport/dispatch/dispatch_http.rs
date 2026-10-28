@@ -140,7 +140,9 @@ pub(super) async fn dispatch_reverse_http_route<R: ReverseTerminalResponse>(
         }
         match response {
             Ok(Ok((interim, resp, upstream_cert))) => {
-                let resp = http_modules.on_upstream_response(resp).await?;
+                let resp = qpx_core::http_message::Response::from_http(
+                    http_modules.on_upstream_response(resp).await?,
+                );
                 let classified_response_destination;
                 let response_destination = if upstream_cert.is_some()
                     && (route.requires_destination_after_selection()

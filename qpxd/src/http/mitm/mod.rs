@@ -2,9 +2,10 @@ use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_reques
 use crate::http::protocol::preflight::{PreflightOptions, PreflightOutcome, preflight_validate};
 use crate::runtime::Runtime;
 use anyhow::Result;
+use hyper::Request;
 use hyper::client::conn::http1::SendRequest;
-use hyper::{Request, Response};
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response;
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
@@ -46,7 +47,7 @@ pub(crate) async fn proxy_mitm_request(
         None,
     ) {
         PreflightOutcome::Continue(validated) => validated,
-        PreflightOutcome::Reject(response) => return Ok(*response),
+        PreflightOutcome::Reject(response) => return Ok(Response::from_http(*response)),
     };
     let base = extract_base_request_fields(
         &req,

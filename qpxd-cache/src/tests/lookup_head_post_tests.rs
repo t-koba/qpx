@@ -106,7 +106,7 @@ async fn lookup_fetches_body_only_for_matching_vary_variant() {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
     };
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"japanese");
@@ -175,13 +175,12 @@ async fn head_lookup_reuses_get_cache_entry_without_body() {
     };
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
-        response
-            .headers()
+        crate::tests::wire_headers(response.headers())
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok()),
         Some("5")
     );
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert!(body.is_empty());
@@ -236,13 +235,12 @@ async fn cached_head_hit_preserves_stored_representation_length() {
         _ => panic!("expected cache hit"),
     };
     assert_eq!(
-        response
-            .headers()
+        crate::tests::wire_headers(response.headers())
             .get(CONTENT_LENGTH)
             .and_then(|value| value.to_str().ok()),
         Some("123")
     );
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert!(body.is_empty());
@@ -366,7 +364,7 @@ async fn post_response_is_write_through_but_can_seed_get_when_content_location_m
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
     };
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     assert_eq!(body.as_ref(), b"posted");

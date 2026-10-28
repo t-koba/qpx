@@ -614,6 +614,46 @@ impl Headers {
             .collect()
     }
 
+    /// Closed cache persistence fields without a hot-path JSON round trip.
+    ///
+    /// Collects the historical textual field pairs directly (names and values
+    /// as text, per-name duplicate order, literal Content-Length spellings,
+    /// non-text omitted) while filtering the caller-supplied excluded names
+    /// (cache `no-cache`/`private` fields). No pairs, maps or message parts
+    /// escape; no caller-supplied serializer or field/value callback receives
+    /// the framing declarations. The live head is not changed. The returned
+    /// carrier offers only fixed JSON persistence operations with the historical
+    /// array schema, so persisted metadata bytes are unchanged.
+    ///
+    /// The former arbitrary pair projection is deliberately unavailable:
+    /// ```compile_fail,E0599
+    /// use qpx_core::http_message::Headers;
+    /// let _: Vec<(String, String)> = Headers::new().textual_fields_for_serialization();
+    /// ```
+    /// Persistence exports an opaque carrier, never an iterable pair carrier
+    /// or raw JSON bytes:
+    /// ```compile_fail,E0308
+    /// use qpx_core::http_message::Headers;
+    /// let _: Vec<(String, String)> = Headers::new().cache_fields(&Default::default());
+    /// ```
+    /// ```compile_fail,E0308
+    /// use qpx_core::http_message::Headers;
+    /// let _: Vec<u8> = Headers::new().cache_fields(&Default::default());
+    /// ```
+    pub fn cache_fields(&self, excluded: &std::collections::HashSet<String>) -> CacheFields {
+        let mut inner = Vec::with_capacity(self.inner.len());
+        for (name, value) in self.inner.iter() {
+            if excluded.contains(name.as_str()) {
+                continue;
+            }
+            let Ok(text) = value.to_str() else {
+                continue;
+            };
+            inner.push((name.as_str().to_owned(), text.to_owned()));
+        }
+        CacheFields { inner }
+    }
+
     /// Serialize HTTP field lines without exporting a map or framing values.
     /// Used by the TRACE message/http serializer; preserves exact field bytes.
     pub fn write_http_field_lines(
@@ -690,6 +730,157 @@ impl Headers {
             self.set_content_length(length);
         }
         Ok(self.inner)
+    }
+}
+
+/// Opaque historical cache field pairs for persistence.
+///
+/// Holds textual field names and values with per-name duplicate order and
+/// literal Content-Length spellings; non-text values are omitted at capture.
+/// The inner pairs never escape: hydration and length reads stay inside the
+/// owner. Fixed JSON persistence operations retain the historical array of pairs,
+/// so persisted metadata bytes and schema are unchanged. No pairs, maps or
+/// message parts are returned, and no caller-supplied serializer or
+/// field/value callback receives the framing declarations.
+///
+/// ```compile_fail,E0616
+/// use qpx_core::http_message::CacheFields;
+/// let fields = CacheFields::default();
+/// let _ = fields.inner;
+/// ```
+/// ```compile_fail,E0599
+/// use qpx_core::http_message::CacheFields;
+/// let fields = CacheFields::default();
+/// let _: Vec<(String, String)> = fields.into_pairs();
+/// ```
+/// Generic serde access is deliberately unavailable, including arbitrary
+/// caller-supplied serializers and deserializers:
+/// ```compile_fail,E0277
+/// use qpx_core::http_message::CacheFields;
+/// fn require_serialize<T: serde::Serialize>() {}
+/// require_serialize::<CacheFields>();
+/// ```
+/// ```compile_fail,E0277
+/// use qpx_core::http_message::CacheFields;
+/// fn require_deserialize<T: for<'de> serde::Deserialize<'de>>() {}
+/// require_deserialize::<CacheFields>();
+/// ```
+#[derive(Clone, Default)]
+pub struct CacheFields {
+    inner: Vec<(String, String)>,
+}
+
+impl fmt::Debug for CacheFields {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CacheFields").finish_non_exhaustive()
+    }
+}
+
+impl CacheFields {
+    /// Encode only the historical JSON array of textual pairs at the cache
+    /// persistence boundary. No caller-provided serializer observes the fields.
+    pub fn to_cache_json(&self) -> serde_json::Result<String> {
+        serde_json::to_string(&self.inner)
+    }
+
+    /// Import the historical JSON field array at the cache persistence boundary.
+    /// Stored spelling, order and even invalid fields survive until hydration.
+    pub fn from_cache_json(json: &str) -> serde_json::Result<Self> {
+        serde_json::from_str(json).map(|inner| Self { inner })
+    }
+
+    /// Merge revalidation fields without exporting stored pairs. Predicates see
+    /// only lowercase names: one excludes stored fields, the other excludes
+    /// updates (e.g. representation labels and Connection-nominated fields).
+    /// Content-Length updates are always excluded. Replacements retain stored
+    /// spelling and position, and each field's duplicate order is preserved.
+    pub fn merge_after_304(
+        &self,
+        not_modified_headers: &Headers,
+        exclude_stored: impl Fn(&str) -> bool,
+        exclude_update: impl Fn(&str) -> bool,
+    ) -> Self {
+        let mut nm = std::collections::HashMap::<String, Vec<String>>::new();
+        for (name, value) in not_modified_headers.inner.iter() {
+            let lower = name.as_str().to_ascii_lowercase();
+            if lower == "content-length" || exclude_update(lower.as_str()) {
+                continue;
+            }
+            let Ok(value) = value.to_str() else {
+                continue;
+            };
+            nm.entry(lower).or_default().push(value.to_string());
+        }
+
+        let mut out = Vec::new();
+        let mut replaced = std::collections::HashSet::new();
+        let mut saw = std::collections::HashSet::new();
+
+        for (name, value) in &self.inner {
+            let lower = name.to_ascii_lowercase();
+            if exclude_stored(lower.as_str()) {
+                continue;
+            }
+            saw.insert(lower.clone());
+
+            // Excluded 304 fields never reach `nm`, so stored framing labels and
+            // other kept fields always survive here unchanged.
+            if let Some(values) = nm.get(lower.as_str()) {
+                if replaced.insert(lower.clone()) {
+                    for v in values {
+                        out.push((name.clone(), v.clone()));
+                    }
+                }
+                continue;
+            }
+            out.push((name.clone(), value.clone()));
+        }
+
+        for (name, values) in nm {
+            if saw.contains(name.as_str()) {
+                continue;
+            }
+            for v in values {
+                out.push((name.clone(), v));
+            }
+        }
+
+        Self { inner: out }
+    }
+
+    /// Rebuild an owner-backed head from historical pairs, preserving
+    /// per-name duplicate order and literal Content-Length spellings.
+    /// Invalid names or values are skipped, matching historical hydration.
+    /// Non-text values never appear here; they were omitted at capture.
+    pub fn hydrate(&self) -> Headers {
+        let mut out = Headers::new();
+        for (name, value) in &self.inner {
+            let Ok(name) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            let Ok(value) = http::HeaderValue::from_str(value.as_str()) else {
+                continue;
+            };
+            if name == CONTENT_LENGTH {
+                out.append_content_length_value(value);
+            } else {
+                let Ok(ordinary) = OrdinaryHeaderName::try_from(name) else {
+                    continue;
+                };
+                out.append(ordinary, value);
+            }
+        }
+        out
+    }
+
+    /// Declared length without exposing framing text, matching
+    /// `declared_content_length_in_named_values` on the historical pairs.
+    pub fn declared_content_length(&self) -> Option<u64> {
+        crate::http_content_length::declared_content_length_in_named_values(
+            self.inner.iter().map(|(name, value)| (name, value)),
+        )
+        .ok()
+        .flatten()
     }
 }
 

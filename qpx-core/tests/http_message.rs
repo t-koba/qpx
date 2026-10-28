@@ -950,3 +950,133 @@ fn response_library_export_is_lossless_even_for_invalid_framing() {
         }
     }
 }
+
+#[test]
+fn closed_cache_fields_match_historical_pairs_without_mutating_the_head() {
+    use std::collections::HashSet;
+    for lengths in [
+        vec![],
+        vec![b"0".as_slice()],
+        vec![b"007, 7".as_slice(), b" 7 "],
+        vec![b"invalid".as_slice()],
+        vec![b"5".as_slice(), b"6"],
+        vec![b"\xff".as_slice()],
+    ] {
+        let mut raw = http::Response::new(());
+        for value in lengths {
+            raw.headers_mut()
+                .append(CONTENT_LENGTH, HeaderValue::from_bytes(value).unwrap());
+        }
+        for value in [b"first".as_slice(), b"\xff", b"\"quoted\"\tvalue\\suffix"] {
+            let mut value = HeaderValue::from_bytes(value).unwrap();
+            value.set_sensitive(true);
+            raw.headers_mut().append("X-Repeat", value);
+        }
+        let historical: Vec<(String, String)> = raw
+            .headers()
+            .iter()
+            .filter_map(|(name, value)| {
+                value
+                    .to_str()
+                    .ok()
+                    .map(|value| (name.as_str().to_owned(), value.to_owned()))
+            })
+            .collect();
+        let expected = serde_json::to_vec(&historical).unwrap();
+        let owned = Response::from_http(raw);
+        let before = owned.headers().clone();
+        let excluded = HashSet::new();
+        let fields = owned.headers().cache_fields(&excluded);
+        assert_eq!(fields.to_cache_json().unwrap().into_bytes(), expected);
+        assert_eq!(owned.headers(), &before);
+        assert_eq!(
+            owned.headers().declared_content_length(),
+            before.declared_content_length()
+        );
+        assert_eq!(
+            fields.hydrate().declared_content_length().ok().flatten(),
+            fields.declared_content_length()
+        );
+        assert_eq!(
+            fields.declared_content_length(),
+            before.declared_content_length().ok().flatten()
+        );
+        // Filtered capture omits excluded names without touching the live head.
+        let mut excluded = HashSet::new();
+        excluded.insert("x-repeat".to_owned());
+        let filtered = owned.headers().cache_fields(&excluded);
+        let expected_filtered: Vec<(String, String)> = historical
+            .into_iter()
+            .filter(|(name, _)| name != "x-repeat")
+            .collect();
+        assert_eq!(
+            filtered.to_cache_json().unwrap().into_bytes(),
+            serde_json::to_vec(&expected_filtered).unwrap()
+        );
+        assert_eq!(owned.headers(), &before);
+    }
+    let empty: HashSet<String> = HashSet::new();
+    assert_eq!(
+        Headers::new()
+            .cache_fields(&empty)
+            .to_cache_json()
+            .unwrap()
+            .into_bytes(),
+        b"[]"
+    );
+}
+
+#[test]
+fn cache_revalidation_keeps_stored_framing_and_spelling_inside_the_owner() {
+    use qpx_core::http_message::CacheFields;
+    for lengths in [
+        vec![],
+        vec!["0"],
+        vec!["007, 7", " 7 "],
+        vec!["invalid"],
+        vec!["5", "6"],
+    ] {
+        let mut pairs = vec![("X-Repeat", "old-first"), ("x-repeat", "old-second")];
+        pairs.extend(lengths.iter().map(|value| ("Content-Length", *value)));
+        pairs.extend([("bad name", "unchanged"), ("x-binary-update", "stored")]);
+        let cached = CacheFields::from_cache_json(&serde_json::to_string(&pairs).unwrap()).unwrap();
+        let mut raw = http::Response::new(());
+        raw.headers_mut()
+            .append("x-repeat", "new-first".parse().unwrap());
+        raw.headers_mut()
+            .append("x-repeat", "new-second".parse().unwrap());
+        raw.headers_mut()
+            .append(CONTENT_LENGTH, "999".parse().unwrap());
+        raw.headers_mut()
+            .append("x-binary-update", HeaderValue::from_bytes(b"\xff").unwrap());
+        let owned = Response::from_http(raw);
+        let before = owned.headers().clone();
+        // Even a permissive field-name policy cannot replace stored framing.
+        let merged = cached.merge_after_304(owned.headers(), |_| false, |_| false);
+        let mut expected = vec![("X-Repeat", "new-first"), ("X-Repeat", "new-second")];
+        expected.extend(lengths.iter().map(|value| ("Content-Length", *value)));
+        expected.extend([("bad name", "unchanged"), ("x-binary-update", "stored")]);
+        assert_eq!(
+            merged.to_cache_json().unwrap(),
+            serde_json::to_string(&expected).unwrap()
+        );
+        assert_eq!(
+            merged.declared_content_length(),
+            cached.declared_content_length()
+        );
+        assert_eq!(owned.headers(), &before);
+        assert_eq!(
+            cached.to_cache_json().unwrap(),
+            serde_json::to_string(&pairs).unwrap()
+        );
+    }
+    // The fixed persistence decoder rejects non-historical schemas.
+    for json in [
+        "null",
+        "{}",
+        r#"[["content-length", 7]]"#,
+        r#"[["x", "v", "extra"]]"#,
+    ] {
+        assert!(CacheFields::from_cache_json(json).is_err());
+    }
+}

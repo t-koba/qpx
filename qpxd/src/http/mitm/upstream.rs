@@ -25,7 +25,6 @@ use crate::policy_context::{
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext};
 use crate::runtime::{ExecutionPlan, Runtime};
 use anyhow::Result;
-use hyper::Response;
 use hyper::client::conn::http1::SendRequest;
 use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::prefilter::MatchPrefilterContext;
@@ -58,7 +57,9 @@ pub(super) struct MitmDispatch<'a> {
     pub(super) req_version: http::Version,
 }
 
-pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Result<Response<Body>> {
+pub(super) async fn dispatch_mitm_upstream(
+    mut input: MitmDispatch<'_>,
+) -> Result<qpx_core::http_message::Response<Body>> {
     let state = input.runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let selected_plan = input.selected_plan;
@@ -89,7 +90,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
                 concurrency.retry_after,
                 (*audit).clone(),
             );
-            return Ok(response);
+            return Ok(qpx_core::http_message::Response::from_http(response));
         }
     };
     let export_session =
@@ -104,7 +105,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
     )
     .await
     {
-        return Ok(response);
+        return Ok(qpx_core::http_message::Response::from_http(response));
     }
     strip_identity(&state, effective_policy, src_ip, input.req.headers_mut())?;
     prepare_request(&mut input.req, proxy_name, route_headers, input.websocket);
@@ -133,9 +134,8 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
                 audit,
             )
             .await?;
-            return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                response,
-                selected_plan,
+            return Ok(qpx_core::http_message::Response::from_http(
+                crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan),
             ));
         }
     }
@@ -161,7 +161,7 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
     )
     .await;
     record_upstream_request_duration(input.audit.kind, upstream_started.elapsed());
-    let mut response = match upstream_result {
+    let response = match upstream_result {
         Ok(Ok(response)) => response.map(Body::from),
         Ok(Err(err)) => {
             let err = err.into();
@@ -181,7 +181,9 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             offered_protocols,
         )?;
     }
-    response = http_modules.on_upstream_response(response).await?;
+    let mut response = qpx_core::http_message::Response::from_http(
+        http_modules.on_upstream_response(response).await?,
+    );
     let response_engine = selected_plan.response_rules.as_deref();
     let response_candidates = response_engine
         .map(|engine| {
@@ -241,12 +243,10 @@ pub(super) async fn dispatch_mitm_upstream(mut input: MitmDispatch<'_>) -> Resul
             policy_tags
         }
         DispatchResponsePolicyOutcome::Response(response) => {
-            return Ok(emit_optional_response_for_export(
-                response,
-                selected_plan,
-                export_session.as_ref(),
-            )
-            .await);
+            return Ok(qpx_core::http_message::Response::from_http(
+                emit_optional_response_for_export(response, selected_plan, export_session.as_ref())
+                    .await,
+            ));
         }
     };
     let keep_upgrade =
