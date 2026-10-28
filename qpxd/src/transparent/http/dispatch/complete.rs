@@ -23,7 +23,7 @@ use crate::policy_context::strip_untrusted_identity_headers;
 use crate::rate_limit::RateLimitContext;
 use crate::upstream::http1::proxy_http1_request_with_interim;
 use anyhow::Result;
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -31,7 +31,7 @@ use tokio::time::Duration;
 
 pub(super) async fn complete_transparent_request(
     prepared: TransparentPreparedRequest,
-) -> Result<hyper::Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let TransparentPreparedRequest {
         mut req,
         context,
@@ -104,7 +104,7 @@ pub(super) async fn complete_transparent_request(
     let (mut policy, audit, timeout_override) = match decision {
         crate::http::dispatch::HttpAccessDecision::Blocked { response, .. } => {
             return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                *response,
+                OwnerResponse::from_http(*response),
                 &selected_plan,
             ));
         }
@@ -118,7 +118,7 @@ pub(super) async fn complete_transparent_request(
                     &[],
                 );
                 return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                    *response,
+                    OwnerResponse::from_http(*response),
                     &selected_plan,
                 ));
             }
@@ -153,7 +153,8 @@ pub(super) async fn complete_transparent_request(
                     request_version,
                     proxy_name,
                     Some(&audit),
-                );
+                )
+                .map(OwnerResponse::from_http);
             }
             Err(err) => return Err(err),
         };
@@ -169,7 +170,8 @@ pub(super) async fn complete_transparent_request(
                 request_version,
                 proxy_name,
                 Some(&audit),
-            );
+            )
+            .map(OwnerResponse::from_http);
         }
         Err(err) => return Err(err),
     };
@@ -183,7 +185,7 @@ pub(super) async fn complete_transparent_request(
     )
     .await
     {
-        return Ok(response);
+        return Ok(OwnerResponse::from_http(response));
     }
     strip_untrusted_identity_headers(&state, &effective_policy, remote_ip, req.headers_mut())?;
     let websocket = is_websocket_upgrade(req.method(), req.headers())?;
@@ -206,7 +208,7 @@ pub(super) async fn complete_transparent_request(
             )
             .await?;
             return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                response,
+                OwnerResponse::from_http(response),
                 &selected_plan,
             ));
         }
@@ -230,7 +232,7 @@ pub(super) async fn complete_transparent_request(
                 concurrency.retry_after,
                 audit.clone(),
             );
-            return Ok(response);
+            return Ok(OwnerResponse::from_http(response));
         }
     };
     let ms = Duration::from_millis;
@@ -257,7 +259,8 @@ pub(super) async fn complete_transparent_request(
             policy_headers,
             audit: &audit,
         })
-        .await;
+        .await
+        .map(OwnerResponse::from_http);
     }
     proxy_transparent_http1(
         req,
@@ -331,7 +334,7 @@ pub(super) async fn proxy_transparent_http1(
     http_modules: &mut crate::http::modules::HttpModuleExecution,
     export_session: Option<&crate::exporter::ExportSession>,
     input: TransparentResponsePolicyInput<'_>,
-) -> Result<hyper::Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut req).await?;
     req = crate::http::capture::stream::emit_request_for_export(
@@ -434,7 +437,7 @@ pub(super) async fn proxy_transparent_http1(
         }
         DispatchResponsePolicyOutcome::Response(response) => {
             return Ok(emit_optional_response_for_export(
-                response,
+                OwnerResponse::from_http(response),
                 input.selected_plan,
                 export_session,
             )
@@ -457,7 +460,10 @@ pub(super) async fn proxy_transparent_http1(
         DispatchOutcome::Allow,
         &response_policy_tags,
     );
-    response =
-        emit_optional_response_for_export(response, input.selected_plan, export_session).await;
-    Ok(response)
+    Ok(emit_optional_response_for_export(
+        OwnerResponse::from_http(response),
+        input.selected_plan,
+        export_session,
+    )
+    .await)
 }

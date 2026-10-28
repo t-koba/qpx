@@ -6,6 +6,7 @@ use qpx_core::config::{
     IngressEdgeConfig, IngressEdgeMode, MessagesConfig, RuntimeConfig, StreamingConfig,
     StreamingRequirement, SystemLogConfig,
 };
+use qpx_core::http_message::OrdinaryHeaderName;
 use qpx_http::body::to_bytes;
 use std::net::{IpAddr, Ipv4Addr};
 
@@ -120,7 +121,7 @@ settings:
         .body(Body::empty())
         .expect("request");
 
-    let response = dispatch_transparent_request(
+    let response: OwnerResponse<Body> = dispatch_transparent_request(
         Request::from_http(request),
         runtime,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
@@ -133,11 +134,13 @@ settings:
     assert_eq!(
         response
             .headers()
-            .get(http::header::CONTENT_ENCODING)
+            .get(&OrdinaryHeaderName::try_from("content-encoding").unwrap())
             .and_then(|value| value.to_str().ok()),
         Some("gzip")
     );
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(decode_gzip(body.as_ref()), "transparent compression");
 }
 
@@ -174,7 +177,7 @@ async fn transparent_early_response_respects_response_body_cap() {
         .body(Body::from("{}"))
         .expect("request");
 
-    let response = dispatch_transparent_request(
+    let response: OwnerResponse<Body> = dispatch_transparent_request(
         Request::from_http(request),
         runtime,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
@@ -186,16 +189,13 @@ async fn transparent_early_response_respects_response_body_cap() {
 
     assert_eq!(response.status(), http::StatusCode::PAYLOAD_TOO_LARGE);
     assert!(
-        response
-            .headers()
-            .get(http::header::CONTENT_LENGTH)
-            .is_none(),
+        !response.headers().contains_content_length(),
         "truncated early response must not retain a stale Content-Length"
     );
     // The 22-byte rejection body is capped to `max_response_body_bytes = 1` via
     // `limit_response_body_for_plan`, which enforces the limit as a read cap:
     // collecting past the first byte surfaces `response body limit exceeded`.
-    match to_bytes(response.into_body()).await {
+    match to_bytes(response.into_head_and_body().1).await {
         Ok(body) => assert_eq!(
             body.len(),
             1,
@@ -206,4 +206,130 @@ async fn transparent_early_response_respects_response_body_cap() {
             "capped early response must enforce the 1-byte limit, got: {err}"
         ),
     }
+}
+
+#[tokio::test]
+async fn transparent_terminal_owner_preserves_headers_and_enforces_body_cap() {
+    let upstream_addr = spawn_static_http_server(
+        "202 Accepted",
+        vec![
+            ("Set-Cookie", "first=1; Path=/".to_string()),
+            ("Set-Cookie", "second=2; Path=/".to_string()),
+            ("X-Opaque", "unchanged !#$%&".to_string()),
+        ],
+        "terminal response".to_string(),
+        1,
+    )
+    .await;
+    let runtime = transparent_test_runtime(
+        Some(StreamingConfig {
+            max_response_body_bytes: Some(1),
+            ..Default::default()
+        }),
+        Vec::new(),
+        None,
+        Vec::new(),
+    );
+    let request = hyper::Request::builder()
+        .uri(format!("http://{upstream_addr}/"))
+        .header("host", upstream_addr.to_string())
+        .body(Body::empty())
+        .expect("request");
+
+    let response: OwnerResponse<Body> = dispatch_transparent_request(
+        Request::from_http(request),
+        runtime,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        None,
+        "transparent",
+    )
+    .await
+    .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::ACCEPTED);
+    assert_eq!(response.version(), http::Version::HTTP_11);
+    assert_eq!(
+        response
+            .headers()
+            .get_all(&OrdinaryHeaderName::try_from("set-cookie").unwrap())
+            .map(|value| value.as_bytes())
+            .collect::<Vec<_>>(),
+        vec![
+            b"first=1; Path=/".as_slice(),
+            b"second=2; Path=/".as_slice()
+        ]
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(&OrdinaryHeaderName::try_from("x-opaque").unwrap())
+            .unwrap(),
+        "unchanged !#$%&"
+    );
+    assert!(!response.headers().contains_content_length());
+    let err = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect_err("body cap");
+    assert!(
+        err.to_string().contains("response body limit exceeded"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn transparent_prepared_early_response_is_adopted_after_processing() {
+    let runtime = transparent_test_runtime(None, Vec::new(), None, Vec::new());
+    let request = hyper::Request::builder()
+        .uri("http://example.com/")
+        .header("host", "example.com")
+        .body(Body::empty())
+        .expect("request");
+    let TransparentPrepareOutcome::Prepared(mut prepared) = prepare_transparent_request(
+        Request::from_http(request),
+        runtime,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        None,
+        "transparent",
+    )
+    .await
+    .expect("prepared request") else {
+        panic!("unexpected preflight response");
+    };
+    // Exercise the mutually exclusive listener-policy early outcome without an
+    // upstream connection. The response has already undergone standard policy
+    // processing; completion must retain its metadata and body during adoption.
+    let mut early = hyper::Response::builder()
+        .status(http::StatusCode::FORBIDDEN)
+        .header("content-length", "6")
+        .header("x-early", "preserved")
+        .body(Body::from("denied"))
+        .expect("early response");
+    early.extensions_mut().insert(42_u32);
+    prepared.policy.policy = None;
+    prepared.policy.early_response = Some(Box::new(early));
+
+    let response: OwnerResponse<Body> = complete_transparent_request(prepared)
+        .await
+        .expect("response");
+
+    assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+    assert_eq!(
+        response.headers().declared_content_length().unwrap(),
+        Some(6)
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get(&OrdinaryHeaderName::try_from("x-early").unwrap())
+            .unwrap(),
+        "preserved"
+    );
+    assert_eq!(response.extensions().get::<u32>(), Some(&42));
+    assert_eq!(
+        to_bytes(response.into_head_and_body().1)
+            .await
+            .expect("body")
+            .as_ref(),
+        b"denied"
+    );
 }

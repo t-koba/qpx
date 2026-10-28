@@ -7,7 +7,7 @@ use crate::http::pipeline::PolicyStage;
 use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 
@@ -37,7 +37,7 @@ pub(super) async fn dispatch_transparent_request(
     remote_addr: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
-) -> Result<hyper::Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
         let span = tracing::info_span!(
@@ -60,11 +60,11 @@ async fn execute_transparent_request(
     remote_addr: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
-) -> Result<hyper::Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     match prepare_transparent_request(req, runtime, remote_addr, original_target, listener_name)
         .await?
     {
-        TransparentPrepareOutcome::Response(response) => Ok(*response),
+        TransparentPrepareOutcome::Response(response) => Ok(OwnerResponse::from_http(*response)),
         TransparentPrepareOutcome::Prepared(prepared) => {
             complete_transparent_request(prepared).await
         }

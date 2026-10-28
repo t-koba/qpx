@@ -58,7 +58,7 @@ where
             )
             .await
             {
-                Ok(response) => Ok::<_, Infallible>(OwnerResponse::from_http(response)),
+                Ok(response) => Ok::<_, Infallible>(response),
                 Err(err) => {
                     error!(error = ?err, "transparent request handling failed");
                     Ok(OwnerResponse::from_http(finalize_response_for_request(
