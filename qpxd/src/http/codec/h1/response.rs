@@ -177,7 +177,7 @@ pub(super) async fn send_http1_response_with_interim_zero_copy<W>(
     writer: &mut W,
     request_version: Version,
     request_method: &Method,
-    response: OwnerResponse<Body>,
+    mut response: OwnerResponse<Body>,
     interim: &[InterimResponseHead],
     request_keep_alive: bool,
     body_read_timeout: Duration,
@@ -211,17 +211,24 @@ where
         }
     }
 
+    let raw_head = response
+        .extensions_mut()
+        .remove::<Arc<RawHttp1ResponseHead>>();
+    if let Some(raw) = raw_head.as_ref() {
+        if !raw.is_finalized() {
+            return Err(anyhow!("raw HTTP/1 response head was not finalized"));
+        }
+        // The finalized raw head owns egress framing; the placeholder's
+        // Content-Length is unused and must neither be validated nor emitted.
+        response.headers_mut().remove_content_length();
+    }
     let response = response.into_http_for_codec()?;
-    let (mut parts, mut body) = response.into_parts();
-    let raw_head = parts.extensions.remove::<Arc<RawHttp1ResponseHead>>();
+    let (parts, mut body) = response.into_parts();
     let mut headers = parts.headers;
     let no_body = request_method == Method::HEAD
         || response_status_has_no_body(parts.status, false)
         || (request_method == Method::CONNECT && parts.status.is_success());
     let body_kind = if let Some(raw) = raw_head.as_ref() {
-        if !raw.is_finalized() {
-            return Err(anyhow!("raw HTTP/1 response head was not finalized"));
-        }
         match raw.framing() {
             RawHttp1BodyFraming::Empty => ResponseBodyKind::Empty,
             RawHttp1BodyFraming::ContentLength(length) => ResponseBodyKind::ContentLength(length),

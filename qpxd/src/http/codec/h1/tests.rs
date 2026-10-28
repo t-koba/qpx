@@ -1445,6 +1445,17 @@ async fn h1_owner_invalid_length_fails_after_interim() {
 
 #[tokio::test]
 async fn h1_owner_raw_head_keeps_interim_order_and_bytes() {
+    assert_owner_raw_head_wire(&[]).await;
+}
+
+#[tokio::test]
+async fn h1_owner_raw_head_ignores_invalid_placeholder_lengths() {
+    for values in [&["invalid"][..], &["4", "5"][..]] {
+        assert_owner_raw_head_wire(values).await;
+    }
+}
+
+async fn assert_owner_raw_head_wire(placeholder_lengths: &[&'static str]) {
     let (mut client, server) = tokio::io::duplex(8192);
     let (read_half, mut write_half) = tokio::io::split(server);
     let parsed = [
@@ -1473,7 +1484,15 @@ async fn h1_owner_raw_head_keeps_interim_order_and_bytes() {
     )
     .expect("raw response head");
     raw_head.finalize("qpx");
+    let mut expected_final = b"HTTP/1.1 200 OK\r\n".to_vec();
+    expected_final.extend_from_slice(raw_head.header_lines());
+    expected_final.extend_from_slice(b"\r\nbody");
     let mut response = Response::new(Body::from("body"));
+    for value in placeholder_lengths {
+        response
+            .headers_mut()
+            .append(CONTENT_LENGTH, HeaderValue::from_static(value));
+    }
     response.extensions_mut().insert(Arc::new(raw_head));
     let keep_alive = send_http1_response_with_interim(
         &mut write_half,
@@ -1493,6 +1512,11 @@ async fn h1_owner_raw_head_keeps_interim_order_and_bytes() {
     let mut wire = Vec::new();
     client.read_to_end(&mut wire).await.unwrap();
     assert_ordered_interim_wire(&wire);
+    let final_start = wire
+        .windows(b"HTTP/1.1 200 OK\r\n".len())
+        .position(|window| window == b"HTTP/1.1 200 OK\r\n")
+        .expect("final response after interim heads");
+    assert_eq!(&wire[final_start..], expected_final);
     let text = String::from_utf8_lossy(&wire);
     assert!(text.contains("Content-Length: 4\r\n"));
     assert!(text.contains("Content-Type: text/plain\r\n"));
