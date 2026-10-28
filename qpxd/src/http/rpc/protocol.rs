@@ -8,8 +8,9 @@ use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 use qpx_core::http_message::OrdinaryHeaderMut;
 
 pub(super) fn response_content_type(headers: &impl OrdinaryHeaderMut) -> Option<String> {
+    let name = OrdinaryHeaderName::try_from("content-type").ok()?;
     headers
-        .ordinary_values(&OrdinaryHeaderName::try_from("content-type").unwrap())
+        .ordinary_values(&name)
         .next()
         .and_then(|v| v.to_str().ok())
         .map(crate::http::media_type::media_type_without_parameters)
@@ -69,10 +70,8 @@ pub(super) fn detect_rpc_protocol(
     {
         return Some(protocol.to_string());
     }
-    if headers
-        .ordinary_values(&OrdinaryHeaderName::try_from("connect-protocol-version").unwrap())
-        .next()
-        .is_some()
+    if let Some(name) = OrdinaryHeaderName::try_from("connect-protocol-version").ok()
+        && headers.ordinary_values(&name).next().is_some()
     {
         return Some("connect".to_string());
     }
@@ -193,7 +192,7 @@ pub(super) fn extract_grpc_status_and_message(
     trailers: Option<&HeaderMap>,
 ) -> (Option<String>, Option<String>) {
     let value = |name: &str| {
-        let name = OrdinaryHeaderName::try_from(name).expect("ordinary RPC field");
+        let name = OrdinaryHeaderName::try_from(name).ok()?;
         match trailers {
             Some(trailers) => trailers.ordinary_values(&name).next(),
             None => headers.ordinary_values(&name).next(),
