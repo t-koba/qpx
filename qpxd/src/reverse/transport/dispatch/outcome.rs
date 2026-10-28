@@ -1,5 +1,6 @@
+use super::super::InterimList;
+use super::super::ReverseTerminalResponse;
 use super::super::mirrors::{record_reverse_upstream_error, record_reverse_upstream_timeout};
-use super::super::{InterimList, empty_interim_response};
 use crate::http::dispatch::{
     DispatchAuditContext, ProxyKind, finalize_dispatch_stale_if_error_response,
     record_upstream_request_duration,
@@ -8,9 +9,8 @@ use crate::reverse::health::UpstreamEndpoint;
 use crate::reverse::router::HttpRoute;
 use crate::runtime;
 use anyhow::{Result, anyhow};
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::rules::CompiledHeaderControl;
-use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::{Duration, Instant, sleep};
 
@@ -80,30 +80,25 @@ pub(super) fn acquire_reverse_upstream_concurrency(
     request_limits.acquire_concurrency_with_retry(&concurrency_ctx)
 }
 
-pub(super) async fn capture_reverse_response_outcome(
+pub(super) async fn capture_reverse_response_outcome<R: ReverseTerminalResponse>(
     outcome: super::ReverseAttemptOutcome,
     route: &HttpRoute,
     export_session: Option<&crate::exporter::ExportSession>,
-) -> super::ReverseAttemptOutcome {
+) -> super::ReverseAttemptOutcome<R> {
     match outcome {
-        super::ReverseAttemptOutcome::Response(mut response) => {
-            let current = std::mem::replace(&mut response.1, Response::new(Body::empty()));
-            response.1 = match export_session {
-                Some(session) => {
-                    crate::http::capture::stream::emit_response_for_export(
-                        current,
-                        &route.plan,
-                        session,
-                    )
-                    .await
-                }
-                None => {
-                    crate::http::capture::stream::limit_response_body_for_plan(current, &route.plan)
-                }
-            };
-            super::ReverseAttemptOutcome::Response(response)
+        super::ReverseAttemptOutcome::Response(response) => {
+            let (interim, response) = *response;
+            let response = R::from_finalized_http(response);
+            let response = crate::http::capture::stream::emit_optional_response_for_export(
+                response,
+                &route.plan,
+                export_session,
+            )
+            .await;
+            super::ReverseAttemptOutcome::Response(Box::new((interim, response)))
         }
-        outcome => outcome,
+        super::ReverseAttemptOutcome::Retry(err) => super::ReverseAttemptOutcome::Retry(err),
+        super::ReverseAttemptOutcome::Stop(err) => super::ReverseAttemptOutcome::Stop(err),
     }
 }
 
@@ -159,9 +154,9 @@ pub(super) struct ReverseUpstreamFailureInput<'a> {
     pub(super) last_err: Option<anyhow::Error>,
 }
 
-pub(super) async fn finish_reverse_upstream_failure(
+pub(super) async fn finish_reverse_upstream_failure<R: ReverseTerminalResponse>(
     input: ReverseUpstreamFailureInput<'_>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     if let Some(stale) = finalize_dispatch_stale_if_error_response(
         input.revalidation_state,
         input.plan,
@@ -173,7 +168,7 @@ pub(super) async fn finish_reverse_upstream_failure(
     )
     .await?
     {
-        return Ok(empty_interim_response(stale));
+        return Ok((Vec::new(), R::from_finalized_http(stale)));
     }
     if let Some(err) = input.last_err.as_ref() {
         input.http_modules.on_error(err).await;

@@ -319,8 +319,8 @@ pub(super) struct ReversePostModuleInput<'a> {
         Option<&'a crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity>,
 }
 
-pub(super) enum ReverseAttemptOutcome {
-    Response(Box<(InterimList, Response<Body>)>),
+pub(super) enum ReverseAttemptOutcome<R = Response<Body>> {
+    Response(Box<(InterimList, R)>),
     Retry(anyhow::Error),
     Stop(anyhow::Error),
 }

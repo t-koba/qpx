@@ -1,5 +1,6 @@
+use super::super::InterimList;
+use super::super::ReverseTerminalResponse;
 use super::super::destination::classify_reverse_destination;
-use super::super::{InterimList, empty_interim_response};
 use super::success::handle_reverse_success;
 use super::{
     ReverseAttemptOutcome, ReverseHttpDispatchInput, ReverseSuccessInput,
@@ -10,13 +11,11 @@ use super::{
 use crate::http::dispatch::concurrency_limited_response_for_parts_with_limits;
 use crate::upstream::origin::OriginEndpoint;
 use anyhow::{Result, anyhow};
-use hyper::Response;
-use qpx_http::body::Body;
 use tokio::time::Instant;
 
-pub(super) async fn dispatch_reverse_http_route(
+pub(super) async fn dispatch_reverse_http_route<R: ReverseTerminalResponse>(
     input: ReverseHttpDispatchInput<'_>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     let ReverseHttpDispatchInput {
         base,
         state,
@@ -86,7 +85,7 @@ pub(super) async fn dispatch_reverse_http_route(
                 concurrency.retry_after,
                 audit_ctx.clone(),
             );
-            return Ok(empty_interim_response(response));
+            return Ok((Vec::new(), R::from_finalized_http(response)));
         };
         let inflight_guard = selected_upstream
             .as_ref()
@@ -158,7 +157,7 @@ pub(super) async fn dispatch_reverse_http_route(
                 } else {
                     request_destination
                 };
-                match handle_reverse_success(ReverseSuccessInput {
+                match handle_reverse_success::<R>(ReverseSuccessInput {
                     base,
                     state,
                     conn,
@@ -241,7 +240,7 @@ pub(super) async fn dispatch_reverse_http_route(
             break;
         }
     }
-    finish_reverse_upstream_failure(ReverseUpstreamFailureInput {
+    finish_reverse_upstream_failure::<R>(ReverseUpstreamFailureInput {
         revalidation_state: revalidation_state.as_ref(),
         plan: &route.plan,
         request_method,

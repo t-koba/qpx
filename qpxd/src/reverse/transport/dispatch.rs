@@ -309,7 +309,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
     let reverse_error = prepared.context.state.messages.reverse_error.clone();
     let request_method = base.method.clone();
     let secure_transport = conn.tls_terminated;
-    let (interim, response) = match Box::pin(execute_reverse_request(
+    let (interim, response) = match Box::pin(execute_reverse_request::<R>(
         prepared,
         base,
         reverse,
@@ -322,18 +322,20 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
         Ok(response) => response,
         Err(error) => {
             tracing::warn!(error = ?error, "reverse handling failed");
-            empty_interim_response(super::response_rules::reverse_gateway_error_response(
-                &request_method,
-                request_version,
-                proxy_name.as_ref(),
-                reverse_error.as_str(),
-            ))
+            (
+                Vec::new(),
+                R::from_finalized_http(super::response_rules::reverse_gateway_error_response(
+                    &request_method,
+                    request_version,
+                    proxy_name.as_ref(),
+                    reverse_error.as_str(),
+                )),
+            )
         }
     };
-    // Capture and standard-only finalization are complete. Keep this head owned
-    // through route effects, observation and codec egress. Raw-H1 selects its
-    // existing standard carrier until its later static-body decision.
-    let mut response = R::from_finalized_http(response);
+    // Terminal helpers adopted after standard-only finalization, before capture.
+    // Raw-H1 still selects its standard carrier until its static-body decision.
+    let mut response = response;
     if let Some(metadata) = api_metadata {
         metadata.apply(response.terminal_headers_mut());
     }
@@ -385,14 +387,14 @@ pub(super) fn apply_reverse_route_metadata(
     Ok(())
 }
 
-async fn execute_reverse_request(
+async fn execute_reverse_request<R: ReverseTerminalResponse>(
     prepared: PreparedReverseRequest,
     base: BaseRequestFields,
     reverse: &ReloadableReverse,
     runtime: &Runtime,
     conn: &ReverseConnInfo,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     // Bind nested fields directly so partially moved containers do not remain
     // in the async state across the dispatch awaits.
     let PreparedReverseRequest {
@@ -444,7 +446,8 @@ async fn execute_reverse_request(
             proxy_name,
             connection_pool,
         )
-        .await;
+        .await
+        .map(|(interim, response)| (interim, R::from_finalized_http(response)));
     }
     let resolution_override = route.plan.destination_resolution.as_ref();
     let route_http_guard = route.plan.guard.as_deref();
@@ -466,7 +469,7 @@ async fn execute_reverse_request(
     .await?
     {
         Ok(req) => req,
-        Err(response) => return Ok(empty_interim_response(response)),
+        Err(response) => return Ok((Vec::new(), R::from_finalized_http(response))),
     };
     let (seed, sticky_seed) = if route.selection_is_seed_independent() {
         (0, 0)
@@ -496,7 +499,7 @@ async fn execute_reverse_request(
     {
         ReverseAccessOutcome::Response(response) => {
             return Ok(attach_streaming_limits(
-                empty_interim_response(*response),
+                (Vec::new(), R::from_finalized_http(*response)),
                 streaming,
                 request_version,
             ));
@@ -541,7 +544,7 @@ async fn execute_reverse_request(
         .await
     {
         return Ok(attach_streaming_limits(
-            empty_interim_response(response),
+            (Vec::new(), R::from_finalized_http(response)),
             streaming,
             request_version,
         ));
@@ -563,10 +566,12 @@ async fn execute_reverse_request(
     .await?
     {
         ReverseModuleOutcome::Response(response) => {
-            let response =
-                crate::http::capture::stream::limit_response_body_for_plan(*response, &route.plan);
+            let response = crate::http::capture::stream::limit_response_body_for_plan(
+                R::from_finalized_http(*response),
+                &route.plan,
+            );
             return Ok(attach_streaming_limits(
-                empty_interim_response(response),
+                (Vec::new(), response),
                 streaming,
                 request_version,
             ));
@@ -590,12 +595,12 @@ async fn execute_reverse_request(
         )
         .await?;
         return Ok(attach_streaming_limits(
-            empty_interim_response(response),
+            (Vec::new(), R::from_finalized_http(response)),
             streaming,
             request_version,
         ));
     }
-    let result = complete_reverse_after_modules(ReversePostModuleInput {
+    let result = complete_reverse_after_modules::<R>(ReversePostModuleInput {
         req,
         http_modules,
         request_cache_policy,
@@ -643,9 +648,9 @@ fn debug_assert_reverse_route_target(route: &HttpRoute) {
     });
 }
 
-async fn complete_reverse_after_modules(
+async fn complete_reverse_after_modules<R: ReverseTerminalResponse>(
     input: ReversePostModuleInput<'_>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     let ReversePostModuleInput {
         req,
         mut http_modules,
@@ -691,10 +696,10 @@ async fn complete_reverse_after_modules(
             allow_file_backed: request_version == http::Version::HTTP_11 && !conn.tls_terminated,
         })
         .await?;
-        return Ok(empty_interim_response(response));
+        return Ok((Vec::new(), R::from_finalized_http(response)));
     }
     if is_websocket_upgrade(req.method(), req.headers())? {
-        return handle_reverse_websocket_upgrade(ReverseWebsocketDispatch {
+        return handle_reverse_websocket_upgrade::<R>(ReverseWebsocketDispatch {
             req,
             state,
             route,
@@ -734,7 +739,7 @@ async fn complete_reverse_after_modules(
     .await?
     {
         ReverseCacheOutcome::Response(response) => {
-            let mut response = *response;
+            let mut response = R::from_finalized_http(*response);
             let export_session = state.export_session_for_plan(&route.plan, conn.remote_addr, host);
             response = crate::http::capture::stream::emit_optional_response_for_export(
                 response,
@@ -742,7 +747,7 @@ async fn complete_reverse_after_modules(
                 export_session.as_ref(),
             )
             .await;
-            return Ok(empty_interim_response(response));
+            return Ok((Vec::new(), response));
         }
         ReverseCacheOutcome::Continue(state) => state,
     };
@@ -774,7 +779,7 @@ async fn complete_reverse_after_modules(
     })
     .await?;
     if override_upstream.is_none() && route.ipc.is_some() {
-        return Box::pin(dispatch_reverse_ipc_route(ReverseIpcDispatchInput {
+        return Box::pin(dispatch_reverse_ipc_route::<R>(ReverseIpcDispatchInput {
             base,
             state,
             conn,
@@ -809,7 +814,7 @@ async fn complete_reverse_after_modules(
     // Keep upstream-only futures out of the enclosing cache-hit state machine.
     // Otherwise boxing generic dispatch copies their large inline storage even
     // when prepare_reverse_cache has already returned a response.
-    Box::pin(dispatch_reverse_http_route(ReverseHttpDispatchInput {
+    Box::pin(dispatch_reverse_http_route::<R>(ReverseHttpDispatchInput {
         base,
         state,
         conn,
@@ -860,9 +865,12 @@ mod future_layout_tests {
     fn cache_hit_state_does_not_embed_upstream_dispatch() {
         // These futures are never polled: compare their compiler-generated
         // layouts without creating a runtime or performing network I/O.
-        let cache_path = future_size(complete_reverse_after_modules);
-        let http_miss = future_size(dispatch_reverse_http_route);
-        let ipc_miss = future_size(dispatch_reverse_ipc_route);
+        let cache_path =
+            future_size(complete_reverse_after_modules::<qpx_core::http_message::Response<Body>>);
+        let http_miss =
+            future_size(dispatch_reverse_http_route::<qpx_core::http_message::Response<Body>>);
+        let ipc_miss =
+            future_size(dispatch_reverse_ipc_route::<qpx_core::http_message::Response<Body>>);
         assert!(
             cache_path < http_miss && cache_path < ipc_miss,
             "cache-hit state ({cache_path}) must exclude upstream-only futures \

@@ -1,3 +1,4 @@
+use super::super::ReverseTerminalResponse;
 use super::super::mirrors::dispatch_mirrors;
 use crate::http::dispatch::{
     DispatchCacheWriteInput, DispatchOutcome, annotate_dispatch_response,
@@ -40,9 +41,9 @@ pub(super) struct ReverseFinalizeResponseInput<'a> {
     pub(super) policy_tags: &'a [String],
 }
 
-pub(super) async fn finalize_reverse_dispatch_response(
+pub(super) async fn finalize_reverse_dispatch_response<R: ReverseTerminalResponse>(
     input: ReverseFinalizeResponseInput<'_>,
-) -> Result<Response<Body>> {
+) -> Result<R> {
     let ReverseFinalizeResponseInput {
         response: mut resp,
         state,
@@ -93,8 +94,8 @@ pub(super) async fn finalize_reverse_dispatch_response(
         route_headers_for_response.as_deref(),
         false,
     );
-    resp = crate::http::capture::stream::emit_optional_response_for_export(
-        resp,
+    let mut resp = crate::http::capture::stream::emit_optional_response_for_export(
+        R::from_finalized_http(resp),
         &route.plan,
         export_session,
     )

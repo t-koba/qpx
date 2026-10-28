@@ -1,7 +1,8 @@
+use super::super::InterimList;
+use super::super::ReverseTerminalResponse;
 use super::super::mirrors::{
     record_reverse_upstream_error, record_reverse_upstream_status, record_reverse_upstream_timeout,
 };
-use super::super::{InterimList, empty_interim_response};
 use super::success::handle_reverse_success;
 use super::{
     ReverseAttemptOutcome, ReverseIpcDispatchInput, ReverseSuccessInput, ReverseWebsocketDispatch,
@@ -16,13 +17,12 @@ use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::ipc_client::{ClientConnInfo, IpcUpstreamRequestContext, proxy_ipc_upstream};
 use crate::upstream::origin::{OriginEndpoint, proxy_websocket};
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
-use qpx_http::body::Body;
+use hyper::StatusCode;
 use tokio::time::{Duration, Instant, timeout};
 
-pub(super) async fn dispatch_reverse_ipc_route(
+pub(super) async fn dispatch_reverse_ipc_route<R: ReverseTerminalResponse>(
     input: ReverseIpcDispatchInput<'_>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     let ReverseIpcDispatchInput {
         base,
         state,
@@ -69,7 +69,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
                 concurrency.retry_after,
                 audit_ctx.clone(),
             );
-            return Ok(empty_interim_response(response));
+            return Ok((Vec::new(), R::from_finalized_http(response)));
         }
     };
     let ipc_conn = ClientConnInfo {
@@ -144,7 +144,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
         match response {
             Ok(Ok(resp)) => {
                 let resp = http_modules.on_upstream_response(resp).await?;
-                match handle_reverse_success(ReverseSuccessInput {
+                match handle_reverse_success::<R>(ReverseSuccessInput {
                     base,
                     state,
                     conn,
@@ -238,7 +238,7 @@ pub(super) async fn dispatch_reverse_ipc_route(
     )
     .await?
     {
-        return Ok(empty_interim_response(stale));
+        return Ok((Vec::new(), R::from_finalized_http(stale)));
     }
     if let Some(err) = last_err.as_ref() {
         http_modules.on_error(err).await;
@@ -246,9 +246,9 @@ pub(super) async fn dispatch_reverse_ipc_route(
     Err(last_err.unwrap_or_else(|| anyhow!("upstream request failed")))
 }
 
-pub(super) async fn handle_reverse_websocket_upgrade(
+pub(super) async fn handle_reverse_websocket_upgrade<R: ReverseTerminalResponse>(
     ctx: ReverseWebsocketDispatch<'_>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, R)> {
     let ReverseWebsocketDispatch {
         req,
         state,
@@ -304,7 +304,7 @@ pub(super) async fn handle_reverse_websocket_upgrade(
                 concurrency.retry_after,
                 audit_ctx.clone(),
             );
-            return Ok(empty_interim_response(response));
+            return Ok((Vec::new(), R::from_finalized_http(response)));
         }
         Some(permits) => permits,
     };
@@ -360,15 +360,15 @@ pub(super) async fn handle_reverse_websocket_upgrade(
                 route_headers,
                 keep_upgrade,
             );
-            resp = crate::http::capture::stream::emit_optional_response_for_export(
-                resp,
+            let mut resp = crate::http::capture::stream::emit_optional_response_for_export(
+                R::from_finalized_http(resp),
                 &route.plan,
                 export_session.as_ref(),
             )
             .await;
             http_modules.on_logging(Some(resp.status()), None).await;
             annotate_dispatch_response(&mut resp, audit_ctx, DispatchOutcome::Allow, &[]);
-            Ok(empty_interim_response(resp))
+            Ok((Vec::new(), resp))
         }
         Ok(Err(err)) => {
             http_modules.on_error(&err).await;

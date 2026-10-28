@@ -1,3 +1,4 @@
+use super::super::ReverseTerminalResponse;
 use super::super::empty_interim_response;
 use super::super::mirrors::record_reverse_upstream_status;
 use super::super::response_rules::{
@@ -12,9 +13,9 @@ use super::{
 use crate::http::dispatch::finalize_dispatch_stale_if_error_response;
 use anyhow::Result;
 
-pub(super) async fn handle_reverse_success(
+pub(super) async fn handle_reverse_success<R: ReverseTerminalResponse>(
     input: ReverseSuccessInput<'_>,
-) -> Result<ReverseAttemptOutcome> {
+) -> Result<ReverseAttemptOutcome<R>> {
     let ReverseSuccessInput {
         base,
         state,
@@ -116,7 +117,7 @@ pub(super) async fn handle_reverse_success(
         record_reverse_upstream_status(upstream, &route.policy, resp.status(), started);
     }
     record_reverse_success_metrics(state, started);
-    let resp = finalize_reverse_dispatch_response(ReverseFinalizeResponseInput {
+    let resp = finalize_reverse_dispatch_response::<R>(ReverseFinalizeResponseInput {
         response: resp,
         state,
         route,
@@ -163,15 +164,21 @@ mod tests {
         // synthetic responses; no transport or lifecycle callbacks are substituted.
         #[tokio::test]
         async fn success_tail_orders_policy_retry_stale_finalization_and_capture() -> Result<()> {
+            success_tail::<Response<Body>>().await?;
+            success_tail::<qpx_core::http_message::Response<Body>>().await
+        }
+
+        async fn success_tail<R: crate::reverse::transport::ReverseTerminalResponse>() -> Result<()>
+        {
             use crate::exporter::ExporterSink;
             use qpx_core::exporter::CaptureEvent;
             use qpx_core::shm_ring::ShmRingBuffer;
             use qpxd_cache::{CacheRequestKey, CacheStoreContext, CacheStoreTiming, LookupOutcome};
 
-            for case in ["http", "ipc", "retry", "stop", "stale", "local"] {
+            for case in ["http", "ipc", "retry", "stop", "stale", "local", "cache"] {
                 let dir = tempfile::tempdir()?;
                 let cache_path = dir.path().canonicalize()?.join("cache");
-                let config = qpx_core::config::load_config_value(
+                let mut config = qpx_core::config::load_config_value(
                     serde_yaml::from_str(&format!(
                         r#"upstreams:
 - name: origin
@@ -205,7 +212,9 @@ edges:
                 let registry = crate::http::modules::default_http_module_registry();
                 let router = ReverseRouter::new(edge, &config.upstreams, registry.as_ref())?;
                 let route = router.route_at(0).unwrap();
-                let state = crate::runtime::Runtime::new(config)?.state();
+                config.telemetry.access_log.output.enabled = true;
+                let runtime = crate::runtime::Runtime::new(config)?;
+                let state = runtime.state();
                 let selected = route.select_upstream(0, 0).unwrap();
                 if matches!(case, "http" | "ipc") {
                     selected.mark_failure(&route.policy.health);
@@ -240,7 +249,14 @@ edges:
                     &key,
                     &policy,
                     Response::builder()
-                        .header("cache-control", "max-age=0, stale-if-error=60")
+                        .header(
+                            "cache-control",
+                            if case == "cache" {
+                                "max-age=60"
+                            } else {
+                                "max-age=0, stale-if-error=60"
+                            },
+                        )
                         .body(Body::from("cached"))?,
                     CacheStoreContext {
                         timing: CacheStoreTiming {
@@ -255,24 +271,25 @@ edges:
                 .await?;
                 assert_eq!(to_bytes(cached.into_body()).await?, "cached");
                 assert!(wait.await, "cache writeback completed");
-                let LookupOutcome::Revalidate(stale) = qpxd_cache::lookup(
+                let lookup = qpxd_cache::lookup(
                     &request,
                     &key,
                     &policy,
                     &state.cache.backends,
                     &state.cache.background_revalidations,
                 )
-                .await?
-                else {
-                    panic!("expected immediately stale cache entry: {case}");
+                .await?;
+                let mut revalidation = match lookup {
+                    LookupOutcome::Revalidate(stale) => Some(stale),
+                    LookupOutcome::Hit(_) if case == "cache" => None,
+                    _ => panic!("unexpected cache entry: {case}"),
                 };
-                let mut revalidation = Some(stale);
                 let mut collapse = None;
                 let mut modules = HttpModuleExecution::Empty;
                 let conn = ReverseConnInfo::plain("127.0.0.1:1234".parse()?, 80);
                 let base = extract_base_request_fields(&request, Default::default());
                 let audit = DispatchAuditContext::new(
-                    None,
+                    Some(state.clone()),
                     ProxyKind::Reverse,
                     None,
                     conn.remote_addr,
@@ -298,53 +315,92 @@ edges:
                     ));
                 }
                 let is_error = !matches!(case, "http" | "ipc");
-                let outcome = handle_reverse_success(ReverseSuccessInput {
-                    base: &base,
-                    state: &state,
-                    conn: &conn,
-                    route,
-                    response_destination: &Default::default(),
-                    request_method: &Method::GET,
-                    request_version: Version::HTTP_11,
-                    request_rpc: None,
-                    identity: &Default::default(),
-                    route_headers: None,
-                    cache_policy: None,
-                    request_headers_snapshot: None,
-                    cache_lookup_key: None,
-                    cache_target_key: None,
-                    revalidation_state: &mut revalidation,
-                    cache_collapse_guard: &mut collapse,
-                    template: None,
-                    replay_recorder: None,
-                    mirror_upstreams: &mut Vec::new(),
-                    attempts: if matches!(case, "retry" | "stop" | "local") {
-                        2
-                    } else {
-                        1
-                    },
-                    route_timeout: Duration::from_secs(1),
-                    proxy_name: "qpx-test",
-                    http_modules: &mut modules,
-                    audit_ctx: &audit,
-                    attempt_idx: 0,
-                    selected_upstream: (case != "ipc").then_some(&selected),
-                    upstream_cert: None,
-                    interim,
-                    started: Some(tokio::time::Instant::now()),
-                    response: Response::builder()
-                        .status(if is_error { 503 } else { 200 })
-                        .header("connection", "keep-alive")
-                        .body(Body::from("origin"))?,
-                    export_session: Some(&session),
-                })
-                .await?;
+                let outcome = if case == "cache" {
+                    // Exercise the actual cache-hit return in transport dispatch,
+                    // not an owner conversion constructed only by this test.
+                    let response =
+                        crate::reverse::transport::dispatch::complete_reverse_after_modules::<R>(
+                            crate::reverse::transport::dispatch::ReversePostModuleInput {
+                                req: request.map_body(|()| Body::empty()),
+                                http_modules: HttpModuleExecution::Empty,
+                                request_cache_policy: Some(policy.clone()),
+                                base: &base,
+                                runtime: &runtime,
+                                state: &state,
+                                conn: &conn,
+                                host: "example.test",
+                                route,
+                                resolution_override: None,
+                                request_destination: &Default::default(),
+                                request_method: &Method::GET,
+                                request_version: Version::HTTP_11,
+                                request_rpc: None,
+                                identity: &Default::default(),
+                                authorization_decision: None,
+                                route_headers: None,
+                                override_upstream: None,
+                                decision_service_mirror_upstreams: Vec::new(),
+                                seed: 0,
+                                sticky_seed: 0,
+                                route_timeout: Duration::from_secs(1),
+                                proxy_name: "qpx-test",
+                                request_limits: &mut Default::default(),
+                                request_limit_ctx: &Default::default(),
+                                audit_ctx: &audit,
+                                connection_pool: None,
+                            },
+                        )
+                        .await?;
+                    ReverseAttemptOutcome::Response(Box::new(response))
+                } else {
+                    handle_reverse_success::<R>(ReverseSuccessInput {
+                        base: &base,
+                        state: &state,
+                        conn: &conn,
+                        route,
+                        response_destination: &Default::default(),
+                        request_method: &Method::GET,
+                        request_version: Version::HTTP_11,
+                        request_rpc: None,
+                        identity: &Default::default(),
+                        route_headers: None,
+                        cache_policy: None,
+                        request_headers_snapshot: None,
+                        cache_lookup_key: None,
+                        cache_target_key: None,
+                        revalidation_state: &mut revalidation,
+                        cache_collapse_guard: &mut collapse,
+                        template: None,
+                        replay_recorder: None,
+                        mirror_upstreams: &mut Vec::new(),
+                        attempts: if matches!(case, "retry" | "stop" | "local") {
+                            2
+                        } else {
+                            1
+                        },
+                        route_timeout: Duration::from_secs(1),
+                        proxy_name: "qpx-test",
+                        http_modules: &mut modules,
+                        audit_ctx: &audit,
+                        attempt_idx: 0,
+                        selected_upstream: (case != "ipc").then_some(&selected),
+                        upstream_cert: None,
+                        interim,
+                        started: Some(tokio::time::Instant::now()),
+                        response: Response::builder()
+                            .status(if is_error { 503 } else { 200 })
+                            .header("connection", "keep-alive")
+                            .body(Body::from("origin"))?,
+                        export_session: Some(&session),
+                    })
+                    .await?
+                };
                 match outcome {
                     ReverseAttemptOutcome::Retry(_) => assert_eq!(case, "retry"),
                     ReverseAttemptOutcome::Stop(_) => assert_eq!(case, "stop"),
                     ReverseAttemptOutcome::Response(response) => {
                         assert!(!matches!(case, "retry" | "stop"));
-                        let (interim, response) = *response;
+                        let (interim, mut response) = *response;
                         assert_eq!(interim.len(), usize::from(case == "http"), "{case}");
                         if case == "http" {
                             assert_eq!(interim[0].status, StatusCode::EARLY_HINTS);
@@ -357,12 +413,21 @@ edges:
                             response.status().as_u16(),
                             if case == "local" { 418 } else { 200 }
                         );
-                        assert!(response.headers().contains_key("via"), "{case}");
-                        assert!(!response.headers().contains_key("connection"), "{case}");
+                        let mut fields = String::new();
+                        response.preview_fields(&mut fields, |_| true);
+                        assert!(fields.contains("via:"), "{case}");
+                        assert!(!fields.contains("connection:"), "{case}");
+                        assert!(
+                            response
+                                .extensions()
+                                .get::<qpx_observability::access_log::RequestLogContext>()
+                                .is_some(),
+                            "audit context: {case}"
+                        );
                         assert_eq!(
-                            to_bytes(response.into_body()).await?,
+                            to_bytes(std::mem::replace(response.body_mut(), Body::empty())).await?,
                             match case {
-                                "stale" => "cached",
+                                "stale" | "cache" => "cached",
                                 "local" => "policy",
                                 _ => "origin",
                             }
@@ -371,7 +436,7 @@ edges:
                 }
                 assert_eq!(
                     selected.is_healthy(crate::runtime::now_millis()),
-                    matches!(case, "http" | "local"),
+                    matches!(case, "http" | "local" | "cache"),
                     "{case}"
                 );
                 // FIFO sentinel makes absence/uniqueness assertions deterministic:
@@ -394,7 +459,7 @@ edges:
                 .await??;
                 assert_eq!(
                     events.len(),
-                    usize::from(!matches!(case, "retry" | "stop")),
+                    usize::from(!matches!(case, "retry" | "stop" | "cache")),
                     "{case}"
                 );
                 if let Some(event) = events.first() {
@@ -405,7 +470,7 @@ edges:
                 }
                 assert_eq!(
                     revalidation.is_some(),
-                    !matches!(case, "http" | "ipc"),
+                    !matches!(case, "http" | "ipc" | "cache"),
                     "only normal finalization consumes cache state: {case}"
                 );
                 ring.unlink_doorbells()?;

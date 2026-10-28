@@ -268,25 +268,27 @@ async fn response_annotation_owner_preserves_context_extensions_and_policy_tags(
         policy_tags: vec!["base".into()],
         ..Default::default()
     };
-    let audit = DispatchAuditContext::new(
-        Some(state),
-        ProxyKind::Forward,
-        Some("forward".into()),
-        "127.0.0.1:1234".parse().unwrap(),
-        http::Method::GET,
-        Some("/".into()),
-        context,
-    );
-    let mut standard = response(&[], Body::empty());
-    let mut owner = OwnerResponse::from_http(response(&[], Body::empty()));
-    let tags = vec![" base ".into(), " added ".into(), "".into(), "added".into()];
-    annotate_dispatch_response(&mut standard, &audit, DispatchOutcome::Allow, &tags);
-    annotate_dispatch_response(&mut owner, &audit, DispatchOutcome::Allow, &tags);
-    let actual = owner.extensions().get::<RequestLogContext>().unwrap();
-    let expected = standard.extensions().get::<RequestLogContext>().unwrap();
-    assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
-    assert_eq!(actual.policy_tags, ["base", "added"]);
-    assert_eq!(audit.log_context.policy_tags, ["base"]);
-    assert_eq!(owner.extensions().get::<usize>(), Some(&42));
-    assert_eq!(fields(&owner), fields(&standard));
+    for kind in [ProxyKind::Forward, ProxyKind::Reverse] {
+        let audit = DispatchAuditContext::new(
+            Some(state.clone()),
+            kind,
+            Some("forward".into()),
+            "127.0.0.1:1234".parse().unwrap(),
+            http::Method::GET,
+            Some("/".into()),
+            context.clone(),
+        );
+        let mut standard = response(&[], Body::empty());
+        let mut owner = OwnerResponse::from_http(response(&[], Body::empty()));
+        let tags = vec![" base ".into(), " added ".into(), "".into(), "added".into()];
+        annotate_dispatch_response(&mut standard, &audit, DispatchOutcome::Allow, &tags);
+        annotate_dispatch_response(&mut owner, &audit, DispatchOutcome::Allow, &tags);
+        let actual = owner.extensions().get::<RequestLogContext>().unwrap();
+        let expected = standard.extensions().get::<RequestLogContext>().unwrap();
+        assert_eq!(format!("{actual:?}"), format!("{expected:?}"));
+        assert_eq!(actual.policy_tags, ["base", "added"]);
+        assert_eq!(audit.log_context.policy_tags, ["base"]);
+        assert_eq!(owner.extensions().get::<usize>(), Some(&42));
+        assert_eq!(fields(&owner), fields(&standard));
+    }
 }

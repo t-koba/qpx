@@ -13,11 +13,11 @@ use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
 
-pub(super) fn attach_streaming_limits(
-    mut result: (InterimList, Response<Body>),
+pub(super) fn attach_streaming_limits<R: crate::http::response_carrier::ResponseCarrier>(
+    mut result: (InterimList, R),
     streaming: crate::runtime::ResolvedStreamingLimits,
     downstream_version: http::Version,
-) -> (InterimList, Response<Body>) {
+) -> (InterimList, R) {
     if downstream_version == http::Version::HTTP_3 {
         result.1.extensions_mut().insert(streaming);
     }

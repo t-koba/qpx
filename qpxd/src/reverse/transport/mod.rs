@@ -80,9 +80,12 @@ impl ReverseConnInfo {
 }
 
 // The raw-H1 dispatcher still owns its standard head until its InMemory
-// decision. Select the terminal carrier once, before shared route effects;
-// ordinary services select the opaque owner, with no owner-to-standard bridge.
-pub(super) trait ReverseTerminalResponse {
+// decision. Select the carrier after standard-only finalization, before the
+// reverse capture/limit/audit tail and shared route effects. Ordinary services
+// select the opaque owner, with no owner-to-standard bridge.
+pub(super) trait ReverseTerminalResponse:
+    crate::http::response_carrier::ResponseCarrier
+{
     type Headers: OrdinaryHeaderMut;
     fn from_finalized_http(response: Response<Body>) -> Self;
     fn terminal_headers_mut(&mut self) -> &mut Self::Headers;
