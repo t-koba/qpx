@@ -2,9 +2,9 @@ use crate::http::body::size::{
     observed_request_prefix_chunks_async, observed_response_prefix_chunks_async,
 };
 use crate::http::protocol::common::http_version_label;
+use crate::http::response_carrier::ResponseCarrier;
 use anyhow::Result;
 use bytes::Bytes;
-use hyper::Response;
 use qpx_core::config::ExporterConfig;
 use qpx_core::exporter::{CaptureDirection, CaptureEvent, CapturePlane, unix_timestamp_nanos};
 use qpx_core::http_message::Request as OwnerRequest;
@@ -415,12 +415,13 @@ pub(crate) fn serialize_request_preview_async(
     }
 }
 
-pub(crate) fn serialize_response_preview_async(
-    response: &Response<Body>,
+pub(crate) fn serialize_response_preview_async<R: ResponseCarrier>(
+    response: &R,
 ) -> impl std::future::Future<Output = Vec<u8>> + Send + 'static {
     let version = response.version();
     let status = response.status();
-    let headers = response.headers().clone();
+    let mut fields = String::new();
+    response.preview_fields(&mut fields, should_include_export_preview_header);
     let body = observed_response_prefix_chunks_async(response, PREVIEW_BODY_BYTES);
     async move {
         let mut out = String::new();
@@ -432,18 +433,7 @@ pub(crate) fn serialize_response_preview_async(
             out.push_str(reason);
         }
         out.push_str("\r\n");
-        for (name, value) in &headers {
-            let name = name.as_str();
-            if !should_include_export_preview_header(name) {
-                continue;
-            }
-            out.push_str(name);
-            out.push_str(": ");
-            if let Ok(text) = value.to_str() {
-                out.push_str(text);
-            }
-            out.push_str("\r\n");
-        }
+        out.push_str(&fields);
         out.push_str("\r\n");
         if let Some(chunks) = body.await {
             push_utf8_preview_chunks(&mut out, &chunks);

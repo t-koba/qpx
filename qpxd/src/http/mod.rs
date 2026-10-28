@@ -12,4 +12,5 @@ pub mod modules;
 pub mod pipeline;
 pub mod policy;
 pub mod protocol;
+pub(crate) mod response_carrier;
 pub mod rpc;

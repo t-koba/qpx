@@ -1,8 +1,6 @@
 use crate::policy_context::{AuditRecord, attach_log_context, emit_audit_log, merge_policy_tags};
 use crate::runtime::RuntimeState;
 use http::Method;
-use hyper::Response;
-use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
 use std::borrow::Cow;
 use std::net::SocketAddr;
@@ -82,8 +80,8 @@ impl DispatchAuditContext {
     }
 }
 
-pub(crate) fn annotate_dispatch_response(
-    response: &mut Response<Body>,
+pub(crate) fn annotate_dispatch_response<R: crate::http::response_carrier::ResponseCarrier>(
+    response: &mut R,
     ctx: &DispatchAuditContext,
     outcome: DispatchOutcome,
     extra_policy_tags: &[String],

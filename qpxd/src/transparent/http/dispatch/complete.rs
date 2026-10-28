@@ -112,7 +112,7 @@ pub(super) async fn complete_transparent_request(
             let crate::http::dispatch::HttpAccessAllowed { audit, controls } = *allowed;
             if let Some(mut response) = early_response {
                 annotate_dispatch_response(
-                    &mut response,
+                    &mut *response,
                     &audit,
                     DispatchOutcome::EarlyResponse,
                     &[],

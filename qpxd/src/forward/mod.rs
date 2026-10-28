@@ -265,7 +265,7 @@ async fn handle_request(
                 "ok",
                 started.elapsed(),
             );
-            Ok(OwnerResponse::from_http(response))
+            Ok(response)
         }
         Err(err) => {
             http_metrics::forward_request(&state.observability.metric_names, "error");

@@ -126,7 +126,9 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
         response.status(),
         StatusCode::from_u16(209).expect("custom status")
     );
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(body.as_ref(), b"rpc matched");
 }
 
@@ -275,7 +277,9 @@ async fn assert_forward_response_rule_matches_streaming(
         response.status(),
         StatusCode::from_u16(status).expect("custom status")
     );
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(body.as_ref(), b"streaming matched");
 }
 

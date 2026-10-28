@@ -274,7 +274,9 @@ edges:
     .expect("dispatch timeout")
     .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let body = to_bytes(response.into_body()).await.expect("echo");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("echo");
     let head = std::str::from_utf8(&body)
         .expect("UTF-8")
         .to_ascii_lowercase();

@@ -106,8 +106,10 @@ pub(crate) fn observed_response_body_reader(
         .map(|body| ObservedBodyReader { body })
 }
 
-pub(crate) fn observed_response_prefix_chunks_async(
-    response: &Response<Body>,
+pub(crate) fn observed_response_prefix_chunks_async<
+    R: crate::http::response_carrier::ResponseCarrier,
+>(
+    response: &R,
     max_bytes: usize,
 ) -> impl std::future::Future<Output = Option<Vec<Bytes>>> + Send + 'static {
     let body = response.extensions().get::<ObservedBodyBytes>().cloned();

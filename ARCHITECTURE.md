@@ -43,6 +43,18 @@ consumers. No temporary raw/owned dual facades have been introduced. The distinc
 raw-H1 and interim owners and cache persistence format are unchanged. This does
 not establish global structural ownership or justify reducing the source gate.
 
+The ordinary forward terminal response suffix now imports after standard-only
+policy/modules/cache/finalization and carries `Response<Body>` through export
+preview, sample/full body capture, size limiting, dispatch audit/log-context
+annotation, and H1/H2 access-log/service or H3 codec egress. Cache hit/collapse,
+response-policy replies and stale fallbacks import at their terminal capture
+calls. Early standard replies import when joining that suffix. A private carrier
+mechanism shares capture/annotation with the still-standard reverse,
+transparent, MITM and WebSocket paths; it exposes no raw heads or maps. Preview
+serialization preserves duplicate framing spellings and renders non-text header
+values as empty text. The raw-H1 direct/in-memory paths, including their existing
+size-limit-before-InMemory decision, remain unchanged.
+
 ## qpxd Runtime Shape
 
 Configuration is parsed in `qpx-core`, compiled into a `RuntimePlan` in `qpxd`, and then consumed by listener-specific dispatch paths. Request handling is intentionally split by ingress type:

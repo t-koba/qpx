@@ -150,6 +150,7 @@ struct ReverseH3Handler {
 
 #[async_trait]
 impl H3RequestHandler for ReverseH3Handler {
+    type Response = Response<Body>;
     fn limits(&self) -> H3Limits {
         let state = self.reverse.runtime.state();
         let limits = state.plan.limits;

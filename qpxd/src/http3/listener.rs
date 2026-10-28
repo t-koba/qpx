@@ -1,4 +1,5 @@
 use crate::http::body::size::set_observed_request_size;
+use crate::http::response_carrier::ResponseCarrier;
 use crate::http3::codec::{h3_request_to_owned, sanitize_interim_response_for_h3};
 use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::response_options::H3ResponseSendOptions;
@@ -59,9 +60,9 @@ fn classify_h3_connect_kind(protocol: Option<::h3::ext::Protocol>) -> H3ConnectK
     }
 }
 
-pub(crate) struct H3HttpResponse {
+pub(crate) struct H3HttpResponse<R = Response<Body>> {
     pub(crate) interim: Vec<crate::upstream::raw_http1::InterimResponseHead>,
-    pub(crate) response: Response<Body>,
+    pub(crate) response: R,
 }
 
 type H3RequestBodyResult =
@@ -111,8 +112,8 @@ async fn finish_h3_request_body_before_response(
     }
 }
 
-impl H3HttpResponse {
-    pub(crate) fn final_only(response: Response<Body>) -> Self {
+impl<R> H3HttpResponse<R> {
+    pub(crate) fn final_only(response: R) -> Self {
         Self {
             interim: Vec::new(),
             response,
@@ -125,6 +126,7 @@ impl H3HttpResponse {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
+    type Response: ResponseCarrier;
     fn limits(&self) -> H3Limits;
 
     fn request_streaming_limits(
@@ -144,13 +146,13 @@ pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
         false
     }
 
-    async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Response<Body>;
+    async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Self::Response;
 
     async fn handle_http_with_interim(
         &self,
         req: Request<Body>,
         conn: H3ConnInfo,
-    ) -> H3HttpResponse {
+    ) -> H3HttpResponse<Self::Response> {
         H3HttpResponse::final_only(self.handle_http(req, conn).await)
     }
 
@@ -440,7 +442,7 @@ async fn handle_stream<H: H3RequestHandler>(
         return;
     }
     let response_result = send_h3_response_observed(
-        qpx_core::http_message::Response::from_http(response.response),
+        response.response.into_owner(),
         &request_method,
         &mut send_stream,
         H3ResponseSendOptions {

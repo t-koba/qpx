@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 #[cfg(feature = "auth-basic")]
 use hyper::StatusCode;
 use hyper::{Method, Response};
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -21,7 +21,7 @@ pub(crate) async fn handle_request_inner(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let ftp_credentials = crate::ftp::extract_forward_credentials(&mut req);
@@ -40,10 +40,12 @@ pub(crate) async fn handle_request_inner(
         ftp_rejection,
     ) {
         PreflightOutcome::Continue(validated) => validated,
-        PreflightOutcome::Reject(response) => return Ok(*response),
+        PreflightOutcome::Reject(response) => return Ok(OwnerResponse::from_http(*response)),
     };
     if req.method() == Method::CONNECT {
-        return connect::handle_connect(req, runtime, listener_name, remote_addr).await;
+        return connect::handle_connect(req, runtime, listener_name, remote_addr)
+            .await
+            .map(OwnerResponse::from_http);
     }
 
     let base = extract_base_request_fields(
@@ -66,7 +68,7 @@ pub(crate) async fn handle_request_inner(
     .await
     {
         Ok(response) => response,
-        Err(err) => err.into_response_result()?,
+        Err(err) => OwnerResponse::from_http(err.into_response_result()?),
     };
     attach_interim_response_heads(&mut response, interim);
     Ok(response)

@@ -309,7 +309,7 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
     .unwrap()
     .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .unwrap();
     assert_eq!(body.as_ref(), b"synthetic file contents");
@@ -335,7 +335,7 @@ async fn forward_http_userinfo_is_rejected_before_dispatch() {
         .await
         .unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = qpx_http::body::to_bytes(response.into_body())
+        let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
             .await
             .unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("synthetic-user"));

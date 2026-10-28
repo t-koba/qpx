@@ -23,9 +23,9 @@ pub(crate) use identity::{
     strip_untrusted_identity_headers,
 };
 
-pub(crate) fn attach_log_context(
+pub(crate) fn attach_log_context<R: crate::http::response_carrier::ResponseCarrier>(
     state: &crate::runtime::RuntimeState,
-    response: &mut hyper::Response<qpx_http::body::Body>,
+    response: &mut R,
     log_context: &qpx_observability::access_log::RequestLogContext,
 ) {
     if state.resources.access_log.output.enabled || qpx_observability::otel_enabled() {

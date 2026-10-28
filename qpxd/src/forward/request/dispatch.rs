@@ -15,8 +15,8 @@ use crate::http::policy::rule_context::{
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::runtime::Runtime;
 use anyhow::anyhow;
-use hyper::Response;
 use qpx_core::http_message::Request;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
 mod http_execute;
@@ -44,7 +44,7 @@ pub(super) async fn dispatch_forward_request(
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
     ftp_credentials: crate::ftp::FtpCredentials,
-) -> std::result::Result<Response<Body>, DispatchError> {
+) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
     use tracing::Instrument as _;
     if qpx_observability::request_spans_enabled() {
         let span = tracing::info_span!(
@@ -83,7 +83,7 @@ async fn execute_forward_request(
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
     ftp_credentials: crate::ftp::FtpCredentials,
-) -> std::result::Result<Response<Body>, DispatchError> {
+) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
     match prepare_forward_request(
         req,
         base,
@@ -94,7 +94,7 @@ async fn execute_forward_request(
     )
     .await?
     {
-        ForwardPrepareOutcome::Response(response) => Ok(*response),
+        ForwardPrepareOutcome::Response(response) => Ok(OwnerResponse::from_http(*response)),
         ForwardPrepareOutcome::Prepared(prepared) => {
             let streaming = prepared.policy.selected_plan.streaming;
             let mut response = complete_forward_request(prepared).await?;
@@ -455,7 +455,7 @@ async fn prepare_forward_request(
 
 async fn complete_forward_request(
     prepared: ForwardPreparedRequest,
-) -> std::result::Result<Response<Body>, DispatchError> {
+) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
     let ForwardPreparedRequest {
         mut req,
         base,
@@ -575,7 +575,7 @@ async fn complete_forward_request(
             body_read_timeout,
             selected_plan.streaming.max_request_body_bytes,
         );
-        return Ok(response);
+        return Ok(OwnerResponse::from_http(response));
     }
 
     req = match limit_request_body(req, selected_plan.streaming.max_request_body_bytes) {
@@ -597,7 +597,7 @@ async fn complete_forward_request(
             &audit,
         )
         .await?;
-        return Ok(response);
+        return Ok(OwnerResponse::from_http(response));
     }
 
     let (observed_req, needs_rpc) =
@@ -636,7 +636,7 @@ async fn complete_forward_request(
     )
     .await
     {
-        return Ok(response);
+        return Ok(OwnerResponse::from_http(response));
     }
     let ready = match prepare_forward_dispatch(ForwardDispatchPrepareInput {
         req,
@@ -664,7 +664,7 @@ async fn complete_forward_request(
                 *response,
                 &selected_plan,
             );
-            return Ok(response);
+            return Ok(OwnerResponse::from_http(response));
         }
         ForwardDispatchPrepareOutcome::Prepared(ready) => ready,
     };
@@ -702,11 +702,11 @@ fn forward_payload_too_large_response(
     client_version: http::Version,
     proxy_name: &str,
     audit: &DispatchAuditContext,
-) -> std::result::Result<Response<Body>, DispatchError> {
-    Ok(request_body_too_large_response(
+) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
+    Ok(OwnerResponse::from_http(request_body_too_large_response(
         &base.method,
         client_version,
         proxy_name,
         Some(audit),
-    )?)
+    )?))
 }

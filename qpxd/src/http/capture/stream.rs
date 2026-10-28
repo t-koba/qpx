@@ -1,8 +1,9 @@
 use crate::exporter::ExportSession;
+use crate::http::response_carrier::ResponseCarrier;
 use crate::runtime::ExecutionPlan;
 use bytes::Bytes;
+#[cfg(test)]
 use hyper::Response;
-use qpx_core::http_content_length::declared_content_length;
 use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::{Body, Sender};
 use tokio::time::{Duration, timeout};
@@ -92,15 +93,15 @@ pub(crate) async fn emit_request_for_export(
     request
 }
 
-pub(crate) fn sample_response_body_for_export(
-    response: Response<Body>,
+pub(crate) fn sample_response_body_for_export<R: ResponseCarrier>(
+    mut response: R,
     sample_bytes: usize,
     channel_capacity: usize,
     read_timeout: Duration,
     session: ExportSession,
-) -> Response<Body> {
+) -> R {
     let sample_bytes = sample_bytes.max(1);
-    let (parts, mut source) = response.into_parts();
+    let mut source = std::mem::replace(response.body_mut(), Body::empty());
     let (mut sender, body) = Body::channel_with_capacity(channel_capacity.max(1));
     tokio::spawn(async move {
         copy_body_with_sample(
@@ -113,18 +114,19 @@ pub(crate) fn sample_response_body_for_export(
         )
         .await;
     });
-    Response::from_parts(parts, body)
+    *response.body_mut() = body;
+    response
 }
 
-pub(crate) fn capture_response_body_for_export(
-    response: Response<Body>,
+pub(crate) fn capture_response_body_for_export<R: ResponseCarrier>(
+    mut response: R,
     max_capture_bytes: usize,
     channel_capacity: usize,
     read_timeout: Duration,
     session: ExportSession,
-) -> Response<Body> {
+) -> R {
     let max_capture_bytes = max_capture_bytes.max(1);
-    let (parts, mut source) = response.into_parts();
+    let mut source = std::mem::replace(response.body_mut(), Body::empty());
     let (mut sender, body) = Body::channel_with_capacity(channel_capacity.max(1));
     tokio::spawn(async move {
         copy_body_with_full_capture(
@@ -137,14 +139,15 @@ pub(crate) fn capture_response_body_for_export(
         )
         .await;
     });
-    Response::from_parts(parts, body)
+    *response.body_mut() = body;
+    response
 }
 
-pub(crate) async fn emit_response_for_export(
-    mut response: Response<Body>,
+pub(crate) async fn emit_response_for_export<R: ResponseCarrier>(
+    mut response: R,
     plan: &ExecutionPlan,
     session: &ExportSession,
-) -> Response<Body> {
+) -> R {
     let preview = crate::exporter::serialize_response_preview_async(&response).await;
     session.emit_plaintext(false, &preview);
     if let Some(sample_bytes) = plan.capture_stream_sample_bytes() {
@@ -167,27 +170,27 @@ pub(crate) async fn emit_response_for_export(
     limit_response_body_for_plan(response, plan)
 }
 
-pub(crate) async fn emit_optional_response_for_export(
-    response: Response<Body>,
+pub(crate) async fn emit_optional_response_for_export<R: ResponseCarrier>(
+    response: R,
     plan: &ExecutionPlan,
     session: Option<&ExportSession>,
-) -> Response<Body> {
+) -> R {
     match session {
         Some(session) => emit_response_for_export(response, plan, session).await,
         None => limit_response_body_for_plan(response, plan),
     }
 }
 
-pub(crate) fn limit_response_body_for_plan(
-    mut response: Response<Body>,
+pub(crate) fn limit_response_body_for_plan<R: ResponseCarrier>(
+    mut response: R,
     plan: &ExecutionPlan,
-) -> Response<Body> {
+) -> R {
     limit_response_body_for_plan_in_place(&mut response, plan);
     response
 }
 
-pub(crate) fn limit_response_body_for_plan_in_place(
-    response: &mut Response<Body>,
+pub(crate) fn limit_response_body_for_plan_in_place<R: ResponseCarrier>(
+    response: &mut R,
     plan: &ExecutionPlan,
 ) {
     limit_response_body_to_max_bytes(response, plan.streaming.max_response_body_bytes);
@@ -198,15 +201,14 @@ pub(crate) fn limit_response_body_for_plan_in_place(
 ///
 /// The body that is cut to the limit is shorter than the length the
 /// response declared, so a declaration over the limit goes with it.
-pub(crate) fn limit_response_body_to_max_bytes(response: &mut Response<Body>, max_bytes: usize) {
+pub(crate) fn limit_response_body_to_max_bytes<R: ResponseCarrier>(
+    response: &mut R,
+    max_bytes: usize,
+) {
     if response_body_fits_limit(response.body(), max_bytes) {
         return;
     }
-    if let Some(len) = declared_content_length(response.headers()).ok().flatten()
-        && len > max_bytes as u64
-    {
-        response.headers_mut().remove(http::header::CONTENT_LENGTH);
-    }
+    response.drop_length_over(max_bytes);
     let body = std::mem::replace(response.body_mut(), Body::empty());
     *response.body_mut() = body.limit_bytes(max_bytes);
 }

@@ -11,6 +11,7 @@ use async_trait::async_trait;
 use hyper::Response;
 use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
 use qpx_core::http_message::Request;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -80,6 +81,7 @@ pub(in crate::forward::h3) struct ForwardH3Handler {
 
 #[async_trait]
 impl H3RequestHandler for ForwardH3Handler {
+    type Response = OwnerResponse<Body>;
     fn limits(&self) -> H3Limits {
         let state = self.runtime.state();
         let limits = state.plan.limits;
@@ -126,7 +128,7 @@ impl H3RequestHandler for ForwardH3Handler {
         )
     }
 
-    async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Response<Body> {
+    async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> OwnerResponse<Body> {
         let state = self.runtime.state();
         let request_method = req.method().clone();
         let request_version = req.version();
@@ -141,14 +143,14 @@ impl H3RequestHandler for ForwardH3Handler {
             Ok(resp) => resp,
             Err(err) => {
                 tracing::warn!(error = ?err, "forward HTTP/3 request handling failed");
-                crate::http::protocol::l7::finalize_response_for_request(
+                OwnerResponse::from_http(crate::http::protocol::l7::finalize_response_for_request(
                     &request_method,
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
                     super::h3_bad_gateway_base_response(state.messages.proxy_error.clone())
                         .unwrap_or_else(|_| Response::new(Body::empty())),
                     false,
-                )
+                ))
             }
         }
     }
@@ -157,7 +159,7 @@ impl H3RequestHandler for ForwardH3Handler {
         &self,
         req: Request<Body>,
         conn: H3ConnInfo,
-    ) -> H3HttpResponse {
+    ) -> H3HttpResponse<OwnerResponse<Body>> {
         let state = self.runtime.state();
         let request_method = req.method().clone();
         let request_version = req.version();
@@ -186,7 +188,7 @@ impl H3RequestHandler for ForwardH3Handler {
             }
             Err(err) => {
                 tracing::warn!(error = ?err, "forward HTTP/3 request handling failed");
-                H3HttpResponse::final_only(
+                H3HttpResponse::final_only(OwnerResponse::from_http(
                     crate::http::protocol::l7::finalize_response_for_request(
                         &request_method,
                         request_version,
@@ -195,7 +197,7 @@ impl H3RequestHandler for ForwardH3Handler {
                             .unwrap_or_else(|_| Response::new(Body::empty())),
                         false,
                     ),
-                )
+                ))
             }
         }
     }

@@ -562,6 +562,24 @@ impl Headers {
         }
     }
 
+    /// Render selected HTTP field lines for textual diagnostics, including framing
+    /// spellings and duplicates. Non-text values render as empty text, not raw bytes.
+    /// This does not validate or canonicalize the live message.
+    pub fn write_textual_http_field_lines(
+        &self,
+        output: &mut String,
+        include: impl Fn(&HeaderName) -> bool,
+    ) {
+        for (name, value) in &self.inner {
+            if include(name) {
+                output.push_str(name.as_str());
+                output.push_str(": ");
+                output.push_str(value.to_str().unwrap_or(""));
+                output.push_str("\r\n");
+            }
+        }
+    }
+
     /// Number of field occurrences, including framing fields and duplicates.
     /// This exposes only the count, never Content-Length values.
     pub fn field_count(&self) -> usize {

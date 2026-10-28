@@ -15,7 +15,7 @@ use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::upstream::http1::proxy_http1_request_with_interim;
 use anyhow::Result;
 use hyper::{Method, Response};
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
@@ -54,7 +54,7 @@ pub(super) struct ForwardUpstreamInput<'a> {
 
 pub(super) async fn execute_forward_upstream(
     input: ForwardUpstreamInput<'_>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let ForwardUpstreamInput {
         mut req,
         upstream,
@@ -118,9 +118,12 @@ pub(super) async fn execute_forward_upstream(
             )
             .await?
             {
-                return Ok(
-                    emit_optional_response_for_export(stale, selected_plan, export_session).await,
-                );
+                return Ok(emit_optional_response_for_export(
+                    OwnerResponse::from_http(stale),
+                    selected_plan,
+                    export_session,
+                )
+                .await);
             }
             return Err(err);
         }
@@ -151,9 +154,12 @@ pub(super) async fn execute_forward_upstream(
     .await?
     {
         DispatchResponsePolicyOutcome::Response(response) => {
-            return Ok(
-                emit_optional_response_for_export(response, selected_plan, export_session).await,
-            );
+            return Ok(emit_optional_response_for_export(
+                OwnerResponse::from_http(response),
+                selected_plan,
+                export_session,
+            )
+            .await);
         }
         DispatchResponsePolicyOutcome::Continue {
             response: updated,
@@ -184,7 +190,12 @@ pub(super) async fn execute_forward_upstream(
         )
         .await?
     {
-        return Ok(emit_optional_response_for_export(stale, selected_plan, export_session).await);
+        return Ok(emit_optional_response_for_export(
+            OwnerResponse::from_http(stale),
+            selected_plan,
+            export_session,
+        )
+        .await);
     }
     response = write_dispatch_cache_result(DispatchCacheWriteInput {
         response,
@@ -209,7 +220,14 @@ pub(super) async fn execute_forward_upstream(
         headers.as_deref(),
         false,
     );
-    response = emit_optional_response_for_export(response, selected_plan, export_session).await;
+    // Last standard-only stage above; retain the owner through capture, audit
+    // and the service/H3 suffix to the actual downstream serializer.
+    let mut response = emit_optional_response_for_export(
+        OwnerResponse::from_http(response),
+        selected_plan,
+        export_session,
+    )
+    .await;
     http_modules.on_logging(Some(response.status()), None).await;
     annotate_dispatch_response(
         &mut response,

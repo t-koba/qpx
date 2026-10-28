@@ -132,8 +132,8 @@ impl ResolvedStreamingLimits {
     /// The dispatch attaches the limits it resolved to the response, so the
     /// servers that serve one read them from here.
     #[cfg(feature = "http3")]
-    pub(crate) fn from_response(
-        response: &http::Response<qpx_http::body::Body>,
+    pub(crate) fn from_response<R: crate::http::response_carrier::ResponseCarrier>(
+        response: &R,
         fallback: Self,
     ) -> Self {
         response

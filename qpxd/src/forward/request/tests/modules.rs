@@ -106,11 +106,13 @@ settings:
     assert_eq!(
         response
             .headers()
-            .get(http::header::CONTENT_ENCODING)
+            .get(&qpx_core::http_message::OrdinaryHeaderName::try_from("content-encoding").unwrap())
             .and_then(|value| value.to_str().ok()),
         Some("gzip")
     );
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(decode_gzip(body.as_ref()), "compress me please");
 }
 
@@ -219,7 +221,9 @@ settings:
     .expect("response");
 
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let body = to_bytes(response.into_body()).await.expect("body");
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
     assert_eq!(body.as_ref(), b"blocked by subrequest");
 }
 
@@ -380,7 +384,10 @@ settings:
     assert_eq!(
         response
             .headers()
-            .get("x-in-process-module")
+            .get(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from("x-in-process-module")
+                    .unwrap()
+            )
             .and_then(|value| value.to_str().ok()),
         Some("active")
     );

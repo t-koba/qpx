@@ -11,7 +11,8 @@ use crate::http::dispatch::{
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::runtime::Runtime;
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -40,7 +41,7 @@ pub(super) struct ForwardPreparedHttpInput<'a> {
 
 pub(super) async fn execute_forward_http_after_prepare(
     input: ForwardPreparedHttpInput<'_>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let ForwardDispatchReady {
         mut req,
         mut http_modules,
@@ -77,7 +78,7 @@ pub(super) async fn execute_forward_http_after_prepare(
     .await?
     {
         DispatchCacheLookupOutcome::Response(response) => {
-            let response = *response;
+            let response = OwnerResponse::from_http(*response);
             return Ok(
                 crate::http::capture::stream::emit_optional_response_for_export(
                     response,
@@ -108,7 +109,7 @@ pub(super) async fn execute_forward_http_after_prepare(
     .await?
     {
         DispatchCacheCollapseOutcome::Response(response) => {
-            let response = *response;
+            let response = OwnerResponse::from_http(*response);
             return Ok(
                 crate::http::capture::stream::emit_optional_response_for_export(
                     response,
