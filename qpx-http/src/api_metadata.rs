@@ -168,23 +168,20 @@ impl PreparedApiMetadata {
 
     pub fn apply(&self, headers: &mut impl OrdinaryHeaderMut) {
         headers.ordinary_reserve(self.field_line_count());
-        if let Some(value) = self.deprecation.as_ref() {
-            headers.ordinary_insert(
-                OrdinaryHeaderName::try_from(DEPRECATION.clone()).expect("ordinary"),
-                value.clone(),
-            );
+        if let Some(value) = self.deprecation.as_ref()
+            && let Ok(name) = OrdinaryHeaderName::try_from(DEPRECATION.clone())
+        {
+            headers.ordinary_insert(name, value.clone());
         }
-        if let Some(value) = self.sunset.as_ref() {
-            headers.ordinary_insert(
-                OrdinaryHeaderName::try_from(SUNSET.clone()).expect("ordinary"),
-                value.clone(),
-            );
+        if let Some(value) = self.sunset.as_ref()
+            && let Ok(name) = OrdinaryHeaderName::try_from(SUNSET.clone())
+        {
+            headers.ordinary_insert(name, value.clone());
         }
-        for value in &self.links {
-            headers.ordinary_append(
-                OrdinaryHeaderName::try_from(LINK).expect("ordinary"),
-                value.clone(),
-            );
+        if let Ok(name) = OrdinaryHeaderName::try_from(LINK) {
+            for value in &self.links {
+                headers.ordinary_append(name.clone(), value.clone());
+            }
         }
     }
 }

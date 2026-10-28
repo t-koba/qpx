@@ -220,11 +220,10 @@ impl CorsPolicy {
             return;
         }
         self.apply_origin_and_credentials(request, response_headers);
-        if let Some(expose_headers) = self.expose_headers.as_ref() {
-            response_headers.ordinary_insert(
-                OrdinaryHeaderName::try_from(EXPOSE_HEADERS).expect("ordinary"),
-                expose_headers.clone(),
-            );
+        if let Some(expose_headers) = self.expose_headers.as_ref()
+            && let Ok(name) = OrdinaryHeaderName::try_from(EXPOSE_HEADERS)
+        {
+            response_headers.ordinary_insert(name, expose_headers.clone());
         }
     }
 
@@ -275,24 +274,21 @@ impl CorsPolicy {
     ) {
         match &self.origins {
             AllowedOrigins::Any => {
-                response_headers.ordinary_insert(
-                    OrdinaryHeaderName::try_from(ALLOW_ORIGIN).expect("ordinary"),
-                    HeaderValue::from_static("*"),
-                );
+                if let Ok(name) = OrdinaryHeaderName::try_from(ALLOW_ORIGIN) {
+                    response_headers.ordinary_insert(name, HeaderValue::from_static("*"));
+                }
             }
             AllowedOrigins::Exact(_) => {
-                response_headers.ordinary_insert(
-                    OrdinaryHeaderName::try_from(ALLOW_ORIGIN).expect("ordinary"),
-                    request.origin_header().clone(),
-                );
+                if let Ok(name) = OrdinaryHeaderName::try_from(ALLOW_ORIGIN) {
+                    response_headers.ordinary_insert(name, request.origin_header().clone());
+                }
                 append_vary(response_headers, "Origin");
             }
         }
-        if self.allow_credentials {
-            response_headers.ordinary_insert(
-                OrdinaryHeaderName::try_from(ALLOW_CREDENTIALS).expect("ordinary"),
-                HeaderValue::from_static("true"),
-            );
+        if self.allow_credentials
+            && let Ok(name) = OrdinaryHeaderName::try_from(ALLOW_CREDENTIALS)
+        {
+            response_headers.ordinary_insert(name, HeaderValue::from_static("true"));
         }
     }
 
@@ -639,22 +635,22 @@ fn remove_cors_response_fields(headers: &mut impl OrdinaryHeaderMut) {
         MAX_AGE,
         ALLOW_PRIVATE_NETWORK,
     ] {
-        headers.ordinary_remove(&OrdinaryHeaderName::try_from(name).expect("ordinary"));
+        if let Ok(name) = OrdinaryHeaderName::try_from(name) {
+            headers.ordinary_remove(&name);
+        }
     }
 }
 
 fn append_vary(headers: &mut impl OrdinaryHeaderMut, token: &'static str) {
     // The wildcard member forbids reuse without revalidation, so it counts as
     // present as well as the token itself.
-    let present = crate::http_token::value_members(
-        headers.ordinary_values(&OrdinaryHeaderName::try_from(VARY).expect("ordinary")),
-    )
-    .any(|member| member.eq_ignore_ascii_case(token) || member == "*");
+    let Ok(vary) = OrdinaryHeaderName::try_from(VARY) else {
+        return;
+    };
+    let present = crate::http_token::value_members(headers.ordinary_values(&vary))
+        .any(|member| member.eq_ignore_ascii_case(token) || member == "*");
     if !present {
-        headers.ordinary_append(
-            OrdinaryHeaderName::try_from(VARY).expect("ordinary"),
-            HeaderValue::from_static(token),
-        );
+        headers.ordinary_append(vary, HeaderValue::from_static(token));
     }
 }
 

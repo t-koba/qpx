@@ -54,11 +54,9 @@ impl CookieSecurityPolicy {
         headers: &mut impl OrdinaryHeaderMut,
         secure_transport: bool,
     ) -> Result<()> {
-        if headers
-            .ordinary_values(&OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"))
-            .next()
-            .is_none()
-        {
+        let set_cookie = OrdinaryHeaderName::try_from(SET_COOKIE)
+            .map_err(|_| anyhow!("Set-Cookie is not an ordinary field name"))?;
+        if headers.ordinary_values(&set_cookie).next().is_none() {
             return Ok(());
         }
         if (self.require_secure || self.require_partitioned) && !secure_transport {
@@ -67,7 +65,7 @@ impl CookieSecurityPolicy {
             ));
         }
         let values = headers
-            .ordinary_values(&OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"))
+            .ordinary_values(&set_cookie)
             .map(|value| {
                 if value.as_bytes().len() > self.max_field_bytes {
                     return Err(anyhow!("Set-Cookie field exceeds configured limit"));
@@ -89,12 +87,9 @@ impl CookieSecurityPolicy {
         if values.is_empty() {
             return Ok(());
         }
-        headers.ordinary_remove(&OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"));
+        headers.ordinary_remove(&set_cookie);
         for value in values {
-            headers.ordinary_append(
-                OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"),
-                value,
-            );
+            headers.ordinary_append(set_cookie.clone(), value);
         }
         Ok(())
     }

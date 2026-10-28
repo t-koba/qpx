@@ -78,20 +78,26 @@ fn invalid(field: &'static str, detail: impl Into<String>) -> BrowserPolicyError
 
 fn insert_header(headers: &mut impl OrdinaryHeaderMut, name: &'static str, value: &str) {
     let name = HeaderName::from_static(name);
-    if let Ok(value) = HeaderValue::from_str(value) {
-        headers.ordinary_insert(OrdinaryHeaderName::try_from(name).expect("ordinary"), value);
+    if let Ok(value) = HeaderValue::from_str(value)
+        && let Ok(name) = OrdinaryHeaderName::try_from(name)
+    {
+        headers.ordinary_insert(name, value);
     }
 }
 
 fn remove_header(headers: &mut impl OrdinaryHeaderMut, name: &'static str) {
-    headers.ordinary_remove(&OrdinaryHeaderName::try_from(name).expect("ordinary"));
+    if let Ok(name) = OrdinaryHeaderName::try_from(name) {
+        headers.ordinary_remove(&name);
+    }
 }
 
 fn append_vary(headers: &mut impl OrdinaryHeaderMut, field: &'static str) {
     // Collect every Vary line before replacing: insert drops all but the
     // written line, so reading only the first line deletes later upstream
     // dimensions (including `*`, which forbids reuse without revalidation).
-    let vary = OrdinaryHeaderName::try_from("vary").expect("ordinary");
+    let Ok(vary) = OrdinaryHeaderName::try_from("vary") else {
+        return;
+    };
     let present = crate::http_token::value_members(headers.ordinary_values(&vary))
         .any(|member| member.eq_ignore_ascii_case(field));
     let mut tokens = crate::http_token::value_members(headers.ordinary_values(&vary))

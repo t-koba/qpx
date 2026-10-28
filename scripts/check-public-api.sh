@@ -45,10 +45,10 @@ check_crate() {
   fi
 }
 
-# qpx-core exposes opaque owner-backed request/header carriers, policy/Vary operations
-# and closed configured transfer/expansion effects; keep the fingerprint gate strict.
-check_crate qpx-core 2e07159b628ca74564c471cc60f914cbd7eff3dc861d961d1877b4e3016996dc
+# qpx-core exposes opaque owner-backed request/header carriers, owner-safe ordinary-field
+# mutation, policy/Vary operations and closed configured effects; keep the fingerprint gate strict.
+check_crate qpx-core de87d96af01103b570cf3a78536ee52f8ee9ea58f84bdb09f45f254cf3bbb80b
 check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
 check_crate qpx-h3 01aecfccd1ef9f622ca8a78e2a6859d06b73060d2e18159ec59a4305523f0d61
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
-check_crate qpx-observability baa66d20c029936bb98c25b9d2925d50eebfa6bba9e2698bb18c19454f1610a2
+check_crate qpx-observability e4acb837145dec488212f673db1dd9907e69228e9af0fe34230476ac17f46b97

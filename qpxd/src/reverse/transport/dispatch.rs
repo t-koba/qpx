@@ -338,11 +338,11 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
         metadata.apply(response.terminal_headers_mut());
     }
     if secure_transport && let Some(hsts) = hsts {
-        response.terminal_headers_mut().ordinary_insert(
-            OrdinaryHeaderName::try_from(http::header::STRICT_TRANSPORT_SECURITY)
-                .expect("ordinary"),
-            hsts.to_header_value()?,
-        );
+        let name = OrdinaryHeaderName::try_from(http::header::STRICT_TRANSPORT_SECURITY)
+            .map_err(|_| anyhow!("invalid Strict-Transport-Security field name"))?;
+        response
+            .terminal_headers_mut()
+            .ordinary_insert(name, hsts.to_header_value()?);
     }
     if let Some(cors) = cors {
         cors.apply_actual_response(cors_request.as_ref(), response.terminal_headers_mut());
