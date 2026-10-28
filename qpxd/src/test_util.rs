@@ -161,6 +161,7 @@ pub(crate) async fn spawn_request_head_echo_server() -> SocketAddr {
     addr
 }
 
+#[cfg(feature = "mitm")]
 pub(crate) fn wire_headers(headers: &qpx_core::http_message::Headers) -> http::HeaderMap {
     let mut response = qpx_core::http_message::Response::new(());
     *response.headers_mut() = headers.clone();
