@@ -36,6 +36,7 @@ def shell_function(script, name):
 def fixture_sampler(lane):
     sampler = object.__new__(DRIVER.Sampler)
     sampler.binaries = {"current": ROOT / "target/fixture-current", "previous": ROOT / "target/fixture-previous"}
+    sampler.sample_env = {}
     sampler.identities = {r: {"source_sha": "a" * 40 if r == "current" else lane["policy"]["previous_release"]["sha"],
                                "binary_sha256": str(i + 1) * 64, "toolchain": "fixture", "runner": "fixture"}
                           for i, r in enumerate(sampler.binaries)}
@@ -157,6 +158,157 @@ class PolicyTests(unittest.TestCase):
         sampler.assert_called_once_with(args.previous_bin, args.previous_sha)
         self.assertEqual(sentinel.read_text(), "stale measurement must remain untouched\n")
         self.assertEqual(list(output.iterdir()), [sentinel])
+
+    def http2_driver_fixture(self, diagnostic, invalid_previous=False):
+        config, lanes = objectives("http2")
+        sampler = fixture_sampler(lanes[0])
+        calls = []
+        output = self.directory / "output"
+        step_summary = self.directory / "step-summary.md"
+        args = SimpleNamespace(suite="http2", out=str(output), previous_bin="fixture",
+                               previous_sha=config["ci_policy"]["previous_release"]["sha"])
+
+        def sample(command, env, stdout, **_kwargs):
+            prefix = "QPX_HTTP2_COMPARE_"
+            lane = next(lane for lane in lanes
+                        if str(lane["body_bytes"]) == env[prefix + "BODY_SIZES"]
+                        and str(lane["max_concurrent_streams"]) == env[prefix + "MAX_CONCURRENT_STREAMS_VALUES"])
+            role = "previous" if env["QPXD_BIN"].endswith("fixture-previous") else "current"
+            calls.append((lane["name"], role, env.copy()))
+            log_dir = Path(env[prefix + "LOG_DIR"])
+            log_dir.mkdir()
+            (log_dir / "raw-attempt.h2load").write_text("fixture raw output")
+            stdout.write("fixture command output\n")
+            if invalid_previous and role == "previous":
+                return SimpleNamespace(returncode=1)
+            records = [record(lane, proxy) for proxy in env[prefix + "PROXY_FILTER"].split(",")]
+            multiplex = lane["max_concurrent_streams"] > 1
+            for r in records:
+                r.update(concurrency=int(env.get(prefix + ("MULTIPLEX_CONCURRENCY" if multiplex else "CONCURRENCY"), "1" if multiplex else "64")),
+                         client_threads=int(env.get(prefix + ("MULTIPLEX_CLIENT_THREADS" if multiplex else "CLIENT_THREADS"), "1" if multiplex else "4")),
+                         sample_attempts=int(env[prefix + "SAMPLE_ATTEMPTS"]),
+                         valid_samples=int(env[prefix + "MIN_VALID_SAMPLES"]))
+                if diagnostic and role == "current" and not multiplex:
+                    r["latency_p99_ms"] *= 2  # A diagnostic must preserve REGRESSED.
+            write_jsonl(command[-1], records)
+            return SimpleNamespace(returncode=0)
+
+        with patch.object(DRIVER, "Sampler", return_value=sampler), \
+                patch.object(DRIVER.subprocess, "run", side_effect=sample), \
+                patch.dict(DRIVER.os.environ, {"GITHUB_STEP_SUMMARY": str(step_summary)}), \
+                patch("builtins.print"):
+            code = DRIVER.run(args, diagnostic=diagnostic)
+        return code, output, calls, step_summary.read_text(), sampler
+
+    def test_http2_diagnostic_exact_paired_lanes_fixed_settings_and_artifacts(self):
+        self.assertEqual(DRIVER.HTTP2_DIAGNOSTIC_ENV, {
+            "QPX_HTTP2_COMPARE_CONCURRENCY": "1",
+            "QPX_HTTP2_COMPARE_CLIENT_THREADS": "1",
+            "QPX_HTTP2_COMPARE_MULTIPLEX_CONCURRENCY": "1",
+            "QPX_HTTP2_COMPARE_MULTIPLEX_CLIENT_THREADS": "1",
+            "QPX_HTTP2_COMPARE_TARGET_DURATION_SECONDS": "10",
+        })
+        # Inherited settings cannot change this diagnostic's fixed client modes.
+        with patch.dict(DRIVER.os.environ, {key: "99" for key in DRIVER.HTTP2_DIAGNOSTIC_ENV}):
+            code, output, calls, step_summary, sampler = self.http2_driver_fixture(True)
+        self.assertEqual(code, 1)
+        report = json.loads((output / "summary.json").read_text())
+        self.assertTrue(report["diagnostic_only"])
+        self.assertEqual(report["status"], "FAILED")
+        self.assertEqual([r["status"] for r in report["results"]], ["REGRESSED", "PASSED"])
+        self.assertEqual(report["identities"], sampler.identities)
+        self.assertEqual(report["pair_order"], ORDER)
+        self.assertEqual((report["pair_samples"], report["max_attempts"]), (3, 3))
+        self.assertEqual(len(calls), 12)
+        expected_lanes = [f"proxy_compare_http2_reverse/1048576/m={m}" for m in (1, 100)]
+        self.assertEqual(report["lanes"], expected_lanes)
+        for index, lane_name in enumerate(expected_lanes):
+            self.assertEqual([(lane, role) for lane, role, _ in calls[index*6:(index+1)*6]],
+                             [(lane_name, role) for roles in ORDER for role in roles])
+        for _, _, env in calls:
+            for key, value in DRIVER.HTTP2_DIAGNOSTIC_ENV.items():
+                self.assertEqual(env[key], value)
+            for key in ("SAMPLE_ATTEMPTS", "MIN_VALID_SAMPLES"):
+                self.assertEqual(env["QPX_HTTP2_COMPARE_" + key], "1")
+            self.assertEqual(env["QPX_HTTP2_COMPARE_PROXY_FILTER"], "qpxd")
+        self.assertFalse((output / "accepted-competitive.jsonl").exists())
+        self.assertEqual(len(list(output.rglob("request.json"))), 12)
+        self.assertEqual(len(list(output.rglob("command.log"))), 12)
+        self.assertEqual(len(list(output.rglob("raw-attempt.h2load"))), 12)
+        request = json.loads(next(output.rglob("request.json")).read_text())
+        self.assertTrue(request["diagnostic_only"])
+        self.assertIn(request["identity"], sampler.identities.values())
+        self.assertTrue(request["command"][0].endswith("perf-audit-http2-compare.sh"))
+        self.assertIn("HTTP/2 diagnostic (diagnostic_only): FAILED", step_summary)
+        self.assertIn("cannot establish causal stream-limit effects", step_summary)
+        self.assertIn("does not satisfy or override CI acceptance gates", step_summary)
+        for field in ("duration_seconds", "requests", "server_workers", "latency_p99_ms",
+                      "requests_per_sec", "rss_peak_kb", "binary_sha256", "source_sha"):
+            self.assertIn('"' + field + '"', step_summary)
+
+    def test_http2_diagnostic_preserves_invalid_attempt_evidence(self):
+        code, output, calls, step_summary, _ = self.http2_driver_fixture(True, invalid_previous=True)
+        self.assertEqual(code, 0)  # Existing inconclusive policy, not a forced success status.
+        report = json.loads((output / "summary.json").read_text())
+        self.assertEqual(report["status"], "INCONCLUSIVE")
+        self.assertTrue(all(r["status"] == "INCONCLUSIVE" for r in report["results"]))
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(len(list(output.rglob("raw-attempt.h2load"))), 4)
+        self.assertEqual(len(list(output.rglob("request.json"))), 4)
+        self.assertEqual(len(list(output.rglob("result.json"))), 2)
+        self.assertIn("INCONCLUSIVE", step_summary)
+
+    def test_default_run_http2_keeps_full_matrix_competitive_and_aggregate(self):
+        code, output, calls, step_summary, sampler = self.http2_driver_fixture(False)
+        self.assertEqual(code, 0)
+        report = json.loads((output / "summary.json").read_text())
+        self.assertNotIn("diagnostic_only", report)
+        self.assertEqual(len(report["results"]), 9)  # four paired, four competitive, aggregate
+        self.assertEqual(len(calls), 28)
+        self.assertEqual(set(lane for lane, _, _ in calls),
+                         {lane["name"] for lane in objectives("http2")[1]})
+        self.assertEqual(len(load_jsonl(output / "accepted-competitive.jsonl")), 12)
+        self.assertEqual(sampler.sample_env, {})
+        self.assertFalse((output / "diagnostic.json").exists())
+        self.assertIn("## http2 performance:", step_summary)
+        self.assertNotIn("diagnostic_only", step_summary)
+
+    def test_http2_diagnostic_cli_dispatch_and_pin_validation(self):
+        config, _ = objectives("http2")
+        pin = config["ci_policy"]["previous_release"]["sha"]
+        with patch.object(sys, "argv", ["perf-audit-policy.py", "diagnostic-http2", "out",
+                                       "--previous-bin", "reference", "--previous-sha", pin]), \
+                patch.object(DRIVER, "run", return_value=7) as run:
+            self.assertEqual(DRIVER.main(), 7)
+        args = run.call_args.args[0]
+        self.assertEqual((args.suite, args.previous_sha), ("http2", pin))
+        self.assertEqual(run.call_args.kwargs, {"diagnostic": True})
+        args.previous_sha = "0" * 40
+        with patch.object(DRIVER, "Sampler") as sampler:
+            with self.assertRaisesRegex(ValueError, "pinned release"):
+                DRIVER.run(args, diagnostic=True)
+        sampler.assert_not_called()
+
+    def test_http2_diagnostic_workflow_is_manual_bounded_and_separate(self):
+        workflow = (ROOT / ".github/workflows/http2-diagnostic.yml").read_text()
+        self.assertEqual(re.search(r"(?ms)^on:\n(.*?)^permissions:", workflow)[1].strip(), "workflow_dispatch:")
+        self.assertEqual(re.findall(r"^  ([a-z_]+):$", workflow.split("jobs:\n")[1], re.M), ["diagnostic"])
+        self.assertEqual(re.findall(r"runs-on: (.*)", workflow), ["ubuntu-latest"])
+        self.assertIn("run-name: HTTP/2 paired diagnostic", workflow)
+        self.assertIn("name: qpx-http2-paired-diagnostic", workflow)
+        self.assertIn("scripts/check-perf-runner.sh", workflow)
+        self.assertIn("perf-audit-policy.py diagnostic-http2", workflow)
+        self.assertIn("if: always()", workflow)
+        self.assertIn("${{ runner.temp }}/qpx-http2-diagnostic/**", workflow)
+        for forbidden in ("inputs", "matrix:", "netem", "run http2", "continue-on-error", "workflow_call"):
+            self.assertNotIn(forbidden, workflow)
+        config, _ = objectives("http2")
+        self.assertIn("ref: " + config["ci_policy"]["previous_release"]["sha"], workflow)
+        # No shell syntax errors in the new workflow's literal run blocks.
+        for block in re.findall(r"(?m)^        run: \|\n((?:^          .*\n|^\n)+)", workflow):
+            script = "\n".join(line[10:] for line in block.splitlines())
+            process = subprocess.run(["bash", "-n"], input=script, text=True, capture_output=True)
+            self.assertEqual(process.returncode, 0, process.stderr)
 
     def test_equal_pairs_and_competitive_misses_are_reports(self):
         for index, lane in enumerate(self.lanes):

@@ -32,6 +32,17 @@ from perf_policy import (
 from perf_records import collect_ratios, fail, number
 
 ORDER = [["current", "previous"], ["previous", "current"], ["current", "previous"]]
+HTTP2_DIAGNOSTIC_ENV = {
+    "QPX_HTTP2_COMPARE_" + key: value for key, value in {
+        "CONCURRENCY": "1", "CLIENT_THREADS": "1",
+        "MULTIPLEX_CONCURRENCY": "1", "MULTIPLEX_CLIENT_THREADS": "1",
+        "TARGET_DURATION_SECONDS": "10",
+    }.items()
+}
+DIAGNOSTIC_NOTICE = (
+    "diagnostic_only: does not satisfy or override CI acceptance gates; "
+    "this comparison alone cannot establish causal stream-limit effects."
+)
 
 
 def aggregate(samples, lane):
@@ -110,6 +121,7 @@ class Sampler:
         self.binaries = {"current": Path(os.environ.get("QPXD_BIN", ROOT / "target/release/qpxd")).resolve(),
                          "previous": Path(previous_bin).resolve()}
         self.identities = {}
+        self.sample_env = {}
         toolchain = subprocess.check_output(["rustc", "-Vv"], text=True).strip()
         runner = os.environ.get("GITHUB_RUN_ID", "local") + ":" + os.environ.get("GITHUB_JOB", "local") + ":" + os.environ.get("RUNNER_NAME", "local")
         for role, path in self.binaries.items():
@@ -174,6 +186,7 @@ class Sampler:
     def sample(self, lane, role, paired, directory):
         directory.mkdir(parents=True, exist_ok=False)
         env = os.environ.copy()
+        env.update(self.sample_env)
         env["QPXD_BIN"] = str(self.binaries[role])
         prefix = "QPX_HTTP2_COMPARE_" if lane["kind"] == "http2" else "QPX_PROXY_COMPARE_"
         env.update({prefix + "BODY_SIZES": str(lane["body_bytes"]),
@@ -197,6 +210,12 @@ class Sampler:
                 env[prefix + "CACHE_ADMISSION_METRICS_PORT"] = "19093"
         out = directory / "samples.jsonl"
         script = ROOT / "scripts" / ("perf-audit-http2-compare.sh" if lane["kind"] == "http2" else "perf-audit-proxy-compare.sh")
+        if self.sample_env:
+            write_json(directory / "request.json", {
+                "diagnostic_only": True, "identity": self.identities[role],
+                "command": [str(script), str(out)],
+                "parameters": {k: v for k, v in env.items() if k.startswith(prefix)},
+            })
         with (directory / "command.log").open("w") as log:
             process = subprocess.run([str(script), str(out)], env=env, stdout=log, stderr=subprocess.STDOUT)
         if lane.get("bench") == "proxy_cache_miss_http1" and lane.get("qpx") == "qpxd-cache":
@@ -274,9 +293,16 @@ class Sampler:
         return [{**aggregated[role], **self.identities[role], "pair_role": role, "pair_order": ORDER, "sample_spread_basis": "full_range", "paired_metric_ratios": deltas} for role in ("current", "previous")]
 
 
-def run(args):
+def run(args, diagnostic=False):
     kinds = ("proxy", "origin") if args.suite == "proxy" else ("http2",)
     configs_lanes = [objectives(k) for k in kinds]
+    if diagnostic:
+        config, lanes = configs_lanes[0]
+        lanes = [lane for lane in lanes if lane["body_bytes"] == 1048576
+                 and lane["max_concurrent_streams"] in (1, 100)]
+        if len(lanes) != 2:
+            fail("HTTP/2 diagnostic requires exactly the 1 MiB m=1 and m=100 lanes")
+        configs_lanes = [(config, lanes)]
     policies = [config["ci_policy"] for config, _ in configs_lanes]
     if any(policy != policies[0] for policy in policies):
         fail("suite policies disagree")
@@ -288,11 +314,20 @@ def run(args):
     baseline = load_baseline(ROOT / "perf/baseline-proxy-compare.json") if args.suite == "proxy" else None
     out = Path(args.out).resolve()
     out.mkdir(parents=True, exist_ok=False)
+    metadata = {}
+    if diagnostic:
+        sampler.sample_env = HTTP2_DIAGNOSTIC_ENV.copy()
+        metadata = {"diagnostic_only": True, "notice": DIAGNOSTIC_NOTICE,
+                    "identities": sampler.identities, "parameters": sampler.sample_env,
+                    "lanes": [lane["name"] for lane in configs_lanes[0][1]],
+                    "pair_order": ORDER, "max_attempts": policy["max_attempts"],
+                    "pair_samples": policy["pair_samples"], "assessment_mode": mode}
+        write_json(out / "diagnostic.json", metadata)
     results = []
-    accepted = {"paired": [], "competitive": []}
+    accepted = {"paired": []} if diagnostic else {"paired": [], "competitive": []}
     for _, lanes in configs_lanes:
         for lane in lanes:
-            for paired in (True, False):
+            for paired in ((True,) if diagnostic else (True, False)):
                 name = "paired" if paired else "competitive"
                 result = bounded_measure(lane, paired, sampler, out / lane["name"] / name, mode,
                                          baseline if lane["kind"] == "proxy" and not paired else None)
@@ -300,18 +335,22 @@ def run(args):
                 if result["status"] in ("PASSED", "REGRESSED", "REPORT_ONLY", "OBJECTIVE_MISS"):
                     attempt_file = out / lane["name"] / name / f'attempt-{result["attempt"]}' / "measurements.jsonl"
                     accepted[name] += load_jsonl(attempt_file)
-                write_json(out / "summary.json", summary(results))
-    if args.suite == "http2":
+                write_json(out / "summary.json", {**summary(results), **metadata})
+    if args.suite == "http2" and not diagnostic:
         results.append(http2_aggregate(configs_lanes[0][0], results))
     for name, records in accepted.items():
         write_jsonl(out / f"accepted-{name}.jsonl", records)
-    report = summary(results)
+    report = {**summary(results), **metadata}
     write_json(out / "summary.json", report)
     print(json.dumps(report, indent=2))
     step_summary = os.environ.get("GITHUB_STEP_SUMMARY")
     if step_summary:
         with open(step_summary, "a") as handle:
-            handle.write(f"## {args.suite} performance: {report['status']}\n\n````json\n{json.dumps(report, indent=2)}\n````\n")
+            label = "HTTP/2 diagnostic (diagnostic_only)" if diagnostic else f"{args.suite} performance"
+            handle.write(f"## {label}: {report['status']}\n\n````json\n{json.dumps(report, indent=2)}\n````\n")
+            if diagnostic:
+                handle.write("\nPaired measurements (all attempts, invalid samples and command logs are in the diagnostic artifact):\n\n````json\n")
+                handle.write(json.dumps(accepted["paired"], indent=2) + "\n````\n")
     return exit_code(results)
 
 
@@ -345,12 +384,19 @@ def main():
     runner.add_argument("out")
     runner.add_argument("--previous-bin", required=True)
     runner.add_argument("--previous-sha", required=True)
+    diagnostic = sub.add_parser("diagnostic-http2", help="fixed paired-only 1 MiB HTTP/2 diagnostic; not an acceptance gate")
+    diagnostic.set_defaults(suite="http2")
+    diagnostic.add_argument("out")
+    diagnostic.add_argument("--previous-bin", required=True)
+    diagnostic.add_argument("--previous-sha", required=True)
     generate = sub.add_parser("generate")
     generate.add_argument("jsonl")
     generate.add_argument("baseline")
     generate.add_argument("--threshold", type=float, default=.05)
     args = parser.parse_args()
     try:
+        if args.command == "diagnostic-http2":
+            return run(args, diagnostic=True)
         if args.command == "run":
             return run(args)
         if args.command == "check":

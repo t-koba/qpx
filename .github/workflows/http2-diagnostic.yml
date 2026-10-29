@@ -1,0 +1,62 @@
+name: HTTP/2 paired diagnostic
+run-name: HTTP/2 paired diagnostic (${{ github.ref_name }})
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    name: HTTP/2 paired diagnostic (diagnostic_only)
+    runs-on: ubuntu-latest
+    env:
+      QPX_PERF_ASSESSMENT: shared
+      QPX_HTTP2_DIAGNOSTIC_OUT: ${{ runner.temp }}/qpx-http2-diagnostic
+    steps:
+      - uses: actions/checkout@v5
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: verify perf runner capacity
+        env:
+          QPX_PERF_RUNNER_JSON: ${{ github.workspace }}/target/perf/diagnostic-runner.jsonl
+        run: |
+          mkdir -p target/perf
+          scripts/check-perf-runner.sh
+      - name: install HTTP/2 diagnostic packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y nginx nghttp2-client openssl curl python3
+      - name: check performance policy fixtures
+        run: python3 scripts/test-perf-policy.py
+      - name: checkout pinned previous release
+        uses: actions/checkout@v5
+        with:
+          ref: d67a148e7ccbbd272750415213601005af0f38c5 # v0.4.2; also pinned in the objectives
+          path: .perf-previous-release
+      - name: build current and previous qpxd on the same toolchain
+        env:
+          RUSTFLAGS: "-D warnings"
+        run: |
+          pin=$(python3 -c 'import json; print(json.load(open("perf/proxy-performance-objectives.json"))["ci_policy"]["previous_release"]["sha"])')
+          test "$(git -C .perf-previous-release rev-parse HEAD)" = "$pin"
+          cargo build -p qpxd --release --locked --features http3-backend-qpx
+          # Match ci.yml: the fixed reference is built without deny-warnings
+          # so new toolchain lints do not prevent measuring the pinned release.
+          (cd .perf-previous-release && CARGO_TARGET_DIR="$RUNNER_TEMP/qpx-perf-previous-target" RUSTFLAGS="" cargo build -p qpxd --release --locked --features http3-backend-qpx)
+          echo "QPX_PREVIOUS_SOURCE_SHA=$pin" >> "$GITHUB_ENV"
+          echo "QPX_PREVIOUS_BIN=$RUNNER_TEMP/qpx-perf-previous-target/release/qpxd" >> "$GITHUB_ENV"
+      - name: paired HTTP/2 diagnostic (not an acceptance gate)
+        run: |
+          python3 scripts/perf-audit-policy.py diagnostic-http2 "$QPX_HTTP2_DIAGNOSTIC_OUT" \
+            --previous-bin "$QPX_PREVIOUS_BIN" --previous-sha "$QPX_PREVIOUS_SOURCE_SHA"
+      - name: upload HTTP/2 diagnostic artifact
+        uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: qpx-http2-paired-diagnostic
+          path: |
+            target/perf/diagnostic-runner.jsonl
+            ${{ runner.temp }}/qpx-http2-diagnostic/**
+          if-no-files-found: warn

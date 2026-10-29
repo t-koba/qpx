@@ -296,6 +296,43 @@ regressed against another is answered by measuring both in the same rounds
 with the order counterbalanced and the per-round measurements published, and
 not by comparing ratios taken from separate runs.
 
+### Manual HTTP/2 paired diagnostic (not an acceptance gate)
+
+Run **HTTP/2 paired diagnostic** (`.github/workflows/http2-diagnostic.yml`) from
+Actions with the desired workflow ref. It is `workflow_dispatch` only, has no
+inputs and runs one `ubuntu-latest` job with the normal runner-capacity check.
+It builds that ref and the pinned previous release on the same toolchain using
+the same build commands as the protocol CI job (including its reference-only
+warning allowance). It does not dispatch the CI workflow.
+
+The fixed `scripts/perf-audit-policy.py diagnostic-http2` entrypoint reuses the
+paired policy and HTTP/2 sampler for **only 1048576-byte bodies, m=1 and m=100**.
+Both modes use concurrency **1** and client threads **1**, overriding inherited
+client-mode settings; the target measurement duration is **10 seconds** (actual
+request counts/durations are calibrated and recorded). There are three pairs in
+the normal alternating current/previous `ORDER`, with the existing maximum of
+three attempts and unchanged validity/retry rules. It runs no competitive
+samples, aggregate competitive objective, other matrix lanes or netem audit.
+The default `run http2` command and all CI gates/thresholds remain unchanged.
+
+The **qpx-http2-paired-diagnostic** artifact retains runner capacity,
+`diagnostic.json` (requested parameters, exact source SHAs, binary SHA-256 hashes,
+toolchain/runner identity, lanes and sampling policy), `summary.json` and paired
+measurements. Each round retains `request.json` (command, role identity and
+environment parameters), `command.log`, samples and the sampler's raw logs,
+including invalid attempts. Actual requests/durations, calibration, client and
+server worker counts, p99, throughput, CPU and RSS remain in the sample records;
+the diagnostic step summary includes identities, settings, comparison statuses
+and accepted paired measurements, with all attempt evidence in the artifact.
+A regression still exits nonzero; an inconclusive result stays inconclusive
+under the existing policy. Neither is relabeled as a passing comparison.
+
+Reports are explicitly **diagnostic_only**: this separately named run cannot
+satisfy or override an existing acceptance check. Holding client settings equal
+makes this a useful follow-up observation, but this comparison alone does **not**
+establish causal stream-limit effects. No local performance result is implied
+by fixture tests; a real run requires `h2load` and the hosted environment.
+
 ### Shared-runner validity and paired-regression contract
 
 The proxy and HTTP/2 CI jobs use `scripts/perf-audit-policy.py run`, not a
