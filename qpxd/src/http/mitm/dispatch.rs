@@ -433,7 +433,13 @@ async fn execute_mitm_request(
                 headers = allow.headers;
                 timeout_override = allow.timeout_override;
             }
-            DecisionServiceHttpAccessOutcome::Blocked(response, _) => {
+            DecisionServiceHttpAccessOutcome::Blocked(response) => {
+                return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+                    response,
+                    selected_plan,
+                ));
+            }
+            DecisionServiceHttpAccessOutcome::RateLimited(response) => {
                 return Ok(qpx_core::http_message::Response::from_http(
                     crate::http::capture::stream::limit_response_body_for_plan(
                         response,
@@ -460,7 +466,7 @@ async fn execute_mitm_request(
         let response = match early_response {
             MitmEarlyResponse::Response(mut response) => {
                 annotate(&mut response, DispatchOutcome::EarlyResponse);
-                response
+                qpx_core::http_message::Response::from_http(response)
             }
             MitmEarlyResponse::Local(local) => annotated_local_response(
                 req.method(),
@@ -472,8 +478,9 @@ async fn execute_mitm_request(
                 DispatchOutcome::EarlyResponse,
             )?,
         };
-        return Ok(qpx_core::http_message::Response::from_http(
-            crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan),
+        return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+            response,
+            selected_plan,
         ));
     }
 

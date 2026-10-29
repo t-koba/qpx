@@ -188,7 +188,12 @@ pub(super) async fn enforce_reverse_access_control(
         audit: &audit_ctx,
     })? {
         DecisionServiceHttpAccessOutcome::Continue(allow) => allow,
-        DecisionServiceHttpAccessOutcome::Blocked(response, _) => {
+        DecisionServiceHttpAccessOutcome::Blocked(response) => {
+            return Ok(ReverseAccessOutcome::DecisionServiceDenied(Box::new(
+                response,
+            )));
+        }
+        DecisionServiceHttpAccessOutcome::RateLimited(response) => {
             return Ok(ReverseAccessOutcome::Response(Box::new(response)));
         }
     };

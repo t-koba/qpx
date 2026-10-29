@@ -12,7 +12,7 @@ use crate::http::protocol::l7::{
 use anyhow::{Result, anyhow};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::ActionKind;
-use qpx_core::http_message::{OrdinaryHeaderName, Request};
+use qpx_core::http_message::{OrdinaryHeaderName, Request, Response as OwnerResponse};
 use qpx_http::body::Body;
 use qpx_http::protocol::address::format_authority_host_port;
 use std::sync::Arc;
@@ -40,7 +40,7 @@ pub(super) fn handle_forward_local_action(
     action: &qpx_core::config::ActionConfig,
     headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     audit: &DispatchAuditContext,
-) -> Result<Option<Response<Body>>> {
+) -> Result<Option<OwnerResponse<Body>>> {
     if matches!(action.kind, ActionKind::Block) {
         let mut response = finalize_response_for_request(
             req.method(),
@@ -50,7 +50,7 @@ pub(super) fn handle_forward_local_action(
             false,
         );
         annotate_dispatch_response(&mut response, audit, DispatchOutcome::Block, &[]);
-        return Ok(Some(response));
+        return Ok(Some(OwnerResponse::from_http(response)));
     }
     if matches!(action.kind, ActionKind::Respond) {
         let local = action

@@ -531,22 +531,20 @@ async fn complete_forward_request(
         })
         .await?;
     let (audit, timeout_override) = match decision {
-        crate::http::dispatch::HttpAccessDecision::Blocked {
-            response,
-            rate_limited,
-        } => {
-            let response = crate::http::capture::stream::limit_response_body_for_plan(
-                *response,
-                &selected_plan,
-            );
-            return Err(if rate_limited {
-                DispatchError::RateLimited {
-                    response: Box::new(response),
-                }
-            } else {
-                DispatchError::DecisionServiceDenied {
-                    response: Box::new(response),
-                }
+        crate::http::dispatch::HttpAccessDecision::RateLimited { response } => {
+            return Err(DispatchError::RateLimited {
+                response: Box::new(crate::http::capture::stream::limit_response_body_for_plan(
+                    *response,
+                    &selected_plan,
+                )),
+            });
+        }
+        crate::http::dispatch::HttpAccessDecision::Blocked { response } => {
+            return Err(DispatchError::DecisionServiceDenied {
+                response: Box::new(crate::http::capture::stream::limit_response_body_for_plan(
+                    *response,
+                    &selected_plan,
+                )),
             });
         }
         crate::http::dispatch::HttpAccessDecision::Allow(allowed) => {
@@ -575,7 +573,7 @@ async fn complete_forward_request(
             body_read_timeout,
             selected_plan.streaming.max_request_body_bytes,
         );
-        return Ok(OwnerResponse::from_http(response));
+        return Ok(response);
     }
 
     req = match limit_request_body(req, selected_plan.streaming.max_request_body_bytes) {

@@ -2,7 +2,7 @@ use super::{
     DispatchAuditContext, DispatchOutcome, annotate_dispatch_response, annotated_local_response,
     rate_limit_response_for_parts_with_limits,
 };
-use crate::http::protocol::l7::finalize_response_with_headers;
+use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::policy_context::{
     DecisionServiceAllow, DecisionServiceDeny, DecisionServiceEnforcement, DecisionServiceMode,
     merge_header_controls, prepare_decision_service_allow,
@@ -10,6 +10,7 @@ use crate::policy_context::{
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, RateLimiters, TransportScope};
 use anyhow::Result;
 use hyper::{Method, Response};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -33,7 +34,8 @@ pub(crate) struct DecisionServiceHttpAccessInput<'a> {
 
 pub(crate) enum DecisionServiceHttpAccessOutcome {
     Continue(DecisionServiceAllow),
-    Blocked(Response<Body>, bool),
+    Blocked(OwnerResponse<Body>),
+    RateLimited(Response<Body>),
 }
 
 pub(crate) fn apply_decision_service_http_access(
@@ -51,7 +53,7 @@ pub(crate) fn apply_decision_service_http_access(
                     1,
                 )?
             {
-                return Ok(DecisionServiceHttpAccessOutcome::Blocked(
+                return Ok(DecisionServiceHttpAccessOutcome::RateLimited(
                     rate_limit_response_for_parts_with_limits(
                         input.request_head.0,
                         input.request_head.1,
@@ -60,7 +62,6 @@ pub(crate) fn apply_decision_service_http_access(
                         request_limits,
                         input.audit.clone(),
                     ),
-                    true,
                 ));
             }
             Ok(DecisionServiceHttpAccessOutcome::Continue(allow))
@@ -75,7 +76,6 @@ pub(crate) fn apply_decision_service_http_access(
                 input.default_deny_body,
                 input.audit,
             )?,
-            false,
         )),
     }
 }
@@ -88,7 +88,7 @@ fn decision_service_deny_response(
     proxy_name: &str,
     default_deny_body: &str,
     audit: &DispatchAuditContext,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let merged_headers = merge_header_controls(base_headers, deny.headers);
     if let Some(local) = deny.local_response.as_ref() {
         return annotated_local_response(
@@ -101,11 +101,14 @@ fn decision_service_deny_response(
             DispatchOutcome::DecisionServiceLocalResponse,
         );
     }
-    let mut response = finalize_response_with_headers(
+    let mut response = OwnerResponse::from_http(crate::http::protocol::common::forbidden_response(
+        default_deny_body,
+    ));
+    finalize_response_with_headers_in_place(
         request_method,
         request_version,
         proxy_name,
-        crate::http::protocol::common::forbidden_response(default_deny_body),
+        &mut response,
         merged_headers.as_deref(),
         false,
     );
@@ -117,3 +120,6 @@ fn decision_service_deny_response(
     );
     Ok(response)
 }
+
+#[cfg(test)]
+mod tests;

@@ -112,7 +112,14 @@ pub(super) enum ReverseStageOutcome<T, R = Response<Body>> {
     Continue(T),
 }
 
-pub(super) type ReverseAccessOutcome = ReverseStageOutcome<ReverseAccessControl>;
+// Keep continuation state inline, like ReverseStageOutcome, rather than
+// adding a per-request allocation solely for this specialized outcome.
+#[allow(clippy::large_enum_variant)]
+pub(super) enum ReverseAccessOutcome {
+    Continue(ReverseAccessControl),
+    Response(Box<Response<Body>>),
+    DecisionServiceDenied(Box<OwnerResponse<Body>>),
+}
 
 pub(super) struct ReverseAccessControl {
     pub(super) req: OwnerRequest<Body>,

@@ -102,9 +102,15 @@ pub(super) async fn complete_transparent_request(
         })
         .await?;
     let (mut policy, audit, timeout_override) = match decision {
-        crate::http::dispatch::HttpAccessDecision::Blocked { response, .. } => {
+        crate::http::dispatch::HttpAccessDecision::RateLimited { response } => {
             return Ok(crate::http::capture::stream::limit_response_body_for_plan(
                 OwnerResponse::from_http(*response),
+                &selected_plan,
+            ));
+        }
+        crate::http::dispatch::HttpAccessDecision::Blocked { response } => {
+            return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+                *response,
                 &selected_plan,
             ));
         }

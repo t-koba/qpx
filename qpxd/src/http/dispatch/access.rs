@@ -13,7 +13,7 @@ use crate::runtime::RuntimeState;
 use anyhow::Result;
 use hyper::{Method, Response};
 use qpx_core::config::ActionConfig;
-use qpx_core::http_message::Headers;
+use qpx_core::http_message::{Headers, Response as OwnerResponse};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
@@ -55,11 +55,12 @@ pub(crate) struct HttpAccessInput<'a> {
 pub(crate) enum HttpAccessDecision {
     /// Request may proceed. `controls` is `None` when decision_service was skipped.
     Allow(Box<HttpAccessAllowed>),
-    /// Request was denied or rate limited; `response` is already finalized
-    /// and annotated.
+    /// Responses are already finalized and annotated.
     Blocked {
+        response: Box<OwnerResponse<Body>>,
+    },
+    RateLimited {
         response: Box<Response<Body>>,
-        rate_limited: bool,
     },
 }
 
@@ -135,11 +136,13 @@ pub(crate) async fn enforce_http_access(input: HttpAccessInput<'_>) -> Result<Ht
                 controls: Some(controls),
             })))
         }
-        DecisionServiceHttpAccessOutcome::Blocked(response, rate_limited) => {
-            Ok(HttpAccessDecision::Blocked {
+        DecisionServiceHttpAccessOutcome::RateLimited(response) => {
+            Ok(HttpAccessDecision::RateLimited {
                 response: Box::new(response),
-                rate_limited,
             })
         }
+        DecisionServiceHttpAccessOutcome::Blocked(response) => Ok(HttpAccessDecision::Blocked {
+            response: Box::new(response),
+        }),
     }
 }

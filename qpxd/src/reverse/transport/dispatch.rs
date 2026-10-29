@@ -504,6 +504,11 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
                 request_version,
             ));
         }
+        ReverseAccessOutcome::DecisionServiceDenied(response) => {
+            let (interim, response) =
+                attach_streaming_limits((Vec::new(), *response), streaming, request_version);
+            return Ok((interim, R::from_finalized_owner(response)));
+        }
         ReverseAccessOutcome::Continue(access) => access,
     };
     let ReverseAccessControl {

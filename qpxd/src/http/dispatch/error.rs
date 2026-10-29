@@ -1,4 +1,5 @@
 use hyper::Response;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use thiserror::Error;
 
@@ -22,7 +23,7 @@ pub(crate) enum DispatchError {
     },
 
     #[error("decision service denied")]
-    DecisionServiceDenied { response: Box<Response<Body>> },
+    DecisionServiceDenied { response: Box<OwnerResponse<Body>> },
 
     #[error("upstream unavailable: {0}")]
     UpstreamUnavailable(String),
@@ -32,13 +33,13 @@ pub(crate) enum DispatchError {
 }
 
 impl DispatchError {
-    pub(crate) fn into_response_result(self) -> anyhow::Result<Response<Body>> {
+    pub(crate) fn into_response_result(self) -> anyhow::Result<OwnerResponse<Body>> {
         match self {
-            Self::RateLimited { response } => Ok(*response),
+            Self::RateLimited { response } => Ok(OwnerResponse::from_http(*response)),
             #[cfg(feature = "auth-basic")]
-            Self::PolicyDenied { response, .. } => Ok(*response),
+            Self::PolicyDenied { response, .. } => Ok(OwnerResponse::from_http(*response)),
             #[cfg(feature = "auth-basic")]
-            Self::AuthRequired { response, .. } => Ok(*response),
+            Self::AuthRequired { response, .. } => Ok(OwnerResponse::from_http(*response)),
             Self::DecisionServiceDenied { response } => Ok(*response),
             Self::UpstreamUnavailable(message) => Err(anyhow::anyhow!(message)),
             Self::Internal(err) => Err(err),

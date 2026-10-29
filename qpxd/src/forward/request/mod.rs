@@ -68,7 +68,7 @@ pub(crate) async fn handle_request_inner(
     .await
     {
         Ok(response) => response,
-        Err(err) => OwnerResponse::from_http(err.into_response_result()?),
+        Err(err) => err.into_response_result()?,
     };
     attach_interim_response_heads(&mut response, interim);
     Ok(response)
