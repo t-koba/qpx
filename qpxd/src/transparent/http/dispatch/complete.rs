@@ -370,7 +370,9 @@ pub(super) async fn proxy_transparent_http1(
     if !proxied.interim.is_empty() {
         response.extensions_mut().insert(proxied.interim);
     }
-    let mut response = OwnerResponse::from_http(http_modules.on_upstream_response(response).await?);
+    let mut response = http_modules
+        .on_upstream_response(OwnerResponse::from_http(response))
+        .await?;
     let response_candidates = input
         .response_engine
         .map(|engine| {

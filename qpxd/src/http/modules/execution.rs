@@ -199,16 +199,16 @@ impl<'a> HttpModuleResponseView<'a> {
     }
 }
 
-/// Private bridge for the single downstream hook. Conversions happen only
+/// Private bridge for response hooks. Conversions happen only
 /// when an applicable module is actually called, never for predicate checks.
-pub(crate) trait DownstreamResponse: ResponseCarrier {
+pub(crate) trait ModuleResponseCarrier: ResponseCarrier {
     fn module_view(&self) -> HttpModuleResponseView<'_>;
     fn insert_pending_header(&mut self, name: HeaderName, value: HeaderValue);
     fn into_module_response(self) -> Response<Body>;
     fn from_module_response(response: Response<Body>) -> Self;
 }
 
-impl DownstreamResponse for Response<Body> {
+impl ModuleResponseCarrier for Response<Body> {
     fn module_view(&self) -> HttpModuleResponseView<'_> {
         HttpModuleResponseView::from_response(self)
     }
@@ -223,7 +223,7 @@ impl DownstreamResponse for Response<Body> {
     }
 }
 
-impl DownstreamResponse for OwnerResponse<Body> {
+impl ModuleResponseCarrier for OwnerResponse<Body> {
     fn module_view(&self) -> HttpModuleResponseView<'_> {
         HttpModuleResponseView {
             response: ResponseViewInner::Owned(self),
@@ -600,7 +600,7 @@ impl HttpModuleContext {
         self.session.response_status = Some(status);
     }
 
-    fn apply_pending_response_headers<R: DownstreamResponse>(&mut self, response: &mut R) {
+    fn apply_pending_response_headers<R: ModuleResponseCarrier>(&mut self, response: &mut R) {
         for (name, value) in self.session.pending_response_headers.drain(..) {
             response.insert_pending_header(name, value);
         }
@@ -947,10 +947,10 @@ impl HttpModuleExecution {
         Ok(())
     }
 
-    pub(crate) async fn on_upstream_response(
+    pub(crate) async fn on_upstream_response<R: ModuleResponseCarrier>(
         &mut self,
-        mut response: Response<Body>,
-    ) -> Result<Response<Body>> {
+        mut response: R,
+    ) -> Result<R> {
         let Some((chain, context)) = self.active_mut() else {
             return Ok(response);
         };
@@ -963,7 +963,9 @@ impl HttpModuleExecution {
                 .call(
                     HttpModuleStage::UpstreamResponse,
                     context,
-                    HttpModuleEvent::UpstreamResponse(HttpModuleResponse::from_inner(response)),
+                    HttpModuleEvent::UpstreamResponse(HttpModuleResponse::from_inner(
+                        response.into_module_response(),
+                    )),
                 )
                 .await
                 .with_context(|| format!("http module {label} upstream_response failed"))?
@@ -971,12 +973,12 @@ impl HttpModuleExecution {
             context.set_response_status(wrapped.status());
             let mut wrapped = wrapped;
             context.apply_pending_response_headers(wrapped.as_inner_mut());
-            response = wrapped.into_inner();
+            response = R::from_module_response(wrapped.into_inner());
         }
         Ok(response)
     }
 
-    pub(crate) async fn prepare_downstream_response<R: DownstreamResponse>(
+    pub(crate) async fn prepare_downstream_response<R: ModuleResponseCarrier>(
         &mut self,
         mut response: R,
     ) -> Result<R> {

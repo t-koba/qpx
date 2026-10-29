@@ -181,9 +181,9 @@ pub(super) async fn dispatch_mitm_upstream(
             offered_protocols,
         )?;
     }
-    let mut response = qpx_core::http_message::Response::from_http(
-        http_modules.on_upstream_response(response).await?,
-    );
+    let mut response = http_modules
+        .on_upstream_response(qpx_core::http_message::Response::from_http(response))
+        .await?;
     let response_engine = selected_plan.response_rules.as_deref();
     let response_candidates = response_engine
         .map(|engine| {

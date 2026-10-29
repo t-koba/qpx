@@ -1985,14 +1985,16 @@ fn owned_subrequest_passes_only_first_occurrence_then_applies_configured_replace
     assert!(req.headers().declared_content_length().is_err());
 }
 
-struct DownstreamBoundaryFactory {
+struct ResponseBoundaryFactory {
+    stage: HttpModuleStage,
     phase: u8,
     framing: Vec<&'static str>,
 }
 
-impl HttpModuleFactory for DownstreamBoundaryFactory {
+impl HttpModuleFactory for ResponseBoundaryFactory {
     fn build(&self, _: &HttpModuleConfig) -> anyhow::Result<Arc<dyn HttpModule>> {
         Ok(Arc::new(Self {
+            stage: self.stage,
             phase: self.phase,
             framing: self.framing.clone(),
         }))
@@ -2000,10 +2002,14 @@ impl HttpModuleFactory for DownstreamBoundaryFactory {
 }
 
 #[async_trait::async_trait]
-impl HttpModule for DownstreamBoundaryFactory {
+impl HttpModule for ResponseBoundaryFactory {
     fn capabilities(&self) -> HttpModuleCapabilities {
         HttpModuleCapabilities {
-            stages: ModuleStages::DOWNSTREAM_RESPONSE,
+            stages: match self.stage {
+                HttpModuleStage::UpstreamResponse => ModuleStages::UPSTREAM_RESPONSE,
+                HttpModuleStage::DownstreamResponse => ModuleStages::DOWNSTREAM_RESPONSE,
+                _ => unreachable!(),
+            },
             body_access: BodyAccess::Streaming,
             ..HttpModuleCapabilities::default()
         }
@@ -2028,12 +2034,15 @@ impl HttpModule for DownstreamBoundaryFactory {
 
     async fn call<'a>(
         &self,
-        _: HttpModuleStage,
+        stage: HttpModuleStage,
         context: &mut HttpModuleContext,
         event: HttpModuleEvent<'a>,
     ) -> anyhow::Result<HttpModuleEvent<'a>> {
-        let HttpModuleEvent::DownstreamResponse(mut response) = event else {
-            panic!("unexpected event");
+        assert_eq!(stage, self.stage);
+        let mut response = match event {
+            HttpModuleEvent::UpstreamResponse(response)
+            | HttpModuleEvent::DownstreamResponse(response) => response,
+            _ => panic!("unexpected event"),
         };
         assert_ne!(self.phase, 0, "inapplicable module must not run");
         let raw = response.as_inner_mut();
@@ -2090,11 +2099,16 @@ impl HttpModule for DownstreamBoundaryFactory {
             value.set_sensitive(true);
             context.queue_response_header(http::header::CONTENT_LENGTH, value);
         }
-        Ok(HttpModuleEvent::DownstreamResponse(response))
+        Ok(match stage {
+            HttpModuleStage::UpstreamResponse => HttpModuleEvent::UpstreamResponse(response),
+            HttpModuleStage::DownstreamResponse => HttpModuleEvent::DownstreamResponse(response),
+            _ => unreachable!(),
+        })
     }
 }
 
-async fn check_downstream_library_boundary<R: super::execution::DownstreamResponse>(
+async fn check_response_library_boundary<R: super::execution::ModuleResponseCarrier>(
+    stage: HttpModuleStage,
     framing: Vec<&'static str>,
     abort_body: bool,
 ) {
@@ -2106,19 +2120,27 @@ async fn check_downstream_library_boundary<R: super::execution::DownstreamRespon
         ("boundary_skip", 0),
         ("boundary_second", 2),
     ] {
+        if phase == 0 && stage == HttpModuleStage::UpstreamResponse {
+            continue; // Upstream hooks have no per-response predicate.
+        }
         registry
             .register_factory(
                 name,
-                DownstreamBoundaryFactory {
+                ResponseBoundaryFactory {
+                    stage,
                     phase,
                     framing: framing.clone(),
                 },
             )
             .unwrap();
     }
-    let configs: Vec<HttpModuleConfig> = serde_yaml::from_str(
-        "- type: boundary_first\n- type: boundary_skip\n- type: boundary_second",
-    )
+    let configs: Vec<HttpModuleConfig> = serde_yaml::from_str(match stage {
+        HttpModuleStage::UpstreamResponse => "- type: boundary_first\n- type: boundary_second",
+        HttpModuleStage::DownstreamResponse => {
+            "- type: boundary_first\n- type: boundary_skip\n- type: boundary_second"
+        }
+        _ => unreachable!(),
+    })
     .unwrap();
     let chain = compile_http_modules(&configs, &registry.build()).unwrap();
     let mut context = module_test_context();
@@ -2155,10 +2177,17 @@ async fn check_downstream_library_boundary<R: super::execution::DownstreamRespon
     let mut value = HeaderValue::from_bytes(b"\x80last").unwrap();
     value.set_sensitive(true);
     response.headers_mut().append("x-duplicate", value);
-    let response = execution
-        .prepare_downstream_response(R::from_module_response(response))
-        .await
-        .unwrap();
+    let response: R = match stage {
+        HttpModuleStage::UpstreamResponse => execution
+            .on_upstream_response(R::from_module_response(response))
+            .await
+            .unwrap(),
+        HttpModuleStage::DownstreamResponse => execution
+            .prepare_downstream_response(R::from_module_response(response))
+            .await
+            .unwrap(),
+        _ => unreachable!(),
+    };
     let mut response = response.into_module_response();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(response.version(), http::Version::HTTP_2);
@@ -2227,9 +2256,18 @@ async fn downstream_module_library_boundary_preserves_and_mutates_both_carriers(
         vec!["7", "8"],
     ] {
         for abort_body in [false, true] {
-            check_downstream_library_boundary::<Response<Body>>(framing.clone(), abort_body).await;
-            check_downstream_library_boundary::<OwnerResponse<Body>>(framing.clone(), abort_body)
-                .await;
+            check_response_library_boundary::<Response<Body>>(
+                HttpModuleStage::DownstreamResponse,
+                framing.clone(),
+                abort_body,
+            )
+            .await;
+            check_response_library_boundary::<OwnerResponse<Body>>(
+                HttpModuleStage::DownstreamResponse,
+                framing.clone(),
+                abort_body,
+            )
+            .await;
         }
     }
 }
@@ -2281,6 +2319,72 @@ async fn downstream_owner_without_module_calls_keeps_exact_framing_and_applies_p
         }
         assert_eq!(
             qpx_http::body::to_bytes(response.into_body())
+                .await
+                .unwrap(),
+            "untouched"
+        );
+    }
+}
+
+#[tokio::test]
+async fn upstream_module_library_boundary_preserves_and_mutates_both_carriers() {
+    use qpx_core::http_message::Response as OwnerResponse;
+    for framing in [
+        vec![],
+        vec!["0"],
+        vec!["0007", "7"],
+        vec!["malformed"],
+        vec!["7", "8"],
+    ] {
+        for abort_body in [false, true] {
+            check_response_library_boundary::<Response<Body>>(
+                HttpModuleStage::UpstreamResponse,
+                framing.clone(),
+                abort_body,
+            )
+            .await;
+            check_response_library_boundary::<OwnerResponse<Body>>(
+                HttpModuleStage::UpstreamResponse,
+                framing.clone(),
+                abort_body,
+            )
+            .await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn upstream_owner_without_module_calls_is_an_identity_transform() {
+    use qpx_core::http_message::Response as OwnerResponse;
+    for active in [false, true] {
+        let mut execution = if active {
+            HttpModuleExecution::new(
+                Arc::new(CompiledHttpModuleChain::default()),
+                module_test_context(),
+            )
+        } else {
+            HttpModuleExecution::empty()
+        };
+        let mut response = Response::builder()
+            .status(StatusCode::PARTIAL_CONTENT)
+            .version(http::Version::HTTP_2)
+            .header("x-duplicate", "first")
+            .header("x-duplicate", "second")
+            .header(http::header::CONTENT_LENGTH, "invalid")
+            .header(http::header::CONTENT_LENGTH, "7")
+            .body(Body::from("untouched"))
+            .unwrap();
+        response.extensions_mut().insert(42_usize);
+        let response = OwnerResponse::from_http(response);
+        let headers = response.headers().clone();
+        // The explicit type proves that the hook returns the caller's carrier.
+        let response: OwnerResponse<Body> = execution.on_upstream_response(response).await.unwrap();
+        assert_eq!(response.headers(), &headers);
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.version(), http::Version::HTTP_2);
+        assert_eq!(response.extensions().get::<usize>(), Some(&42));
+        assert_eq!(
+            qpx_http::body::to_bytes(response.into_head_and_body().1)
                 .await
                 .unwrap(),
             "untouched"
