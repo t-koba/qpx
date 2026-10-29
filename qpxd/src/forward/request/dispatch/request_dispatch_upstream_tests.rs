@@ -96,7 +96,8 @@ caches:
 "#,
         )
         .unwrap();
-        config.caches[0].path = Some(dir.path().to_str().unwrap().to_owned());
+        let cache_path = std::fs::canonicalize(dir.path()).unwrap();
+        config.caches[0].path = Some(cache_path.to_str().unwrap().to_owned());
         if active {
             let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0] else {
                 unreachable!()
