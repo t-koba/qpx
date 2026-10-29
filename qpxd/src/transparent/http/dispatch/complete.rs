@@ -437,7 +437,7 @@ pub(super) async fn proxy_transparent_http1(
         }
         DispatchResponsePolicyOutcome::Response(response) => {
             return Ok(emit_optional_response_for_export(
-                OwnerResponse::from_http(response),
+                response,
                 input.selected_plan,
                 export_session,
             )

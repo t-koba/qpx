@@ -14,14 +14,16 @@ use crate::upstream::origin::{
 };
 use anyhow::{Result, anyhow};
 use hyper::Response;
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
 use url::Url;
 
 pub(super) async fn reverse_continue_response_rule(
     input: ReverseResponseRuleInput<'_>,
-) -> Result<std::result::Result<ReverseResponseRuleContinue, ReverseAttemptOutcome>> {
+) -> Result<
+    std::result::Result<ReverseResponseRuleContinue, ReverseAttemptOutcome<OwnerResponse<Body>>>,
+> {
     let ReverseResponseRuleInput {
         response_rule,
         http_modules,

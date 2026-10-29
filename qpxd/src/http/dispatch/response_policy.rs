@@ -5,7 +5,7 @@ use crate::http::policy::response_policy::{
 };
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use qpx_http::body::Body;
@@ -36,7 +36,7 @@ pub(crate) enum DispatchResponsePolicyOutcome {
         mirror: Option<bool>,
         policy_tags: Vec<String>,
     },
-    Response(Response<Body>),
+    Response(OwnerResponse<Body>),
 }
 
 struct DispatchResponseTransformContext<'a> {
@@ -84,10 +84,13 @@ impl ResponseTransform for ListenerResponsePolicyDecision {
                 headers,
                 policy_tags,
             } => {
-                let mut response = ctx
+                let response = ctx
                     .http_modules
                     .prepare_downstream_response(response)
                     .await?;
+                // Generated responses stay standard through the local builder/module hook.
+                // Carry the owner from this module boundary through finalization and egress.
+                let mut response = OwnerResponse::from_http(response);
                 finalize_response_with_headers_in_place(
                     ctx.request_method,
                     ctx.request_version,
@@ -150,3 +153,6 @@ pub(crate) async fn apply_dispatch_response_policy(
         })
         .await
 }
+
+#[cfg(test)]
+mod tests;

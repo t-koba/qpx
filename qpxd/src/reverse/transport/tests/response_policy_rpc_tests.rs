@@ -312,7 +312,7 @@ async fn assert_reverse_response_rule_matches_streaming(
             .expect("request"),
     );
 
-    let (_, response) = handle_request_with_interim(
+    let (interim, response) = handle_request_with_interim(
         request,
         reverse,
         ReverseConnInfo::plain(SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345), 80),
@@ -320,6 +320,11 @@ async fn assert_reverse_response_rule_matches_streaming(
     .await
     .expect("response");
 
+    assert!(
+        interim.is_empty(),
+        "policy replacements have no upstream interim heads"
+    );
+    let _: &OwnerResponse<Body> = &response;
     assert_eq!(
         response.status(),
         StatusCode::from_u16(status).expect("custom status")

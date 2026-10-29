@@ -243,10 +243,12 @@ pub(super) async fn dispatch_mitm_upstream(
             policy_tags
         }
         DispatchResponsePolicyOutcome::Response(response) => {
-            return Ok(qpx_core::http_message::Response::from_http(
-                emit_optional_response_for_export(response, selected_plan, export_session.as_ref())
-                    .await,
-            ));
+            return Ok(emit_optional_response_for_export(
+                response,
+                selected_plan,
+                export_session.as_ref(),
+            )
+            .await);
         }
     };
     let keep_upgrade =

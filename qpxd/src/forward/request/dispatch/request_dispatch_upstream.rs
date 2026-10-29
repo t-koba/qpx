@@ -151,12 +151,9 @@ pub(super) async fn execute_forward_upstream(
     .await?
     {
         DispatchResponsePolicyOutcome::Response(response) => {
-            return Ok(emit_optional_response_for_export(
-                OwnerResponse::from_http(response),
-                selected_plan,
-                export_session,
-            )
-            .await);
+            return Ok(
+                emit_optional_response_for_export(response, selected_plan, export_session).await,
+            );
         }
         DispatchResponsePolicyOutcome::Continue {
             response: updated,

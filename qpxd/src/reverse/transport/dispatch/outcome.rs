@@ -81,14 +81,14 @@ pub(super) fn acquire_reverse_upstream_concurrency(
 }
 
 pub(super) async fn capture_reverse_response_outcome<R: ReverseTerminalResponse>(
-    outcome: super::ReverseAttemptOutcome,
+    outcome: super::ReverseAttemptOutcome<qpx_core::http_message::Response<qpx_http::body::Body>>,
     route: &HttpRoute,
     export_session: Option<&crate::exporter::ExportSession>,
 ) -> super::ReverseAttemptOutcome<R> {
     match outcome {
         super::ReverseAttemptOutcome::Response(response) => {
             let (interim, response) = *response;
-            let response = R::from_finalized_http(response);
+            let response = R::from_finalized_owner(response);
             let response = crate::http::capture::stream::emit_optional_response_for_export(
                 response,
                 &route.plan,

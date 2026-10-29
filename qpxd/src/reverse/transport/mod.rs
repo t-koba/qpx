@@ -118,7 +118,7 @@ impl ReverseTerminalResponse for OwnerResponse<Body> {
     }
 }
 
-fn empty_interim_response(response: Response<Body>) -> (InterimList, Response<Body>) {
+fn empty_interim_response<R>(response: R) -> (InterimList, R) {
     (Vec::new(), response)
 }
 
