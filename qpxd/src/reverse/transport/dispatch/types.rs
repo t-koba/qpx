@@ -117,7 +117,7 @@ pub(super) enum ReverseStageOutcome<T, R = Response<Body>> {
 #[allow(clippy::large_enum_variant)]
 pub(super) enum ReverseAccessOutcome {
     Continue(ReverseAccessControl),
-    Response(Box<Response<Body>>),
+    Response(Box<OwnerResponse<Body>>),
     DecisionServiceDenied(Box<OwnerResponse<Body>>),
 }
 
@@ -151,7 +151,8 @@ pub(super) struct ReverseAccessInput<'a> {
     pub(super) request_destination: &'a crate::destination::DestinationMetadata,
 }
 
-pub(super) type ReverseModuleOutcome = ReverseStageOutcome<ReverseModuleDispatch>;
+pub(super) type ReverseModuleOutcome =
+    ReverseStageOutcome<ReverseModuleDispatch, OwnerResponse<Body>>;
 
 pub(super) struct ReverseModuleDispatch {
     pub(super) req: OwnerRequest<Body>,

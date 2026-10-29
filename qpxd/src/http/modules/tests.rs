@@ -2391,3 +2391,161 @@ async fn upstream_owner_without_module_calls_is_an_identity_transform() {
         );
     }
 }
+
+#[tokio::test]
+async fn module_local_response_stays_owned_through_hooks_finalization_and_prepared_outcome() {
+    use crate::http::dispatch::{
+        DispatchAuditContext, ProxyKind, prepare_http_module_local_response,
+    };
+    use crate::http::pipeline::PrepareOutcome;
+    use qpx_core::config::HeaderControl;
+    use qpx_core::http_message::Response as OwnerResponse;
+    use qpx_core::rules::CompiledHeaderControl;
+
+    let control = CompiledHeaderControl::compile(
+        &serde_yaml::from_str::<HeaderControl>(
+            "response_set:\n  date: Thu, 01 Jan 1970 00:00:00 GMT\nresponse_regex_replace:\n- { header: x-pending, pattern: between, replace: route }",
+        ).unwrap(),
+    ).unwrap();
+    for framing in [
+        vec![],
+        vec!["0"],
+        vec!["0007"],
+        vec!["invalid"],
+        vec!["7", "8"],
+    ] {
+        for method in [Method::GET, Method::HEAD] {
+            let mut registry = HttpModuleRegistryBuilder::new();
+            for (name, phase) in [("local_first", 1), ("local_skip", 0), ("local_second", 2)] {
+                registry
+                    .register_factory(
+                        name,
+                        ResponseBoundaryFactory {
+                            stage: HttpModuleStage::DownstreamResponse,
+                            phase,
+                            framing: framing.clone(),
+                        },
+                    )
+                    .unwrap();
+            }
+            let configs = serde_yaml::from_str::<Vec<HttpModuleConfig>>(
+                "- type: local_first\n- type: local_skip\n- type: local_second",
+            )
+            .unwrap();
+            let mut context = module_test_context();
+            context.queue_response_header(
+                HeaderName::from_static("x-pending"),
+                HeaderValue::from_static("initial-last"),
+            );
+            let mut execution = HttpModuleExecution::new(
+                compile_http_modules(&configs, &registry.build()).unwrap(),
+                context,
+            );
+            let mut trailers = http::HeaderMap::new();
+            trailers.append("x-trailer", HeaderValue::from_static("one"));
+            trailers.append("x-trailer", HeaderValue::from_static("two"));
+            let mut response = Response::new(Body::replay_chunks(
+                vec![Bytes::from_static(b"payload")],
+                Some(trailers),
+            ));
+            *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+            response.extensions_mut().insert(0_usize);
+            for value in &framing {
+                let mut value = HeaderValue::from_static(value);
+                value.set_sensitive(true);
+                response
+                    .headers_mut()
+                    .append(http::header::CONTENT_LENGTH, value);
+            }
+            response
+                .headers_mut()
+                .append("x-duplicate", HeaderValue::from_static("first"));
+            let mut raw = HeaderValue::from_bytes(b"\x80last").unwrap();
+            raw.set_sensitive(true);
+            response.headers_mut().append("x-duplicate", raw);
+            response
+                .headers_mut()
+                .insert("connection", HeaderValue::from_static("x-hop"));
+            response
+                .headers_mut()
+                .insert("x-hop", HeaderValue::from_static("drop"));
+            let audit = DispatchAuditContext::new(
+                None,
+                ProxyKind::Forward,
+                None,
+                "127.0.0.1:1234".parse().unwrap(),
+                method.clone(),
+                None,
+                Default::default(),
+            );
+            let response: OwnerResponse<Body> = prepare_http_module_local_response(
+                &mut execution,
+                HttpModuleResponse::from_inner(response),
+                &method,
+                "qpx-test",
+                Some(&control),
+                &audit,
+            )
+            .await
+            .unwrap();
+            let outcome: PrepareOutcome<()> = PrepareOutcome::Response(Box::new(response));
+            let PrepareOutcome::Response(mut response) = outcome else {
+                panic!("lost local response")
+            };
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(response.version(), http::Version::HTTP_2);
+            assert_eq!(response.extensions().get::<usize>(), Some(&1));
+            assert_eq!(
+                response
+                    .headers()
+                    .get(&"x-pending".try_into().unwrap())
+                    .unwrap(),
+                "route"
+            );
+            assert!(
+                !response
+                    .headers()
+                    .contains_key(&"x-hop".try_into().unwrap())
+            );
+            assert_eq!(
+                response.headers().get(&"via".try_into().unwrap()).unwrap(),
+                "2 qpx-test"
+            );
+            // The final hook's invalid/sensitive framing is not silently parsed or canonicalized.
+            assert!(response.headers().declared_content_length().is_err());
+            let duplicate = response
+                .headers()
+                .get_all(&"x-duplicate".try_into().unwrap())
+                .map(|value| (value.as_bytes(), value.is_sensitive()))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                duplicate,
+                vec![(b"first".as_slice(), false), (b"\x80last".as_slice(), true)]
+            );
+            if method == Method::HEAD {
+                assert!(response.body_mut().data().await.is_none());
+                assert!(response.body_mut().trailers().await.unwrap().is_none());
+            } else {
+                assert_eq!(
+                    response.body_mut().data().await.unwrap().unwrap(),
+                    "payload"
+                );
+                assert!(response.body_mut().data().await.is_none());
+                let trailers = response.body_mut().trailers().await.unwrap().unwrap();
+                assert_eq!(
+                    trailers.get_all("x-trailer").iter().collect::<Vec<_>>(),
+                    vec!["one", "two"]
+                );
+            }
+            // A test-only library egress observes the exact stored framing, after the owned stages.
+            let raw = (*response).into_http_for_library();
+            let fields = raw
+                .headers()
+                .get_all(http::header::CONTENT_LENGTH)
+                .iter()
+                .map(|value| (value.as_bytes(), value.is_sensitive()))
+                .collect::<Vec<_>>();
+            assert_eq!(fields, vec![(b"final-invalid".as_slice(), true)]);
+        }
+    }
+}

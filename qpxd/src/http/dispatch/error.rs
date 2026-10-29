@@ -6,7 +6,7 @@ use thiserror::Error;
 #[derive(Debug, Error)]
 pub(crate) enum DispatchError {
     #[error("rate limited")]
-    RateLimited { response: Box<Response<Body>> },
+    RateLimited { response: Box<OwnerResponse<Body>> },
 
     #[cfg(feature = "auth-basic")]
     #[error("policy denied: {reason}")]
@@ -35,7 +35,7 @@ pub(crate) enum DispatchError {
 impl DispatchError {
     pub(crate) fn into_response_result(self) -> anyhow::Result<OwnerResponse<Body>> {
         match self {
-            Self::RateLimited { response } => Ok(OwnerResponse::from_http(*response)),
+            Self::RateLimited { response } => Ok(*response),
             #[cfg(feature = "auth-basic")]
             Self::PolicyDenied { response, .. } => Ok(OwnerResponse::from_http(*response)),
             #[cfg(feature = "auth-basic")]

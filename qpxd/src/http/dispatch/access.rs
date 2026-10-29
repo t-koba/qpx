@@ -11,7 +11,7 @@ use crate::policy_context::{
 };
 use crate::runtime::RuntimeState;
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::config::ActionConfig;
 use qpx_core::http_message::{Headers, Response as OwnerResponse};
 use qpx_core::rules::CompiledHeaderControl;
@@ -60,7 +60,7 @@ pub(crate) enum HttpAccessDecision {
         response: Box<OwnerResponse<Body>>,
     },
     RateLimited {
-        response: Box<Response<Body>>,
+        response: Box<OwnerResponse<Body>>,
     },
 }
 

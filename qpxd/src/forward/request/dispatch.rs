@@ -94,7 +94,7 @@ async fn execute_forward_request(
     )
     .await?
     {
-        ForwardPrepareOutcome::Response(response) => Ok(OwnerResponse::from_http(*response)),
+        ForwardPrepareOutcome::Response(response) => Ok(*response),
         ForwardPrepareOutcome::Prepared(prepared) => {
             let streaming = prepared.policy.selected_plan.streaming;
             let mut response = complete_forward_request(prepared).await?;
@@ -662,7 +662,7 @@ async fn complete_forward_request(
                 *response,
                 &selected_plan,
             );
-            return Ok(OwnerResponse::from_http(response));
+            return Ok(response);
         }
         ForwardDispatchPrepareOutcome::Prepared(ready) => ready,
     };
@@ -701,10 +701,63 @@ fn forward_payload_too_large_response(
     proxy_name: &str,
     audit: &DispatchAuditContext,
 ) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
-    Ok(OwnerResponse::from_http(request_body_too_large_response(
+    Ok(request_body_too_large_response(
         &base.method,
         client_version,
         proxy_name,
         Some(audit),
-    )?))
+    )?)
+}
+
+#[cfg(test)]
+mod prepared_response_tests {
+    use super::*;
+    use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
+
+    #[tokio::test]
+    async fn target_rejections_are_owned_before_prepared_outcome_and_capture_limit() {
+        let runtime = Runtime::new(serde_yaml::from_str(
+            "edges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:0\n  default_action: { type: direct }\n  streaming: { max_response_body_bytes: 1 }",
+        ).unwrap()).unwrap();
+        for (uri, status) in [
+            ("/", http::StatusCode::BAD_REQUEST),
+            ("ftp://example.com/file", http::StatusCode::NOT_IMPLEMENTED),
+        ] {
+            for method in [http::Method::GET, http::Method::HEAD] {
+                let req = Request::from_http(
+                    http::Request::builder()
+                        .method(method.clone())
+                        .uri(uri)
+                        .body(Body::empty())
+                        .unwrap(),
+                );
+                let base = extract_base_request_fields(&req, BaseRequestContext::default());
+                let ForwardPrepareOutcome::Response(response) = prepare_forward_request(
+                    req,
+                    base,
+                    runtime.clone(),
+                    "forward",
+                    "127.0.0.1:1234".parse().unwrap(),
+                    Default::default(),
+                )
+                .await
+                .unwrap() else {
+                    panic!("target rejection must precede policy/upstream work")
+                };
+                let mut response: OwnerResponse<Body> = *response;
+                assert_eq!(response.status(), status);
+                if method == http::Method::HEAD {
+                    assert!(response.body_mut().data().await.is_none());
+                } else {
+                    assert!(
+                        qpx_http::body::to_bytes(response.into_head_and_body().1)
+                            .await
+                            .unwrap_err()
+                            .to_string()
+                            .contains("response body limit exceeded")
+                    );
+                }
+            }
+        }
+    }
 }

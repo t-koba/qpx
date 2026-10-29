@@ -3,8 +3,9 @@ use crate::http::dispatch::request_body_too_large_response;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::reverse::transport::{InterimList, ReverseConnInfo, empty_interim_response};
 use anyhow::Result;
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use tracing::warn;
 
@@ -24,13 +25,13 @@ pub(super) fn reverse_security_rejection(
         return Ok(None);
     };
     warn!(error = ?err, "reverse TLS host policy rejected request");
+    let mut response = Response::new(Body::from("misdirected request"));
+    *response.status_mut() = StatusCode::MISDIRECTED_REQUEST;
     Ok(Some(empty_interim_response(finalize_response_for_request(
         req.method(),
         req.version(),
         state.plan.identity.proxy_name.as_ref(),
-        Response::builder()
-            .status(StatusCode::MISDIRECTED_REQUEST)
-            .body(Body::from("misdirected request"))?,
+        response,
         false,
     ))))
 }
@@ -59,10 +60,12 @@ pub(super) fn enforce_selected_reverse_route_constraints(
             )
             .with_detail(error.to_string())
             .to_json()?;
-            let response = Response::builder()
-                .status(status)
-                .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-                .body(Body::from(body))?;
+            let mut response = Response::new(Body::from(body));
+            *response.status_mut() = status;
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE.try_into().expect("ordinary"),
+                http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
+            );
             return Ok(Err(empty_interim_response(finalize_response_for_request(
                 request_method,
                 request_version,
@@ -113,10 +116,12 @@ pub(super) fn enforce_selected_reverse_route_constraints(
         let body = qpx_http::problem::ProblemDetails::new(status, "Precondition required")
             .with_detail("This route requires If-Match or If-Unmodified-Since")
             .to_json()?;
-        let response = Response::builder()
-            .status(status)
-            .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-            .body(Body::from(body))?;
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE.try_into().expect("ordinary"),
+            http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
+        );
         return Ok(Err(empty_interim_response(finalize_response_for_request(
             request_method,
             request_version,
@@ -165,10 +170,12 @@ fn fetch_metadata_rejection(
     let body = qpx_http::problem::ProblemDetails::new(status, title)
         .with_detail(detail)
         .to_json()?;
-    let response = Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-        .body(Body::from(body))?;
+    let mut response = Response::new(Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE.try_into().expect("ordinary"),
+        http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
+    );
     let mut response =
         finalize_response_for_request(request_method, request_version, proxy_name, response, false);
     super::apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;

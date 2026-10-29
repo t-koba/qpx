@@ -3,7 +3,8 @@ use super::prepare_scan::{ReverseRouteSelection, reverse_prefilter_context, scan
 use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::{InterimList, ReverseConnInfo, ReverseRouter};
 use anyhow::{Result, anyhow};
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -74,10 +75,12 @@ pub(super) async fn prepare_cors_preflight(
             )
             .with_detail(detail)
             .to_json()?;
-            let mut response = Response::builder()
-                .status(status)
-                .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-                .body(Body::from(body))?;
+            let mut response = Response::new(Body::from(body));
+            *response.status_mut() = status;
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE.try_into().expect("ordinary"),
+                http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
+            );
             crate::http::protocol::l7::finalize_response_with_headers_in_place(
                 &Method::OPTIONS,
                 request_version,
@@ -91,9 +94,8 @@ pub(super) async fn prepare_cors_preflight(
             return Ok(Some(empty_interim_response(response)));
         }
     }
-    let mut response = Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .body(Body::empty())?;
+    let mut response = Response::new(Body::empty());
+    *response.status_mut() = StatusCode::NO_CONTENT;
     crate::http::protocol::l7::finalize_response_with_headers_in_place(
         &Method::OPTIONS,
         request_version,
@@ -107,10 +109,12 @@ pub(super) async fn prepare_cors_preflight(
         let body = qpx_http::problem::ProblemDetails::new(status, "CORS preflight rejected")
             .with_detail(rejection.to_string())
             .to_json()?;
-        response = Response::builder()
-            .status(status)
-            .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-            .body(Body::from(body))?;
+        response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        response.headers_mut().insert(
+            http::header::CONTENT_TYPE.try_into().expect("ordinary"),
+            http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
+        );
         crate::http::protocol::l7::finalize_response_with_headers_in_place(
             &Method::OPTIONS,
             request_version,

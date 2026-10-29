@@ -6,8 +6,8 @@ use crate::http::protocol::base_fields::BaseRequestFields;
 use crate::reverse::transport::destination::classify_reverse_destination;
 use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use anyhow::{Result, anyhow};
-use hyper::Response;
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use std::sync::Arc;
 

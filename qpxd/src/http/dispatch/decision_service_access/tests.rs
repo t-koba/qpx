@@ -264,9 +264,13 @@ requests:
     let DecisionServiceHttpAccessOutcome::RateLimited(response) = run() else {
         panic!("second request must be rate limited");
     };
-    let _: &Response<Body> = &response;
+    let _: &OwnerResponse<Body> = &response;
     assert_eq!(response.status(), StatusCode::TOO_MANY_REQUESTS);
-    assert!(response.headers().contains_key("retry-after"));
+    assert!(
+        response
+            .headers()
+            .contains_key(&"retry-after".try_into().unwrap())
+    );
     let response = DispatchError::RateLimited {
         response: Box::new(response),
     }

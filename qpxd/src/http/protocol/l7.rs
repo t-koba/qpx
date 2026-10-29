@@ -19,13 +19,13 @@ use std::time::{Duration, SystemTime};
 use tokio::time::timeout;
 use tracing::warn;
 
-pub(crate) fn finalize_response_for_request(
+pub(crate) fn finalize_response_for_request<R: FinalizeResponse<Body = Body>>(
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-    mut response: Response<Body>,
+    mut response: R,
     preserve_upgrade: bool,
-) -> Response<Body> {
+) -> R {
     finalize_response_in_place(
         request_method,
         request_version,

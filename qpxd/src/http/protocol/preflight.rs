@@ -1,7 +1,6 @@
-use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
 use hyper::{Method, Response, StatusCode};
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_incoming_request_with_metadata;
 
@@ -41,7 +40,7 @@ impl<'a> PreflightOptions<'a> {
 
 pub(crate) enum PreflightOutcome {
     Continue(qpx_http::protocol::semantics::ValidatedIncomingRequest),
-    Reject(Box<Response<Body>>),
+    Reject(Box<OwnerResponse<Body>>),
 }
 
 pub(crate) fn preflight_validate<B>(
@@ -50,58 +49,35 @@ pub(crate) fn preflight_validate<B>(
     options: PreflightOptions<'_>,
     rejection: Option<Response<Body>>,
 ) -> PreflightOutcome {
-    if let Some(response) = rejection {
-        return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
-            req.method(),
-            req.version(),
-            proxy_name,
-            response,
-            false,
-        )));
-    }
-
-    let validated = match validate_incoming_request_with_metadata(req) {
-        Ok(validated) => validated,
-        Err(err) => {
-            return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
-                req.method(),
-                req.version(),
-                proxy_name,
-                Response::builder()
-                    .status(err.http_status())
-                    .body(Body::from(err.to_string()))
-                    .unwrap_or_else(|_| bad_request(err.to_string())),
-                false,
-            )));
-        }
+    let response = if let Some(response) = rejection {
+        OwnerResponse::from_http(response)
+    } else {
+        let (status, body) = match validate_incoming_request_with_metadata(req) {
+            Err(err) => (err.http_status(), err.to_string()),
+            Ok(validated) => {
+                if req.method() == Method::TRACE && !options.trace_enabled {
+                    (
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        options.trace_disabled_message.to_owned(),
+                    )
+                } else if req.method() == Method::CONNECT
+                    && let ConnectPolicy::Reject { status, body } = options.connect_policy
+                {
+                    (status, body.to_owned())
+                } else {
+                    return PreflightOutcome::Continue(validated);
+                }
+            }
+        };
+        let mut response = OwnerResponse::new(Body::from(body));
+        *response.status_mut() = status;
+        response
     };
-    if req.method() == Method::TRACE && !options.trace_enabled {
-        return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
-            req.method(),
-            req.version(),
-            proxy_name,
-            Response::builder()
-                .status(StatusCode::METHOD_NOT_ALLOWED)
-                .body(Body::from(options.trace_disabled_message.to_owned()))
-                .unwrap_or_else(|_| bad_request("trace disabled")),
-            false,
-        )));
-    }
-
-    if req.method() == Method::CONNECT
-        && let ConnectPolicy::Reject { status, body } = options.connect_policy
-    {
-        return PreflightOutcome::Reject(Box::new(finalize_response_for_request(
-            &Method::CONNECT,
-            req.version(),
-            proxy_name,
-            Response::builder()
-                .status(status)
-                .body(Body::from(body.to_owned()))
-                .unwrap_or_else(|_| bad_request(body)),
-            false,
-        )));
-    }
-
-    PreflightOutcome::Continue(validated)
+    PreflightOutcome::Reject(Box::new(finalize_response_for_request(
+        req.method(),
+        req.version(),
+        proxy_name,
+        response,
+        false,
+    )))
 }

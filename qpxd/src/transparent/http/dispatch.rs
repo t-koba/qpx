@@ -64,7 +64,7 @@ async fn execute_transparent_request(
     match prepare_transparent_request(req, runtime, remote_addr, original_target, listener_name)
         .await?
     {
-        TransparentPrepareOutcome::Response(response) => Ok(OwnerResponse::from_http(*response)),
+        TransparentPrepareOutcome::Response(response) => Ok(*response),
         TransparentPrepareOutcome::Prepared(prepared) => {
             complete_transparent_request(prepared).await
         }

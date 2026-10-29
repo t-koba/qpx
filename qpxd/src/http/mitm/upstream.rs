@@ -90,7 +90,7 @@ pub(super) async fn dispatch_mitm_upstream(
                 concurrency.retry_after,
                 (*audit).clone(),
             );
-            return Ok(qpx_core::http_message::Response::from_http(response));
+            return Ok(response);
         }
     };
     let export_session =
@@ -127,15 +127,16 @@ pub(super) async fn dispatch_mitm_upstream(
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
             let response = prepare_http_module_local_response(
                 &mut http_modules,
-                (*response).into_inner(),
+                *response,
                 req_method,
                 proxy_name,
                 route_headers,
                 audit,
             )
             .await?;
-            return Ok(qpx_core::http_message::Response::from_http(
-                crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan),
+            return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+                response,
+                selected_plan,
             ));
         }
     }

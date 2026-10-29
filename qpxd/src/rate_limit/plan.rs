@@ -291,17 +291,20 @@ impl AppliedRateLimits {
 
     pub(crate) fn apply_rate_limit_fields(
         &self,
-        headers: &mut http::HeaderMap,
+        headers: &mut impl qpx_core::http_message::OrdinaryHeaderMut,
         retry_after: Option<Duration>,
     ) {
         if self.rate_limit_policies.is_empty() {
             return;
         }
 
-        let policy_header = http::HeaderName::from_static("rate-limit-policy");
-        let current_header = http::HeaderName::from_static("ratelimit");
-        headers.remove(&policy_header);
-        headers.remove(&current_header);
+        let policy_header =
+            qpx_core::http_message::OrdinaryHeaderName::try_from("rate-limit-policy")
+                .expect("ordinary");
+        let current_header =
+            qpx_core::http_message::OrdinaryHeaderName::try_from("ratelimit").expect("ordinary");
+        headers.ordinary_remove(&policy_header);
+        headers.ordinary_remove(&current_header);
 
         for policy in &self.rate_limit_policies {
             let value = qpx_http::rate_limit_fields::RateLimitPolicyField {
@@ -313,7 +316,7 @@ impl AppliedRateLimits {
             }
             .to_header_value();
             if let Ok(value) = value {
-                headers.append(policy_header.clone(), value);
+                headers.ordinary_append(policy_header.clone(), value);
             }
         }
 
@@ -330,12 +333,13 @@ impl AppliedRateLimits {
             }
             .to_header_value();
             if let Ok(value) = value {
-                headers.append(current_header.clone(), value);
+                headers.ordinary_append(current_header.clone(), value);
             }
         }
 
-        headers.insert(
-            http::header::CACHE_CONTROL,
+        headers.ordinary_insert(
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::CACHE_CONTROL)
+                .expect("ordinary"),
             http::HeaderValue::from_static("private, no-store"),
         );
     }

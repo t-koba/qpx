@@ -20,13 +20,15 @@ use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use std::sync::Arc;
 
-pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reverse_request(
+pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reverse_request<
+    R: super::super::ReverseTerminalResponse,
+>(
     req: OwnerRequest<Body>,
     reverse: &ReloadableReverse,
     conn: &ReverseConnInfo,
     state: &Arc<crate::runtime::RuntimeState>,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<std::result::Result<(InterimList, Response<Body>), OwnerRequest<Body>>> {
+) -> Result<std::result::Result<(InterimList, R), OwnerRequest<Body>>> {
     let request_version = req.version();
     if state.destination_trace_enabled()
         || qpx_observability::metrics_enabled()
@@ -54,7 +56,7 @@ pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reve
         return Ok(Err(req));
     }
     if let Some(response) = reverse_security_rejection(&req, conn, state, &compiled)? {
-        return Ok(Ok(response));
+        return Ok(Ok((response.0, R::from_finalized_owner(response.1))));
     }
     let request_method = req.method().clone();
     let req =
@@ -63,7 +65,7 @@ pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reve
             Ok(req) => req,
             Err(mut response) => {
                 apply_reverse_route_metadata(route, conn.tls_terminated, &mut response.1)?;
-                return Ok(Ok(response));
+                return Ok(Ok((response.0, R::from_finalized_owner(response.1))));
             }
         };
     let (interim, mut response) = dispatch_plain_reverse_http(
@@ -77,7 +79,7 @@ pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reve
     )
     .await?;
     apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
-    Ok(Ok((interim, response)))
+    Ok(Ok((interim, R::from_finalized_http(response))))
 }
 
 pub(super) async fn dispatch_plain_reverse_http(

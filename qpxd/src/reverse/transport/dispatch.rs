@@ -187,7 +187,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
             Ok(None) => {
                 return Err(anyhow!("no route matched"));
             }
-            Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
+            Err((interim, response)) => return Ok((interim, R::from_finalized_owner(response))),
         }
     }
     if !state.destination_trace_enabled()
@@ -218,10 +218,10 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
                     None,
                 )?;
                 apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
-                return Ok((Vec::new(), R::from_finalized_http(response)));
+                return Ok((Vec::new(), R::from_finalized_owner(response)));
             }
             Ok(None) => return Err(anyhow!("no route matched")),
-            Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
+            Err((interim, response)) => return Ok((interim, R::from_finalized_owner(response))),
         }
     }
     if !state.destination_trace_enabled()
@@ -272,7 +272,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
                 return Ok((Vec::new(), R::from_finalized_http(response)));
             }
             Ok(None) => return Err(anyhow!("no route matched")),
-            Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
+            Err((interim, response)) => return Ok((interim, R::from_finalized_owner(response))),
         }
     }
     // Keep slow-path-only futures out of the enclosing single-route fast-path
@@ -292,7 +292,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
     .await?
     {
         Ok(prepared) => prepared,
-        Err((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
+        Err((interim, response)) => return Ok((interim, R::from_finalized_owner(response))),
     };
     let route = prepared
         .context
@@ -361,28 +361,30 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
     Ok((interim, response))
 }
 
-pub(super) fn apply_reverse_route_metadata(
+pub(super) fn apply_reverse_route_metadata<R: ReverseTerminalResponse>(
     route: &HttpRoute,
     secure_transport: bool,
-    response: &mut Response<Body>,
+    response: &mut R,
 ) -> Result<()> {
     if let Some(metadata) = route.plan.api_metadata.as_deref() {
-        metadata.apply(response.headers_mut());
+        metadata.apply(response.terminal_headers_mut());
     }
     if secure_transport && let Some(hsts) = route.plan.hsts {
-        response.headers_mut().insert(
-            http::header::STRICT_TRANSPORT_SECURITY,
+        response.terminal_headers_mut().ordinary_insert(
+            http::header::STRICT_TRANSPORT_SECURITY
+                .try_into()
+                .expect("ordinary"),
             hsts.to_header_value()?,
         );
     }
     if let Some(cookies) = route.plan.cookies.as_ref() {
-        cookies.apply_response(response.headers_mut(), secure_transport)?;
+        cookies.apply_response(response.terminal_headers_mut(), secure_transport)?;
     }
     if let Some(fetch_metadata) = route.plan.fetch_metadata.as_deref() {
-        fetch_metadata.apply_response_vary(response.headers_mut());
+        fetch_metadata.apply_response_vary(response.terminal_headers_mut());
     }
     if let Some(browser_security) = route.plan.browser_security.as_deref() {
-        browser_security.apply(response.headers_mut());
+        browser_security.apply(response.terminal_headers_mut());
     }
     Ok(())
 }
@@ -469,7 +471,7 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
     .await?
     {
         Ok(req) => req,
-        Err(response) => return Ok((Vec::new(), R::from_finalized_http(response))),
+        Err(response) => return Ok((Vec::new(), R::from_finalized_owner(response))),
     };
     let (seed, sticky_seed) = if route.selection_is_seed_independent() {
         (0, 0)
@@ -499,7 +501,7 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
     {
         ReverseAccessOutcome::Response(response) => {
             return Ok(attach_streaming_limits(
-                (Vec::new(), R::from_finalized_http(*response)),
+                (Vec::new(), R::from_finalized_owner(*response)),
                 streaming,
                 request_version,
             ));
@@ -572,7 +574,7 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
     {
         ReverseModuleOutcome::Response(response) => {
             let response = crate::http::capture::stream::limit_response_body_for_plan(
-                R::from_finalized_http(*response),
+                R::from_finalized_owner(*response),
                 &route.plan,
             );
             return Ok(attach_streaming_limits(

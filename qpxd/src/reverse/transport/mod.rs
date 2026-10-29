@@ -204,7 +204,7 @@ async fn handle_request_inner_with_origin_pool<R: ReverseTerminalResponse>(
         )
         .await?
         {
-            Ok((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
+            Ok((interim, response)) => return Ok((interim, response)),
             Err(req) => req,
         };
     }
@@ -223,7 +223,7 @@ async fn handle_request_inner_with_origin_pool<R: ReverseTerminalResponse>(
     ) {
         PreflightOutcome::Continue(validated) => validated,
         PreflightOutcome::Reject(response) => {
-            return Ok((Vec::new(), R::from_finalized_http(*response)));
+            return Ok((Vec::new(), R::from_finalized_owner(*response)));
         }
     };
     if !common_h2_request {
@@ -236,7 +236,7 @@ async fn handle_request_inner_with_origin_pool<R: ReverseTerminalResponse>(
         )
         .await?
         {
-            Ok((interim, response)) => return Ok((interim, R::from_finalized_http(response))),
+            Ok((interim, response)) => return Ok((interim, response)),
             Err(req) => req,
         };
     }

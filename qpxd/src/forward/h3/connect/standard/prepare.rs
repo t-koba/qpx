@@ -136,7 +136,7 @@ pub(crate) async fn prepare_h3_connect_request(
                 &error,
             ) {
                 send_h3_response(
-                    qpx_core::http_message::Response::from_http(response?),
+                    response?,
                     req_head.method(),
                     req_stream,
                     max_h3_response_body_bytes,

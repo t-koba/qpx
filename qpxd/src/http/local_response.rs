@@ -102,15 +102,17 @@ pub(crate) fn finalized_compiled_local_response(
     proxy_name: &str,
     local: &CompiledLocalResponse,
     headers: Option<&qpx_core::rules::CompiledHeaderControl>,
-) -> Result<Response<Body>> {
-    Ok(finalize_response_with_headers(
+) -> Result<qpx_core::http_message::Response<Body>> {
+    let mut response = qpx_core::http_message::Response::from_http(local.build()?);
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
         request_method,
         request_version,
         proxy_name,
-        local.build()?,
+        &mut response,
         headers,
         false,
-    ))
+    );
+    Ok(response)
 }
 
 #[cfg(test)]

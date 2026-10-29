@@ -85,7 +85,7 @@ pub(super) async fn dispatch_reverse_http_route<R: ReverseTerminalResponse>(
                 concurrency.retry_after,
                 audit_ctx.clone(),
             );
-            return Ok((Vec::new(), R::from_finalized_http(response)));
+            return Ok((Vec::new(), R::from_finalized_owner(response)));
         };
         let inflight_guard = selected_upstream
             .as_ref()

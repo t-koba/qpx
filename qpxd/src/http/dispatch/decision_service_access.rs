@@ -9,7 +9,7 @@ use crate::policy_context::{
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, RateLimiters, TransportScope};
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
@@ -35,7 +35,7 @@ pub(crate) struct DecisionServiceHttpAccessInput<'a> {
 pub(crate) enum DecisionServiceHttpAccessOutcome {
     Continue(DecisionServiceAllow),
     Blocked(OwnerResponse<Body>),
-    RateLimited(Response<Body>),
+    RateLimited(OwnerResponse<Body>),
 }
 
 pub(crate) fn apply_decision_service_http_access(

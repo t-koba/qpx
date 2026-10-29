@@ -40,12 +40,10 @@ pub(crate) async fn handle_request_inner(
         ftp_rejection,
     ) {
         PreflightOutcome::Continue(validated) => validated,
-        PreflightOutcome::Reject(response) => return Ok(OwnerResponse::from_http(*response)),
+        PreflightOutcome::Reject(response) => return Ok(*response),
     };
     if req.method() == Method::CONNECT {
-        return connect::handle_connect(req, runtime, listener_name, remote_addr)
-            .await
-            .map(OwnerResponse::from_http);
+        return connect::handle_connect(req, runtime, listener_name, remote_addr).await;
     }
 
     let base = extract_base_request_fields(

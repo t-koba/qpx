@@ -552,17 +552,14 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         )?;
         super::dispatch::apply_reverse_route_metadata(route, false, &mut response)?;
         if let Some(body) = take_in_memory_body(&[], &mut response) {
-            let (parts, _) = response.into_parts();
+            let (parts, _) = response.into_http_for_library().into_parts();
             return Ok(PreparedRawHttp1Response::InMemory {
                 status: parts.status,
                 headers: parts.headers,
                 body,
             });
         }
-        return Ok(PreparedRawHttp1Response::Generic(
-            Vec::new(),
-            OwnerResponse::from_http(response),
-        ));
+        return Ok(PreparedRawHttp1Response::Generic(Vec::new(), response));
     }
     let route = prepared
         .compiled

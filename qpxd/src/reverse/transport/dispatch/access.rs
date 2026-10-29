@@ -1,15 +1,16 @@
 use super::{ReverseAccessControl, ReverseAccessInput, ReverseAccessOutcome};
 use crate::http::dispatch::{
     DecisionServiceHttpAccessInput, DecisionServiceHttpAccessOutcome, DispatchAuditContext,
-    DispatchAuditInput, DispatchGuardInput, DispatchOutcome, ProxyKind,
-    annotated_compiled_local_response, apply_decision_service_http_access,
-    build_dispatch_audit_context, evaluate_http_guard, rate_limit_response_for_parts_with_limits,
+    DispatchAuditInput, DispatchGuardInput, DispatchOutcome, ProxyKind, annotate_dispatch_response,
+    apply_decision_service_http_access, build_dispatch_audit_context, evaluate_http_guard,
+    rate_limit_response_for_parts_with_limits,
 };
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use crate::rate_limit::{RateLimitContext, TransportScope};
 use crate::reverse::router::HttpRoute;
 use anyhow::Result;
-use hyper::{Method, Response};
+use hyper::Method;
+use qpx_core::http_message::Response;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 
@@ -293,14 +294,13 @@ fn reverse_local_route_response(
         return Ok(None);
     };
     super::super::metrics::local_response(state);
-    annotated_compiled_local_response(
+    let mut response = crate::http::local_response::finalized_compiled_local_response(
         request_method,
         request_version,
         proxy_name,
         local,
         route_headers,
-        audit_ctx,
-        DispatchOutcome::Respond,
-    )
-    .map(Some)
+    )?;
+    annotate_dispatch_response(&mut response, audit_ctx, DispatchOutcome::Respond, &[]);
+    Ok(Some(response))
 }

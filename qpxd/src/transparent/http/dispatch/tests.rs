@@ -333,3 +333,33 @@ async fn transparent_prepared_early_response_is_adopted_after_processing() {
         b"denied"
     );
 }
+
+#[tokio::test]
+async fn transparent_preflight_rejection_is_an_owned_prepared_outcome() {
+    let runtime = transparent_test_runtime(None, Vec::new(), None, Vec::new());
+    let request = Request::from_http(
+        hyper::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri("example.com:443")
+            .header("host", "example.com:443")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let TransparentPrepareOutcome::Response(response) = prepare_transparent_request(
+        request,
+        runtime,
+        "127.0.0.1:1234".parse().unwrap(),
+        None,
+        "transparent",
+    )
+    .await
+    .unwrap() else {
+        panic!("CONNECT must be rejected before transparent policy")
+    };
+    let response: OwnerResponse<Body> = *response;
+    assert_eq!(response.status(), http::StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(
+        to_bytes(response.into_head_and_body().1).await.unwrap(),
+        "transparent HTTP forward_edges do not support CONNECT"
+    );
+}

@@ -27,7 +27,7 @@ use ::http::{Method, Response, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
 use std::net::SocketAddr;
@@ -81,7 +81,7 @@ pub(super) async fn handle_connect(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     if req.version() == http::Version::HTTP_2 && req.extensions().get::<H2Protocol>().is_some() {
         return handle_h2_extended_connect(req, runtime, listener_name, remote_addr).await;
     }
@@ -202,20 +202,20 @@ pub(super) async fn handle_connect(
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let log_context = identity.to_log_context(None, None, None);
-            return Ok(pre_access_response!(
+            return Ok(OwnerResponse::from_http(pre_access_response!(
                 proxy_auth_required(chal, state.messages.proxy_auth_required.as_str()),
                 &log_context,
                 DispatchOutcome::Challenge
-            ));
+            )));
         }
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let log_context = identity.to_log_context(None, None, None);
-            return Ok(pre_access_response!(
+            return Ok(OwnerResponse::from_http(pre_access_response!(
                 forbidden(state.messages.forbidden.as_str()),
                 &log_context,
                 DispatchOutcome::Forbidden
-            ));
+            )));
         }
     };
     let selected_plan = state
@@ -239,7 +239,7 @@ pub(super) async fn handle_connect(
             false,
         );
         request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
-        return Ok(response);
+        return Ok(OwnerResponse::from_http(response));
     }
     let decision_service = enforce_decision_service(
         &state,
@@ -292,7 +292,7 @@ pub(super) async fn handle_connect(
             if !matches!(outcome, DispatchOutcome::RateLimited) {
                 audit.annotate(&mut response, outcome);
             }
-            return Ok(response);
+            return Ok(OwnerResponse::from_http(response));
         }
     };
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
@@ -349,7 +349,7 @@ pub(super) async fn handle_connect(
     }
 
     match action.kind {
-        ActionKind::Block => Ok(blocked_connect_response!()),
+        ActionKind::Block => Ok(OwnerResponse::from_http(blocked_connect_response!())),
         ActionKind::Respond => {
             let local = action
                 .local_response
@@ -363,12 +363,12 @@ pub(super) async fn handle_connect(
                 response_headers.as_deref(),
             )?;
             audit.annotate(&mut response, DispatchOutcome::Respond);
-            Ok(response)
+            Ok(OwnerResponse::from_http(response))
         }
         ActionKind::Inspect => {
             #[cfg(not(feature = "mitm"))]
             {
-                Ok(blocked_connect_response!())
+                Ok(OwnerResponse::from_http(blocked_connect_response!()))
             }
 
             #[cfg(feature = "mitm")]
@@ -378,7 +378,7 @@ pub(super) async fn handle_connect(
                     .ok_or_else(|| anyhow!("listener not found"))?;
                 let tls_inspection = listener_cfg.tls_inspection.as_ref();
                 if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
-                    return Ok(blocked_connect_response!());
+                    return Ok(OwnerResponse::from_http(blocked_connect_response!()));
                 }
                 let verify =
                     state.tls_verify_upstream(Some(listener_cfg), listener_name, host.as_str());
@@ -392,7 +392,11 @@ pub(super) async fn handle_connect(
                 let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_ctx);
                 let concurrency_permits = match concurrency.permits {
                     Some(permits) => Some(permits),
-                    None => return Ok(too_many_connect_response!(concurrency.retry_after)),
+                    None => {
+                        return Ok(OwnerResponse::from_http(too_many_connect_response!(
+                            concurrency.retry_after
+                        )));
+                    }
                 };
                 let upstream_connected = match connect_tunnel_target(
                     &host,
@@ -404,7 +408,9 @@ pub(super) async fn handle_connect(
                 .await
                 {
                     Ok(stream) => stream,
-                    Err(_) => return Ok(proxy_error_connect_response!()),
+                    Err(_) => {
+                        return Ok(OwnerResponse::from_http(proxy_error_connect_response!()));
+                    }
                 };
                 let runtime_for_mitm = runtime.clone();
                 let listener_name_owned = listener_name.to_string();
@@ -439,7 +445,7 @@ pub(super) async fn handle_connect(
                         warn!(error = ?err, "mitm tunnel failed");
                     }
                 });
-                Ok(established_connect_response!())
+                Ok(OwnerResponse::from_http(established_connect_response!()))
             }
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {
@@ -453,7 +459,11 @@ pub(super) async fn handle_connect(
             let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_ctx);
             let concurrency_permits = match concurrency.permits {
                 Some(permits) => Some(permits),
-                None => return Ok(too_many_connect_response!(concurrency.retry_after)),
+                None => {
+                    return Ok(OwnerResponse::from_http(too_many_connect_response!(
+                        concurrency.retry_after
+                    )));
+                }
             };
             let connected = match connect_tunnel_target(
                 &host,
@@ -465,7 +475,9 @@ pub(super) async fn handle_connect(
             .await
             {
                 Ok(stream) => stream,
-                Err(_) => return Ok(proxy_error_connect_response!()),
+                Err(_) => {
+                    return Ok(OwnerResponse::from_http(proxy_error_connect_response!()));
+                }
             };
             let throttle = BandwidthThrottle::with_context(
                 rate_limit_ctx,
@@ -505,7 +517,7 @@ pub(super) async fn handle_connect(
                     warn!(error = ?err, "tunnel failed");
                 }
             });
-            Ok(established_connect_response!())
+            Ok(OwnerResponse::from_http(established_connect_response!()))
         }
     }
 }

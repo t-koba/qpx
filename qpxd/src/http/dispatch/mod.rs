@@ -48,8 +48,8 @@ pub(crate) use metrics::{
 };
 pub(crate) use outcome::DispatchOutcome;
 pub(crate) use prepare::response::{
-    annotated_compiled_local_response, annotated_local_response, annotated_max_forwards_response,
-    prepare_http_module_local_response, request_body_too_large_response,
+    annotated_local_response, annotated_max_forwards_response, prepare_http_module_local_response,
+    request_body_too_large_response,
 };
 pub(crate) use prepare::{
     DispatchRequestPrepareInput, PreparedDispatchRequest, prepare_dispatch_request,

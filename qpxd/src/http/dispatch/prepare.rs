@@ -9,8 +9,8 @@ use crate::policy_context::{
     authentication_response_for_error, resolve_identity_for_request, sanitize_headers_for_policy,
 };
 use anyhow::Result;
-use hyper::{Method, Response};
-use qpx_core::http_message::{Headers, Request};
+use hyper::Method;
+use qpx_core::http_message::{Headers, Request, Response};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::rules::RuleEngine;
 use qpx_http::body::Body;

@@ -104,7 +104,7 @@ pub(super) async fn complete_transparent_request(
     let (mut policy, audit, timeout_override) = match decision {
         crate::http::dispatch::HttpAccessDecision::RateLimited { response } => {
             return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                OwnerResponse::from_http(*response),
+                *response,
                 &selected_plan,
             ));
         }
@@ -159,8 +159,7 @@ pub(super) async fn complete_transparent_request(
                     request_version,
                     proxy_name,
                     Some(&audit),
-                )
-                .map(OwnerResponse::from_http);
+                );
             }
             Err(err) => return Err(err),
         };
@@ -176,8 +175,7 @@ pub(super) async fn complete_transparent_request(
                 request_version,
                 proxy_name,
                 Some(&audit),
-            )
-            .map(OwnerResponse::from_http);
+            );
         }
         Err(err) => return Err(err),
     };
@@ -206,7 +204,7 @@ pub(super) async fn complete_transparent_request(
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
             let response = prepare_http_module_local_response(
                 &mut http_modules,
-                (*response).into_inner(),
+                *response,
                 &request_method,
                 proxy_name,
                 policy_headers,
@@ -214,7 +212,7 @@ pub(super) async fn complete_transparent_request(
             )
             .await?;
             return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                OwnerResponse::from_http(response),
+                response,
                 &selected_plan,
             ));
         }
@@ -238,7 +236,7 @@ pub(super) async fn complete_transparent_request(
                 concurrency.retry_after,
                 audit.clone(),
             );
-            return Ok(OwnerResponse::from_http(response));
+            return Ok(response);
         }
     };
     let ms = Duration::from_millis;

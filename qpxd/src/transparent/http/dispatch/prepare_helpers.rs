@@ -90,7 +90,7 @@ pub(super) fn preflight_result(
     trace_disabled_message: &str,
 ) -> std::result::Result<
     qpx_http::protocol::semantics::ValidatedIncomingRequest,
-    Box<hyper::Response<Body>>,
+    Box<qpx_core::http_message::Response<Body>>,
 > {
     match preflight_validate(
         req,

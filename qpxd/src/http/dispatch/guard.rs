@@ -4,8 +4,7 @@ use crate::http::policy::guard::{CompiledHttpGuardProfile, HttpGuardReject};
 use crate::http::policy::rule_context::attach_destination_trace;
 use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::Result;
-use hyper::Response;
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Request, Response};
 use qpx_http::body::Body;
 
 pub(crate) struct DispatchGuardInput<'a> {
@@ -71,15 +70,9 @@ fn build_guard_rejection(
     audit: DispatchAuditContext,
     reject: HttpGuardReject,
 ) -> Result<Response<Body>> {
-    let mut response = finalize_response_for_request(
-        method,
-        version,
-        proxy_name,
-        Response::builder()
-            .status(reject.status)
-            .body(Body::from(reject.body))?,
-        false,
-    );
+    let mut response = Response::new(Body::from(reject.body));
+    *response.status_mut() = reject.status;
+    let mut response = finalize_response_for_request(method, version, proxy_name, response, false);
     annotate_dispatch_response(&mut response, &audit, DispatchOutcome::GuardReject, &[]);
     Ok(response)
 }

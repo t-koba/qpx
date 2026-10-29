@@ -7,7 +7,7 @@ use crate::policy_context::{IdentityRequestContext, authentication_response_for_
 use crate::reverse::transport::ReverseRouter;
 use crate::reverse::transport::empty_interim_response;
 use anyhow::Result;
-use hyper::Response;
+use qpx_core::http_message::Response;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;

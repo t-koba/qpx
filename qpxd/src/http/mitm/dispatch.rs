@@ -135,7 +135,7 @@ async fn execute_mitm_request(
     .await?
     {
         Ok(prepared) => prepared,
-        Err(response) => return Ok(qpx_core::http_message::Response::from_http(response)),
+        Err(response) => return Ok(response),
     };
     req = prepared_req;
     let mut request_body_observed = initial_observation_plan.needs_body;
@@ -192,7 +192,7 @@ async fn execute_mitm_request(
     })
     .await?
     {
-        return Ok(qpx_core::http_message::Response::from_http(response));
+        return Ok(response);
     }
     let ctx = build_request_rule_match_context(RequestRuleContextInput {
         base: &base,
@@ -231,8 +231,7 @@ async fn execute_mitm_request(
                     request_version_for_observation,
                     proxy_name,
                     None,
-                )
-                .map(qpx_core::http_message::Response::from_http);
+                );
             }
             Err(err) => return Err(err),
         };
@@ -440,11 +439,9 @@ async fn execute_mitm_request(
                 ));
             }
             DecisionServiceHttpAccessOutcome::RateLimited(response) => {
-                return Ok(qpx_core::http_message::Response::from_http(
-                    crate::http::capture::stream::limit_response_body_for_plan(
-                        response,
-                        selected_plan,
-                    ),
+                return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+                    response,
+                    selected_plan,
                 ));
             }
         }
@@ -458,8 +455,9 @@ async fn execute_mitm_request(
             &request_limits,
             audit.clone(),
         );
-        return Ok(qpx_core::http_message::Response::from_http(
-            crate::http::capture::stream::limit_response_body_for_plan(response, selected_plan),
+        return Ok(crate::http::capture::stream::limit_response_body_for_plan(
+            response,
+            selected_plan,
         ));
     }
     if let Some(early_response) = early_response {
@@ -503,7 +501,7 @@ async fn execute_mitm_request(
                     proxy_name,
                     Some(&audit),
                 )?;
-                return Ok(qpx_core::http_message::Response::from_http(response));
+                return Ok(response);
             }
             Err(err) => return Err(err),
         };
@@ -523,7 +521,7 @@ async fn execute_mitm_request(
                 proxy_name,
                 Some(&audit),
             )?;
-            return Ok(qpx_core::http_message::Response::from_http(response));
+            return Ok(response);
         }
         Err(err) => return Err(err),
     };

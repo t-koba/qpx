@@ -33,7 +33,7 @@ use ::http::{Method, Response, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
-use qpx_core::http_message::Request;
+use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
@@ -46,7 +46,7 @@ pub(super) async fn handle_h2_extended_connect(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: SocketAddr,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let protocol = req
         .extensions()
         .get::<H2Protocol>()
@@ -193,20 +193,20 @@ pub(super) async fn handle_h2_extended_connect(
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let log_context = identity.to_log_context(None, None, None);
-            return Ok(pre_access_response!(
+            return Ok(OwnerResponse::from_http(pre_access_response!(
                 proxy_auth_required(chal, state.messages.proxy_auth_required.as_str()),
                 &log_context,
                 DispatchOutcome::Challenge
-            ));
+            )));
         }
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let log_context = identity.to_log_context(None, None, None);
-            return Ok(pre_access_response!(
+            return Ok(OwnerResponse::from_http(pre_access_response!(
                 forbidden(state.messages.forbidden.as_str()),
                 &log_context,
                 DispatchOutcome::Forbidden
-            ));
+            )));
         }
     };
     let selected_plan = state
@@ -231,7 +231,7 @@ pub(super) async fn handle_h2_extended_connect(
             false,
         );
         request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
-        return Ok(response);
+        return Ok(OwnerResponse::from_http(response));
     }
     let decision_service = enforce_decision_service(
         &state,
@@ -284,7 +284,7 @@ pub(super) async fn handle_h2_extended_connect(
             if !matches!(outcome, DispatchOutcome::RateLimited) {
                 audit.annotate(&mut response, outcome);
             }
-            return Ok(response);
+            return Ok(OwnerResponse::from_http(response));
         }
     };
     macro_rules! connect_response {
@@ -325,10 +325,10 @@ pub(super) async fn handle_h2_extended_connect(
 
     match action.kind {
         ActionKind::Block | ActionKind::Inspect => {
-            return Ok(connect_response!(
+            return Ok(OwnerResponse::from_http(connect_response!(
                 blocked(state.messages.blocked.as_str()),
                 DispatchOutcome::Block
-            ));
+            )));
         }
         ActionKind::Respond => {
             let local = action
@@ -343,7 +343,7 @@ pub(super) async fn handle_h2_extended_connect(
                 response_headers.as_deref(),
             )?;
             audit.annotate(&mut response, DispatchOutcome::Respond);
-            return Ok(response);
+            return Ok(OwnerResponse::from_http(response));
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {}
     }
@@ -358,7 +358,11 @@ pub(super) async fn handle_h2_extended_connect(
     let concurrency = request_limits.acquire_concurrency_with_retry(&rate_limit_ctx);
     let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
-        None => return Ok(too_many_connect_response!(concurrency.retry_after)),
+        None => {
+            return Ok(OwnerResponse::from_http(too_many_connect_response!(
+                concurrency.retry_after
+            )));
+        }
     };
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
@@ -380,7 +384,7 @@ pub(super) async fn handle_h2_extended_connect(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/2 extended CONNECT establish failed");
-            return Ok(proxy_error_connect_response!());
+            return Ok(OwnerResponse::from_http(proxy_error_connect_response!()));
         }
     };
 
@@ -410,7 +414,7 @@ pub(super) async fn handle_h2_extended_connect(
             response.extensions_mut().insert(interim);
         }
         audit.annotate(&mut response, DispatchOutcome::Allow);
-        return Ok(response);
+        return Ok(OwnerResponse::from_http(response));
     }
 
     let (parts, upstream_body) = response.into_parts();
@@ -440,5 +444,5 @@ pub(super) async fn handle_h2_extended_connect(
         response.extensions_mut().insert(interim);
     }
     audit.annotate(&mut response, DispatchOutcome::Allow);
-    Ok(response)
+    Ok(OwnerResponse::from_http(response))
 }

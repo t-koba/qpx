@@ -1,11 +1,10 @@
 use super::super::HostPort;
 use crate::destination::DestinationInputs;
 use crate::http::protocol::base_fields::BaseRequestFields;
-use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::Result;
-use hyper::{Response, StatusCode};
-use qpx_core::http_message::Request;
+use hyper::StatusCode;
+use qpx_core::http_message::{Request, Response};
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 
@@ -18,25 +17,24 @@ pub(super) fn resolve_forward_target_or_response(
     is_ftp_request: bool,
 ) -> Result<std::result::Result<HostPort, Response<Body>>> {
     if is_ftp_request && !listener_cfg.ftp.enabled {
+        let mut response = Response::new(Body::from(state.messages.ftp_disabled.clone()));
+        *response.status_mut() = StatusCode::NOT_IMPLEMENTED;
         return Ok(Err(finalize_response_for_request(
             req.method(),
             req.version(),
             proxy_name,
-            Response::builder()
-                .status(StatusCode::NOT_IMPLEMENTED)
-                .body(Body::from(state.messages.ftp_disabled.clone()))?,
+            response,
             false,
         )));
     }
     let Some(host) = base.host() else {
+        let mut response = Response::new(Body::from("missing Host/authority"));
+        *response.status_mut() = StatusCode::BAD_REQUEST;
         return Ok(Err(finalize_response_for_request(
             req.method(),
             req.version(),
             proxy_name,
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("missing Host/authority"))
-                .unwrap_or_else(|_| bad_request("missing Host/authority")),
+            response,
             false,
         )));
     };

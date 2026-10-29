@@ -15,8 +15,8 @@ use crate::reverse::transport::{
     InterimList, ReverseConnInfo, ReverseRouter, empty_interim_response,
 };
 use anyhow::{Result, anyhow};
-use hyper::Response;
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_http::body::Body;
 use std::sync::Arc;

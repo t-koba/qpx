@@ -56,9 +56,11 @@ pub(crate) async fn proxy_dispatch_websocket_http1(
     .await
 }
 
-pub(crate) fn emit_dispatch_websocket_response_preview(
+pub(crate) fn emit_dispatch_websocket_response_preview<
+    R: crate::http::response_carrier::ResponseCarrier,
+>(
     export_session: Option<&crate::exporter::ExportSession>,
-    response: &Response<Body>,
+    response: &R,
 ) -> impl std::future::Future<Output = ()> + Send + 'static {
     let session = export_session.cloned();
     let preview = crate::exporter::serialize_response_preview_async(response);

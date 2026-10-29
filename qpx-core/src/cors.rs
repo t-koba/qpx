@@ -3,6 +3,7 @@
 use crate::config::CorsConfig;
 use crate::http_message::OrdinaryHeaderMut;
 use crate::http_message::{Headers, OrdinaryHeaderName};
+#[cfg(test)]
 use http::HeaderMap;
 use http::Method;
 use http::header::{HeaderName, HeaderValue, ORIGIN, VARY};
@@ -231,7 +232,7 @@ impl CorsPolicy {
     pub fn apply_preflight_response(
         &self,
         request: &CorsRequest,
-        response_headers: &mut HeaderMap,
+        response_headers: &mut impl OrdinaryHeaderMut,
     ) -> Result<(), CorsRejection> {
         remove_cors_response_fields(response_headers);
         let preflight = request.preflight().ok_or(CorsRejection::NotPreflight)?;
@@ -249,17 +250,24 @@ impl CorsPolicy {
         }
 
         self.apply_origin_and_credentials(request, response_headers);
-        response_headers.insert(ALLOW_METHODS, self.methods.response_value());
+        response_headers.ordinary_insert(
+            ALLOW_METHODS.try_into().expect("ordinary"),
+            self.methods.response_value(),
+        );
         if !preflight.headers().is_empty()
             && let Some(value) = self.headers.response_value()
         {
-            response_headers.insert(ALLOW_HEADERS, value);
+            response_headers.ordinary_insert(ALLOW_HEADERS.try_into().expect("ordinary"), value);
         }
         if let Some(max_age) = self.max_age.as_ref() {
-            response_headers.insert(MAX_AGE, max_age.clone());
+            response_headers
+                .ordinary_insert(MAX_AGE.try_into().expect("ordinary"), max_age.clone());
         }
         if preflight.private_network() {
-            response_headers.insert(ALLOW_PRIVATE_NETWORK, HeaderValue::from_static("true"));
+            response_headers.ordinary_insert(
+                ALLOW_PRIVATE_NETWORK.try_into().expect("ordinary"),
+                HeaderValue::from_static("true"),
+            );
         }
         append_vary(response_headers, REQUEST_METHOD);
         append_vary(response_headers, REQUEST_HEADERS);

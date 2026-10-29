@@ -47,7 +47,7 @@ pub(crate) async fn proxy_mitm_request(
         None,
     ) {
         PreflightOutcome::Continue(validated) => validated,
-        PreflightOutcome::Reject(response) => return Ok(Response::from_http(*response)),
+        PreflightOutcome::Reject(response) => return Ok(*response),
     };
     let base = extract_base_request_fields(
         &req,

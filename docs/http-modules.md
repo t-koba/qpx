@@ -205,3 +205,21 @@ fn main() -> Result<()> {
 
 </details>
 
+
+### Prepared local-response ownership
+
+A module's short-circuit `HttpModuleResponse` is a module-API boundary. Dispatch
+imports it once into the opaque `qpx_core::http_message::Response<Body>` before
+running downstream response hooks. The same owner then passes through route
+header controls and protocol finalization, module logging, dispatch annotations,
+and the existing response-body limit. Individual hooks still use the public
+module facade; skipped hooks do not require a standard-response conversion.
+Forward (including its inner dispatch preparation) and transparent preparation
+share a single owner-backed response outcome. MITM and reverse module dispatch
+also retain the owner through their terminal handoffs. This changes no policy
+order, configuration default, capture limit, or module API behavior.
+
+This is not global raw-header closure: codec/library sends, raw-H1 direct relay,
+legacy generated response builders and other specialized response paths remain
+separate. In particular, transparent listener-policy `early_response` is not the
+shared prepared-response outcome and retains its existing processing semantics.

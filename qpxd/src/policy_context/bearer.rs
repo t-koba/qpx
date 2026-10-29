@@ -147,7 +147,7 @@ pub(crate) fn authentication_response(
     version: http::Version,
     proxy_name: &str,
     error: &BearerAuthenticationError,
-) -> Result<hyper::Response<Body>> {
+) -> Result<qpx_core::http_message::Response<Body>> {
     let challenge = error.challenge();
     let title = if error.is_dpop() {
         "DPoP authentication required"
@@ -161,16 +161,23 @@ pub(crate) fn authentication_response(
             serde_json::Value::String(error.error_code().to_string()),
         )?
         .to_json()?;
-    let mut builder = hyper::Response::builder()
-        .status(http::StatusCode::UNAUTHORIZED)
-        .header(http::header::WWW_AUTHENTICATE, challenge)
-        .header(http::header::CONTENT_TYPE, PROBLEM_JSON);
+    let mut response = qpx_core::http_message::Response::new(Body::from(body));
+    *response.status_mut() = http::StatusCode::UNAUTHORIZED;
+    response.headers_mut().insert(
+        http::header::WWW_AUTHENTICATE.try_into()?,
+        challenge.parse()?,
+    );
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE.try_into()?,
+        PROBLEM_JSON.parse()?,
+    );
     if error.is_dpop()
         && let Some(nonce) = error.nonce()
     {
-        builder = builder.header("DPoP-Nonce", nonce);
+        response
+            .headers_mut()
+            .insert("dpop-nonce".try_into()?, nonce.parse()?);
     }
-    let mut response = builder.body(Body::from(body))?;
     response = crate::http::protocol::l7::finalize_response_for_request(
         method, version, proxy_name, response, false,
     );
@@ -182,7 +189,7 @@ pub(crate) fn authentication_response_for_error(
     version: http::Version,
     proxy_name: &str,
     error: &anyhow::Error,
-) -> Option<Result<hyper::Response<Body>>> {
+) -> Option<Result<qpx_core::http_message::Response<Body>>> {
     error
         .downcast_ref::<BearerAuthenticationError>()
         .map(|error| authentication_response(method, version, proxy_name, error))
@@ -1418,21 +1425,21 @@ mod tests {
         assert_eq!(
             response
                 .headers()
-                .get(http::header::WWW_AUTHENTICATE)
+                .get(&http::header::WWW_AUTHENTICATE.try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some(r#"DPoP error="invalid_dpop_proof""#)
         );
         assert_eq!(
             response
                 .headers()
-                .get(http::header::CONTENT_TYPE)
+                .get(&http::header::CONTENT_TYPE.try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some(PROBLEM_JSON)
         );
         assert_eq!(
             response
                 .headers()
-                .get("DPoP-Nonce")
+                .get(&"dpop-nonce".try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some("server-nonce")
         );
@@ -1450,14 +1457,14 @@ mod tests {
         assert_eq!(
             response
                 .headers()
-                .get(http::header::WWW_AUTHENTICATE)
+                .get(&http::header::WWW_AUTHENTICATE.try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some(r#"DPoP error="use_dpop_nonce""#)
         );
         assert_eq!(
             response
                 .headers()
-                .get("DPoP-Nonce")
+                .get(&"dpop-nonce".try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some("nonce-1")
         );
@@ -1476,14 +1483,14 @@ mod tests {
         assert_eq!(
             response
                 .headers()
-                .get(http::header::WWW_AUTHENTICATE)
+                .get(&http::header::WWW_AUTHENTICATE.try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some(r#"DPoP error="invalid_token""#)
         );
         assert_eq!(
             response
                 .headers()
-                .get("DPoP-Nonce")
+                .get(&"dpop-nonce".try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some("nonce-2")
         );
@@ -1749,11 +1756,15 @@ mod tests {
         assert_eq!(
             response
                 .headers()
-                .get(http::header::WWW_AUTHENTICATE)
+                .get(&http::header::WWW_AUTHENTICATE.try_into().unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some(r#"Bearer error="invalid_token""#)
         );
-        assert!(!response.headers().contains_key("DPoP-Nonce"));
+        assert!(
+            !response
+                .headers()
+                .contains_key(&"dpop-nonce".try_into().unwrap())
+        );
     }
 
     #[test]

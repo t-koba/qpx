@@ -69,7 +69,7 @@ pub(super) async fn dispatch_reverse_ipc_route<R: ReverseTerminalResponse>(
                 concurrency.retry_after,
                 audit_ctx.clone(),
             );
-            return Ok((Vec::new(), R::from_finalized_http(response)));
+            return Ok((Vec::new(), R::from_finalized_owner(response)));
         }
     };
     let ipc_conn = ClientConnInfo {
@@ -306,7 +306,7 @@ pub(super) async fn handle_reverse_websocket_upgrade<R: ReverseTerminalResponse>
                 concurrency.retry_after,
                 audit_ctx.clone(),
             );
-            return Ok((Vec::new(), R::from_finalized_http(response)));
+            return Ok((Vec::new(), R::from_finalized_owner(response)));
         }
         Some(permits) => permits,
     };
