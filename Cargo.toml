@@ -54,7 +54,7 @@ bytes = "1"
 memchr = "2"
 brotli = "8"
 flate2 = "1"
-zstd = { version = "0.13", default-features = false }
+zstd = { version = "0.14.3", default-features = false }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json"] }
 tracing-appender = "0.2"
@@ -125,7 +125,7 @@ pcap-file = "2"
 etherparse = "0.13"
 
 # WASM
-wasmtime = { version = "49.0.4", default-features = false, features = ["async", "cache", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
+wasmtime = { version = "49.0.4", default-features = false, features = ["async", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
 wasmtime-wasi = { version = "49.0.4", default-features = false, features = ["p1"] }
 
 # CLI
