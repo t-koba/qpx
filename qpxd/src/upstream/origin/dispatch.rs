@@ -36,10 +36,4 @@ fn scheme_from_parsed(scheme: Option<&str>) -> Result<OriginScheme> {
     }
 }
 
-pub(super) fn default_port_for_scheme(scheme: &str) -> u16 {
-    match scheme {
-        "http" | "ws" | "h2c" => 80,
-        "https" | "wss" | "h2" | "h3" => 443,
-        _ => 443,
-    }
-}
+pub(super) use crate::http::protocol::default_port_for_http_upstream_scheme as default_port_for_scheme;

@@ -222,13 +222,7 @@ fn parse_h2_extended_connect_upstream(
     Ok((host, port, use_tls))
 }
 
-pub(super) fn default_port_for_scheme(scheme: &str) -> u16 {
-    match scheme {
-        "http" | "ws" | "h2c" => 80,
-        "https" | "wss" | "h2" => 443,
-        _ => 443,
-    }
-}
+pub(super) use crate::http::protocol::default_port_for_http_upstream_scheme as default_port_for_scheme;
 
 pub(super) fn spawn_h2_extended_connect_relay(
     mut downstream_body: Body,
