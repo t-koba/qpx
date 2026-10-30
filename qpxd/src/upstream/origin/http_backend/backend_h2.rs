@@ -19,33 +19,27 @@ use std::sync::atomic::AtomicUsize;
 use std::task::Poll;
 
 pub(super) fn prepare_proxy_h2_request(
-    mut req: OwnerRequest<Body>,
+    req: OwnerRequest<Body>,
     scheme: &str,
     authority: &str,
     proxy_name: &str,
 ) -> Result<OwnerRequest<Body>> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/")
-        .to_string();
-    prepare_request_with_headers_in_place(&mut req, proxy_name, None, false);
-    req.headers_mut()
-        .remove(&OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field"));
-    *req.version_mut() = http::Version::HTTP_2;
-    *req.uri_mut() = Uri::builder()
-        .scheme(scheme)
-        .authority(authority)
-        .path_and_query(path.as_str())
-        .build()?;
-    Ok(req)
+    prepare_h2_request(req, scheme, authority, Some(proxy_name))
 }
 
 pub(super) fn prepare_internal_h2_request(
+    req: OwnerRequest<Body>,
+    scheme: &str,
+    authority: &str,
+) -> Result<OwnerRequest<Body>> {
+    prepare_h2_request(req, scheme, authority, None)
+}
+
+fn prepare_h2_request(
     mut req: OwnerRequest<Body>,
     scheme: &str,
     authority: &str,
+    proxy_name: Option<&str>,
 ) -> Result<OwnerRequest<Body>> {
     let path = req
         .uri()
@@ -53,6 +47,9 @@ pub(super) fn prepare_internal_h2_request(
         .map(|value| value.as_str())
         .unwrap_or("/")
         .to_string();
+    if let Some(proxy_name) = proxy_name {
+        prepare_request_with_headers_in_place(&mut req, proxy_name, None, false);
+    }
     req.headers_mut()
         .remove(&OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field"));
     *req.version_mut() = http::Version::HTTP_2;
@@ -191,5 +188,48 @@ async fn recv_h2_response_with_interim(
             }
             H2ResponseEvent::Final(response) => return Ok((interim, response)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use hyper::header::VIA;
+
+    #[test]
+    fn h2_request_preparation_keeps_proxy_headers_out_of_internal_path() -> Result<()> {
+        let request = || -> Result<OwnerRequest<Body>> {
+            Ok(OwnerRequest::from_http(
+                Http1Request::builder()
+                    .method("GET")
+                    .uri("http://incoming.invalid/path?x=1")
+                    .header(HOST, "incoming.invalid")
+                    .body(Body::empty())?,
+            ))
+        };
+
+        let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
+        let via = OrdinaryHeaderName::try_from(VIA).expect("via is an ordinary field");
+        let proxy = prepare_proxy_h2_request(request()?, "https", "proxy.invalid", "qpx-test")?;
+        assert_eq!(proxy.version(), http::Version::HTTP_2);
+        assert_eq!(proxy.uri().to_string(), "https://proxy.invalid/path?x=1");
+        assert!(!proxy.headers().contains_key(&host));
+        assert_eq!(
+            proxy
+                .headers()
+                .get(&via)
+                .and_then(|value| value.to_str().ok()),
+            Some("1.1 qpx-test")
+        );
+
+        let internal = prepare_internal_h2_request(request()?, "https", "internal.invalid")?;
+        assert_eq!(internal.version(), http::Version::HTTP_2);
+        assert_eq!(
+            internal.uri().to_string(),
+            "https://internal.invalid/path?x=1"
+        );
+        assert!(!internal.headers().contains_key(&host));
+        assert!(!internal.headers().contains_key(&via));
+        Ok(())
     }
 }
