@@ -263,8 +263,7 @@ pub(super) async fn complete_transparent_request(
             policy_headers,
             audit: &audit,
         })
-        .await
-        .map(OwnerResponse::from_http);
+        .await;
     }
     proxy_transparent_http1(
         req,

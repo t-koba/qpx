@@ -1,7 +1,6 @@
 use crate::upstream::http1::{WebsocketProxyConfig, proxy_websocket_http1};
 use anyhow::Result;
-use hyper::Response;
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::time::Duration;
 
@@ -21,7 +20,7 @@ pub(crate) struct DispatchWebsocketProxyInput<'a> {
 
 pub(crate) async fn proxy_dispatch_websocket_http1(
     input: DispatchWebsocketProxyInput<'_>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let DispatchWebsocketProxyInput {
         req,
         upstream_proxy,
@@ -54,6 +53,7 @@ pub(crate) async fn proxy_dispatch_websocket_http1(
         },
     )
     .await
+    .map(OwnerResponse::from_http)
 }
 
 pub(crate) fn emit_dispatch_websocket_response_preview<

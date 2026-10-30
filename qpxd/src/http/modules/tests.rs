@@ -2549,3 +2549,78 @@ async fn module_local_response_stays_owned_through_hooks_finalization_and_prepar
         }
     }
 }
+
+#[tokio::test]
+async fn websocket_owner_preserves_extensions_and_headers_through_both_module_hooks() {
+    use crate::http::protocol::l7::finalize_response_with_headers_in_place;
+    use qpx_core::http_message::Response as OwnerResponse;
+
+    let mut context = module_test_context();
+    context.queue_response_header(
+        HeaderName::from_static("x-pending"),
+        HeaderValue::from_static("module"),
+    );
+    let mut execution =
+        HttpModuleExecution::new(Arc::new(CompiledHttpModuleChain::default()), context);
+    let mut raw = Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+        .header("x-duplicate", "first")
+        .header("x-duplicate", "second")
+        .body(Body::empty())
+        .unwrap();
+    raw.extensions_mut().insert(42_usize);
+    let response = OwnerResponse::from_http(raw);
+    let response: OwnerResponse<Body> = execution.on_upstream_response(response).await.unwrap();
+    let mut response: OwnerResponse<Body> = execution
+        .prepare_downstream_response(response)
+        .await
+        .unwrap();
+    let control = qpx_core::rules::CompiledHeaderControl::compile(
+        &serde_yaml::from_str(
+            "response_regex_replace:\n- { header: x-pending, pattern: module, replace: route }",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let version = response.version();
+    finalize_response_with_headers_in_place(
+        &Method::GET,
+        version,
+        "qpx-test",
+        &mut response,
+        Some(&control),
+        true,
+    );
+    execution.on_logging(Some(response.status()), None).await;
+    assert_eq!(response.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert_eq!(response.version(), http::Version::HTTP_11);
+    assert_eq!(response.extensions().get::<usize>(), Some(&42));
+    for (name, value) in [
+        ("connection", "upgrade"),
+        ("upgrade", "websocket"),
+        ("sec-websocket-accept", "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="),
+        ("x-pending", "route"),
+    ] {
+        assert_eq!(
+            response.headers().get(&name.try_into().unwrap()).unwrap(),
+            value
+        );
+    }
+    assert_eq!(
+        response
+            .headers()
+            .get_all(&"x-duplicate".try_into().unwrap())
+            .map(|v| v.as_bytes())
+            .collect::<Vec<_>>(),
+        [b"first".as_slice(), b"second".as_slice()]
+    );
+    assert!(
+        qpx_http::body::to_bytes(response.into_head_and_body().1)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}

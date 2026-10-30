@@ -148,7 +148,7 @@ pub(super) async fn proxy_forward_websocket(
         headers,
         audit,
     } = input;
-    let response = proxy_dispatch_websocket_http1(DispatchWebsocketProxyInput {
+    let mut response = proxy_dispatch_websocket_http1(DispatchWebsocketProxyInput {
         req,
         upstream_proxy: upstream,
         direct_connect_authority: connect_authority,
@@ -162,7 +162,6 @@ pub(super) async fn proxy_forward_websocket(
         export_session,
     })
     .await?;
-    let mut response = OwnerResponse::from_http(response);
     let keep_upgrade = response.status() == StatusCode::SWITCHING_PROTOCOLS;
     finalize_response_with_headers_in_place(
         request_method,
