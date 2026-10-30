@@ -602,7 +602,7 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
         )
         .await?;
         return Ok(attach_streaming_limits(
-            (Vec::new(), R::from_finalized_http(response)),
+            (Vec::new(), R::from_finalized_owner(response)),
             streaming,
             request_version,
         ));

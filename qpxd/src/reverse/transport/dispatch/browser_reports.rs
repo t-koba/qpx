@@ -1,6 +1,8 @@
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
-use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request as OwnerRequest};
+use hyper::StatusCode;
+use qpx_core::http_message::{
+    Headers, OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_core::redaction::redact_uri_query_keys;
 use qpx_http::body::Body;
 
@@ -12,74 +14,58 @@ pub(super) async fn collect_browser_reports(
     proxy_name: &str,
     route_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     redact_query_keys: &[String],
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
+    let finalize = |mut response: OwnerResponse<Body>| {
+        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            request_method,
+            request_version,
+            proxy_name,
+            &mut response,
+            route_headers,
+            false,
+        );
+        response
+    };
     if request_method != http::Method::POST {
         let mut response = reporting_problem_response(
             StatusCode::METHOD_NOT_ALLOWED,
             "Browser report method is not allowed",
             "Reporting endpoints accept POST requests only",
         )?;
-        response
-            .headers_mut()
-            .insert(http::header::ALLOW, http::HeaderValue::from_static("POST"));
-        return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-            request_method,
-            request_version,
-            proxy_name,
-            response,
-            route_headers,
-            false,
-        ));
+        response.headers_mut().insert(
+            OrdinaryHeaderName::try_from(http::header::ALLOW).expect("ordinary header"),
+            http::HeaderValue::from_static("POST"),
+        );
+        return Ok(finalize(response));
     }
     if req.headers().contains_key(
         &OrdinaryHeaderName::try_from(http::header::CONTENT_ENCODING).expect("ordinary header"),
     ) {
-        return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-            request_method,
-            request_version,
-            proxy_name,
-            reporting_problem_response(
-                StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                "Encoded browser report is not supported",
-                "Content-Encoding is not accepted by the report collector",
-            )?,
-            route_headers,
-            false,
-        ));
+        return Ok(finalize(reporting_problem_response(
+            StatusCode::UNSUPPORTED_MEDIA_TYPE,
+            "Encoded browser report is not supported",
+            "Content-Encoding is not accepted by the report collector",
+        )?));
     }
     let content_type = match single_media_type(req.headers()) {
         Ok(content_type) => content_type,
         Err(error) => {
-            return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-                request_method,
-                request_version,
-                proxy_name,
-                reporting_problem_response(
-                    StatusCode::BAD_REQUEST,
-                    "Invalid browser report Content-Type",
-                    error.to_string().as_str(),
-                )?,
-                route_headers,
-                false,
-            ));
+            return Ok(finalize(reporting_problem_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid browser report Content-Type",
+                error.to_string().as_str(),
+            )?));
         }
     };
     let legacy = match content_type.as_str() {
         "application/reports+json" => false,
         "application/csp-report" if config.accept_legacy_csp_reports => true,
         _ => {
-            return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-                request_method,
-                request_version,
-                proxy_name,
-                reporting_problem_response(
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "Unsupported browser report media type",
-                    "Expected application/reports+json",
-                )?,
-                route_headers,
-                false,
-            ));
+            return Ok(finalize(reporting_problem_response(
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Unsupported browser report media type",
+                "Expected application/reports+json",
+            )?));
         }
     };
     let bytes = match collect_bounded_report_body(req.into_head_and_body().1, config.max_body_bytes)
@@ -87,35 +73,21 @@ pub(super) async fn collect_browser_reports(
     {
         Ok(bytes) => bytes,
         Err(error) => {
-            return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-                request_method,
-                request_version,
-                proxy_name,
-                reporting_problem_response(
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "Browser report body is too large",
-                    error.to_string().as_str(),
-                )?,
-                route_headers,
-                false,
-            ));
+            return Ok(finalize(reporting_problem_response(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Browser report body is too large",
+                error.to_string().as_str(),
+            )?));
         }
     };
     let payload: serde_json::Value = match serde_json::from_slice(&bytes) {
         Ok(payload) => payload,
         Err(error) => {
-            return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-                request_method,
-                request_version,
-                proxy_name,
-                reporting_problem_response(
-                    StatusCode::BAD_REQUEST,
-                    "Invalid browser report",
-                    error.to_string().as_str(),
-                )?,
-                route_headers,
-                false,
-            ));
+            return Ok(finalize(reporting_problem_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid browser report",
+                error.to_string().as_str(),
+            )?));
         }
     };
     let report_count = match validate_and_observe_browser_reports(
@@ -126,33 +98,21 @@ pub(super) async fn collect_browser_reports(
     ) {
         Ok((report_count, _)) => report_count,
         Err(error) => {
-            return Ok(crate::http::protocol::l7::finalize_response_with_headers(
-                request_method,
-                request_version,
-                proxy_name,
-                reporting_problem_response(
-                    StatusCode::BAD_REQUEST,
-                    "Invalid browser report",
-                    error.to_string().as_str(),
-                )?,
-                route_headers,
-                false,
-            ));
+            return Ok(finalize(reporting_problem_response(
+                StatusCode::BAD_REQUEST,
+                "Invalid browser report",
+                error.to_string().as_str(),
+            )?));
         }
     };
     crate::reverse::transport::metrics::browser_reports_received(report_count as u64, legacy);
-    let response = Response::builder()
-        .status(StatusCode::NO_CONTENT)
-        .header(http::header::CACHE_CONTROL, "no-store")
-        .body(Body::empty())?;
-    Ok(crate::http::protocol::l7::finalize_response_with_headers(
-        request_method,
-        request_version,
-        proxy_name,
-        response,
-        route_headers,
-        false,
-    ))
+    let mut response = OwnerResponse::new(Body::empty());
+    *response.status_mut() = StatusCode::NO_CONTENT;
+    response.headers_mut().insert(
+        OrdinaryHeaderName::try_from(http::header::CACHE_CONTROL).expect("ordinary header"),
+        http::HeaderValue::from_static("no-store"),
+    );
+    Ok(finalize(response))
 }
 
 fn single_media_type(headers: &Headers) -> Result<String> {
@@ -266,15 +226,21 @@ fn reporting_problem_response(
     status: StatusCode,
     title: &'static str,
     detail: &str,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let body = qpx_http::problem::ProblemDetails::new(status, title)
         .with_detail(detail)
         .to_json()?;
-    Ok(Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-        .header(http::header::CACHE_CONTROL, "no-store")
-        .body(Body::from(body))?)
+    let mut response = OwnerResponse::new(Body::from(body));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE).expect("ordinary header"),
+        http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
+    );
+    response.headers_mut().insert(
+        OrdinaryHeaderName::try_from(http::header::CACHE_CONTROL).expect("ordinary header"),
+        http::HeaderValue::from_static("no-store"),
+    );
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -313,73 +279,288 @@ mod browser_report_tests {
         assert!(single_media_type(&headers).is_err());
     }
 
-    #[tokio::test]
-    async fn collector_accepts_reporting_api_payload() {
-        let request = Request::builder()
-            .method(http::Method::POST)
-            .uri("https://reports.example/.well-known/reports")
-            .header(http::header::CONTENT_TYPE, "application/reports+json")
-            .body(Body::from(
-                r#"[{"type":"csp-violation","url":"https://app.example/","body":{}}]"#,
-            ))
-            .expect("request");
-        let response = collect_browser_reports(
-            OwnerRequest::from_http(request),
-            &collector(),
-            &http::Method::POST,
-            http::Version::HTTP_2,
-            "qpx",
-            None,
-            &[],
-        )
-        .await
-        .expect("collect report");
-
-        assert_eq!(response.status(), StatusCode::NO_CONTENT);
-        assert_eq!(response.headers()[http::header::CACHE_CONTROL], "no-store");
+    fn header<'a>(response: &'a OwnerResponse<Body>, name: &str) -> Option<&'a http::HeaderValue> {
+        response
+            .headers()
+            .get(&OrdinaryHeaderName::try_from(name).unwrap())
     }
 
     #[tokio::test]
-    async fn collector_rejects_invalid_and_oversized_payloads() {
-        let invalid = Request::builder()
-            .method(http::Method::POST)
-            .uri("https://reports.example/.well-known/reports")
-            .header(http::header::CONTENT_TYPE, "application/reports+json")
-            .body(Body::from(r#"[{"type":"csp-violation"}]"#))
-            .expect("request");
-        let response = collect_browser_reports(
-            OwnerRequest::from_http(invalid),
-            &collector(),
-            &http::Method::POST,
-            http::Version::HTTP_11,
-            "qpx",
-            None,
-            &[],
-        )
-        .await
-        .expect("reject invalid report");
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    async fn collector_responses_preserve_status_body_headers_and_route_controls() {
+        use crate::reverse::transport::ReverseTerminalResponse;
+        use http::Method;
 
-        let mut limits = collector();
-        limits.max_body_bytes = 1;
-        let oversized = Request::builder()
-            .method(http::Method::POST)
-            .uri("https://reports.example/.well-known/reports")
-            .header(http::header::CONTENT_TYPE, "application/reports+json")
-            .body(Body::from("[]"))
-            .expect("request");
-        let response = collect_browser_reports(
-            OwnerRequest::from_http(oversized),
-            &limits,
-            &http::Method::POST,
-            http::Version::HTTP_11,
-            "qpx",
-            None,
-            &[],
+        let control = qpx_core::rules::CompiledHeaderControl::compile(
+            &serde_yaml::from_str(
+                r#"
+response_set:
+  cache-control: private
+  x-report-route: configured
+  connection: x-drop
+  x-drop: removed-by-normalization
+response_add:
+  set-cookie: report=1
+"#,
+            )
+            .unwrap(),
         )
-        .await
-        .expect("reject oversized report");
-        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        .unwrap();
+        let oversized = " ".repeat(1025);
+        // Cover every response-producing branch, including HEAD body suppression.
+        for (method, media_type, encoded, payload, status, title, detail) in [
+            (
+                Method::GET,
+                None,
+                false,
+                "",
+                405,
+                "Browser report method is not allowed",
+                "Reporting endpoints accept POST requests only",
+            ),
+            (
+                Method::HEAD,
+                None,
+                false,
+                "",
+                405,
+                "Browser report method is not allowed",
+                "Reporting endpoints accept POST requests only",
+            ),
+            (
+                Method::POST,
+                None,
+                true,
+                "",
+                415,
+                "Encoded browser report is not supported",
+                "Content-Encoding is not accepted by the report collector",
+            ),
+            (
+                Method::POST,
+                None,
+                false,
+                "",
+                400,
+                "Invalid browser report Content-Type",
+                "browser report Content-Type is missing",
+            ),
+            (
+                Method::POST,
+                Some("text/plain"),
+                false,
+                "",
+                415,
+                "Unsupported browser report media type",
+                "Expected application/reports+json",
+            ),
+            (
+                Method::POST,
+                Some("application/csp-report"),
+                false,
+                "{}",
+                415,
+                "Unsupported browser report media type",
+                "Expected application/reports+json",
+            ),
+            (
+                Method::POST,
+                Some("application/reports+json"),
+                false,
+                oversized.as_str(),
+                413,
+                "Browser report body is too large",
+                "browser report body exceeds configured limit of 1024 bytes",
+            ),
+            (
+                Method::POST,
+                Some("application/reports+json"),
+                false,
+                "{",
+                400,
+                "Invalid browser report",
+                "EOF while parsing an object at line 1 column 1",
+            ),
+            (
+                Method::POST,
+                Some("application/reports+json"),
+                false,
+                r#"[{"type":"csp-violation"}]"#,
+                400,
+                "Invalid browser report",
+                "browser report url must be a string",
+            ),
+            (
+                Method::POST,
+                Some("Application/Reports+Json; charset=utf-8"),
+                false,
+                r#"[{"type":"csp-violation","url":"https://app.example/","body":{}}]"#,
+                204,
+                "",
+                "",
+            ),
+        ] {
+            for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
+                for controlled in [false, true] {
+                    let mut request = Request::builder()
+                        .method(method.clone())
+                        .uri("https://reports.example/.well-known/reports");
+                    if let Some(media_type) = media_type {
+                        request = request.header(http::header::CONTENT_TYPE, media_type);
+                    }
+                    if encoded {
+                        request = request.header(http::header::CONTENT_ENCODING, "gzip");
+                    }
+                    let response = collect_browser_reports(
+                        OwnerRequest::from_http(
+                            request.body(Body::from(payload.to_owned())).unwrap(),
+                        ),
+                        &collector(),
+                        &method,
+                        version,
+                        "qpx",
+                        controlled.then_some(&control),
+                        &[],
+                    )
+                    .await
+                    .unwrap();
+                    // The ordinary reverse handoff must retain the owner, not export it.
+                    let response =
+                        <OwnerResponse<Body> as ReverseTerminalResponse>::from_finalized_owner(
+                            response,
+                        );
+                    assert_eq!(response.status().as_u16(), status);
+                    assert_eq!(
+                        header(&response, "cache-control").unwrap(),
+                        if controlled { "private" } else { "no-store" }
+                    );
+                    assert_eq!(
+                        header(&response, "x-report-route").map(|v| v.to_str().unwrap()),
+                        controlled.then_some("configured")
+                    );
+                    assert_eq!(
+                        header(&response, "set-cookie").map(|v| v.to_str().unwrap()),
+                        controlled.then_some("report=1")
+                    );
+                    assert!(header(&response, "connection").is_none());
+                    assert!(header(&response, "x-drop").is_none());
+                    assert_eq!(
+                        header(&response, "allow").map(|v| v.to_str().unwrap()),
+                        (status == 405).then_some("POST")
+                    );
+                    assert_eq!(
+                        header(&response, "content-type").map(|v| v.to_str().unwrap()),
+                        (status != 204).then_some(qpx_http::problem::PROBLEM_JSON)
+                    );
+                    if status == 204 {
+                        assert!(!response.headers().contains_content_length());
+                    }
+                    let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
+                        .await
+                        .unwrap();
+                    if status == 204 || method == Method::HEAD {
+                        assert!(bytes.is_empty());
+                    } else {
+                        let expected = qpx_http::problem::ProblemDetails::new(
+                            StatusCode::from_u16(status).unwrap(),
+                            title,
+                        )
+                        .with_detail(detail)
+                        .to_json()
+                        .unwrap();
+                        assert_eq!(bytes.as_ref(), expected.as_slice());
+                    }
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_collector_response_survives_owner_and_raw_h1_handoffs() {
+        use crate::reverse::transport::ReverseTerminalResponse;
+
+        for method in [http::Method::POST, http::Method::GET] {
+            for raw_h1 in [false, true] {
+                let request = Request::builder()
+                    .method(method.clone())
+                    .header(http::header::CONTENT_TYPE, "application/csp-report")
+                    .body(Body::from(
+                        r#"{"csp-report":{"document-uri":"https://app.example/"}}"#,
+                    ))
+                    .unwrap();
+                let mut config = collector();
+                config.accept_legacy_csp_reports = true;
+                let mut response = collect_browser_reports(
+                    OwnerRequest::from_http(request),
+                    &config,
+                    &method,
+                    http::Version::HTTP_11,
+                    "qpx",
+                    None,
+                    &[],
+                )
+                .await
+                .unwrap();
+                // Pin the carrier's move semantics for metadata, exact bytes and duplicates.
+                let marker = std::sync::Arc::new(42_u32);
+                response.extensions_mut().insert(marker.clone());
+                let name = OrdinaryHeaderName::try_from("x-exact").unwrap();
+                let exact = http::HeaderValue::from_bytes(b" \x80\t").unwrap();
+                response.headers_mut().append(name.clone(), exact.clone());
+                response
+                    .headers_mut()
+                    .append(name.clone(), http::HeaderValue::from_static("second"));
+                let response = if raw_h1 {
+                    let response =
+                        <http::Response<Body> as ReverseTerminalResponse>::from_finalized_owner(
+                            response,
+                        );
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get_all("x-exact")
+                            .iter()
+                            .collect::<Vec<_>>(),
+                        [&exact, &http::HeaderValue::from_static("second")]
+                    );
+                    // Test-only import so both existing carrier selections share assertions.
+                    OwnerResponse::from_http(response)
+                } else {
+                    <OwnerResponse<Body> as ReverseTerminalResponse>::from_finalized_owner(response)
+                };
+                assert_eq!(
+                    response.status(),
+                    if method == http::Method::POST {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::METHOD_NOT_ALLOWED
+                    }
+                );
+                assert_eq!(header(&response, "cache-control").unwrap(), "no-store");
+                assert_eq!(
+                    response.headers().get_all(&name).collect::<Vec<_>>(),
+                    [&exact, &http::HeaderValue::from_static("second")]
+                );
+                assert!(std::sync::Arc::ptr_eq(
+                    response.extensions().get().unwrap(),
+                    &marker
+                ));
+                let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
+                    .await
+                    .unwrap();
+                if method == http::Method::POST {
+                    assert!(bytes.is_empty());
+                } else {
+                    let expected = qpx_http::problem::ProblemDetails::new(
+                        StatusCode::METHOD_NOT_ALLOWED,
+                        "Browser report method is not allowed",
+                    )
+                    .with_detail("Reporting endpoints accept POST requests only")
+                    .to_json()
+                    .unwrap();
+                    assert_eq!(bytes.as_ref(), expected.as_slice());
+                }
+            }
+        }
     }
 }
 
