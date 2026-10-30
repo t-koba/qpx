@@ -22,6 +22,12 @@ const REQUEST_HEADERS: &str = "access-control-request-headers";
 const REQUEST_PRIVATE_NETWORK: &str = "access-control-request-private-network";
 const ALLOW_PRIVATE_NETWORK: &str = "access-control-allow-private-network";
 
+const ALLOW_METHODS_NAME: OrdinaryHeaderName = OrdinaryHeaderName::from_static(ALLOW_METHODS);
+const ALLOW_HEADERS_NAME: OrdinaryHeaderName = OrdinaryHeaderName::from_static(ALLOW_HEADERS);
+const MAX_AGE_NAME: OrdinaryHeaderName = OrdinaryHeaderName::from_static(MAX_AGE);
+const ALLOW_PRIVATE_NETWORK_NAME: OrdinaryHeaderName =
+    OrdinaryHeaderName::from_static(ALLOW_PRIVATE_NETWORK);
+
 /// A validated, allocation-free-on-application CORS policy.
 #[derive(Debug, Clone)]
 pub struct CorsPolicy {
@@ -250,24 +256,18 @@ impl CorsPolicy {
         }
 
         self.apply_origin_and_credentials(request, response_headers);
-        response_headers.ordinary_insert(
-            ALLOW_METHODS.try_into().expect("ordinary"),
-            self.methods.response_value(),
-        );
+        response_headers.ordinary_insert(ALLOW_METHODS_NAME, self.methods.response_value());
         if !preflight.headers().is_empty()
             && let Some(value) = self.headers.response_value()
         {
-            response_headers.ordinary_insert(ALLOW_HEADERS.try_into().expect("ordinary"), value);
+            response_headers.ordinary_insert(ALLOW_HEADERS_NAME, value);
         }
         if let Some(max_age) = self.max_age.as_ref() {
-            response_headers
-                .ordinary_insert(MAX_AGE.try_into().expect("ordinary"), max_age.clone());
+            response_headers.ordinary_insert(MAX_AGE_NAME, max_age.clone());
         }
         if preflight.private_network() {
-            response_headers.ordinary_insert(
-                ALLOW_PRIVATE_NETWORK.try_into().expect("ordinary"),
-                HeaderValue::from_static("true"),
-            );
+            response_headers
+                .ordinary_insert(ALLOW_PRIVATE_NETWORK_NAME, HeaderValue::from_static("true"));
         }
         append_vary(response_headers, REQUEST_METHOD);
         append_vary(response_headers, REQUEST_HEADERS);

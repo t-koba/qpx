@@ -1,3 +1,4 @@
+#[cfg(feature = "auth-basic")]
 use hyper::Response;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;

@@ -109,7 +109,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
             ) {
                 send_qpx_response_stream(
                     &mut req_stream,
-                    response?,
+                    response?.into_http_for_library(),
                     req_head.method(),
                     max_h3_response_body_bytes,
                     Duration::from_secs(1),

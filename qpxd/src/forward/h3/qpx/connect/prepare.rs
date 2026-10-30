@@ -109,7 +109,7 @@ pub(super) async fn prepare_qpx_connect_request(
             ) {
                 send_qpx_response_stream(
                     input.req_stream,
-                    response?,
+                    response?.into_http_for_library(),
                     input.req_head.method(),
                     input
                         .handler

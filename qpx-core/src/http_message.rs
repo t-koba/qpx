@@ -67,6 +67,14 @@ impl TryFrom<&str> for OrdinaryHeaderName {
 }
 
 impl OrdinaryHeaderName {
+    /// Constructs a name from a crate-owned, statically valid ordinary field literal.
+    ///
+    /// The caller must not pass Content-Length. This is crate-private for fixed protocol
+    /// fields whose names are validated at compile time by `HeaderName::from_static`.
+    pub(crate) const fn from_static(name: &'static str) -> Self {
+        Self(HeaderName::from_static(name))
+    }
+
     /// The normalized field name, never Content-Length.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
