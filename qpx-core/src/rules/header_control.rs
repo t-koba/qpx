@@ -70,43 +70,11 @@ impl CompiledHeaderControl {
         merged
     }
 
-    /// Applies request mutations to a transitional raw map.
-    /// Prefer [`Self::apply_request_owned`] for in-domain messages.
-    ///
-    /// Returns the header names whose regex replacement produced an invalid
-    /// value, in execution order with repetitions preserved. Callers report
-    /// one diagnostic per entry.
-    pub fn apply_request(&self, headers: &mut http::HeaderMap) -> Vec<http::header::HeaderName> {
-        apply_mutations(
-            headers,
-            &self.request_set,
-            &self.request_add,
-            &self.request_remove,
-            &self.request_regex_replace,
-        )
-    }
-
-    /// Applies response mutations to a transitional raw map.
-    /// Prefer [`Self::apply_response_owned`] for in-domain messages.
-    ///
-    /// Returns the header names whose regex replacement produced an invalid
-    /// value, in execution order with repetitions preserved. Callers report
-    /// one diagnostic per entry.
-    pub fn apply_response(&self, headers: &mut http::HeaderMap) -> Vec<http::header::HeaderName> {
-        apply_mutations(
-            headers,
-            &self.response_set,
-            &self.response_add,
-            &self.response_remove,
-            &self.response_regex_replace,
-        )
-    }
-
     /// Applies request policy to owned headers without exposing stored values.
     ///
-    /// Like [`Self::apply_request`], returns invalid replacement names in
-    /// execution order, including repetitions. Literal Content-Length set/add
-    /// values are preserved; framing validation remains the owner's job.
+    /// Returns invalid regex replacement names in execution order, including
+    /// repetitions. Literal Content-Length set/add values are preserved;
+    /// framing validation remains the owner's job.
     pub fn apply_request_owned(&self, headers: &mut Headers) -> Vec<http::header::HeaderName> {
         apply_mutations(
             headers,
@@ -145,71 +113,8 @@ impl CompiledHeaderControl {
     }
 }
 
-// Private capability boundary: implementations accept configured literals but
-// never return stored field values, even to the shared mutation engine.
-trait MutationTarget {
-    fn reserve(&mut self, additional: usize);
-    fn set(&mut self, name: http::header::HeaderName, value: http::HeaderValue);
-    fn add(&mut self, name: http::header::HeaderName, value: http::HeaderValue);
-    fn remove(&mut self, name: &http::header::HeaderName);
-    fn replace(&mut self, operation: &CompiledRegexReplace) -> bool;
-}
-
-impl MutationTarget for http::HeaderMap {
-    fn reserve(&mut self, additional: usize) {
-        self.reserve(additional);
-    }
-    fn set(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
-        self.insert(name, value);
-    }
-    fn add(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
-        self.append(name, value);
-    }
-    fn remove(&mut self, name: &http::header::HeaderName) {
-        self.remove(name);
-    }
-    fn replace(&mut self, operation: &CompiledRegexReplace) -> bool {
-        crate::http_message::replace_header_regex(
-            self,
-            &operation.header,
-            &operation.pattern,
-            &operation.replace,
-        )
-    }
-}
-
-impl MutationTarget for Headers {
-    fn reserve(&mut self, additional: usize) {
-        self.reserve(additional);
-    }
-    fn set(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
-        if let Ok(name) = OrdinaryHeaderName::try_from(name) {
-            self.insert(name, value);
-        } else {
-            self.set_content_length_value(value);
-        }
-    }
-    fn add(&mut self, name: http::header::HeaderName, value: http::HeaderValue) {
-        if let Ok(name) = OrdinaryHeaderName::try_from(name) {
-            self.append(name, value);
-        } else {
-            self.append_content_length_value(value);
-        }
-    }
-    fn remove(&mut self, name: &http::header::HeaderName) {
-        if let Ok(name) = OrdinaryHeaderName::try_from(name.clone()) {
-            self.remove(&name);
-        } else {
-            self.remove_content_length();
-        }
-    }
-    fn replace(&mut self, operation: &CompiledRegexReplace) -> bool {
-        self.replace_header_regex(&operation.header, &operation.pattern, &operation.replace)
-    }
-}
-
 fn apply_mutations(
-    headers: &mut impl MutationTarget,
+    headers: &mut Headers,
     set: &[(http::header::HeaderName, http::HeaderValue)],
     add: &[(http::header::HeaderName, http::HeaderValue)],
     remove: &[http::header::HeaderName],
@@ -217,17 +122,29 @@ fn apply_mutations(
 ) -> Vec<http::header::HeaderName> {
     headers.reserve(set.len().saturating_add(add.len()));
     for (name, value) in set {
-        headers.set(name.clone(), value.clone());
+        if let Ok(name) = OrdinaryHeaderName::try_from(name.clone()) {
+            headers.insert(name, value.clone());
+        } else {
+            headers.set_content_length_value(value.clone());
+        }
     }
     for (name, value) in add {
-        headers.add(name.clone(), value.clone());
+        if let Ok(name) = OrdinaryHeaderName::try_from(name.clone()) {
+            headers.append(name, value.clone());
+        } else {
+            headers.append_content_length_value(value.clone());
+        }
     }
     for name in remove {
-        headers.remove(name);
+        if let Ok(name) = OrdinaryHeaderName::try_from(name.clone()) {
+            headers.remove(&name);
+        } else {
+            headers.remove_content_length();
+        }
     }
     let mut invalid = Vec::new();
     for replace in regex_replace {
-        if headers.replace(replace) {
+        if headers.replace_header_regex(&replace.header, &replace.pattern, &replace.replace) {
             invalid.push(replace.header.clone());
         }
     }
@@ -283,6 +200,10 @@ mod tests {
     use super::*;
     use crate::config::RegexReplace;
     use std::collections::HashMap;
+
+    fn name(value: &str) -> OrdinaryHeaderName {
+        value.try_into().unwrap()
+    }
 
     fn empty_control() -> HeaderControl {
         HeaderControl {
@@ -348,13 +269,13 @@ mod tests {
     #[test]
     fn regex_without_match_collapses_duplicates() {
         let control = response_control(vec![], vec![], vec![], vec![("x-dup", "zzz", "yyy")]);
-        let mut headers = http::HeaderMap::new();
-        headers.append("x-dup", http::HeaderValue::from_static("a"));
-        headers.append("x-dup", http::HeaderValue::from_static("a"));
-        assert_eq!(headers.get_all("x-dup").iter().count(), 2);
-        let invalid = control.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        headers.append(name("x-dup"), http::HeaderValue::from_static("a"));
+        headers.append(name("x-dup"), http::HeaderValue::from_static("a"));
+        assert_eq!(headers.get_all(&name("x-dup")).count(), 2);
+        let invalid = control.apply_response_owned(&mut headers);
         assert!(invalid.is_empty());
-        let values: Vec<_> = headers.get_all("x-dup").iter().collect();
+        let values: Vec<_> = headers.get_all(&name("x-dup")).collect();
         assert_eq!(values.len(), 1);
         assert_eq!(values[0], "a");
     }
@@ -362,13 +283,13 @@ mod tests {
     #[test]
     fn invalid_first_value_text_skips_silently() {
         let control = response_control(vec![], vec![], vec![], vec![("x-opaque", "a", "b")]);
-        let mut headers = http::HeaderMap::new();
+        let mut headers = Headers::new();
         let opaque = http::HeaderValue::from_bytes(b"\xff").expect("opaque value");
-        headers.append("x-opaque", opaque.clone());
-        headers.append("x-opaque", http::HeaderValue::from_static("valid"));
-        let invalid = control.apply_response(&mut headers);
+        headers.append(name("x-opaque"), opaque.clone());
+        headers.append(name("x-opaque"), http::HeaderValue::from_static("valid"));
+        let invalid = control.apply_response_owned(&mut headers);
         assert!(invalid.is_empty());
-        let values: Vec<_> = headers.get_all("x-opaque").iter().collect();
+        let values: Vec<_> = headers.get_all(&name("x-opaque")).collect();
         assert_eq!(values.len(), 2);
         assert_eq!(values[0], &opaque);
         assert_eq!(values[1], "valid");
@@ -382,13 +303,13 @@ mod tests {
             vec![],
             vec![("x-bad", "ok", "bad\nvalue"), ("x-good", "ok", "fine")],
         );
-        let mut headers = http::HeaderMap::new();
-        headers.insert("x-bad", http::HeaderValue::from_static("ok"));
-        headers.insert("x-good", http::HeaderValue::from_static("ok"));
-        let invalid = control.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        headers.insert(name("x-bad"), http::HeaderValue::from_static("ok"));
+        headers.insert(name("x-good"), http::HeaderValue::from_static("ok"));
+        let invalid = control.apply_response_owned(&mut headers);
         assert_eq!(invalid, vec!["x-bad"]);
-        assert_eq!(headers.get("x-bad").unwrap(), "ok");
-        assert_eq!(headers.get("x-good").unwrap(), "fine");
+        assert_eq!(headers.get(&name("x-bad")).unwrap(), "ok");
+        assert_eq!(headers.get(&name("x-good")).unwrap(), "fine");
     }
 
     #[test]
@@ -403,16 +324,16 @@ mod tests {
                 ("x-first", "ok", "bad\nthree"),
             ],
         );
-        let mut headers = http::HeaderMap::new();
-        headers.insert("x-first", http::HeaderValue::from_static("ok"));
-        headers.insert("x-second", http::HeaderValue::from_static("ok"));
-        let invalid = control.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        headers.insert(name("x-first"), http::HeaderValue::from_static("ok"));
+        headers.insert(name("x-second"), http::HeaderValue::from_static("ok"));
+        let invalid = control.apply_response_owned(&mut headers);
         assert_eq!(invalid.len(), 3);
         assert_eq!(invalid[0], "x-first");
         assert_eq!(invalid[1], "x-second");
         assert_eq!(invalid[2], "x-first");
-        assert_eq!(headers.get("x-first").unwrap(), "ok");
-        assert_eq!(headers.get("x-second").unwrap(), "ok");
+        assert_eq!(headers.get(&name("x-first")).unwrap(), "ok");
+        assert_eq!(headers.get(&name("x-second")).unwrap(), "ok");
     }
 
     #[test]
@@ -423,11 +344,11 @@ mod tests {
             vec![],
             vec![("x-chain", "foo", "bar"), ("x-chain", "bar", "baz")],
         );
-        let mut headers = http::HeaderMap::new();
-        headers.insert("x-chain", http::HeaderValue::from_static("foo"));
-        let invalid = control.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        headers.insert(name("x-chain"), http::HeaderValue::from_static("foo"));
+        let invalid = control.apply_response_owned(&mut headers);
         assert!(invalid.is_empty());
-        assert_eq!(headers.get("x-chain").unwrap(), "baz");
+        assert_eq!(headers.get(&name("x-chain")).unwrap(), "baz");
     }
 
     #[test]
@@ -438,12 +359,12 @@ mod tests {
             vec![],
             vec![("x-expand", "(mid)", "prefix-$1-suffix")],
         );
-        let mut headers = http::HeaderMap::new();
-        headers.insert("x-expand", http::HeaderValue::from_static("mid mid"));
-        let invalid = control.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        headers.insert(name("x-expand"), http::HeaderValue::from_static("mid mid"));
+        let invalid = control.apply_response_owned(&mut headers);
         assert!(invalid.is_empty());
         assert_eq!(
-            headers.get("x-expand").unwrap(),
+            headers.get(&name("x-expand")).unwrap(),
             "prefix-mid-suffix prefix-mid-suffix"
         );
     }
@@ -459,13 +380,13 @@ mod tests {
                 ("x-remove", ".*", "reappeared"),
             ],
         );
-        let mut headers = http::HeaderMap::new();
-        let invalid = control.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        let invalid = control.apply_response_owned(&mut headers);
         assert!(invalid.is_empty());
-        let stage_values: Vec<_> = headers.get_all("x-stage").iter().collect();
+        let stage_values: Vec<_> = headers.get_all(&name("x-stage")).collect();
         assert_eq!(stage_values.len(), 1);
         assert_eq!(stage_values[0], "regex");
-        assert!(!headers.contains_key("x-remove"));
+        assert!(!headers.contains_key(&name("x-remove")));
     }
 
     #[test]
@@ -473,10 +394,10 @@ mod tests {
         let base = response_control(vec![("x-merge", "base")], vec![], vec![], vec![]);
         let extra = response_control(vec![("x-merge", "extra")], vec![], vec![], vec![]);
         let merged = base.merged(&extra);
-        let mut headers = http::HeaderMap::new();
-        let invalid = merged.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        let invalid = merged.apply_response_owned(&mut headers);
         assert!(invalid.is_empty());
-        assert_eq!(headers.get("x-merge").unwrap(), "extra");
+        assert_eq!(headers.get(&name("x-merge")).unwrap(), "extra");
     }
 
     #[test]
@@ -492,12 +413,11 @@ mod tests {
             .insert("x-cross".to_string(), "extra-set".to_string());
         let extra = compile(&extra_raw);
         let merged = base.merged(&extra);
-        let mut headers = http::HeaderMap::new();
-        let invalid = merged.apply_response(&mut headers);
+        let mut headers = Headers::new();
+        let invalid = merged.apply_response_owned(&mut headers);
         assert!(invalid.is_empty());
         let values: Vec<_> = headers
-            .get_all("x-cross")
-            .iter()
+            .get_all(&name("x-cross"))
             .map(|v| v.to_str().expect("text").to_string())
             .collect();
         assert_eq!(
@@ -514,33 +434,35 @@ mod tests {
         raw.response_set
             .insert("x-resp".to_string(), "resp".to_string());
         let control = compile(&raw);
-        let mut request_headers = http::HeaderMap::new();
-        let mut response_headers = http::HeaderMap::new();
-        assert!(control.apply_request(&mut request_headers).is_empty());
-        assert!(control.apply_response(&mut response_headers).is_empty());
-        assert_eq!(request_headers.get("x-req").unwrap(), "req");
-        assert!(request_headers.get("x-resp").is_none());
-        assert_eq!(response_headers.get("x-resp").unwrap(), "resp");
-        assert!(response_headers.get("x-req").is_none());
+        let mut request_headers = Headers::new();
+        let mut response_headers = Headers::new();
+        assert!(control.apply_request_owned(&mut request_headers).is_empty());
+        assert!(
+            control
+                .apply_response_owned(&mut response_headers)
+                .is_empty()
+        );
+        assert_eq!(request_headers.get(&name("x-req")).unwrap(), "req");
+        assert!(request_headers.get(&name("x-resp")).is_none());
+        assert_eq!(response_headers.get(&name("x-resp")).unwrap(), "resp");
+        assert!(response_headers.get(&name("x-req")).is_none());
     }
 
     #[test]
     fn configured_content_length_mutation_applies() {
         let request = request_control(vec![("content-length", "5")], vec![]);
-        let mut headers = http::HeaderMap::new();
-        headers.insert(
-            http::header::CONTENT_LENGTH,
-            http::HeaderValue::from_static("99"),
-        );
-        assert!(request.apply_request(&mut headers).is_empty());
-        assert_eq!(headers.get(http::header::CONTENT_LENGTH).unwrap(), "5");
+        let mut headers = Headers::new();
+        headers.set_content_length(99);
+        assert!(request.apply_request_owned(&mut headers).is_empty());
+        assert_eq!(headers.declared_content_length(), Ok(Some(5)));
 
         let response = response_control(vec![("content-length", "7")], vec![], vec![], vec![]);
-        let mut response_headers = http::HeaderMap::new();
-        assert!(response.apply_response(&mut response_headers).is_empty());
-        assert_eq!(
-            response_headers.get(http::header::CONTENT_LENGTH).unwrap(),
-            "7"
+        let mut response_headers = Headers::new();
+        assert!(
+            response
+                .apply_response_owned(&mut response_headers)
+                .is_empty()
         );
+        assert_eq!(response_headers.declared_content_length(), Ok(Some(7)));
     }
 }

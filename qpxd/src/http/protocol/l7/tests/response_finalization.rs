@@ -70,13 +70,13 @@ response_remove:
     for status in [100, 101, 103, 200, 204, 205, 304, 407, 502] {
         for method in [Method::GET, Method::HEAD, Method::CONNECT] {
             for preserve in [false, true] {
-                let mut standard = response(status, Body::from("abc"));
+                let standard = response(status, Body::from("abc"));
                 let mut owner = OwnerResponse::from_http(response(status, Body::from("abc")));
-                finalize_response_with_headers_in_place(
+                let mut standard = finalize_response_with_headers(
                     &method,
                     http::Version::HTTP_2,
                     "qpx",
-                    &mut standard,
+                    standard,
                     Some(&control),
                     preserve,
                 );
@@ -148,13 +148,13 @@ response_set:
                     "x-drop"
                 }
             ));
-            let mut standard = response(200, Body::from("abc"));
+            let standard = response(200, Body::from("abc"));
             let mut owner = OwnerResponse::from_http(response(200, Body::from("abc")));
-            finalize_response_with_headers_in_place(
+            let standard = finalize_response_with_headers(
                 &Method::HEAD,
                 http::Version::HTTP_11,
                 "qpx",
-                &mut standard,
+                standard,
                 Some(&control),
                 false,
             );
@@ -188,13 +188,14 @@ fn paired_finalization_date_and_invalid_proxy_status_repair() {
                 .body(Body::empty())
                 .unwrap()
         };
-        let mut standard = make();
+        let standard = make();
         let mut owner = OwnerResponse::from_http(make());
-        finalize_response_in_place(
+        let mut standard = finalize_response_with_headers(
             &Method::GET,
             http::Version::HTTP_11,
             "qpx",
-            &mut standard,
+            standard,
+            None,
             false,
         );
         finalize_response_in_place(
@@ -234,12 +235,12 @@ async fn paired_finalization_stream_backpressure_trailers_and_errors() {
             let mut owner = if owned {
                 OwnerResponse::from_http(make)
             } else {
-                let mut standard = make;
-                finalize_response_in_place(
+                let standard = finalize_response_with_headers(
                     &Method::GET,
                     http::Version::HTTP_11,
                     "qpx",
-                    &mut standard,
+                    make,
+                    None,
                     false,
                 );
                 OwnerResponse::from_http(standard)
@@ -320,11 +321,12 @@ fn paired_finalization_raw_head_extension_is_finalized_once() {
         let mut standard = make();
         let mut owner = OwnerResponse::from_http(make());
         for _ in 0..2 {
-            finalize_response_in_place(
+            standard = finalize_response_with_headers(
                 &Method::GET,
                 http::Version::HTTP_11,
                 "qpx",
-                &mut standard,
+                standard,
+                None,
                 false,
             );
             finalize_response_in_place(

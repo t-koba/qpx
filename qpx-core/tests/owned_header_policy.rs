@@ -1,11 +1,11 @@
 //! External-consumer controls for owner-backed policy, without map export.
-use http::header::{CONTENT_LENGTH, HeaderValue};
+use http::header::HeaderValue;
 use qpx_core::config::{
     ActionConfig, ActionKind, HeaderControl, HeaderMatch, MatchConfig, RegexReplace,
     RpcMatchConfig, RuleConfig,
 };
 use qpx_core::http_content_length::{ContentLengthError, HeaderView};
-use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 use qpx_core::matchers::{CompiledMatch, MatchReason};
 use qpx_core::prefilter::StringInterner;
 use qpx_core::rules::{CompiledHeaderControl, RuleEngine, RuleMatchContext};
@@ -24,12 +24,6 @@ fn replace(header: &str, pattern: &str, replacement: &str) -> RegexReplace {
 
 fn request_control(raw: HeaderControl) -> CompiledHeaderControl {
     CompiledHeaderControl::compile(&raw).unwrap()
-}
-
-fn owned(raw: http::HeaderMap) -> Headers {
-    let mut request = http::Request::new(());
-    *request.headers_mut() = raw;
-    Request::from_http(request).headers().clone()
 }
 
 #[test]
@@ -158,7 +152,7 @@ fn regex_skips_nontextual_first_content_length_and_collapses_on_no_match() {
 }
 
 #[test]
-fn raw_and_owner_controls_agree_without_owner_export() {
+fn request_and_response_controls_preserve_literal_length_outcomes() {
     let raw_control = HeaderControl {
         request_set: [("x-stage".into(), "set".into())].into(),
         request_add: [("x-stage".into(), "add".into())].into(),
@@ -178,33 +172,36 @@ fn raw_and_owner_controls_agree_without_owner_export() {
         response_regex_replace: raw_control.request_regex_replace.clone(),
         ..raw_control
     });
-    for values in [
-        vec![],
-        vec!["5"],
-        vec![" 5 ", "99"],
-        vec!["bad", "5"],
-        vec!["", "5"],
+    for (values, expected_length, fails) in [
+        (vec![], None, false),
+        (vec!["5"], Some("6"), true),
+        (vec![" 5 ", "99"], Some(" 6 "), true),
+        (vec!["bad", "5"], Some("bad"), false),
+        (vec!["", "5"], Some(""), false),
     ] {
-        let mut raw = http::HeaderMap::new();
+        let mut headers = Headers::new();
         for value in values {
-            raw.append(CONTENT_LENGTH, HeaderValue::from_str(value).unwrap());
+            headers.append_content_length_value(HeaderValue::from_str(value).unwrap());
         }
-        raw.insert("x-remove", HeaderValue::from_static("gone"));
-        raw.insert("x-opaque", HeaderValue::from_bytes(b"\xff").unwrap());
-        let mut headers = owned(raw.clone());
-        let mut raw_response = raw.clone();
+        headers.insert(name("x-remove"), HeaderValue::from_static("gone"));
+        let opaque = HeaderValue::from_bytes(b"\xff").unwrap();
+        headers.insert(name("x-opaque"), opaque.clone());
         let mut response = headers.clone();
-        assert_eq!(
-            control.apply_request(&mut raw),
-            control.apply_request_owned(&mut headers)
-        );
-        assert_eq!(
-            control.apply_response(&mut raw_response),
-            control.apply_response_owned(&mut response)
-        );
-        assert_eq!(headers, owned(raw));
-        assert_eq!(response, owned(raw_response));
-        assert_eq!(headers, response);
+        let diagnostics = if fails {
+            vec!["content-length"]
+        } else {
+            vec![]
+        };
+        assert_eq!(control.apply_request_owned(&mut headers), diagnostics);
+        assert_eq!(control.apply_response_owned(&mut response), diagnostics);
+        let mut expected = Headers::new();
+        if let Some(value) = expected_length {
+            expected.set_content_length_value(HeaderValue::from_str(value).unwrap());
+        }
+        expected.insert(name("x-stage"), HeaderValue::from_static("done"));
+        expected.insert(name("x-opaque"), opaque);
+        assert_eq!(headers, expected);
+        assert_eq!(response, expected);
     }
 }
 

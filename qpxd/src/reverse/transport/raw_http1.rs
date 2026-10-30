@@ -877,12 +877,11 @@ mod tests {
                 .body(Body::from("ok"))
                 .expect("upstream response");
             let full_version = full.version();
-            crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            crate::http::protocol::l7::finalize_response_in_place(
                 &Method::GET,
                 full_version,
                 "qpx",
                 &mut full,
-                None,
                 false,
             );
             let full_via: Vec<_> = full
@@ -1107,12 +1106,11 @@ mod tests {
         let mut standard = make();
         let mut owned = OwnerResponse::from_http(make());
         let upstream_version = owned.version();
-        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        crate::http::protocol::l7::finalize_response_in_place(
             &Method::GET,
             upstream_version,
             "qpx",
             &mut standard,
-            None,
             false,
         );
         crate::http::protocol::l7::finalize_response_with_headers_in_place(

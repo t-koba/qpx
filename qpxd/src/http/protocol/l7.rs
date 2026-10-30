@@ -1,7 +1,5 @@
 use crate::http::protocol::common::trim_http_ows;
-use crate::http::protocol::header_control::{
-    ResponseHeaderControl, apply_request_headers, apply_response_headers,
-};
+use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
 use crate::http::protocol::trailer_body;
 use hyper::{Method, Response, StatusCode};
 use qpx_core::http_message::{
@@ -206,14 +204,16 @@ thread_local! {
     };
 }
 
+#[cfg(any(feature = "http3", test))]
 pub(crate) fn finalize_response_with_headers(
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-    mut response: Response<Body>,
+    response: Response<Body>,
     header_control: Option<&CompiledHeaderControl>,
     preserve_upgrade: bool,
 ) -> Response<Body> {
+    let mut response = OwnerResponse::from_http(response);
     finalize_response_with_headers_in_place(
         request_method,
         request_version,
@@ -222,20 +222,17 @@ pub(crate) fn finalize_response_with_headers(
         header_control,
         preserve_upgrade,
     );
-    response
+    response.into_http_for_library()
 }
 
-pub(crate) fn finalize_response_with_headers_in_place<R>(
+pub(crate) fn finalize_response_with_headers_in_place(
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-    response: &mut R,
+    response: &mut OwnerResponse<Body>,
     header_control: Option<&CompiledHeaderControl>,
     preserve_upgrade: bool,
-) where
-    R: FinalizeResponse<Body = Body>,
-    R::Headers: ResponseHeaderControl,
-{
+) {
     apply_response_headers(response.headers_mut(), header_control);
     finalize_response_in_place(
         request_method,

@@ -196,12 +196,11 @@ mod tests {
         // Full dispatch finalizes with the parsed upstream version
         // (`resp.version()` in `dispatch_http.rs`).
         let upstream_version = response.version();
-        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        crate::http::protocol::l7::finalize_response_in_place(
             request_method,
             upstream_version,
             "qpx",
             response,
-            None,
             false,
         );
     }
