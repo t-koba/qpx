@@ -59,6 +59,12 @@ impl AdaptiveEjection {
         self.backoff_shift.store(0, Ordering::Relaxed);
     }
 
+    /// Records a success and trims the adaptive counters if needed.
+    pub(crate) fn note_success_and_maybe_trim(&self) {
+        self.note_success();
+        self.maybe_trim();
+    }
+
     /// The backoff shift for the next ejection, one step past the last one.
     ///
     /// The shift grows with every consecutive ejection and is capped, so a

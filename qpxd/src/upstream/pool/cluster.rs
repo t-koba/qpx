@@ -120,7 +120,7 @@ impl ManagedUpstreamEndpoint {
     pub(super) fn mark_passive_success(&self) {
         let recovered = self.unhealthy_until_ms.swap(0, Ordering::Relaxed) != 0;
         self.passive.reset_all();
-        self.note_adaptive_success();
+        self.adaptive.note_success_and_maybe_trim();
         if recovered {
             super::metrics::probe_success();
         }
@@ -181,11 +181,6 @@ impl ManagedUpstreamEndpoint {
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
         self.adaptive.reset();
         super::metrics::ejection(reason.as_label());
-    }
-
-    fn note_adaptive_success(&self) {
-        self.adaptive.note_success();
-        self.adaptive.maybe_trim();
     }
 
     fn note_adaptive_failure(&self, max_ejection: Duration) {

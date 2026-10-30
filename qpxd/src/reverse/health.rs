@@ -198,7 +198,7 @@ impl UpstreamEndpoint {
         let recovered = self.unhealthy_until_ms.swap(0, Ordering::Relaxed) != 0;
         self.failures.store(0, Ordering::Relaxed);
         self.passive.reset_all();
-        self.note_adaptive_success();
+        self.adaptive.note_success_and_maybe_trim();
         if recovered {
             self.begin_recovery_window(lifecycle);
             super::metrics::upstream_probe_success();
@@ -234,7 +234,7 @@ impl UpstreamEndpoint {
     pub(super) fn mark_passive_success(&self, lifecycle: &EndpointLifecycleRuntime) {
         let recovered = self.unhealthy_until_ms.swap(0, Ordering::Relaxed) != 0;
         self.passive.reset_all();
-        self.note_adaptive_success();
+        self.adaptive.note_success_and_maybe_trim();
         if recovered {
             self.begin_recovery_window(lifecycle);
             super::metrics::upstream_probe_success();
@@ -385,11 +385,6 @@ impl UpstreamEndpoint {
 
     pub(super) fn recovery_start_ms(&self) -> u64 {
         self.recovery_start_ms.load(Ordering::Relaxed)
-    }
-
-    fn note_adaptive_success(&self) {
-        self.adaptive.note_success();
-        self.adaptive.maybe_trim();
     }
 
     fn note_adaptive_failure(
