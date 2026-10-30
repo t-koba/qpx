@@ -10,7 +10,7 @@ use crate::http::protocol::l7::{
     finalize_response_for_request, finalize_response_with_headers_in_place,
 };
 use anyhow::{Result, anyhow};
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::config::ActionKind;
 use qpx_core::http_message::{OrdinaryHeaderName, Request, Response as OwnerResponse};
 use qpx_http::body::Body;
@@ -79,15 +79,17 @@ pub(super) async fn handle_forward_ftp(
     proxy_name: &str,
     headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     audit: &DispatchAuditContext,
-) -> Result<Response<Body>> {
-    let mut response = ftp::handle_ftp(
-        req,
-        credentials,
-        listener_cfg.ftp.clone(),
-        Arc::<str>::from(state.messages.unsupported_ftp_method.as_str()),
-        state.ftp_semaphore.clone(),
-    )
-    .await?;
+) -> Result<OwnerResponse<Body>> {
+    let mut response = OwnerResponse::from_http(
+        ftp::handle_ftp(
+            req,
+            credentials,
+            listener_cfg.ftp.clone(),
+            Arc::<str>::from(state.messages.unsupported_ftp_method.as_str()),
+            state.ftp_semaphore.clone(),
+        )
+        .await?,
+    );
     finalize_response_with_headers_in_place(
         request_method,
         response.version(),

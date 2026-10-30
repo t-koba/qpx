@@ -370,3 +370,60 @@ edges:
         server.await.unwrap();
     }).await.expect("bounded forward success suffix");
 }
+
+#[tokio::test]
+async fn ftp_module_response_is_finalized_and_audited_as_owner() {
+    use qpx_core::http_message::OrdinaryHeaderName;
+    use qpx_observability::access_log::RequestLogContext;
+
+    let config = serde_yaml::from_str(
+        r#"
+telemetry:
+  access_log: { enabled: true }
+messages:
+  unsupported_ftp_method: "ftp method is not supported"
+edges:
+- kind: forward
+  name: ftp-test
+  listen: 127.0.0.1:0
+  default_action: { type: direct }
+  ftp: { enabled: true }
+  rules:
+  - name: ftp-response
+    headers:
+      response_set:
+        x-ftp-policy: applied
+"#,
+    )
+    .expect("FTP forward config");
+    let runtime = Runtime::new(config).expect("FTP forward runtime");
+    let request = http::Request::builder()
+        .method(Method::PATCH)
+        .uri("ftp://example.com/file.txt")
+        .header("host", "example.com")
+        .body(Body::empty())
+        .expect("unsupported FTP request");
+
+    let response = handle_request_inner(
+        OwnerRequest::from_http(request),
+        runtime,
+        "ftp-test",
+        "127.0.0.1:12345".parse().unwrap(),
+    )
+    .await
+    .expect("FTP response");
+
+    assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    let name = OrdinaryHeaderName::try_from("x-ftp-policy").expect("ordinary header");
+    assert_eq!(response.headers().get(&name).unwrap(), "applied");
+    assert!(!response.headers().contains_content_length());
+    let log = response
+        .extensions()
+        .get::<RequestLogContext>()
+        .expect("FTP dispatch audit annotation");
+    assert_eq!(log.matched_rule.as_deref(), Some("ftp-response"));
+    let body = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("FTP response body");
+    assert_eq!(body.as_ref(), b"ftp method is not supported");
+}
