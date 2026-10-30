@@ -172,7 +172,7 @@ pub(super) async fn handle_request_with_interim_and_origin_pool_ref<R: ReverseTe
             let state = runtime.state();
             Ok((
                 Vec::new(),
-                R::from_finalized_http(response_rules::reverse_gateway_error_response(
+                R::from_finalized_owner(response_rules::reverse_gateway_error_response(
                     &request_method,
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),

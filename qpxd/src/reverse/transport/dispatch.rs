@@ -9,8 +9,9 @@ use crate::reverse::router::HttpRoute;
 use crate::runtime::Runtime;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use anyhow::{Result, anyhow};
-use hyper::Response;
-use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    OrdinaryHeaderMut, OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -136,10 +137,12 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
             let body = qpx_http::problem::ProblemDetails::new(status, "Invalid CORS request")
                 .with_detail(error.to_string())
                 .to_json()?;
-            let mut response = Response::builder()
-                .status(status)
-                .header(http::header::CONTENT_TYPE, qpx_http::problem::PROBLEM_JSON)
-                .body(Body::from(body))?;
+            let mut response = OwnerResponse::new(Body::from(body));
+            *response.status_mut() = status;
+            response.headers_mut().insert(
+                http::header::CONTENT_TYPE.try_into().expect("ordinary"),
+                http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
+            );
             crate::http::protocol::l7::finalize_response_with_headers_in_place(
                 req.method(),
                 request_version,
@@ -148,7 +151,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
                 None,
                 false,
             );
-            return Ok((Vec::new(), R::from_finalized_http(response)));
+            return Ok((Vec::new(), R::from_finalized_owner(response)));
         }
     };
     if !state.destination_trace_enabled()
@@ -324,7 +327,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
             tracing::warn!(error = ?error, "reverse handling failed");
             (
                 Vec::new(),
-                R::from_finalized_http(super::response_rules::reverse_gateway_error_response(
+                R::from_finalized_owner(super::response_rules::reverse_gateway_error_response(
                     &request_method,
                     request_version,
                     proxy_name.as_ref(),

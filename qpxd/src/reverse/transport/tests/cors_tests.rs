@@ -248,6 +248,13 @@ async fn malformed_cors_request_is_rejected_explicitly() {
             .body(Body::empty())
             .expect("malformed request"),
     );
+    let parse_error = qpx_core::cors::CorsRequest::parse(request.method(), request.headers())
+        .expect_err("duplicate Origin is malformed");
+    let expected_body =
+        qpx_http::problem::ProblemDetails::new(StatusCode::BAD_REQUEST, "Invalid CORS request")
+            .with_detail(parse_error.to_string())
+            .to_json()
+            .expect("serialize expected problem");
     let (_, response) = handle_request_with_interim(request, build_cors_reverse(), connection())
         .await
         .expect("malformed CORS response");
@@ -257,6 +264,17 @@ async fn malformed_cors_request_is_rejected_explicitly() {
         field(&response, http::header::CONTENT_TYPE),
         qpx_http::problem::PROBLEM_JSON
     );
+    assert!(!response.headers().contains_content_length());
+    for name in ["transfer-encoding", "trailer"] {
+        assert!(
+            !response.headers().contains_key(&ordinary(name)),
+            "unexpected {name} framing header"
+        );
+    }
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("read malformed CORS body");
+    assert_eq!(body.as_ref(), expected_body.as_slice());
 }
 
 #[tokio::test]
@@ -297,6 +315,17 @@ async fn cors_is_applied_to_generated_upstream_failure_response() {
         ALLOWED_ORIGIN
     );
     assert_eq!(field(&response, "access-control-allow-credentials"), "true");
+    assert!(!response.headers().contains_content_length());
+    for name in ["transfer-encoding", "trailer"] {
+        assert!(
+            !response.headers().contains_key(&ordinary(name)),
+            "unexpected {name} framing header"
+        );
+    }
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("read gateway error body");
+    assert_eq!(body.as_ref(), b"reverse_edge error");
 }
 
 #[tokio::test]

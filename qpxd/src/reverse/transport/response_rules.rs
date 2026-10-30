@@ -19,7 +19,8 @@ use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::rpc::RpcMatchContext;
 use crate::policy_context::ResolvedIdentity;
 use anyhow::Result;
-use hyper::{Method, Response, StatusCode, Version};
+use hyper::{Method, StatusCode, Version};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::prefilter::MatchPrefilterContext;
 use qpx_core::rules::{CompiledHeaderControl, RuleMatchContext};
 use qpx_core::tls::UpstreamCertificateInfo;
@@ -32,8 +33,8 @@ pub(super) fn reverse_gateway_error_response(
     request_version: Version,
     proxy_name: &str,
     message: &str,
-) -> Response<Body> {
-    let mut response = Response::new(Body::from(message.to_owned()));
+) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(Body::from(message.to_owned()));
     *response.status_mut() = StatusCode::BAD_GATEWAY;
     finalize_response_for_request(request_method, request_version, proxy_name, response, false)
 }
