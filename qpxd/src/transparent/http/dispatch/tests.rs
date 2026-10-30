@@ -306,7 +306,7 @@ async fn transparent_prepared_early_response_is_adopted_after_processing() {
         .expect("early response");
     early.extensions_mut().insert(42_u32);
     prepared.policy.policy = None;
-    prepared.policy.early_response = Some(Box::new(early));
+    prepared.policy.early_response = Some(Box::new(OwnerResponse::from_http(early)));
 
     let response: OwnerResponse<Body> = complete_transparent_request(prepared)
         .await

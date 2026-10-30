@@ -1,15 +1,18 @@
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{forbidden_response, too_many_requests_response};
-use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
+use crate::http::protocol::l7::{
+    finalize_response_for_request, finalize_response_with_headers_in_place,
+};
 use crate::policy_context::{
     DecisionServiceAllow, DecisionServiceEnforcement, DecisionServiceMode,
     prepare_decision_service_allow,
 };
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, RateLimiters, TransportScope};
-use ::http::{Method, Response, Version};
+use ::http::{Method, Version};
 use anyhow::Result;
 use qpx_core::config::ActionConfig;
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use std::ops::ControlFlow;
 
@@ -39,7 +42,7 @@ pub(in crate::forward) fn apply_connect_decision_service(
                     &Method::CONNECT,
                     req_version,
                     proxy_name,
-                    too_many_requests_response(Some(retry_after)),
+                    Response::from_http(too_many_requests_response(Some(retry_after))),
                     false,
                 );
                 request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
@@ -63,14 +66,16 @@ pub(in crate::forward) fn apply_connect_decision_service(
                     deny.headers.as_deref(),
                 )?
             } else {
-                finalize_response_with_headers(
+                let mut response = Response::from_http(forbidden_response(forbidden_message));
+                finalize_response_with_headers_in_place(
                     &Method::CONNECT,
                     req_version,
                     proxy_name,
-                    forbidden_response(forbidden_message),
+                    &mut response,
                     deny.headers.as_deref(),
                     false,
-                )
+                );
+                response
             };
             Ok(ControlFlow::Break((response, outcome)))
         }

@@ -327,14 +327,18 @@ pub(super) async fn handle_qpx_webtransport_connect(
                     deny.headers.as_deref(),
                 )?
             } else {
-                finalize_response_with_headers(
+                let mut response = qpx_core::http_message::Response::from_http(forbidden(
+                    state.messages.forbidden.as_str(),
+                ));
+                crate::http::protocol::l7::finalize_response_with_headers_in_place(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,
                     proxy_name.as_str(),
-                    forbidden(state.messages.forbidden.as_str()),
+                    &mut response,
                     deny.headers.as_deref(),
                     false,
-                )
+                );
+                response
             };
             return_with_policy!(
                 response,

@@ -284,7 +284,7 @@ pub(super) async fn handle_h2_extended_connect(
             if !matches!(outcome, DispatchOutcome::RateLimited) {
                 audit.annotate(&mut response, outcome);
             }
-            return Ok(OwnerResponse::from_http(response));
+            return Ok(response);
         }
     };
     macro_rules! connect_response {
@@ -343,7 +343,7 @@ pub(super) async fn handle_h2_extended_connect(
                 response_headers.as_deref(),
             )?;
             audit.annotate(&mut response, DispatchOutcome::Respond);
-            return Ok(OwnerResponse::from_http(response));
+            return Ok(response);
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {}
     }

@@ -12,7 +12,7 @@ use crate::http::protocol::common::blocked_response as blocked;
 use crate::http::protocol::common::forbidden_response as forbidden;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::l7::finalize_response_for_request;
-use crate::http::protocol::l7::finalize_response_with_headers;
+use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use anyhow::{Result, anyhow};
 use hyper::StatusCode;
@@ -332,17 +332,20 @@ async fn send_connect_local_action(input: SendConnectLocalActionInput<'_>) -> Re
         action,
     } = input;
     let (response, outcome) = match action.kind {
-        ActionKind::Block => (
-            finalize_response_with_headers(
+        ActionKind::Block => {
+            let mut response = qpx_core::http_message::Response::from_http(blocked(
+                state.messages.blocked.as_str(),
+            ));
+            finalize_response_with_headers_in_place(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
                 proxy_name,
-                blocked(state.messages.blocked.as_str()),
+                &mut response,
                 response_headers,
                 false,
-            ),
-            crate::http::dispatch::DispatchOutcome::Block,
-        ),
+            );
+            (response, crate::http::dispatch::DispatchOutcome::Block)
+        }
         ActionKind::Respond => {
             let local = action
                 .local_response

@@ -292,7 +292,7 @@ pub(super) async fn handle_connect(
             if !matches!(outcome, DispatchOutcome::RateLimited) {
                 audit.annotate(&mut response, outcome);
             }
-            return Ok(OwnerResponse::from_http(response));
+            return Ok(response);
         }
     };
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
@@ -363,7 +363,7 @@ pub(super) async fn handle_connect(
                 response_headers.as_deref(),
             )?;
             audit.annotate(&mut response, DispatchOutcome::Respond);
-            Ok(OwnerResponse::from_http(response))
+            Ok(response)
         }
         ActionKind::Inspect => {
             #[cfg(not(feature = "mitm"))]

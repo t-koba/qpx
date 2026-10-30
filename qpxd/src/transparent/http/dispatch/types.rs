@@ -19,7 +19,7 @@ pub(super) struct TransparentPreparedPolicy {
         Option<Arc<crate::http::policy::response_policy::HttpResponseRuleEngine>>,
     pub(super) selected_plan: crate::runtime::ExecutionPlan,
     pub(super) policy: Option<Box<EvaluatedAction>>,
-    pub(super) early_response: Option<Box<hyper::Response<Body>>>,
+    pub(super) early_response: Option<Box<qpx_core::http_message::Response<Body>>>,
     pub(super) matched_rule: Option<String>,
 }
 
@@ -30,7 +30,7 @@ pub(super) struct TransparentPreparedMode {
 
 pub(super) struct TransparentPolicyEvaluation {
     pub(super) policy: Option<Box<EvaluatedAction>>,
-    pub(super) early_response: Option<Box<hyper::Response<Body>>>,
+    pub(super) early_response: Option<Box<qpx_core::http_message::Response<Body>>>,
     pub(super) matched_rule: Option<String>,
     pub(super) request_rpc: Option<crate::http::rpc::RpcMatchContext>,
 }

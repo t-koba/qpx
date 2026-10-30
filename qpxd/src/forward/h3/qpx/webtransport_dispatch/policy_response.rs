@@ -1,6 +1,5 @@
 use super::super::response::{QpxPolicyResponseContext, send_qpx_policy_response};
 use anyhow::Result;
-use hyper::Response;
 use qpx_observability::access_log::RequestLogContext;
 
 pub(super) struct WebTransportPolicyResponder<'a> {
@@ -12,10 +11,10 @@ pub(super) struct WebTransportPolicyResponder<'a> {
 }
 
 impl WebTransportPolicyResponder<'_> {
-    pub(super) async fn send(
+    pub(super) async fn send<R: crate::http::response_carrier::ResponseCarrier>(
         &self,
         req_stream: &mut qpx_h3::RequestStream,
-        response: Response<qpx_http::body::Body>,
+        response: R,
         outcome: crate::http::dispatch::DispatchOutcome,
         matched_rule: Option<&str>,
         decision_service_policy_id: Option<&str>,

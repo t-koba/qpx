@@ -6,8 +6,6 @@ use crate::http3::stream_limits::{response_stream_timeouts, timeout_or_deadline}
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http::HeaderMap;
-use hyper::Response;
-use qpx_http::body::Body;
 use std::future::Future;
 use tokio::time::{Duration, Instant, timeout};
 
@@ -91,9 +89,9 @@ async fn send_qpx_interim_response_inner(
     Ok(())
 }
 
-pub(crate) async fn send_qpx_response_stream(
+pub(crate) async fn send_qpx_response_stream<R: ResponseCarrier>(
     req_stream: &mut qpx_h3::RequestStream,
-    response: Response<Body>,
+    response: R,
     request_method: &http::Method,
     max_body_bytes: usize,
     body_read_timeout: Duration,
@@ -112,9 +110,9 @@ pub(crate) async fn send_qpx_response_stream(
     })
 }
 
-pub(crate) async fn send_qpx_response_stream_observed(
+pub(crate) async fn send_qpx_response_stream_observed<R: ResponseCarrier>(
     req_stream: &mut qpx_h3::RequestStream,
-    response: Response<Body>,
+    response: R,
     request_method: &http::Method,
     options: H3ResponseSendOptions<'_>,
 ) -> std::result::Result<Option<crate::http::rpc::FramedBodySummary>, H3ResponseSendError> {

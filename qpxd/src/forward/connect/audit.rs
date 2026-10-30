@@ -1,7 +1,6 @@
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
+use crate::http::response_carrier::ResponseCarrier;
 use crate::policy_context::{AuditRecord, attach_log_context, emit_audit_log};
-use hyper::Response;
-use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
 use std::net::IpAddr;
 
@@ -17,7 +16,7 @@ pub(super) struct ConnectAuditContext<'a> {
 }
 
 impl ConnectAuditContext<'_> {
-    pub(super) fn annotate(&self, response: &mut Response<Body>, outcome: DispatchOutcome) {
+    pub(super) fn annotate<R: ResponseCarrier>(&self, response: &mut R, outcome: DispatchOutcome) {
         attach_log_context(self.state, response, self.log_context);
         emit_audit_log(
             self.state,

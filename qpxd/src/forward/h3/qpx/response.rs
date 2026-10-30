@@ -46,9 +46,9 @@ fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<Response<Body>
         .body(Body::from(Bytes::copy_from_slice(body)))?)
 }
 
-pub(super) async fn send_qpx_response_stream(
+pub(super) async fn send_qpx_response_stream<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut qpx_h3::RequestStream,
-    response: Response<Body>,
+    response: R,
     request_method: &http::Method,
     max_body_bytes: usize,
     body_read_timeout: Duration,
@@ -63,9 +63,9 @@ pub(super) async fn send_qpx_response_stream(
     .await
 }
 
-pub(super) async fn send_qpx_policy_response(
+pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut qpx_h3::RequestStream,
-    response: Response<Body>,
+    response: R,
     ctx: QpxPolicyResponseContext<'_>,
 ) -> Result<()> {
     let QpxPolicyResponseContext {

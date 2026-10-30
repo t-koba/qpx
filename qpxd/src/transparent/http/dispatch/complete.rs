@@ -124,7 +124,7 @@ pub(super) async fn complete_transparent_request(
                     &[],
                 );
                 return Ok(crate::http::capture::stream::limit_response_body_for_plan(
-                    OwnerResponse::from_http(*response),
+                    *response,
                     &selected_plan,
                 ));
             }

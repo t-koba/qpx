@@ -7,10 +7,8 @@ use crate::http3::server::{H3ServerRequestStream, send_h3_response};
 use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::RateLimitContext;
 use anyhow::Result;
-use hyper::Response;
 use qpx_core::config::ActionConfig;
 use qpx_core::rules::CompiledHeaderControl;
-use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
 use std::sync::Arc;
 use tokio::time::Duration;
@@ -92,9 +90,9 @@ pub(super) fn build_h3_connect_success_response(
     Ok(out)
 }
 
-pub(super) async fn send_h3_policy_response(
+pub(super) async fn send_h3_policy_response<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut H3ServerRequestStream,
-    response: Response<Body>,
+    response: R,
     ctx: H3PolicyResponseContext<'_>,
 ) -> Result<()> {
     let H3PolicyResponseContext {
@@ -128,7 +126,7 @@ pub(super) async fn send_h3_policy_response(
         log_context,
     );
     send_h3_response(
-        qpx_core::http_message::Response::from_http(response),
+        response.into_owner(),
         request_method,
         req_stream,
         state.plan.limits.body.max_h3_response_body_bytes,

@@ -7,6 +7,7 @@ use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::{Result, anyhow};
 use hyper::{Method, Response, Version};
 use qpx_core::config::{ActionConfig, ActionKind};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::{CompiledHeaderControl, RuleEngine, RuleMatchContext};
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -20,7 +21,7 @@ pub struct EvaluatedAction {
 
 pub enum ListenerPolicyDecision {
     Proceed(Box<EvaluatedAction>),
-    Early(Box<Response<Body>>, Option<String>),
+    Early(Box<OwnerResponse<Body>>, Option<String>),
 }
 
 pub(crate) fn evaluate_listener_policy(
@@ -42,7 +43,7 @@ pub(crate) fn evaluate_listener_policy(
                 method,
                 version,
                 proxy_name,
-                deny_builder(deny_message),
+                OwnerResponse::from_http(deny_builder(deny_message)),
                 false,
             )),
             matched_rule,

@@ -501,8 +501,8 @@ async fn h2_extended_connect_upload_stalls_without_upstream_window() {
     server_task.abort();
 }
 
-#[test]
-fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
+#[tokio::test]
+async fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
     let runtime = connect_runtime();
     let state = runtime.state();
     let identity = crate::policy_context::ResolvedIdentity::default();
@@ -569,11 +569,20 @@ fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
             crate::policy_context::DecisionServiceDeny {
                 local_response: Some(qpx_core::config::LocalResponseConfig {
                     status: 418,
-                    body: String::new(),
+                    body: "denied".to_string(),
                     content_type: None,
                     headers: std::collections::HashMap::new(),
                     rpc: None,
                 }),
+                headers: Some(std::sync::Arc::new(
+                    qpx_core::rules::CompiledHeaderControl::compile(
+                        &serde_yaml::from_str(
+                            "response_set: { x-policy: denied, connection: x-hop, x-hop: removed }",
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                )),
                 ..Default::default()
             },
         ),
@@ -588,7 +597,24 @@ fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
     .expect("deny local result");
     match deny_local {
         std::ops::ControlFlow::Break((response, outcome)) => {
+            let response: OwnerResponse<Body> = response;
             assert_eq!(response.status().as_u16(), 418);
+            assert_eq!(
+                response
+                    .headers()
+                    .get(&qpx_core::http_message::OrdinaryHeaderName::try_from("x-policy").unwrap())
+                    .unwrap(),
+                "denied"
+            );
+            assert!(!response.headers().contains_key(
+                &qpx_core::http_message::OrdinaryHeaderName::try_from("x-hop").unwrap()
+            ));
+            assert_eq!(
+                qpx_http::body::to_bytes(response.into_head_and_body().1)
+                    .await
+                    .unwrap(),
+                "denied"
+            );
             assert!(matches!(
                 outcome,
                 crate::http::dispatch::DispatchOutcome::DecisionServiceLocalResponse
