@@ -202,8 +202,8 @@ class PolicyTests(unittest.TestCase):
 
     def test_http2_diagnostic_exact_paired_lanes_fixed_settings_and_artifacts(self):
         self.assertEqual(DRIVER.HTTP2_DIAGNOSTIC_ENV, {
-            "QPX_HTTP2_COMPARE_CONCURRENCY": "1",
-            "QPX_HTTP2_COMPARE_CLIENT_THREADS": "1",
+            "QPX_HTTP2_COMPARE_CONCURRENCY": "64",
+            "QPX_HTTP2_COMPARE_CLIENT_THREADS": "4",
             "QPX_HTTP2_COMPARE_MULTIPLEX_CONCURRENCY": "1",
             "QPX_HTTP2_COMPARE_MULTIPLEX_CLIENT_THREADS": "1",
             "QPX_HTTP2_COMPARE_TARGET_DURATION_SECONDS": "10",
@@ -225,9 +225,16 @@ class PolicyTests(unittest.TestCase):
         for index, lane_name in enumerate(expected_lanes):
             self.assertEqual([(lane, role) for lane, role, _ in calls[index*6:(index+1)*6]],
                              [(lane_name, role) for roles in ORDER for role in roles])
-        for _, _, env in calls:
+        for lane_name, _, env in calls:
             for key, value in DRIVER.HTTP2_DIAGNOSTIC_ENV.items():
                 self.assertEqual(env[key], value)
+            if lane_name.endswith("/m=1"):
+                self.assertEqual((env["QPX_HTTP2_COMPARE_CONCURRENCY"],
+                                  env["QPX_HTTP2_COMPARE_CLIENT_THREADS"]), ("64", "4"))
+            else:
+                self.assertTrue(lane_name.endswith("/m=100"))
+                self.assertEqual((env["QPX_HTTP2_COMPARE_MULTIPLEX_CONCURRENCY"],
+                                  env["QPX_HTTP2_COMPARE_MULTIPLEX_CLIENT_THREADS"]), ("1", "1"))
             for key in ("SAMPLE_ATTEMPTS", "MIN_VALID_SAMPLES"):
                 self.assertEqual(env["QPX_HTTP2_COMPARE_" + key], "1")
             self.assertEqual(env["QPX_HTTP2_COMPARE_PROXY_FILTER"], "qpxd")

@@ -32,9 +32,11 @@ from perf_policy import (
 from perf_records import collect_ratios, fail, number
 
 ORDER = [["current", "previous"], ["previous", "current"], ["current", "previous"]]
+# Match the accepted 1 MiB/m=1 client topology; keep the m=100 lane's
+# accepted one-connection/one-thread multiplexed setup unchanged.
 HTTP2_DIAGNOSTIC_ENV = {
     "QPX_HTTP2_COMPARE_" + key: value for key, value in {
-        "CONCURRENCY": "1", "CLIENT_THREADS": "1",
+        "CONCURRENCY": "64", "CLIENT_THREADS": "4",
         "MULTIPLEX_CONCURRENCY": "1", "MULTIPLEX_CLIENT_THREADS": "1",
         "TARGET_DURATION_SECONDS": "10",
     }.items()
