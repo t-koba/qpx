@@ -437,13 +437,21 @@ async fn h2_extended_connect_upload_stalls_without_upstream_window() {
     let upstream_body = response.into_body();
 
     let (mut downstream_tx, downstream_body) = Body::channel_with_capacity(1);
-    let mut out_body = spawn_h2_extended_connect_relay(
+    let out_body = spawn_h2_extended_connect_relay(
         downstream_body,
         None,
         upstream_send,
         upstream_body,
         Duration::from_millis(300),
     );
+    let response = crate::http::protocol::l7::finalize_extended_connect_response_with_headers(
+        http::Version::HTTP_2,
+        "qpx",
+        OwnerResponse::new(out_body),
+        None,
+        false,
+    );
+    let (_, mut out_body) = response.into_head_and_body();
 
     let chunk = || Bytes::from(vec![0xABu8; 16384]);
     // The relay must consume these promptly; generous bounds fail loudly
@@ -624,4 +632,229 @@ async fn shared_connect_decision_service_preserves_allow_and_deny_behavior() {
             panic!("deny with local response must return a response")
         }
     }
+}
+
+fn direct_connect_runtime() -> Runtime {
+    let mut config = connect_config();
+    let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0] else {
+        unreachable!()
+    };
+    edge.rules.clear();
+    edge.default_action.kind = ActionKind::Direct;
+    Runtime::new(config).unwrap()
+}
+
+#[tokio::test]
+async fn connect_owned_finalization_preserves_control_order_headers_and_bodies() {
+    use crate::http::protocol::l7::finalize_response_with_headers;
+    use qpx_core::rules::CompiledHeaderControl;
+
+    let control = CompiledHeaderControl::compile(
+        &serde_yaml::from_str(
+            "response_set: { connection: x-hop, x-hop: removed, content-length: '3' }
+\
+             response_add: { x-duplicate: third }
+\
+             response_remove: [x-remove]",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    for version in [http::Version::HTTP_11, http::Version::HTTP_2] {
+        for status in [
+            StatusCode::OK,
+            StatusCode::FORBIDDEN,
+            StatusCode::TOO_MANY_REQUESTS,
+            StatusCode::BAD_GATEWAY,
+        ] {
+            let base = || {
+                let mut response = Response::builder()
+                    .status(status)
+                    .header("date", "Thu, 01 Jan 1970 00:00:00 GMT")
+                    .header("x-duplicate", "first")
+                    .header("x-duplicate", "second")
+                    .header("x-remove", "gone")
+                    .header("retry-after", "7")
+                    .body(Body::from("err"))
+                    .unwrap();
+                response.headers_mut().insert(
+                    "x-opaque",
+                    http::HeaderValue::from_bytes(b"\x80\xff").unwrap(),
+                );
+                response.extensions_mut().insert(42u32);
+                response
+            };
+            let expected = finalize_response_with_headers(
+                &Method::CONNECT,
+                version,
+                "qpx",
+                base(),
+                Some(&control),
+                false,
+            );
+            let mut owned = OwnerResponse::from_http(base());
+            finalize_response_with_headers_in_place(
+                &Method::CONNECT,
+                version,
+                "qpx",
+                &mut owned,
+                Some(&control),
+                false,
+            );
+            // Inspect the exact serialized head at codec egress, not an internal
+            // map projection. CONNECT success loses framing and its local body;
+            // errors retain both. Ordinary duplicate/opaque bytes stay intact.
+            let actual = owned.into_http_for_codec().unwrap();
+            assert_eq!(actual.status(), expected.status());
+            assert_eq!(actual.version(), expected.version());
+            assert_eq!(actual.headers(), expected.headers());
+            assert_eq!(actual.extensions().get::<u32>(), Some(&42));
+            assert!(!actual.headers().contains_key("x-hop"));
+            assert!(!actual.headers().contains_key("x-remove"));
+            assert_eq!(
+                actual
+                    .headers()
+                    .get_all("x-duplicate")
+                    .iter()
+                    .collect::<Vec<_>>(),
+                ["first", "second", "third"]
+            );
+            let expected_body = if status.is_success() { "" } else { "err" };
+            assert_eq!(
+                qpx_http::body::to_bytes(actual.into_body()).await.unwrap(),
+                expected_body
+            );
+            assert_eq!(
+                qpx_http::body::to_bytes(expected.into_body())
+                    .await
+                    .unwrap(),
+                expected_body
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn connect_owned_generated_responses_keep_status_and_tunnel_semantics() {
+    for (kind, status) in [
+        (ActionKind::Block, StatusCode::FORBIDDEN),
+        (ActionKind::Direct, StatusCode::BAD_GATEWAY),
+    ] {
+        let mut config = connect_config();
+        let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0] else {
+            unreachable!()
+        };
+        edge.rules.clear();
+        edge.default_action.kind = kind;
+        let runtime = Runtime::new(config).unwrap();
+        // Port zero cannot be an upstream listener; failure is deterministic.
+        let request = http::Request::builder()
+            .method(Method::CONNECT)
+            .uri("127.0.0.1:0")
+            .body(Body::empty())
+            .unwrap();
+        let response: OwnerResponse<Body> = handle_connect(
+            OwnerRequest::from_http(request),
+            runtime,
+            "forward",
+            SocketAddr::from(([127, 0, 0, 1], 12345)),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), status);
+        let response = response.into_http_for_codec().unwrap();
+        assert!(response.headers().contains_key("via"));
+        assert!(
+            !qpx_http::body::to_bytes(response.into_body())
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let request = http::Request::builder()
+        .method(Method::CONNECT)
+        .uri(listener.local_addr().unwrap().to_string())
+        .body(Body::empty())
+        .unwrap();
+    let response: OwnerResponse<Body> = handle_connect(
+        OwnerRequest::from_http(request),
+        direct_connect_runtime(),
+        "forward",
+        SocketAddr::from(([127, 0, 0, 1], 12345)),
+    )
+    .await
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let response = response.into_http_for_codec().unwrap();
+    assert!(!response.headers().contains_key("content-length"));
+    assert!(
+        qpx_http::body::to_bytes(response.into_body())
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    // The upstream socket was established before returning the owned response.
+    tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn h2_extended_connect_owned_finalization_keeps_stream_body_and_header_controls() {
+    use crate::http::protocol::l7::finalize_extended_connect_response_with_headers;
+    use qpx_core::rules::CompiledHeaderControl;
+
+    let control = CompiledHeaderControl::compile(
+        &serde_yaml::from_str(
+            "response_set: { connection: x-hop, x-hop: removed, content-length: '5' }\n\
+             response_add: { x-duplicate: third }",
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut response = Response::builder()
+        .status(StatusCode::OK)
+        .version(http::Version::HTTP_2)
+        .header("date", "Thu, 01 Jan 1970 00:00:00 GMT")
+        .header("x-duplicate", "first")
+        .header("x-duplicate", "second")
+        .header("upgrade", "websocket")
+        .body(Body::from("reply"))
+        .unwrap();
+    response.extensions_mut().insert(42u32);
+    let response: OwnerResponse<Body> = finalize_extended_connect_response_with_headers(
+        http::Version::HTTP_2,
+        "qpx",
+        OwnerResponse::from_http(response),
+        Some(&control),
+        false,
+    );
+    let response = response.into_http_for_codec().unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.version(), http::Version::HTTP_2);
+    assert_eq!(response.extensions().get::<u32>(), Some(&42));
+    assert_eq!(response.headers()["content-length"], "5");
+    assert_eq!(response.headers()["via"], "2 qpx");
+    assert_eq!(response.headers()["proxy-status"], "qpx");
+    assert!(!response.headers().contains_key("x-hop"));
+    assert!(!response.headers().contains_key("connection"));
+    assert!(!response.headers().contains_key("upgrade"));
+    assert_eq!(
+        response
+            .headers()
+            .get_all("x-duplicate")
+            .iter()
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+    // Unlike an ordinary successful CONNECT response, extended CONNECT must
+    // retain the tunnel stream and must not run bodyless normalization.
+    assert_eq!(
+        qpx_http::body::to_bytes(response.into_body())
+            .await
+            .unwrap(),
+        "reply"
+    );
 }

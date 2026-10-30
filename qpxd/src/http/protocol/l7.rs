@@ -4,7 +4,9 @@ use crate::http::protocol::header_control::{
 };
 use crate::http::protocol::trailer_body;
 use hyper::{Method, Response, StatusCode};
-use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName, Request};
+use qpx_core::http_message::{
+    OrdinaryHeaderMut, OrdinaryHeaderName, Request, Response as OwnerResponse,
+};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpx_http::protocol::finalization::FinalizeResponse;
@@ -204,16 +206,6 @@ thread_local! {
     };
 }
 
-fn finalize_extended_connect_response_in_place(
-    request_version: http::Version,
-    proxy_name: &str,
-    response: &mut Response<Body>,
-    preserve_upgrade: bool,
-) {
-    finalize_response_headers_common(request_version, proxy_name, response, preserve_upgrade);
-    wrap_body_sanitizing_response_trailers(response);
-}
-
 pub(crate) fn finalize_response_with_headers(
     request_method: &Method,
     request_version: http::Version,
@@ -257,10 +249,10 @@ pub(crate) fn finalize_response_with_headers_in_place<R>(
 pub(crate) fn finalize_extended_connect_response_with_headers(
     request_version: http::Version,
     proxy_name: &str,
-    mut response: Response<Body>,
+    mut response: OwnerResponse<Body>,
     header_control: Option<&CompiledHeaderControl>,
     preserve_upgrade: bool,
-) -> Response<Body> {
+) -> OwnerResponse<Body> {
     finalize_extended_connect_response_with_headers_in_place(
         request_version,
         proxy_name,
@@ -274,17 +266,14 @@ pub(crate) fn finalize_extended_connect_response_with_headers(
 pub(crate) fn finalize_extended_connect_response_with_headers_in_place(
     request_version: http::Version,
     proxy_name: &str,
-    response: &mut Response<Body>,
+    response: &mut OwnerResponse<Body>,
     header_control: Option<&CompiledHeaderControl>,
     preserve_upgrade: bool,
 ) {
     apply_response_headers(response.headers_mut(), header_control);
-    finalize_extended_connect_response_in_place(
-        request_version,
-        proxy_name,
-        response,
-        preserve_upgrade,
-    );
+    // Extended CONNECT retains its tunnel body; do not apply ordinary CONNECT normalization.
+    finalize_response_headers_common(request_version, proxy_name, response, preserve_upgrade);
+    wrap_body_sanitizing_response_trailers(response);
 }
 
 /// Consume client hop metadata before synthesizing trusted request fields.

@@ -13,7 +13,9 @@ use crate::http::protocol::common::{
     blocked_response as blocked, connect_established_response as connect_established,
     too_many_requests_response as too_many_requests,
 };
-use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
+use crate::http::protocol::l7::{
+    finalize_response_for_request, finalize_response_with_headers_in_place,
+};
 use crate::policy_context::{
     DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
     authentication_response_for_error, enforce_decision_service, resolve_identity_for_request,
@@ -300,11 +302,12 @@ pub(super) async fn handle_connect(
     });
     macro_rules! connect_response {
         ($base:expr, $outcome:expr) => {{
-            let mut response = finalize_response_with_headers(
+            let mut response = OwnerResponse::from_http($base);
+            finalize_response_with_headers_in_place(
                 &Method::CONNECT,
                 req_version,
                 proxy_name,
-                $base,
+                &mut response,
                 response_headers.as_deref(),
                 false,
             );
@@ -349,7 +352,7 @@ pub(super) async fn handle_connect(
     }
 
     match action.kind {
-        ActionKind::Block => Ok(OwnerResponse::from_http(blocked_connect_response!())),
+        ActionKind::Block => Ok(blocked_connect_response!()),
         ActionKind::Respond => {
             let local = action
                 .local_response
@@ -368,7 +371,7 @@ pub(super) async fn handle_connect(
         ActionKind::Inspect => {
             #[cfg(not(feature = "mitm"))]
             {
-                Ok(OwnerResponse::from_http(blocked_connect_response!()))
+                Ok(blocked_connect_response!())
             }
 
             #[cfg(feature = "mitm")]
@@ -378,7 +381,7 @@ pub(super) async fn handle_connect(
                     .ok_or_else(|| anyhow!("listener not found"))?;
                 let tls_inspection = listener_cfg.tls_inspection.as_ref();
                 if !tls_inspection.map(|t| t.enabled).unwrap_or(false) {
-                    return Ok(OwnerResponse::from_http(blocked_connect_response!()));
+                    return Ok(blocked_connect_response!());
                 }
                 let verify =
                     state.tls_verify_upstream(Some(listener_cfg), listener_name, host.as_str());
@@ -393,9 +396,7 @@ pub(super) async fn handle_connect(
                 let concurrency_permits = match concurrency.permits {
                     Some(permits) => Some(permits),
                     None => {
-                        return Ok(OwnerResponse::from_http(too_many_connect_response!(
-                            concurrency.retry_after
-                        )));
+                        return Ok(too_many_connect_response!(concurrency.retry_after));
                     }
                 };
                 let upstream_connected = match connect_tunnel_target(
@@ -409,7 +410,7 @@ pub(super) async fn handle_connect(
                 {
                     Ok(stream) => stream,
                     Err(_) => {
-                        return Ok(OwnerResponse::from_http(proxy_error_connect_response!()));
+                        return Ok(proxy_error_connect_response!());
                     }
                 };
                 let runtime_for_mitm = runtime.clone();
@@ -445,7 +446,7 @@ pub(super) async fn handle_connect(
                         warn!(error = ?err, "mitm tunnel failed");
                     }
                 });
-                Ok(OwnerResponse::from_http(established_connect_response!()))
+                Ok(established_connect_response!())
             }
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {
@@ -460,9 +461,7 @@ pub(super) async fn handle_connect(
             let concurrency_permits = match concurrency.permits {
                 Some(permits) => Some(permits),
                 None => {
-                    return Ok(OwnerResponse::from_http(too_many_connect_response!(
-                        concurrency.retry_after
-                    )));
+                    return Ok(too_many_connect_response!(concurrency.retry_after));
                 }
             };
             let connected = match connect_tunnel_target(
@@ -476,7 +475,7 @@ pub(super) async fn handle_connect(
             {
                 Ok(stream) => stream,
                 Err(_) => {
-                    return Ok(OwnerResponse::from_http(proxy_error_connect_response!()));
+                    return Ok(proxy_error_connect_response!());
                 }
             };
             let throttle = BandwidthThrottle::with_context(
@@ -517,7 +516,7 @@ pub(super) async fn handle_connect(
                     warn!(error = ?err, "tunnel failed");
                 }
             });
-            Ok(OwnerResponse::from_http(established_connect_response!()))
+            Ok(established_connect_response!())
         }
     }
 }

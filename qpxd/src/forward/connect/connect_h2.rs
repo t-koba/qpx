@@ -20,7 +20,7 @@ use crate::http::protocol::common::{
 };
 use crate::http::protocol::l7::{
     finalize_extended_connect_response_with_headers, finalize_response_for_request,
-    finalize_response_with_headers,
+    finalize_response_with_headers_in_place,
 };
 use crate::policy_context::{
     DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
@@ -289,11 +289,12 @@ pub(super) async fn handle_h2_extended_connect(
     };
     macro_rules! connect_response {
         ($base:expr, $outcome:expr) => {{
-            let mut response = finalize_response_with_headers(
+            let mut response = OwnerResponse::from_http($base);
+            finalize_response_with_headers_in_place(
                 &Method::CONNECT,
                 req_version,
                 proxy_name,
-                $base,
+                &mut response,
                 response_headers.as_deref(),
                 false,
             );
@@ -325,10 +326,10 @@ pub(super) async fn handle_h2_extended_connect(
 
     match action.kind {
         ActionKind::Block | ActionKind::Inspect => {
-            return Ok(OwnerResponse::from_http(connect_response!(
+            return Ok(connect_response!(
                 blocked(state.messages.blocked.as_str()),
                 DispatchOutcome::Block
-            )));
+            ));
         }
         ActionKind::Respond => {
             let local = action
@@ -359,9 +360,7 @@ pub(super) async fn handle_h2_extended_connect(
     let _concurrency_permits = match concurrency.permits {
         Some(permits) => permits,
         None => {
-            return Ok(OwnerResponse::from_http(too_many_connect_response!(
-                concurrency.retry_after
-            )));
+            return Ok(too_many_connect_response!(concurrency.retry_after));
         }
     };
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
@@ -384,7 +383,7 @@ pub(super) async fn handle_h2_extended_connect(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/2 extended CONNECT establish failed");
-            return Ok(OwnerResponse::from_http(proxy_error_connect_response!()));
+            return Ok(proxy_error_connect_response!());
         }
     };
 
@@ -402,11 +401,12 @@ pub(super) async fn handle_h2_extended_connect(
     }
     let (_, downstream_body) = req.into_head_and_body();
     if !response.status().is_success() {
-        let mut response = finalize_response_with_headers(
+        let mut response = OwnerResponse::from_http(h2_response_to_hyper(response)?);
+        finalize_response_with_headers_in_place(
             &Method::CONNECT,
             req_version,
             proxy_name,
-            h2_response_to_hyper(response)?,
+            &mut response,
             response_headers.as_deref(),
             false,
         );
@@ -414,7 +414,7 @@ pub(super) async fn handle_h2_extended_connect(
             response.extensions_mut().insert(interim);
         }
         audit.annotate(&mut response, DispatchOutcome::Allow);
-        return Ok(OwnerResponse::from_http(response));
+        return Ok(response);
     }
 
     let (parts, upstream_body) = response.into_parts();
@@ -436,7 +436,7 @@ pub(super) async fn handle_h2_extended_connect(
     let mut response = finalize_extended_connect_response_with_headers(
         req_version,
         proxy_name,
-        response,
+        OwnerResponse::from_http(response),
         response_headers.as_deref(),
         false,
     );
@@ -444,5 +444,5 @@ pub(super) async fn handle_h2_extended_connect(
         response.extensions_mut().insert(interim);
     }
     audit.annotate(&mut response, DispatchOutcome::Allow);
-    Ok(OwnerResponse::from_http(response))
+    Ok(response)
 }
