@@ -1080,3 +1080,54 @@ fn cache_revalidation_keeps_stored_framing_and_spelling_inside_the_owner() {
         assert!(CacheFields::from_cache_json(json).is_err());
     }
 }
+
+#[test]
+fn owned_response_transfer_patches_keep_first_literal_and_boundary_semantics() {
+    use qpx_core::http_message::{HeaderTransferMode, HeaderTransferPatch};
+    let mut source = Response::new(());
+    let mut first = HeaderValue::from_static("0007");
+    first.set_sensitive(true);
+    source.headers_mut().append_content_length_value(first);
+    source
+        .headers_mut()
+        .append_content_length_value(HeaderValue::from_static("8"));
+    let destination = HeaderName::from_static("x-length");
+    let patch =
+        HeaderTransferPatch::from_owned_response(&source, CONTENT_LENGTH, destination.clone());
+    let mut owner = Response::new(());
+    patch
+        .clone()
+        .apply(owner.headers_mut(), HeaderTransferMode::Replace);
+    let mut standard = http::Response::new(());
+    patch
+        .clone()
+        .apply_to_http_response(&mut standard, HeaderTransferMode::Replace);
+    patch.apply_to_http_response(&mut standard, HeaderTransferMode::Append);
+    let owned = owner.into_http_for_library();
+    assert_eq!(owned.headers()[&destination], "0007");
+    assert!(owned.headers()[&destination].is_sensitive());
+    assert_eq!(standard.headers().get_all(&destination).iter().count(), 2);
+    assert!(
+        standard
+            .headers()
+            .get_all(&destination)
+            .iter()
+            .all(HeaderValue::is_sensitive)
+    );
+
+    HeaderTransferPatch::from_owned_response(
+        &source,
+        HeaderName::from_static("x-missing"),
+        destination.clone(),
+    )
+    .apply_to_http_response(&mut standard, HeaderTransferMode::Replace);
+    assert_eq!(standard.headers().get_all(&destination).iter().count(), 2);
+    let mut owner = Response::new(());
+    HeaderTransferPatch::literal(CONTENT_LENGTH, HeaderValue::from_static("invalid"))
+        .apply(owner.headers_mut(), HeaderTransferMode::Replace);
+    assert!(owner.headers().declared_content_length().is_err());
+    assert_eq!(
+        owner.into_http_for_library().headers()[CONTENT_LENGTH],
+        "invalid"
+    );
+}

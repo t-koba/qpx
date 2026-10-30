@@ -984,6 +984,7 @@ pub enum HeaderTransferMode {
 /// use http::HeaderMap;
 /// let _ = HeaderTransferPatch::from_response(&HeaderMap::new(), CONTENT_LENGTH, CONTENT_LENGTH);
 /// ```
+#[derive(Clone)]
 pub struct HeaderTransferPatch {
     destination: HeaderName,
     value: Option<HeaderValue>,
@@ -1002,6 +1003,45 @@ impl HeaderTransferPatch {
         Self {
             value: source.inner.get(&name).cloned(),
             destination: name,
+        }
+    }
+
+    /// Capture the first occurrence of an owned response for a named destination.
+    /// Literal bytes and sensitivity stay opaque, including Content-Length.
+    pub fn from_owned_response<B>(
+        source: &Response<B>,
+        name: HeaderName,
+        destination: HeaderName,
+    ) -> Self {
+        Self {
+            value: source.headers.inner.get(&name).cloned(),
+            destination,
+        }
+    }
+
+    /// A caller-supplied literal replacement, never a read of stored framing text.
+    pub fn literal(destination: HeaderName, value: HeaderValue) -> Self {
+        Self {
+            destination,
+            value: Some(value),
+        }
+    }
+
+    /// Apply at a standard library response boundary without exposing its fields.
+    pub fn apply_to_http_response<B>(
+        self,
+        response: &mut http::Response<B>,
+        mode: HeaderTransferMode,
+    ) {
+        if let Some(value) = self.value {
+            match mode {
+                HeaderTransferMode::Replace => {
+                    response.headers_mut().insert(self.destination, value);
+                }
+                HeaderTransferMode::Append => {
+                    response.headers_mut().append(self.destination, value);
+                }
+            }
         }
     }
 

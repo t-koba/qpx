@@ -1,5 +1,6 @@
 use super::*;
-use http::header::CONTENT_TYPE;
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use hyper::Response as HttpResponse;
 
 #[test]
 fn accept_encoding_parses_shared_members_across_repeated_fields() {
@@ -94,14 +95,20 @@ fn request_snapshot_only_copies_compression_negotiation_fields() {
             .expect("snapshot");
     assert_eq!(snapshot.method, Method::POST);
     assert_eq!(
-        snapshot.headers.get(ACCEPT_ENCODING),
+        snapshot.headers.get(&ord(ACCEPT_ENCODING)),
         Some(&HeaderValue::from_static("gzip"))
     );
     assert_eq!(
-        snapshot.headers.get("dictionary-id"),
+        snapshot
+            .headers
+            .get(&ord(http::HeaderName::from_static("dictionary-id"))),
         Some(&HeaderValue::from_static("example"))
     );
-    assert!(!snapshot.headers.contains_key("x-unrelated"));
+    assert!(
+        !snapshot
+            .headers
+            .contains_key(&ord(http::HeaderName::from_static("x-unrelated")))
+    );
 }
 
 #[test]
@@ -154,12 +161,14 @@ fn event_stream_compression_requires_explicit_force() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/event-stream")
-        .header(CONTENT_LENGTH, "12")
-        .body(Body::empty())
-        .expect("response");
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/event-stream")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     let mut config = ResponseCompressionModuleConfig {
         min_body_bytes: 1,
         max_body_bytes: 1024,
@@ -211,12 +220,14 @@ fn no_body_success_responses_are_not_compressed() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let connect_response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .body(Body::empty())
-        .expect("response");
+    let connect_response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert_eq!(
         select_response_encoding(
             connect_request.method(),
@@ -233,12 +244,14 @@ fn no_body_success_responses_are_not_compressed() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let reset_content_response = Response::builder()
-        .status(StatusCode::RESET_CONTENT)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .body(Body::empty())
-        .expect("response");
+    let reset_content_response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::RESET_CONTENT)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert_eq!(
         select_response_encoding(
             get_request.method(),
@@ -273,13 +286,15 @@ fn response_no_transform_disables_compression() {
         .header(http::header::ACCEPT_ENCODING, "gzip")
         .body(Body::empty())
         .expect("request");
-    let compressible = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .header(http::header::CACHE_CONTROL, "public, max-age=60")
-        .body(Body::empty())
-        .expect("response");
+    let compressible = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .header(http::header::CACHE_CONTROL, "public, max-age=60")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert_eq!(
         select_response_encoding(
             get_request.method(),
@@ -290,16 +305,18 @@ fn response_no_transform_disables_compression() {
         .expect("select encoding"),
         Some(ContentEncoding::Gzip)
     );
-    let frozen = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .header(
-            http::header::CACHE_CONTROL,
-            "public, no-transform, max-age=60",
-        )
-        .body(Body::empty())
-        .expect("response");
+    let frozen = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .header(
+                http::header::CACHE_CONTROL,
+                "public, no-transform, max-age=60",
+            )
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert_eq!(
         select_response_encoding(
             get_request.method(),
@@ -320,12 +337,14 @@ fn the_compressible_window_reads_the_declared_length_through_the_owner() {
 
     // A comma list of equal members is one length, so the response declares
     // a size inside the window and is compressible.
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12, 12")
-        .body(Body::empty())
-        .expect("response");
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12, 12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert!(
         response_body_is_compressible(&config, &response).expect("predicate runs"),
         "a comma list of equal members is one length"
@@ -333,21 +352,25 @@ fn the_compressible_window_reads_the_declared_length_through_the_owner() {
 
     // A declaration the owner refuses names no length, so the response
     // declares no size and is not compressed.
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "+12")
-        .body(Body::empty())
-        .expect("response");
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "+12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert!(!response_body_is_compressible(&config, &response).expect("predicate runs"));
 
     // Two members that disagree declare no length either.
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12, 13")
-        .body(Body::empty())
-        .expect("response");
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12, 13")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert!(!response_body_is_compressible(&config, &response).expect("predicate runs"));
 }
 
@@ -372,8 +395,7 @@ fn identity_test_config() -> ResponseCompressionModuleConfig {
 fn vary_values(response: &Response<Body>) -> String {
     response
         .headers()
-        .get_all(VARY)
-        .iter()
+        .get_all(&ord(VARY))
         .filter_map(|value| value.to_str().ok())
         .collect::<Vec<_>>()
         .join(", ")
@@ -390,25 +412,27 @@ fn identity_response_carries_vary_when_compression_negotiable() {
         .header(http::header::ACCEPT_ENCODING, "gzip;q=0")
         .body(Body::empty())
         .expect("request");
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .header(http::header::CACHE_CONTROL, "public, max-age=60")
-        .body(Body::empty())
-        .expect("response");
+    let mut response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .header(http::header::CACHE_CONTROL, "public, max-age=60")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert_eq!(
         select_response_encoding(request.method(), request.headers(), &config, &response)
             .expect("select encoding"),
         None
     );
     // Selection alone leaves identity unmarked: the old observable gap.
-    assert!(!response.headers().contains_key(VARY));
+    assert!(!response.headers().contains_key(&ord(VARY)));
     mark_identity_variant(&config, &mut response).expect("mark identity");
     assert!(
         vary_values(&response).contains("accept-encoding"),
         "identity needs Vary, got {:?}",
-        response.headers().get_all(VARY)
+        response.headers().get_all(&ord(VARY)).collect::<Vec<_>>()
     );
 }
 
@@ -416,25 +440,29 @@ fn identity_response_carries_vary_when_compression_negotiable() {
 async fn absent_accept_encoding_identity_response_marks_downstream_cache_variant() {
     let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
     let ctx = super::super::tests::module_test_context();
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .header(http::header::CACHE_CONTROL, "public, max-age=60")
-        .body(Body::from("hello world!"))
-        .expect("response");
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .header(http::header::CACHE_CONTROL, "public, max-age=60")
+            .body(Body::from("hello world!"))
+            .expect("response"),
+    );
 
     let identity = module
         .compress(&ctx, response)
         .await
         .expect("identity response");
-    assert!(!identity.headers().contains_key(CONTENT_ENCODING));
+    assert!(!identity.headers().contains_key(&ord(CONTENT_ENCODING)));
     assert!(
         vary_values(&identity).contains("accept-encoding"),
         "identity response must prevent a downstream cache from masking a later compressed variant"
     );
     assert_eq!(
-        to_bytes(identity.into_body()).await.expect("identity body"),
+        to_bytes(identity.into_head_and_body().1)
+            .await
+            .expect("identity body"),
         "hello world!"
     );
 }
@@ -444,22 +472,26 @@ async fn absent_accept_encoding_does_not_mark_ineligible_or_no_transform_identit
     let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
     let ctx = super::super::tests::module_test_context();
     let controls = [
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "image/png")
-            .header(CONTENT_LENGTH, "12")
-            .body(Body::from("hello world!"))
-            .expect("ineligible response"),
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "text/plain")
-            .header(CONTENT_LENGTH, "12")
-            .header(
-                http::header::CACHE_CONTROL,
-                "public, no-transform, max-age=60",
-            )
-            .body(Body::from("hello world!"))
-            .expect("no-transform response"),
+        Response::from_http(
+            HttpResponse::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "image/png")
+                .header(CONTENT_LENGTH, "12")
+                .body(Body::from("hello world!"))
+                .expect("ineligible response"),
+        ),
+        Response::from_http(
+            HttpResponse::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/plain")
+                .header(CONTENT_LENGTH, "12")
+                .header(
+                    http::header::CACHE_CONTROL,
+                    "public, no-transform, max-age=60",
+                )
+                .body(Body::from("hello world!"))
+                .expect("no-transform response"),
+        ),
     ];
 
     for response in controls {
@@ -468,7 +500,7 @@ async fn absent_accept_encoding_does_not_mark_ineligible_or_no_transform_identit
             .await
             .expect("identity response");
         assert!(
-            !identity.headers().contains_key(VARY),
+            !identity.headers().contains_key(&ord(VARY)),
             "ineligible identity response should preserve its original Vary behavior"
         );
     }
@@ -478,27 +510,31 @@ async fn absent_accept_encoding_does_not_mark_ineligible_or_no_transform_identit
 fn identity_response_keeps_fast_path_when_nothing_negotiable() {
     let config = identity_test_config();
     // Non-compressible body: negotiation cannot change the output.
-    let mut image = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "image/png")
-        .header(CONTENT_LENGTH, "12")
-        .body(Body::empty())
-        .expect("response");
+    let mut image = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "image/png")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     mark_identity_variant(&config, &mut image).expect("mark identity");
-    assert!(!image.headers().contains_key(VARY));
+    assert!(!image.headers().contains_key(&ord(VARY)));
     // Nothing enabled: even a compressible body stays untouched.
     let disabled = ResponseCompressionModuleConfig {
         gzip: false,
         ..identity_test_config()
     };
-    let mut text = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .body(Body::empty())
-        .expect("response");
+    let mut text = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     mark_identity_variant(&disabled, &mut text).expect("mark identity");
-    assert!(!text.headers().contains_key(VARY));
+    assert!(!text.headers().contains_key(&ord(VARY)));
 }
 
 #[test]
@@ -514,12 +550,14 @@ fn identity_response_carries_dictionary_vary_when_dictionary_configured() {
         }),
         ..identity_test_config()
     };
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .body(Body::empty())
-        .expect("response");
+    let mut response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     mark_identity_variant(&config, &mut response).expect("mark identity");
     let vary = vary_values(&response);
     for token in ["accept-encoding", "available-dictionary", "dictionary-id"] {
@@ -546,12 +584,14 @@ fn explicit_identity_quality_beats_lower_encoding() {
         .header(http::header::ACCEPT_ENCODING, "gzip;q=0.1, identity;q=1")
         .body(Body::empty())
         .expect("request");
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(CONTENT_TYPE, "text/plain")
-        .header(CONTENT_LENGTH, "12")
-        .body(Body::empty())
-        .expect("response");
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
     assert_eq!(
         select_response_encoding(request.method(), request.headers(), &config, &response)
             .expect("select encoding"),
@@ -568,12 +608,14 @@ fn higher_encoding_quality_beats_identity() {
             .header(http::header::ACCEPT_ENCODING, accept)
             .body(Body::empty())
             .expect("request");
-        let response = Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "text/plain")
-            .header(CONTENT_LENGTH, "12")
-            .body(Body::empty())
-            .expect("response");
+        let response = Response::from_http(
+            HttpResponse::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/plain")
+                .header(CONTENT_LENGTH, "12")
+                .body(Body::empty())
+                .expect("response"),
+        );
         assert_eq!(
             select_response_encoding(request.method(), request.headers(), &config, &response)
                 .expect("select encoding"),
@@ -587,7 +629,7 @@ fn response_with_digests(
     body: &'static str,
     cache_control: Option<&'static str>,
 ) -> Response<Body> {
-    let mut builder = Response::builder()
+    let mut builder = HttpResponse::builder()
         .status(StatusCode::OK)
         .header(CONTENT_TYPE, "text/plain")
         .header(CONTENT_LENGTH, body.len().to_string())
@@ -602,24 +644,24 @@ fn response_with_digests(
     if let Some(cache_control) = cache_control {
         builder = builder.header(http::header::CACHE_CONTROL, cache_control);
     }
-    builder.body(Body::from(body)).expect("response")
+    Response::from_http(builder.body(Body::from(body)).expect("response"))
 }
 
-fn assert_digest_fields_present(headers: &HeaderMap) {
-    assert!(headers.contains_key(CONTENT_DIGEST.clone()));
-    assert!(headers.contains_key(REPR_DIGEST.clone()));
+fn assert_digest_fields_present(headers: &Headers) {
+    assert!(headers.contains_key(&ord(CONTENT_DIGEST.clone())));
+    assert!(headers.contains_key(&ord(REPR_DIGEST.clone())));
 }
 
-fn assert_digest_fields_absent(headers: &HeaderMap) {
-    assert!(!headers.contains_key(CONTENT_DIGEST.clone()));
-    assert!(!headers.contains_key(REPR_DIGEST.clone()));
+fn assert_digest_fields_absent(headers: &Headers) {
+    assert!(!headers.contains_key(&ord(CONTENT_DIGEST.clone())));
+    assert!(!headers.contains_key(&ord(REPR_DIGEST.clone())));
 }
 
 fn compression_context(accept_encoding: &str) -> HttpModuleContext {
     let mut ctx = super::super::tests::module_test_context();
-    let mut headers = HeaderMap::new();
+    let mut headers = Headers::new();
     headers.insert(
-        ACCEPT_ENCODING,
+        ord(ACCEPT_ENCODING),
         HeaderValue::from_str(accept_encoding).expect("encoding"),
     );
     ctx.extensions_mut().insert(CompressionRequest {
@@ -637,11 +679,11 @@ async fn ordinary_compression_drops_both_digest_fields_from_transformed_headers(
 
     let compressed = module.compress(&ctx, response).await.expect("compression");
     assert_eq!(
-        compressed.headers().get(CONTENT_ENCODING),
+        compressed.headers().get(&ord(CONTENT_ENCODING)),
         Some(&HeaderValue::from_static("gzip"))
     );
     assert_digest_fields_absent(compressed.headers());
-    let compressed_body = to_bytes(compressed.into_body())
+    let compressed_body = to_bytes(compressed.into_head_and_body().1)
         .await
         .expect("compressed body");
     assert!(!compressed_body.is_empty());
@@ -678,27 +720,35 @@ async fn dictionary_compression_drops_both_digest_fields_and_no_transform_preser
     );
     request_headers.insert("dictionary-id", HeaderValue::from_static("\"example\""));
 
+    let marker = Arc::new(23_usize);
+    let mut response = response_with_digests("frequent words from a response", None);
+    *response.version_mut() = http::Version::HTTP_2;
+    *response.status_mut() = StatusCode::ACCEPTED;
+    response.extensions_mut().insert(marker.clone());
     let compressed = module
-        .compress_with_dictionary(
-            &ctx,
-            &Method::GET,
-            &request_headers,
-            response_with_digests("frequent words from a response", None),
-        )
+        .compress_with_dictionary(&ctx, &Method::GET, &request_headers, response)
         .await
         .expect("dictionary compression");
     let DictionaryCompressionOutcome::Compressed(compressed) = compressed else {
         panic!("dictionary should be selected");
     };
     assert_eq!(
-        compressed.headers().get(CONTENT_ENCODING),
+        compressed.headers().get(&ord(CONTENT_ENCODING)),
         Some(&HeaderValue::from_static("dcb"))
     );
+    assert_eq!(compressed.status(), StatusCode::ACCEPTED);
+    assert_eq!(compressed.version(), http::Version::HTTP_2);
+    assert!(Arc::ptr_eq(
+        compressed.extensions().get::<Arc<usize>>().unwrap(),
+        &marker
+    ));
     assert_digest_fields_absent(compressed.headers());
-    let compressed_length = declared_content_length(compressed.headers())
+    let compressed_length = compressed
+        .headers()
+        .declared_content_length()
         .expect("dictionary compression sets a readable length")
         .expect("dictionary compression declares a length");
-    let compressed_body = to_bytes(compressed.into_body())
+    let compressed_body = to_bytes(compressed.into_head_and_body().1)
         .await
         .expect("dictionary body");
     assert_eq!(
@@ -729,17 +779,19 @@ async fn dictionary_compression_drops_both_digest_fields_and_no_transform_preser
     };
     assert_digest_fields_present(unchanged.headers());
     assert!(
-        !unchanged.headers().contains_key(CONTENT_ENCODING),
+        !unchanged.headers().contains_key(&ord(CONTENT_ENCODING)),
         "no-transform dictionary response must stay identity"
     );
     assert_eq!(
-        declared_content_length(unchanged.headers())
+        unchanged
+            .headers()
+            .declared_content_length()
             .expect("no-transform preserves a readable length")
             .expect("no-transform preserves a length"),
         u64::try_from("frequent words from a response".len()).expect("origin length"),
         "no-transform must preserve the origin length"
     );
-    let unchanged_body = to_bytes(unchanged.into_body())
+    let unchanged_body = to_bytes(unchanged.into_head_and_body().1)
         .await
         .expect("no-transform body");
     assert_eq!(
@@ -761,9 +813,9 @@ async fn identity_and_no_transform_responses_preserve_both_digest_fields() {
             .compress(&ctx, response)
             .await
             .expect("unchanged response");
-        assert!(!unchanged.headers().contains_key(CONTENT_ENCODING));
+        assert!(!unchanged.headers().contains_key(&ord(CONTENT_ENCODING)));
         assert_digest_fields_present(unchanged.headers());
-        let body = to_bytes(unchanged.into_body())
+        let body = to_bytes(unchanged.into_head_and_body().1)
             .await
             .expect("identity body");
         assert_eq!(body, "hello world!");
@@ -781,14 +833,16 @@ async fn ordinary_compression_strips_length_and_etag_unless_no_transform() {
     const BODY: &str = "hello world! hello world! hello world! hello world! ";
     const ETAG_VALUE: &str = "\"synthetic-etag\"";
     fn origin_response(cache_control: &'static str) -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(CONTENT_TYPE, "text/plain")
-            .header(CONTENT_LENGTH, BODY.len().to_string())
-            .header(ETAG, ETAG_VALUE)
-            .header(http::header::CACHE_CONTROL, cache_control)
-            .body(Body::from(BODY))
-            .expect("response")
+        Response::from_http(
+            HttpResponse::builder()
+                .status(StatusCode::OK)
+                .header(CONTENT_TYPE, "text/plain")
+                .header(CONTENT_LENGTH, BODY.len().to_string())
+                .header(ETAG, ETAG_VALUE)
+                .header(http::header::CACHE_CONTROL, cache_control)
+                .body(Body::from(BODY))
+                .expect("response"),
+        )
     }
 
     let module = ResponseCompressionModule::new(identity_test_config()).expect("module");
@@ -800,23 +854,23 @@ async fn ordinary_compression_strips_length_and_etag_unless_no_transform() {
         .await
         .expect("compression");
     assert_eq!(
-        compressed.headers().get(CONTENT_ENCODING),
+        compressed.headers().get(&ord(CONTENT_ENCODING)),
         Some(&HeaderValue::from_static("gzip")),
         "eligible response must gain content encoding"
     );
     assert!(
-        !compressed.headers().contains_key(CONTENT_LENGTH),
+        !compressed.headers().contains_content_length(),
         "ordinary compression must strip content length"
     );
     assert!(
-        !compressed.headers().contains_key(ETAG),
+        !compressed.headers().contains_key(&ord(ETAG)),
         "ordinary compression must strip etag"
     );
     assert!(
         vary_values(&compressed).contains("accept-encoding"),
         "compressed variant must carry Vary"
     );
-    let compressed_body = to_bytes(compressed.into_body())
+    let compressed_body = to_bytes(compressed.into_head_and_body().1)
         .await
         .expect("compressed body");
     assert!(
@@ -845,26 +899,28 @@ async fn ordinary_compression_strips_length_and_etag_unless_no_transform() {
         .await
         .expect("unchanged response");
     assert!(
-        !unchanged.headers().contains_key(CONTENT_ENCODING),
+        !unchanged.headers().contains_key(&ord(CONTENT_ENCODING)),
         "no-transform response must not gain content encoding"
     );
     assert_eq!(
-        declared_content_length(unchanged.headers())
+        unchanged
+            .headers()
+            .declared_content_length()
             .expect("no-transform preserves a readable length")
             .expect("no-transform preserves a length"),
         u64::try_from(BODY.len()).expect("origin length"),
         "no-transform must preserve the origin length"
     );
     assert_eq!(
-        unchanged.headers().get(ETAG),
+        unchanged.headers().get(&ord(ETAG)),
         Some(&HeaderValue::from_static(ETAG_VALUE)),
         "no-transform must preserve the origin etag"
     );
     assert!(
-        !unchanged.headers().contains_key(VARY),
+        !unchanged.headers().contains_key(&ord(VARY)),
         "no-transform identity must not gain Vary"
     );
-    let unchanged_body = to_bytes(unchanged.into_body())
+    let unchanged_body = to_bytes(unchanged.into_head_and_body().1)
         .await
         .expect("identity body");
     assert_eq!(
@@ -872,4 +928,79 @@ async fn ordinary_compression_strips_length_and_etag_unless_no_transform() {
         BODY.as_bytes(),
         "no-transform must preserve the origin body"
     );
+}
+
+#[tokio::test]
+async fn owned_compression_preserves_metadata_trailers_and_body_errors() {
+    use bytes::Bytes;
+    use http_body_util::BodyExt as _;
+    use std::io::Read as _;
+
+    let module = ResponseCompressionModule::new(identity_test_config()).unwrap();
+    for abort in [false, true] {
+        let body = if abort {
+            let (mut sender, body) = Body::channel();
+            sender.abort();
+            body
+        } else {
+            let mut trailers = HeaderMap::new();
+            trailers.append("x-trailer", HeaderValue::from_static("first"));
+            trailers.append("x-trailer", HeaderValue::from_static("second"));
+            trailers.insert(CONTENT_DIGEST.clone(), HeaderValue::from_static("stale"));
+            trailers.insert(REPR_DIGEST.clone(), HeaderValue::from_static("stale"));
+            Body::replay_chunks(
+                vec![Bytes::from_static(b"hello "), Bytes::from_static(b"world!")],
+                Some(trailers),
+            )
+        };
+        let marker = Arc::new(42_usize);
+        let mut response = response_with_digests("hello world!", None).map_body(|_| body);
+        *response.status_mut() = StatusCode::ACCEPTED;
+        *response.version_mut() = http::Version::HTTP_2;
+        response.extensions_mut().insert(marker.clone());
+        let name = ord(http::HeaderName::from_static("x-opaque"));
+        let mut opaque = HeaderValue::from_bytes(b"\x80opaque").unwrap();
+        opaque.set_sensitive(true);
+        response.headers_mut().append(name.clone(), opaque);
+        response
+            .headers_mut()
+            .append(name.clone(), HeaderValue::from_static("second"));
+        let compressed = module
+            .compress(&compression_context("gzip"), response)
+            .await
+            .unwrap();
+        assert_eq!(compressed.status(), StatusCode::ACCEPTED);
+        assert_eq!(compressed.version(), http::Version::HTTP_2);
+        assert!(Arc::ptr_eq(
+            compressed.extensions().get::<Arc<usize>>().unwrap(),
+            &marker
+        ));
+        let values = compressed.headers().get_all(&name).collect::<Vec<_>>();
+        assert_eq!(values[0].as_bytes(), b"\x80opaque");
+        assert!(values[0].is_sensitive());
+        assert_eq!(values[1], "second");
+        assert!(!compressed.headers().contains_content_length());
+        let collected = compressed.into_head_and_body().1.collect().await;
+        if abort {
+            assert!(
+                collected.is_err(),
+                "an aborted origin must not become successful compressed EOF"
+            );
+        } else {
+            let collected = collected.unwrap();
+            let trailers = collected.trailers().unwrap();
+            assert_eq!(
+                trailers.get_all("x-trailer").iter().collect::<Vec<_>>(),
+                ["first", "second"]
+            );
+            assert!(!trailers.contains_key(CONTENT_DIGEST.clone()));
+            assert!(!trailers.contains_key(REPR_DIGEST.clone()));
+            let bytes = collected.to_bytes();
+            let mut decoded = String::new();
+            flate2::read::GzDecoder::new(bytes.as_ref())
+                .read_to_string(&mut decoded)
+                .unwrap();
+            assert_eq!(decoded, "hello world!");
+        }
+    }
 }

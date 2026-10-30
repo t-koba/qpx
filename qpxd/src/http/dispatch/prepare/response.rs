@@ -58,7 +58,7 @@ pub(crate) async fn prepare_http_module_local_response(
     audit: &DispatchAuditContext,
 ) -> Result<OwnerResponse<Body>> {
     let mut response = http_modules
-        .prepare_downstream_response(OwnerResponse::from_http(response.into_inner()))
+        .prepare_downstream_response(response.into_owner())
         .await?;
     finalize_response_with_headers_in_place(
         request_method,

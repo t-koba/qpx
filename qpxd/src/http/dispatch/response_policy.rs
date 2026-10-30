@@ -84,13 +84,10 @@ impl ResponseTransform for ListenerResponsePolicyDecision {
                 headers,
                 policy_tags,
             } => {
-                let response = ctx
+                let mut response = ctx
                     .http_modules
-                    .prepare_downstream_response(response)
+                    .prepare_downstream_response(OwnerResponse::from_http(response))
                     .await?;
-                // Generated responses stay standard through the local builder/module hook.
-                // Carry the owner from this module boundary through finalization and egress.
-                let mut response = OwnerResponse::from_http(response);
                 finalize_response_with_headers_in_place(
                     ctx.request_method,
                     ctx.request_version,

@@ -102,27 +102,116 @@ async fn initial_subrequest_private_ip_check_rejects_loopback_target() {
 fn the_declared_response_length_is_read_through_the_owner() {
     // A comma list of equal members is one length, so a response that
     // declares a length over the limit is over it.
-    let mut headers = HeaderMap::new();
-    headers.append(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_static("100, 100"),
-    );
+    let mut headers = Headers::new();
+    headers.append_content_length_value(http::HeaderValue::from_static("100, 100"));
     assert!(response_exceeds_max_response_bytes(&headers, 64));
 
     // A declaration the owner refuses names no length, so the check does
     // not fire and the body is cut to the limit instead.
-    let mut headers = HeaderMap::new();
-    headers.append(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_static("+100"),
-    );
+    let mut headers = Headers::new();
+    headers.append_content_length_value(http::HeaderValue::from_static("+100"));
     assert!(!response_exceeds_max_response_bytes(&headers, 64));
 
     // A declared length within the limit is not over it.
-    let mut headers = HeaderMap::new();
-    headers.append(
-        http::header::CONTENT_LENGTH,
-        http::HeaderValue::from_static("64"),
-    );
+    let mut headers = Headers::new();
+    headers.append_content_length_value(http::HeaderValue::from_static("64"));
     assert!(!response_exceeds_max_response_bytes(&headers, 64));
+}
+
+#[test]
+fn owned_subresponse_copies_first_literal_field_and_preserves_pending_order() {
+    let module = SubrequestModule::new(
+        serde_yaml::from_str(
+            r#"
+name: capture
+phase: request_headers
+url: https://auth.example.com/check
+allowed_schemes: [https]
+allowed_hosts: [auth.example.com]
+max_response_bytes: 1024
+copy_response_headers_to_request:
+  - {from: content-length, to: x-length}
+  - {from: x-opaque, to: content-length}
+  - {from: x-missing, to: x-keep}
+copy_response_headers_to_response:
+  - {from: content-length, to: x-length}
+  - {from: x-opaque, to: content-length}
+  - {from: x-missing, to: x-keep}
+"#,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    let mut source = hyper::Response::new(Body::empty());
+    let mut length = HeaderValue::from_static("0007");
+    length.set_sensitive(true);
+    source
+        .headers_mut()
+        .append(http::header::CONTENT_LENGTH, length);
+    source
+        .headers_mut()
+        .append(http::header::CONTENT_LENGTH, HeaderValue::from_static("8"));
+    let mut opaque = HeaderValue::from_bytes(b"\x80opaque").unwrap();
+    opaque.set_sensitive(true);
+    source.headers_mut().insert("x-opaque", opaque.clone());
+    let source = Response::from_http(source); // Simulated subrequest client ingress.
+    let mut ctx = crate::http::modules::tests::module_test_context();
+    let mut request = OwnerRequest::new(Body::empty());
+    request.headers_mut().insert(
+        OrdinaryHeaderName::try_from("x-keep").unwrap(),
+        HeaderValue::from_static("keep"),
+    );
+    ctx.sync_frozen_request(&request);
+    ctx.queue_response_header(
+        HeaderName::from_static("x-length"),
+        HeaderValue::from_static("before"),
+    );
+    module.apply_request_response_headers(
+        &source,
+        &mut ctx,
+        &mut HttpModuleRequest::new(&mut request),
+    );
+    let frozen = &ctx.session.request.as_ref().unwrap().headers;
+    let copied = frozen
+        .get(&OrdinaryHeaderName::try_from("x-length").unwrap())
+        .unwrap();
+    assert_eq!(copied, "0007");
+    assert!(copied.is_sensitive());
+    assert!(frozen.declared_content_length().is_err());
+    assert_eq!(request.headers(), frozen);
+
+    // Captured fields and caller-supplied literals share the same ordered queue.
+    ctx.queue_response_header(
+        HeaderName::from_static("x-length"),
+        HeaderValue::from_static("after"),
+    );
+    let mut response =
+        HttpModuleResponse::new(http::StatusCode::OK, crate::http::modules::Body::empty());
+    response.set_header(
+        HeaderName::from_static("x-keep"),
+        HeaderValue::from_static("keep"),
+    );
+    ctx.apply_pending_response_headers(response.as_owner_mut());
+    let raw = response.into_owner().into_http_for_library(); // Assertion boundary only.
+    assert_eq!(raw.headers()["x-length"], "after");
+    assert_eq!(raw.headers()["x-keep"], "keep");
+    assert_eq!(raw.headers()[http::header::CONTENT_LENGTH], opaque);
+    assert!(raw.headers()[http::header::CONTENT_LENGTH].is_sensitive());
+
+    let mut response = HttpModuleResponse::new(
+        http::StatusCode::ACCEPTED,
+        crate::http::modules::Body::empty(),
+    );
+    response.set_header(
+        HeaderName::from_static("x-keep"),
+        HeaderValue::from_static("keep"),
+    );
+    module.apply_subrequest_response_headers(&source, &mut ctx, &mut response);
+    let raw = response.into_owner().into_http_for_library();
+    assert_eq!(raw.status(), http::StatusCode::ACCEPTED);
+    assert_eq!(raw.headers()["x-length"], "0007");
+    assert!(raw.headers()["x-length"].is_sensitive());
+    assert_eq!(raw.headers()[http::header::CONTENT_LENGTH], opaque);
+    assert!(raw.headers()[http::header::CONTENT_LENGTH].is_sensitive());
+    assert_eq!(raw.headers()["x-keep"], "keep");
 }

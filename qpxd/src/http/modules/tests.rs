@@ -54,6 +54,10 @@ fn module_test_runtime() -> Runtime {
 }
 
 pub(super) fn module_test_context() -> HttpModuleContext {
+    module_test_context_with_identity(Some("alice"))
+}
+
+pub(super) fn module_test_context_with_identity(identity_user: Option<&str>) -> HttpModuleContext {
     HttpModuleContext::new(
         module_test_runtime().state(),
         HttpModuleSessionInit {
@@ -63,7 +67,7 @@ pub(super) fn module_test_context() -> HttpModuleContext {
             route_name: Some("test-route"),
             remote_ip: "127.0.0.1".parse::<IpAddr>().expect("ip"),
             sni: Some("example.com"),
-            identity_user: Some("alice"),
+            identity_user,
             cache_policy: None,
             cache_default_scheme: None,
         },
@@ -691,10 +695,9 @@ fn event_facade_response_mutations_preserve_same_name_value_order() {
         HeaderValue::from_static("two"),
     );
     let values: Vec<_> = response
-        .as_inner_mut()
+        .as_owner_mut()
         .headers()
-        .get_all("x-event")
-        .iter()
+        .get_all(&OrdinaryHeaderName::try_from(HeaderName::from_static("x-event")).unwrap())
         .map(|value| value.to_str().expect("value").to_owned())
         .collect();
     assert_eq!(values, vec!["one".to_owned(), "two".to_owned()]);
@@ -705,10 +708,9 @@ fn event_facade_response_mutations_preserve_same_name_value_order() {
         HeaderValue::from_static("three"),
     );
     let values: Vec<_> = response
-        .as_inner_mut()
+        .as_owner_mut()
         .headers()
-        .get_all("x-event")
-        .iter()
+        .get_all(&OrdinaryHeaderName::try_from(HeaderName::from_static("x-event")).unwrap())
         .map(|value| value.to_str().expect("value").to_owned())
         .collect();
     assert_eq!(values, vec!["three".to_owned()]);
@@ -767,7 +769,7 @@ fn event_facade_header_mutations_preserve_obs_text_bytes() {
         name.clone(),
         HeaderValue::from_bytes(second).expect("valid obs-text"),
     );
-    let raw = response.into_inner();
+    let raw = response.into_owner().into_http_for_library();
     let values: Vec<_> = raw
         .headers()
         .get_all(&name)
@@ -858,7 +860,7 @@ async fn module_body_reentry_preserves_an_observed_stream_error() {
     assert_eq!(observed.to_string(), "body aborted");
 
     response.set_body(body);
-    let mut response = response.into_inner();
+    let mut response = response.into_owner().into_http_for_library();
     crate::http::protocol::l7::finalize_response_in_place(
         &Method::GET,
         http::Version::HTTP_11,
@@ -1364,7 +1366,7 @@ fn module_test_trailers() -> super::Trailers {
 }
 
 async fn assert_module_finalized_trailers(response: super::HttpModuleResponse) {
-    let mut response = response.into_inner();
+    let mut response = response.into_owner().into_http_for_library();
     assert!(
         !response.body().trailers_are_sanitized(),
         "module re-entry must clear trust"
@@ -1455,7 +1457,7 @@ async fn module_forwarded_transport_sanitized_assertion_is_not_trusted() {
             let mut response = HttpModuleResponse::from_inner(hyper::Response::new(raw));
             let body = response.take_body();
             response.set_body(body);
-            assert!(!response.as_inner_mut().body().trailers_are_sanitized());
+            assert!(!response.as_owner_mut().body().trailers_are_sanitized());
             response.take_body()
         };
         assert_module_finalized_trailers(HttpModuleResponse::new(StatusCode::OK, body)).await;
@@ -1469,14 +1471,14 @@ fn module_untouched_internal_response_preserves_transport_trust_and_timeout() {
         .mark_read_timeout_enforced();
     let mut response = super::HttpModuleResponse::from_inner(hyper::Response::new(raw));
     response.set_status(StatusCode::CREATED);
-    let response = response.into_inner();
+    let response = response.into_owner().into_http_for_library();
     assert!(response.body().trailers_are_sanitized());
     assert!(response.body().read_timeout_is_enforced());
 
     let mut response = super::HttpModuleResponse::from_inner(response);
     let body = response.take_body();
     response.set_body(body);
-    let response = response.into_inner();
+    let response = response.into_owner().into_http_for_library();
     assert!(!response.body().trailers_are_sanitized());
     assert!(response.body().read_timeout_is_enforced());
 }
@@ -1488,7 +1490,9 @@ async fn module_body_finalization_preserves_idle_timeout_and_abort() {
     use std::task::{Context, Poll, Waker};
 
     let (mut sender, body) = ModuleBody::channel_with_capacity(1);
-    let mut response = HttpModuleResponse::new(StatusCode::OK, body).into_inner();
+    let mut response = HttpModuleResponse::new(StatusCode::OK, body)
+        .into_owner()
+        .into_http_for_library();
     crate::http::protocol::l7::finalize_response_in_place(
         &Method::GET,
         http::Version::HTTP_11,
@@ -1511,7 +1515,9 @@ async fn module_body_finalization_preserves_idle_timeout_and_abort() {
 
     let (mut sender, body) = ModuleBody::channel();
     sender.abort();
-    let mut response = HttpModuleResponse::new(StatusCode::OK, body).into_inner();
+    let mut response = HttpModuleResponse::new(StatusCode::OK, body)
+        .into_owner()
+        .into_http_for_library();
     crate::http::protocol::l7::finalize_response_in_place(
         &Method::GET,
         http::Version::HTTP_11,
@@ -1549,7 +1555,7 @@ fn module_body_bridge_retains_transport_resources_until_drop() {
     let mut response = super::HttpModuleResponse::from_inner(hyper::Response::new(body));
     let body = response.take_body();
     response.set_body(body);
-    let response = response.into_inner();
+    let response = response.into_owner().into_http_for_library();
     assert_eq!(drops.load(Ordering::SeqCst), 0);
     drop(response);
     assert_eq!(drops.load(Ordering::SeqCst), 1);
@@ -2045,32 +2051,36 @@ impl HttpModule for ResponseBoundaryFactory {
             _ => panic!("unexpected event"),
         };
         assert_ne!(self.phase, 0, "inapplicable module must not run");
-        let raw = response.as_inner_mut();
-        let mut expected = self.framing.clone();
-        if self.phase == 2 {
-            expected.push("module-invalid");
+        assert_eq!(context.response_status(), Some(response.status()));
+        let raw = response.as_owner_mut();
+        let mut expected = qpx_core::http_message::Headers::new();
+        for value in self
+            .framing
+            .iter()
+            .copied()
+            .chain((self.phase == 2).then_some("module-invalid"))
+        {
+            let mut value = HeaderValue::from_static(value);
+            value.set_sensitive(true);
+            expected.append_content_length_value(value);
         }
         assert_eq!(
-            raw.headers()
-                .get_all(http::header::CONTENT_LENGTH)
-                .iter()
-                .map(|value| (value.as_bytes(), value.is_sensitive()))
-                .collect::<Vec<_>>(),
-            expected
-                .iter()
-                .map(|value| (value.as_bytes(), true))
-                .collect::<Vec<_>>()
+            raw.headers().view().vary_selector("content-length"),
+            expected.view().vary_selector("content-length")
         );
         assert_eq!(
             raw.headers()
-                .get_all("x-duplicate")
-                .iter()
+                .get_all(
+                    &OrdinaryHeaderName::try_from(HeaderName::from_static("x-duplicate")).unwrap()
+                )
                 .map(|value| (value.as_bytes(), value.is_sensitive()))
                 .collect::<Vec<_>>(),
             vec![(b"first".as_slice(), false), (b"\x80last".as_slice(), true)]
         );
         assert_eq!(
-            raw.headers()["x-pending"],
+            raw.headers()
+                .get(&OrdinaryHeaderName::try_from(HeaderName::from_static("x-pending")).unwrap())
+                .unwrap(),
             if self.phase == 1 {
                 "initial-last"
             } else {
@@ -2089,7 +2099,7 @@ impl HttpModule for ResponseBoundaryFactory {
             response.append_header(http::header::CONTENT_LENGTH, value);
             response.set_status(StatusCode::ACCEPTED);
             response.set_version(http::Version::HTTP_2);
-            response.as_inner_mut().extensions_mut().insert(1_usize);
+            response.as_owner_mut().extensions_mut().insert(1_usize);
             context.queue_response_header(
                 HeaderName::from_static("x-pending"),
                 HeaderValue::from_static("between"),
@@ -2179,16 +2189,20 @@ async fn check_response_library_boundary<R: super::execution::ModuleResponseCarr
     response.headers_mut().append("x-duplicate", value);
     let response: R = match stage {
         HttpModuleStage::UpstreamResponse => execution
-            .on_upstream_response(R::from_module_response(response))
+            .on_upstream_response(R::from_module_response(
+                qpx_core::http_message::Response::from_http(response),
+            ))
             .await
             .unwrap(),
         HttpModuleStage::DownstreamResponse => execution
-            .prepare_downstream_response(R::from_module_response(response))
+            .prepare_downstream_response(R::from_module_response(
+                qpx_core::http_message::Response::from_http(response),
+            ))
             .await
             .unwrap(),
         _ => unreachable!(),
     };
-    let mut response = response.into_module_response();
+    let mut response = response.into_module_response().into_http_for_library();
     assert_eq!(response.status(), StatusCode::ACCEPTED);
     assert_eq!(response.version(), http::Version::HTTP_2);
     assert_eq!(response.extensions().get::<usize>(), Some(&1));
@@ -2623,4 +2637,57 @@ async fn websocket_owner_preserves_extensions_and_headers_through_both_module_ho
             .unwrap()
             .is_empty()
     );
+}
+
+#[tokio::test]
+async fn owner_response_envelope_and_carrier_preserve_metadata_and_body_trust() {
+    use super::execution::ModuleResponseCarrier;
+    use qpx_core::http_message::Response as OwnerResponse;
+    for framing in [
+        vec![],
+        vec!["0"],
+        vec!["0007", "7"],
+        vec!["invalid"],
+        vec!["7", "8"],
+    ] {
+        let marker = Arc::new(17_usize);
+        let mut raw = Response::new(
+            Body::from("payload")
+                .mark_trailers_sanitized()
+                .mark_read_timeout_enforced(),
+        );
+        *raw.status_mut() = StatusCode::PARTIAL_CONTENT;
+        *raw.version_mut() = http::Version::HTTP_2;
+        raw.extensions_mut().insert(marker.clone());
+        for value in framing {
+            let mut value = HeaderValue::from_static(value);
+            value.set_sensitive(true);
+            raw.headers_mut()
+                .append(http::header::CONTENT_LENGTH, value);
+        }
+        let mut opaque = HeaderValue::from_bytes(b"\x80opaque").unwrap();
+        opaque.set_sensitive(true);
+        raw.headers_mut().append("x-opaque", opaque);
+        raw.headers_mut()
+            .append("x-opaque", HeaderValue::from_static("second"));
+        let owner = OwnerResponse::from_http(raw);
+        let expected = owner.headers().clone();
+        let wrapped = HttpModuleResponse::from_owner(owner.into_module_response());
+        assert_eq!(wrapped.as_view().status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(wrapped.as_view().version(), http::Version::HTTP_2);
+        let owner = OwnerResponse::from_module_response(wrapped.into_owner());
+        assert_eq!(owner.headers(), &expected);
+        assert!(Arc::ptr_eq(
+            owner.extensions().get::<Arc<usize>>().unwrap(),
+            &marker
+        ));
+        assert!(owner.body().trailers_are_sanitized());
+        assert!(owner.body().read_timeout_is_enforced());
+        assert_eq!(
+            qpx_http::body::to_bytes(owner.into_head_and_body().1)
+                .await
+                .unwrap(),
+            "payload"
+        );
+    }
 }

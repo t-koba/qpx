@@ -18,7 +18,8 @@ use http::{Extensions, HeaderName, HeaderValue, Method, StatusCode, Version};
 use hyper::Response;
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_message::{
-    Headers, OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+    HeaderTransferMode, HeaderTransferPatch, Headers, OrdinaryHeaderName, Request as OwnerRequest,
+    Response as OwnerResponse,
 };
 use qpx_http::body::Body;
 use qpxd_cache::{CacheRequestKey, purge_cache_key};
@@ -199,27 +200,27 @@ impl<'a> HttpModuleResponseView<'a> {
     }
 }
 
-/// Private bridge for response hooks. Conversions happen only
-/// when an applicable module is actually called, never for predicate checks.
+/// Private bridge for response hooks. Owned carriers move through callbacks unchanged;
+/// standard carriers import/export only at their explicit library boundary.
 pub(crate) trait ModuleResponseCarrier: ResponseCarrier {
     fn module_view(&self) -> HttpModuleResponseView<'_>;
-    fn insert_pending_header(&mut self, name: HeaderName, value: HeaderValue);
-    fn into_module_response(self) -> Response<Body>;
-    fn from_module_response(response: Response<Body>) -> Self;
+    fn apply_header_patch(&mut self, patch: HeaderTransferPatch);
+    fn into_module_response(self) -> OwnerResponse<Body>;
+    fn from_module_response(response: OwnerResponse<Body>) -> Self;
 }
 
 impl ModuleResponseCarrier for Response<Body> {
     fn module_view(&self) -> HttpModuleResponseView<'_> {
         HttpModuleResponseView::from_response(self)
     }
-    fn insert_pending_header(&mut self, name: HeaderName, value: HeaderValue) {
-        self.headers_mut().insert(name, value);
+    fn apply_header_patch(&mut self, patch: HeaderTransferPatch) {
+        patch.apply_to_http_response(self, HeaderTransferMode::Replace);
     }
-    fn into_module_response(self) -> Response<Body> {
-        self
+    fn into_module_response(self) -> OwnerResponse<Body> {
+        OwnerResponse::from_http(self)
     }
-    fn from_module_response(response: Response<Body>) -> Self {
-        response
+    fn from_module_response(response: OwnerResponse<Body>) -> Self {
+        response.into_http_for_library()
     }
 }
 
@@ -229,19 +230,14 @@ impl ModuleResponseCarrier for OwnerResponse<Body> {
             response: ResponseViewInner::Owned(self),
         }
     }
-    fn insert_pending_header(&mut self, name: HeaderName, value: HeaderValue) {
-        match OrdinaryHeaderName::try_from(name) {
-            Ok(name) => {
-                self.headers_mut().insert(name, value);
-            }
-            Err(_) => self.headers_mut().set_content_length_value(value),
-        }
+    fn apply_header_patch(&mut self, patch: HeaderTransferPatch) {
+        patch.apply(self.headers_mut(), HeaderTransferMode::Replace);
     }
-    fn into_module_response(self) -> Response<Body> {
-        self.into_http_for_library()
+    fn into_module_response(self) -> OwnerResponse<Body> {
+        self
     }
-    fn from_module_response(response: Response<Body>) -> Self {
-        Self::from_http(response)
+    fn from_module_response(response: OwnerResponse<Body>) -> Self {
+        response
     }
 }
 
@@ -439,13 +435,13 @@ impl<'a> HttpModuleRequest<'a> {
 /// }
 /// ```
 pub struct HttpModuleResponse {
-    inner: Response<Body>,
+    inner: OwnerResponse<Body>,
 }
 
 impl HttpModuleResponse {
     /// Builds a short-circuit response from a status and a body.
     pub fn new(status: StatusCode, body: ModuleBody) -> Self {
-        let mut inner = Response::new(body.into_transport());
+        let mut inner = OwnerResponse::new(body.into_transport());
         *inner.status_mut() = status;
         Self { inner }
     }
@@ -472,29 +468,38 @@ impl HttpModuleResponse {
 
     /// Returns a semantic view of this response.
     pub fn as_view(&self) -> HttpModuleResponseView<'_> {
-        HttpModuleResponseView::from_response(&self.inner)
+        self.inner.module_view()
     }
 
     /// Returns whether this response contains the named header.
     pub fn has_header(&self, name: &HeaderName) -> bool {
-        self.inner.headers().contains_key(name)
+        self.as_view().has_header(name)
     }
 
     /// Replaces all values of the named response header.
     pub fn set_header(&mut self, name: HeaderName, value: HeaderValue) {
-        self.inner.headers_mut().insert(name, value);
+        self.inner
+            .apply_header_patch(HeaderTransferPatch::literal(name, value));
     }
 
     /// Appends a value to the named response header, preserving order.
     pub fn append_header(&mut self, name: HeaderName, value: HeaderValue) {
-        self.inner.headers_mut().append(name, value);
+        match OrdinaryHeaderName::try_from(name) {
+            Ok(name) => self.inner.headers_mut().append(name, value),
+            Err(_) => self.inner.headers_mut().append_content_length_value(value),
+        }
     }
 
     /// Removes the named response header, returning whether it was present.
     pub fn remove_header(&mut self, name: &HeaderName) -> bool {
-        let present = self.inner.headers().contains_key(name);
+        let present = self.has_header(name);
         if present {
-            self.inner.headers_mut().remove(name);
+            match OrdinaryHeaderName::try_from(name.clone()) {
+                Ok(name) => {
+                    self.inner.headers_mut().remove(&name);
+                }
+                Err(_) => self.inner.headers_mut().remove_content_length(),
+            }
         }
         present
     }
@@ -509,15 +514,20 @@ impl HttpModuleResponse {
         *self.inner.body_mut() = body.into_transport();
     }
 
+    /// Import a response returned by a network/client library.
     pub(super) fn from_inner(inner: Response<Body>) -> Self {
+        Self::from_owner(OwnerResponse::from_http(inner))
+    }
+
+    pub(crate) fn from_owner(inner: OwnerResponse<Body>) -> Self {
         Self { inner }
     }
 
-    pub(crate) fn into_inner(self) -> Response<Body> {
+    pub(crate) fn into_owner(self) -> OwnerResponse<Body> {
         self.inner
     }
 
-    pub(super) fn as_inner_mut(&mut self) -> &mut Response<Body> {
+    pub(super) fn as_owner_mut(&mut self) -> &mut OwnerResponse<Body> {
         &mut self.inner
     }
 }
@@ -535,7 +545,7 @@ struct HttpModuleSession {
     response_status: Option<StatusCode>,
     cache_policy: Option<CachePolicyConfig>,
     cache_default_scheme: Option<String>,
-    pending_response_headers: Vec<(HeaderName, HeaderValue)>,
+    pending_response_headers: Vec<HeaderTransferPatch>,
     extensions: Extensions,
 }
 
@@ -585,14 +595,9 @@ impl HttpModuleContext {
         true
     }
 
-    pub(super) fn remember_request_header(&mut self, name: HeaderName, value: HeaderValue) {
+    pub(super) fn remember_request_header(&mut self, patch: HeaderTransferPatch) {
         if let Some(request) = self.session.request.as_mut() {
-            match OrdinaryHeaderName::try_from(name) {
-                Ok(name) => {
-                    request.headers.insert(name, value);
-                }
-                Err(_) => request.headers.set_content_length_value(value),
-            }
+            patch.apply(&mut request.headers, HeaderTransferMode::Replace);
         }
     }
 
@@ -601,8 +606,8 @@ impl HttpModuleContext {
     }
 
     fn apply_pending_response_headers<R: ModuleResponseCarrier>(&mut self, response: &mut R) {
-        for (name, value) in self.session.pending_response_headers.drain(..) {
-            response.insert_pending_header(name, value);
+        for patch in self.session.pending_response_headers.drain(..) {
+            response.apply_header_patch(patch);
         }
     }
 
@@ -671,12 +676,14 @@ impl HttpModuleContext {
     /// value. When pending entries are applied, later entries with the same
     /// name replace earlier ones, matching `HeaderMap::insert` semantics.
     pub fn queue_response_header(&mut self, name: HeaderName, value: HeaderValue) {
-        self.session.pending_response_headers.push((name, value));
+        self.session
+            .pending_response_headers
+            .push(HeaderTransferPatch::literal(name, value));
     }
 
     /// Sends a caller-owned absolute-form request, returning an opaque module response.
     ///
-    /// The `OwnerRequest` input is consumed; the returned envelope wraps the raw
+    /// The `OwnerRequest` input is consumed; the returned envelope imports the library
     /// transport response without reading, buffering or cloning its body.
     ///
     /// ```compile_fail
@@ -963,7 +970,7 @@ impl HttpModuleExecution {
                 .call(
                     HttpModuleStage::UpstreamResponse,
                     context,
-                    HttpModuleEvent::UpstreamResponse(HttpModuleResponse::from_inner(
+                    HttpModuleEvent::UpstreamResponse(HttpModuleResponse::from_owner(
                         response.into_module_response(),
                     )),
                 )
@@ -972,8 +979,8 @@ impl HttpModuleExecution {
                 .upstream_response(label)?;
             context.set_response_status(wrapped.status());
             let mut wrapped = wrapped;
-            context.apply_pending_response_headers(wrapped.as_inner_mut());
-            response = R::from_module_response(wrapped.into_inner());
+            context.apply_pending_response_headers(wrapped.as_owner_mut());
+            response = R::from_module_response(wrapped.into_owner());
         }
         Ok(response)
     }
@@ -1003,7 +1010,7 @@ impl HttpModuleExecution {
                 .call(
                     HttpModuleStage::DownstreamResponse,
                     context,
-                    HttpModuleEvent::DownstreamResponse(HttpModuleResponse::from_inner(
+                    HttpModuleEvent::DownstreamResponse(HttpModuleResponse::from_owner(
                         response.into_module_response(),
                     )),
                 )
@@ -1012,8 +1019,8 @@ impl HttpModuleExecution {
                 .downstream_response(label)?;
             context.set_response_status(wrapped.status());
             let mut wrapped = wrapped;
-            context.apply_pending_response_headers(wrapped.as_inner_mut());
-            response = R::from_module_response(wrapped.into_inner());
+            context.apply_pending_response_headers(wrapped.as_owner_mut());
+            response = R::from_module_response(wrapped.into_owner());
         }
         Ok(response)
     }

@@ -8,9 +8,7 @@ use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use cidr::IpCidr;
 use http::{HeaderName, HeaderValue, Method, StatusCode};
-use hyper::Response;
 use qpx_core::config::{CachePurgeModuleConfig, HttpModuleConfig};
-use qpx_http::body::Body;
 use std::sync::Arc;
 
 pub(super) struct CachePurgeModuleFactory;
@@ -77,25 +75,22 @@ impl CachePurgeModule {
         !self.require_identity || ctx.identity_user().is_some()
     }
 
-    fn build_response(&self) -> Response<Body> {
-        let mut response = match Response::builder()
-            .status(self.response_status)
-            .body(Body::from(self.response_body.clone()))
-        {
-            Ok(response) => response,
-            Err(_) => Response::new(Body::from(self.response_body.clone())),
-        };
+    fn build_response(&self) -> HttpModuleResponse {
+        let mut response = HttpModuleResponse::new(
+            self.response_status,
+            super::Body::from(self.response_body.clone()),
+        );
         for (name, value) in &self.response_headers {
-            response.headers_mut().insert(name.clone(), value.clone());
+            response.set_header(name.clone(), value.clone());
         }
         response
     }
 
-    fn build_forbidden_response(&self) -> Response<Body> {
-        Response::builder()
-            .status(StatusCode::FORBIDDEN)
-            .body(Body::from("cache purge requires authorization"))
-            .unwrap_or_else(|_| Response::new(Body::from("cache purge requires authorization")))
+    fn build_forbidden_response(&self) -> HttpModuleResponse {
+        HttpModuleResponse::new(
+            StatusCode::FORBIDDEN,
+            super::Body::from("cache purge requires authorization"),
+        )
     }
 }
 
@@ -140,9 +135,7 @@ impl HttpModule for CachePurgeModule {
         }
         if !self.authorized(ctx) {
             return Ok(HttpModuleEvent::RequestHeadersResult(
-                RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::from_inner(
-                    self.build_forbidden_response(),
-                ))),
+                RequestHeadersOutcome::Respond(Box::new(self.build_forbidden_response())),
             ));
         }
         let key = {
@@ -153,9 +146,84 @@ impl HttpModule for CachePurgeModule {
             let _ = ctx.purge_cache_key(&key).await?;
         }
         Ok(HttpModuleEvent::RequestHeadersResult(
-            RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::from_inner(
-                self.build_response(),
-            ))),
+            RequestHeadersOutcome::Respond(Box::new(self.build_response())),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn generated_purge_responses_keep_configured_literals_and_authorization() {
+        let module = CachePurgeModule::new(
+            serde_yaml::from_str(
+                r#"
+require_identity: true
+response_status: 202
+response_body: purged
+response_headers: {content-length: invalid, x-purge: done}
+"#,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let mut request = qpx_core::http_message::Request::new(qpx_http::body::Body::empty());
+        *request.method_mut() = Method::from_bytes(b"PURGE").unwrap();
+        for authorized in [true, false] {
+            let mut ctx = super::super::tests::module_test_context_with_identity(
+                authorized.then_some("alice"),
+            );
+            let event = module
+                .call(
+                    HttpModuleStage::RequestHeaders,
+                    &mut ctx,
+                    HttpModuleEvent::RequestHeaders(super::super::HttpModuleRequest::new(
+                        &mut request,
+                    )),
+                )
+                .await
+                .unwrap();
+            let RequestHeadersOutcome::Respond(response) =
+                event.request_headers_result("purge").unwrap()
+            else {
+                panic!("must short circuit")
+            };
+            let owner = response.into_owner();
+            assert_eq!(
+                owner.status(),
+                if authorized {
+                    StatusCode::ACCEPTED
+                } else {
+                    StatusCode::FORBIDDEN
+                }
+            );
+            if authorized {
+                assert!(owner.headers().declared_content_length().is_err());
+                assert_eq!(
+                    owner
+                        .headers()
+                        .get(
+                            &qpx_core::http_message::OrdinaryHeaderName::try_from("x-purge")
+                                .unwrap()
+                        )
+                        .unwrap(),
+                    "done"
+                );
+            } else {
+                assert_eq!(owner.headers().declared_content_length().unwrap(), None);
+            }
+            assert_eq!(
+                qpx_http::body::to_bytes(owner.into_head_and_body().1)
+                    .await
+                    .unwrap(),
+                if authorized {
+                    "purged"
+                } else {
+                    "cache purge requires authorization"
+                }
+            );
+        }
     }
 }

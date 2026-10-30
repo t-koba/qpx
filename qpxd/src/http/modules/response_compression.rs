@@ -4,16 +4,15 @@ use super::{
     HttpModuleFactory, HttpModuleRequestView, HttpModuleResponse, HttpModuleResponseView,
     HttpModuleStage, ModuleStages,
 };
-use crate::http::media_type::raw_media_type;
+use crate::http::media_type::{media_type_without_parameters, raw_media_type};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 #[cfg(test)]
 use http::StatusCode;
-use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_LENGTH, CONTENT_RANGE, ETAG, VARY};
+use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, ETAG, VARY};
 use http::{HeaderMap, HeaderValue, Method};
-use hyper::Response;
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
-use qpx_core::http_content_length::declared_content_length;
+use qpx_core::http_message::{Headers, OrdinaryHeaderMut, OrdinaryHeaderName, Response};
 use qpx_http::body::{Body, to_bytes};
 use qpx_http::compression_dictionary::{
     encode_dcb, encode_dcz, parse_available_dictionary, parse_dictionary_id,
@@ -52,28 +51,22 @@ struct ResponseCompressionModule {
 #[derive(Clone)]
 struct CompressionRequest {
     method: Method,
-    headers: HeaderMap,
+    headers: Headers,
 }
 
 impl CompressionRequest {
     fn from_request(request: &qpx_core::http_message::Request<Body>) -> Option<Self> {
-        if !request.headers().contains_key(
-            &qpx_core::http_message::OrdinaryHeaderName::try_from(ACCEPT_ENCODING)
-                .expect("ordinary accept-encoding"),
-        ) {
+        if !request.headers().contains_key(&ord(ACCEPT_ENCODING)) {
             return None;
         }
-        let mut headers = HeaderMap::with_capacity(3);
+        let mut headers = Headers::new();
         for name in [
             ACCEPT_ENCODING,
             http::HeaderName::from_static("available-dictionary"),
             http::HeaderName::from_static("dictionary-id"),
         ] {
-            for value in request.headers().get_all(
-                &qpx_core::http_message::OrdinaryHeaderName::try_from(name.clone())
-                    .expect("ordinary compression header"),
-            ) {
-                headers.append(name.clone(), value.clone());
+            for value in request.headers().get_all(&ord(name.clone())) {
+                headers.append(ord(name.clone()), value.clone());
             }
         }
         Some(Self {
@@ -136,7 +129,7 @@ impl ResponseCompressionModule {
         } else {
             response
         };
-        let Some(encoding) = select_response_encoding_parts(
+        let Some(encoding) = select_response_encoding(
             &compression_request.method,
             &compression_request.headers,
             &self.config,
@@ -150,15 +143,15 @@ impl ResponseCompressionModule {
             mark_identity_variant(&self.config, &mut response)?;
             return Ok(response);
         };
-        let (mut parts, body) = response.into_parts();
-        parts.headers.remove(CONTENT_LENGTH);
-        parts.headers.remove(ETAG);
-        strip_stale_digests(&mut parts.headers);
-        parts.headers.insert(
-            CONTENT_ENCODING,
+        let (mut head, body) = response.into_head_and_body();
+        head.headers_mut().remove_content_length();
+        head.headers_mut().remove(&ord(ETAG));
+        strip_stale_digests(head.headers_mut());
+        head.headers_mut().insert(
+            ord(CONTENT_ENCODING),
             HeaderValue::from_static(encoding.http_name()),
         );
-        append_vary_accept_encoding(&mut parts.headers);
+        append_vary_accept_encoding(head.headers_mut());
         let body_read_timeout = ctx
             .runtime_state()
             .plan
@@ -173,14 +166,14 @@ impl ResponseCompressionModule {
             body_read_timeout,
             ctx.runtime_state().plan.limits.body.body_channel_capacity,
         );
-        Ok(Response::from_parts(parts, body))
+        Ok(head.map_body(|()| body))
     }
 
     async fn compress_with_dictionary(
         &self,
         ctx: &HttpModuleContext,
         request_method: &Method,
-        request_headers: &HeaderMap,
+        request_headers: &impl OrdinaryHeaderMut,
         response: Response<Body>,
     ) -> Result<DictionaryCompressionOutcome> {
         let Some(profile) = self.config.dictionary.as_ref() else {
@@ -195,11 +188,13 @@ impl ResponseCompressionModule {
             ));
         };
         let available = request_headers
-            .get("available-dictionary")
+            .ordinary_values(&ord(http::HeaderName::from_static("available-dictionary")))
+            .next()
             .map(|value| parse_available_dictionary(value.as_bytes()))
             .transpose()?;
         let dictionary_id = request_headers
-            .get("dictionary-id")
+            .ordinary_values(&ord(http::HeaderName::from_static("dictionary-id")))
+            .next()
             .map(|value| parse_dictionary_id(value.as_bytes()))
             .transpose()?;
         let preferences = parse_accept_encoding(request_headers);
@@ -213,7 +208,7 @@ impl ResponseCompressionModule {
         {
             return Ok(DictionaryCompressionOutcome::Unchanged(response));
         }
-        let (mut parts, body) = response.into_parts();
+        let (mut head, body) = response.into_head_and_body();
         let timeout_duration = ctx
             .runtime_state()
             .plan
@@ -233,20 +228,18 @@ impl ResponseCompressionModule {
             "dcz" => encode_dcz(&body, dictionary, self.config.zstd_level)?,
             _ => return Err(anyhow!("unsupported dictionary compression encoding")),
         };
-        parts.headers.remove(ETAG);
-        strip_stale_digests(&mut parts.headers);
-        parts
-            .headers
-            .insert(CONTENT_ENCODING, HeaderValue::from_str(&profile.encoding)?);
-        parts.headers.insert(
-            CONTENT_LENGTH,
-            HeaderValue::from_str(&encoded.len().to_string())?,
+        head.headers_mut().remove(&ord(ETAG));
+        strip_stale_digests(head.headers_mut());
+        head.headers_mut().insert(
+            ord(CONTENT_ENCODING),
+            HeaderValue::from_str(&profile.encoding)?,
         );
-        append_vary_token(&mut parts.headers, "available-dictionary")?;
-        append_vary_token(&mut parts.headers, "dictionary-id")?;
-        append_vary_accept_encoding(&mut parts.headers);
+        head.headers_mut().set_content_length(encoded.len() as u64);
+        append_vary_token(head.headers_mut(), "available-dictionary")?;
+        append_vary_token(head.headers_mut(), "dictionary-id")?;
+        append_vary_accept_encoding(head.headers_mut());
         Ok(DictionaryCompressionOutcome::Compressed(
-            Response::from_parts(parts, Body::from(encoded)),
+            head.map_body(|()| Body::from(encoded)),
         ))
     }
 }
@@ -306,21 +299,11 @@ impl HttpModule for ResponseCompressionModule {
                 HttpModuleStage::DownstreamResponse,
                 HttpModuleEvent::DownstreamResponse(response),
             ) => Ok(HttpModuleEvent::DownstreamResponse(
-                HttpModuleResponse::from_inner(self.compress(ctx, response.into_inner()).await?),
+                HttpModuleResponse::from_owner(self.compress(ctx, response.into_owner()).await?),
             )),
             (_, event) => Ok(event),
         }
     }
-}
-
-#[cfg(test)]
-fn select_response_encoding(
-    request_method: &Method,
-    request_headers: &HeaderMap,
-    config: &ResponseCompressionModuleConfig,
-    response: &Response<Body>,
-) -> Result<Option<ContentEncoding>> {
-    select_response_encoding_parts(request_method, request_headers, config, response)
 }
 
 /// Whether an explicit identity quality outranks an encoding: identity
@@ -330,9 +313,9 @@ fn identity_preferred(encoding_q: i32, identity_q: i32) -> bool {
     identity_q > encoding_q
 }
 
-fn select_response_encoding_parts(
+fn select_response_encoding(
     request_method: &Method,
-    request_headers: &HeaderMap,
+    request_headers: &impl OrdinaryHeaderMut,
     config: &ResponseCompressionModuleConfig,
     response: &Response<Body>,
 ) -> Result<Option<ContentEncoding>> {
@@ -390,13 +373,13 @@ fn response_body_is_compressible(
     response: &Response<Body>,
 ) -> Result<bool> {
     if response_status_has_no_body(response.status(), false)
-        || response.headers().contains_key(CONTENT_ENCODING)
-        || response.headers().contains_key(CONTENT_RANGE)
+        || response.headers().contains_key(&ord(CONTENT_ENCODING))
+        || response.headers().contains_key(&ord(CONTENT_RANGE))
     {
         return Ok(false);
     }
 
-    let Some(content_length) = declared_content_length(response.headers()).ok().flatten() else {
+    let Some(content_length) = response.headers().declared_content_length().ok().flatten() else {
         return Ok(false);
     };
     if content_length < config.min_body_bytes as u64
@@ -409,7 +392,10 @@ fn response_body_is_compressible(
         // carrying Cache-Control: no-transform.
         return Ok(false);
     }
-    if !config.force_compress_event_stream && is_event_stream_headers(response.headers()) {
+    if !config.force_compress_event_stream
+        && compression_media_type(response.headers())
+            .is_some_and(|value| value.eq_ignore_ascii_case("text/event-stream"))
+    {
         return Ok(false);
     }
     if !content_type_allowed(response.headers(), &config.content_types) {
@@ -446,18 +432,19 @@ fn mark_identity_variant(
 /// RFC 9530 §3 defines `Content-Digest` over the message content and `Repr-Digest`
 /// over the selected representation, including its content coding (see also
 /// Appendix B.4). Neither origin value remains valid after compression.
-fn strip_stale_digests(headers: &mut HeaderMap) {
-    headers.remove(CONTENT_DIGEST.clone());
-    headers.remove(REPR_DIGEST.clone());
+fn strip_stale_digests(headers: &mut impl OrdinaryHeaderMut) {
+    headers.ordinary_remove(&ord(CONTENT_DIGEST.clone()));
+    headers.ordinary_remove(&ord(REPR_DIGEST.clone()));
 }
 
-fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
-    if qpx_core::http_token::header_values_contain_token(headers, &VARY, token) {
+fn append_vary_token(headers: &mut impl OrdinaryHeaderMut, token: &str) -> Result<()> {
+    if qpx_core::http_token::value_members(headers.ordinary_values(&ord(VARY)))
+        .any(|member| member.eq_ignore_ascii_case(token))
+    {
         return Ok(());
     }
     let existing = headers
-        .get_all(VARY)
-        .iter()
+        .ordinary_values(&ord(VARY))
         .map(|value| value.to_str())
         .collect::<std::result::Result<Vec<_>, _>>()?
         .join(", ");
@@ -466,19 +453,32 @@ fn append_vary_token(headers: &mut HeaderMap, token: &str) -> Result<()> {
     } else {
         format!("{existing}, {token}")
     };
-    headers.remove(VARY);
-    headers.insert(VARY, HeaderValue::from_str(&value)?);
+    headers.ordinary_remove(&ord(VARY));
+    headers.ordinary_insert(ord(VARY), HeaderValue::from_str(&value)?);
     Ok(())
 }
 
+/// Standard-header predicate retained for the specialized HTTP/3 stream boundary.
 pub(crate) fn is_event_stream_headers(headers: &HeaderMap) -> bool {
     raw_media_type(headers)
         .map(|value| value.eq_ignore_ascii_case("text/event-stream"))
         .unwrap_or(false)
 }
 
-fn content_type_allowed(headers: &HeaderMap, configured: &[String]) -> bool {
-    let Some(content_type) = raw_media_type(headers) else {
+fn ord(name: http::HeaderName) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).expect("ordinary compression header")
+}
+
+fn compression_media_type(headers: &impl OrdinaryHeaderMut) -> Option<&str> {
+    headers
+        .ordinary_values(&ord(http::header::CONTENT_TYPE))
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .map(media_type_without_parameters)
+}
+
+fn content_type_allowed(headers: &impl OrdinaryHeaderMut, configured: &[String]) -> bool {
+    let Some(content_type) = compression_media_type(headers) else {
         return false;
     };
     let mut iter: Box<dyn Iterator<Item = &str>> = if configured.is_empty() {

@@ -12,14 +12,15 @@ use crate::http::modules::{
 use anyhow::{Context, Result, anyhow};
 use async_trait::async_trait;
 use http::header::LOCATION;
-use http::{HeaderMap, HeaderName, HeaderValue, Method};
-use hyper::Response;
+use http::{HeaderName, HeaderValue, Method};
 use qpx_core::config::{
     HeaderCaptureConfig, HttpModuleConfig, SubrequestModuleConfig, SubrequestPhase,
     SubrequestResponseMode,
 };
-use qpx_core::http_content_length::declared_content_length;
-use qpx_core::http_message::{HeaderTransferMode, HeaderTransferPatch, Request as OwnerRequest};
+use qpx_core::http_message::{
+    HeaderTransferMode, HeaderTransferPatch, Headers, OrdinaryHeaderName, Request as OwnerRequest,
+    Response,
+};
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -238,16 +239,23 @@ impl SubrequestModule {
                 None => ctx.send_absolute_request_inner(req).await,
             }
         };
-        let response = timeout(timeout_dur, future)
-            .await
-            .with_context(|| format!("subrequest {} timed out", self.name))?
-            .with_context(|| format!("subrequest {} failed", self.name))?;
+        let response = Response::from_http(
+            timeout(timeout_dur, future)
+                .await
+                .with_context(|| format!("subrequest {} timed out", self.name))?
+                .with_context(|| format!("subrequest {} failed", self.name))?,
+        );
         if self.deny_redirects && response.status().is_redirection() {
             return Err(anyhow!("subrequest {} received a redirect", self.name));
         }
         if self.deny_private_ip_redirects && response.status().is_redirection() {
-            self.validate_redirect_location(response.headers().get(LOCATION), timeout_dur)
-                .await?;
+            self.validate_redirect_location(
+                response
+                    .headers()
+                    .get(&OrdinaryHeaderName::try_from(LOCATION).expect("ordinary location")),
+                timeout_dur,
+            )
+            .await?;
         }
         if response_exceeds_max_response_bytes(response.headers(), self.max_response_bytes) {
             return Err(anyhow!(
@@ -257,7 +265,7 @@ impl SubrequestModule {
         }
         let max_response_bytes = self.max_response_bytes;
         let name = self.name.clone();
-        Ok(response.map(move |body| {
+        Ok(response.map_body(move |body| {
             limit_subrequest_response_body(body, max_response_bytes, timeout_dur, name)
         }))
     }
@@ -340,15 +348,21 @@ impl SubrequestModule {
         req: &mut HttpModuleRequest<'_>,
     ) {
         for (from, to) in &self.copy_to_request {
-            if let Some(value) = subresponse.headers().get(from) {
-                req.set_header(to.clone(), value.clone());
-                ctx.remember_request_header(to.clone(), value.clone());
-            }
+            let patch =
+                HeaderTransferPatch::from_owned_response(subresponse, from.clone(), to.clone());
+            patch
+                .clone()
+                .apply(req.inner.headers_mut(), HeaderTransferMode::Replace);
+            ctx.remember_request_header(patch);
         }
         for (from, to) in &self.copy_to_response {
-            if let Some(value) = subresponse.headers().get(from) {
-                ctx.queue_response_header(to.clone(), value.clone());
-            }
+            ctx.session
+                .pending_response_headers
+                .push(HeaderTransferPatch::from_owned_response(
+                    subresponse,
+                    from.clone(),
+                    to.clone(),
+                ));
         }
     }
 
@@ -359,17 +373,17 @@ impl SubrequestModule {
         response: &mut HttpModuleResponse,
     ) {
         for (from, to) in &self.copy_to_request {
-            if let Some(value) = subresponse.headers().get(from) {
-                ctx.remember_request_header(to.clone(), value.clone());
-            }
+            ctx.remember_request_header(HeaderTransferPatch::from_owned_response(
+                subresponse,
+                from.clone(),
+                to.clone(),
+            ));
         }
         for (from, to) in &self.copy_to_response {
-            if let Some(value) = subresponse.headers().get(from) {
-                response
-                    .as_inner_mut()
-                    .headers_mut()
-                    .insert(to.clone(), value.clone());
-            }
+            HeaderTransferPatch::from_owned_response(subresponse, from.clone(), to.clone()).apply(
+                response.as_owner_mut().headers_mut(),
+                HeaderTransferMode::Replace,
+            );
         }
     }
 }
@@ -436,7 +450,7 @@ impl HttpModule for SubrequestModule {
                 let subresponse = self.run_built_request(ctx, subrequest).await?;
                 if self.should_return_response(&subresponse) {
                     return Ok(HttpModuleEvent::RequestHeadersResult(
-                        RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::from_inner(
+                        RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::from_owner(
                             subresponse,
                         ))),
                     ));
@@ -458,7 +472,7 @@ impl HttpModule for SubrequestModule {
                 let subresponse = self.run_frozen(ctx).await?;
                 if self.should_return_response(&subresponse) {
                     return Ok(HttpModuleEvent::DownstreamResponse(
-                        HttpModuleResponse::from_inner(subresponse),
+                        HttpModuleResponse::from_owner(subresponse),
                     ));
                 }
                 self.apply_subrequest_response_headers(&subresponse, ctx, &mut response);
@@ -563,8 +577,9 @@ fn compile_header_captures(
 /// members is one length and a declaration the owner refuses names no
 /// length. The body is limited either way, so a response that declares no
 /// length is cut to the limit rather than refused.
-fn response_exceeds_max_response_bytes(headers: &HeaderMap, max_response_bytes: usize) -> bool {
-    declared_content_length(headers)
+fn response_exceeds_max_response_bytes(headers: &Headers, max_response_bytes: usize) -> bool {
+    headers
+        .declared_content_length()
         .ok()
         .flatten()
         .is_some_and(|len| len > max_response_bytes as u64)

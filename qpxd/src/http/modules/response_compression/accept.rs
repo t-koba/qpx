@@ -1,9 +1,11 @@
-use http::HeaderMap;
+use super::ord;
 use http::header::{ACCEPT_ENCODING, VARY};
+use qpx_core::http_message::OrdinaryHeaderMut;
 
-pub(super) fn parse_accept_encoding(headers: &HeaderMap) -> Vec<(String, i32)> {
+pub(super) fn parse_accept_encoding(headers: &impl OrdinaryHeaderMut) -> Vec<(String, i32)> {
     let mut out = Vec::new();
-    for part in qpx_core::http_token::header_value_members(headers, &ACCEPT_ENCODING) {
+    for part in qpx_core::http_token::value_members(headers.ordinary_values(&ord(ACCEPT_ENCODING)))
+    {
         if part.is_empty() {
             continue;
         }
@@ -35,11 +37,13 @@ pub(super) fn accept_encoding_q(name: &str, values: &[(String, i32)]) -> i32 {
         .unwrap_or(wildcard)
 }
 
-pub(super) fn append_vary_accept_encoding(headers: &mut HeaderMap) {
-    if qpx_core::http_token::header_values_contain_token(headers, &VARY, "accept-encoding") {
+pub(super) fn append_vary_accept_encoding(headers: &mut impl OrdinaryHeaderMut) {
+    if qpx_core::http_token::value_members(headers.ordinary_values(&ord(VARY)))
+        .any(|member| member.eq_ignore_ascii_case("accept-encoding"))
+    {
         return;
     }
-    headers.append(VARY, http::HeaderValue::from_static("Accept-Encoding"));
+    headers.ordinary_append(ord(VARY), http::HeaderValue::from_static("Accept-Encoding"));
 }
 
 fn parse_quality(raw: &str) -> i32 {
