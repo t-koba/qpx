@@ -22,23 +22,13 @@ use qpxd_cache::CacheRequestKey;
 use std::sync::Arc;
 use tokio::time::Duration;
 
-pub(super) struct ForwardUpstreamInput<'a> {
-    pub(super) req: Request<Body>,
-    pub(super) upstream: Option<&'a crate::upstream::pool::ResolvedUpstreamProxy>,
-    pub(super) http_authority: &'a str,
-    pub(super) upstream_timeout: Duration,
-    pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
-    pub(super) export_session: Option<&'a crate::exporter::ExportSession>,
+pub(super) struct ForwardRequestContext<'a> {
     pub(super) request_method: &'a Method,
     pub(super) client_version: http::Version,
     pub(super) proxy_name: &'a str,
     pub(super) headers: Option<Arc<qpx_core::rules::CompiledHeaderControl>>,
-    pub(super) cache_policy: Option<qpx_core::config::CachePolicyConfig>,
-    pub(super) request_headers_snapshot: Option<&'a Request<()>>,
-    pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
-    pub(super) cache_target_key: Option<&'a CacheRequestKey>,
-    pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
-    pub(super) cache_collapse_guard: Option<qpxd_cache::RequestCollapseGuard>,
+    pub(super) state: &'a crate::runtime::RuntimeState,
+    pub(super) audit: &'a DispatchAuditContext,
     pub(super) response_engine:
         Option<&'a crate::http::policy::response_policy::HttpResponseRuleEngine>,
     pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
@@ -47,9 +37,23 @@ pub(super) struct ForwardUpstreamInput<'a> {
     pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
     pub(super) host: &'a HostPort,
     pub(super) remote_addr: std::net::SocketAddr,
-    pub(super) state: &'a crate::runtime::RuntimeState,
     pub(super) request_rpc: Option<&'a crate::http::rpc::RpcMatchContext>,
-    pub(super) audit: &'a DispatchAuditContext,
+}
+
+pub(super) struct ForwardUpstreamInput<'a> {
+    pub(super) context: ForwardRequestContext<'a>,
+    pub(super) req: Request<Body>,
+    pub(super) upstream: Option<&'a crate::upstream::pool::ResolvedUpstreamProxy>,
+    pub(super) http_authority: &'a str,
+    pub(super) upstream_timeout: Duration,
+    pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
+    pub(super) export_session: Option<&'a crate::exporter::ExportSession>,
+    pub(super) cache_policy: Option<qpx_core::config::CachePolicyConfig>,
+    pub(super) request_headers_snapshot: Option<&'a Request<()>>,
+    pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
+    pub(super) cache_target_key: Option<&'a CacheRequestKey>,
+    pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
+    pub(super) cache_collapse_guard: Option<qpxd_cache::RequestCollapseGuard>,
 }
 
 pub(super) async fn execute_forward_upstream(
@@ -62,26 +66,29 @@ pub(super) async fn execute_forward_upstream(
         upstream_timeout,
         http_modules,
         export_session,
-        request_method,
-        client_version,
-        proxy_name,
-        mut headers,
         mut cache_policy,
         request_headers_snapshot,
         cache_lookup_key,
         cache_target_key,
         revalidation_state,
         cache_collapse_guard,
-        response_engine,
-        selected_plan,
-        base,
-        destination,
-        identity,
-        host,
-        remote_addr,
-        state,
-        request_rpc,
-        audit,
+        context:
+            ForwardRequestContext {
+                request_method,
+                client_version,
+                proxy_name,
+                mut headers,
+                response_engine,
+                selected_plan,
+                base,
+                destination,
+                identity,
+                host,
+                remote_addr,
+                state,
+                request_rpc,
+                audit,
+            },
     } = input;
     let upstream_started = std::time::Instant::now();
     http_modules.on_upstream_request(&mut req).await?;
@@ -134,21 +141,23 @@ pub(super) async fn execute_forward_upstream(
         .await?;
     let response_policy_tags = match apply_forward_response_policy(ForwardResponsePolicyInput {
         response,
-        response_engine,
-        selected_plan,
-        base,
-        destination,
-        identity,
-        host,
-        remote_addr,
-        state,
-        request_method,
-        client_version,
-        proxy_name,
-        headers,
-        request_rpc,
         http_modules,
-        audit,
+        context: ForwardRequestContext {
+            response_engine,
+            selected_plan,
+            base,
+            destination,
+            identity,
+            host,
+            remote_addr,
+            state,
+            request_method,
+            client_version,
+            proxy_name,
+            headers,
+            request_rpc,
+            audit,
+        },
     })
     .await?
     {
@@ -224,37 +233,24 @@ pub(super) async fn execute_forward_upstream(
 }
 
 pub(super) struct ForwardResponsePolicyInput<'a> {
+    pub(super) context: ForwardRequestContext<'a>,
     pub(super) response: OwnerResponse<Body>,
-    pub(super) response_engine:
-        Option<&'a crate::http::policy::response_policy::HttpResponseRuleEngine>,
-    pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
-    pub(super) base: &'a BaseRequestFields,
-    pub(super) destination: &'a crate::destination::DestinationMetadata,
-    pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
-    pub(super) host: &'a HostPort,
-    pub(super) remote_addr: std::net::SocketAddr,
-    pub(super) state: &'a crate::runtime::RuntimeState,
-    pub(super) request_method: &'a Method,
-    pub(super) client_version: http::Version,
-    pub(super) proxy_name: &'a str,
-    pub(super) headers: Option<Arc<qpx_core::rules::CompiledHeaderControl>>,
-    pub(super) request_rpc: Option<&'a crate::http::rpc::RpcMatchContext>,
     pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
-    pub(super) audit: &'a DispatchAuditContext,
 }
 
 async fn apply_forward_response_policy(
     input: ForwardResponsePolicyInput<'_>,
 ) -> Result<DispatchResponsePolicyOutcome> {
+    let context = input.context;
     let response_prefilter_ctx = MatchPrefilterContext {
-        method: Some(input.request_method.as_str()),
-        dst_port: input.host.port,
-        src_ip: Some(input.remote_addr.ip()),
-        host: Some(input.host.host.as_str()),
+        method: Some(context.request_method.as_str()),
+        dst_port: context.host.port,
+        src_ip: Some(context.remote_addr.ip()),
+        host: Some(context.host.host.as_str()),
         sni: None,
-        path: input.base.path(),
+        path: context.base.path(),
     };
-    let response_candidates = input
+    let response_candidates = context
         .response_engine
         .map(|engine| engine.candidate_profile(response_prefilter_ctx))
         .unwrap_or_default();
@@ -262,31 +258,31 @@ async fn apply_forward_response_policy(
     let response_headers = input.response.headers().clone();
     apply_dispatch_response_policy(DispatchResponsePolicyInput {
         response: input.response,
-        engine: input.response_engine,
+        engine: context.response_engine,
         candidates: response_candidates,
         rule_context: build_response_rule_match_context(ResponseRuleContextInput {
-            base: input.base,
+            base: context.base,
             headers: Some(&response_headers),
-            destination: input.destination,
-            identity: input.identity,
+            destination: context.destination,
+            identity: context.identity,
             response_status,
             response_size: None,
             rpc: None,
             client_cert: None,
             upstream_cert: None,
         }),
-        headers: input.headers,
-        request_rpc: input.request_rpc,
+        headers: context.headers,
+        request_rpc: context.request_rpc,
         body_observation: ResponseBodyObservationLimits {
-            max_body_bytes: input.selected_plan.response_body_observation_limit(
-                input
+            max_body_bytes: context.selected_plan.response_body_observation_limit(
+                context
                     .state
                     .plan
                     .limits
                     .body
                     .max_observed_response_body_bytes,
             ),
-            read_timeout: input
+            read_timeout: context
                 .state
                 .plan
                 .limits
@@ -295,11 +291,11 @@ async fn apply_forward_response_policy(
             force_body: false,
         },
         http_modules: input.http_modules,
-        audit: input.audit,
+        audit: context.audit,
         local_response_outcome: crate::http::dispatch::DispatchOutcome::ResponseLocalResponse,
-        request_method: input.request_method,
-        request_version: input.client_version,
-        proxy_name: input.proxy_name,
+        request_method: context.request_method,
+        request_version: context.client_version,
+        proxy_name: context.proxy_name,
     })
     .await
 }

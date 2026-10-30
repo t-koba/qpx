@@ -32,6 +32,7 @@ use self::http_execute::{ForwardPreparedHttpInput, execute_forward_http_after_pr
 use self::local::{handle_forward_ftp, handle_forward_local_action};
 use self::policy::{build_forward_rate_limit_audit_context, evaluate_forward_policy_outcome};
 use self::prepare::prepare_forward_dispatch;
+use self::request_dispatch_upstream::ForwardRequestContext;
 use self::target::{
     forward_destination_metadata, forward_prefilter_context, resolve_forward_target_or_response,
 };
@@ -658,21 +659,23 @@ async fn complete_forward_request(
         runtime: &runtime,
         action: &action,
         listener_name,
-        request_method: &request_method,
-        client_version,
-        proxy_name,
         cache_policy: cache_policy.as_ref(),
-        headers,
-        state: &state,
-        audit: &audit,
-        response_engine: response_engine.as_deref(),
-        selected_plan: &selected_plan,
-        base: &base,
-        destination: &destination,
-        identity: &identity,
-        host: &host,
-        remote_addr,
-        request_rpc: request_rpc.as_ref(),
+        context: ForwardRequestContext {
+            request_method: &request_method,
+            client_version,
+            proxy_name,
+            headers,
+            state: &state,
+            audit: &audit,
+            response_engine: response_engine.as_deref(),
+            selected_plan: &selected_plan,
+            base: &base,
+            destination: &destination,
+            identity: &identity,
+            host: &host,
+            remote_addr,
+            request_rpc: request_rpc.as_ref(),
+        },
     })
     .await
     .map_err(DispatchError::from)

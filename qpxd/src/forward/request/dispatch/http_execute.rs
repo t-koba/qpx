@@ -1,42 +1,24 @@
-use super::super::HostPort;
 use super::request_dispatch_cache::{
     ForwardCacheCollapseInput, ForwardCacheLookupInput, try_forward_cache_collapse,
     try_forward_cache_lookup,
 };
-use super::request_dispatch_upstream::{ForwardUpstreamInput, execute_forward_upstream};
-use super::types::ForwardDispatchReady;
-use crate::http::dispatch::{
-    DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheLookupOutcome,
+use super::request_dispatch_upstream::{
+    ForwardRequestContext, ForwardUpstreamInput, execute_forward_upstream,
 };
-use crate::http::protocol::base_fields::BaseRequestFields;
+use super::types::ForwardDispatchReady;
+use crate::http::dispatch::{DispatchCacheCollapseOutcome, DispatchCacheLookupOutcome};
 use crate::runtime::Runtime;
 use anyhow::Result;
-use hyper::Method;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
-use std::sync::Arc;
 
 pub(super) struct ForwardPreparedHttpInput<'a> {
+    pub(super) context: ForwardRequestContext<'a>,
     pub(super) ready: ForwardDispatchReady,
     pub(super) runtime: &'a Runtime,
     pub(super) action: &'a qpx_core::config::ActionConfig,
     pub(super) listener_name: &'a str,
-    pub(super) request_method: &'a Method,
-    pub(super) client_version: http::Version,
-    pub(super) proxy_name: &'a str,
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
-    pub(super) headers: Option<Arc<qpx_core::rules::CompiledHeaderControl>>,
-    pub(super) state: &'a crate::runtime::RuntimeState,
-    pub(super) audit: &'a DispatchAuditContext,
-    pub(super) response_engine:
-        Option<&'a crate::http::policy::response_policy::HttpResponseRuleEngine>,
-    pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
-    pub(super) base: &'a BaseRequestFields,
-    pub(super) destination: &'a crate::destination::DestinationMetadata,
-    pub(super) identity: &'a crate::policy_context::ResolvedIdentity,
-    pub(super) host: &'a HostPort,
-    pub(super) remote_addr: std::net::SocketAddr,
-    pub(super) request_rpc: Option<&'a crate::http::rpc::RpcMatchContext>,
 }
 
 pub(super) async fn execute_forward_http_after_prepare(
@@ -62,18 +44,18 @@ pub(super) async fn execute_forward_http_after_prepare(
         listener_name: input.listener_name,
         http_authority: http_authority.as_str(),
         upstream_timeout,
-        request_method: input.request_method,
-        client_version: input.client_version,
-        proxy_name: input.proxy_name,
-        headers: input.headers.as_deref(),
-        selected_plan: input.selected_plan,
+        request_method: input.context.request_method,
+        client_version: input.context.client_version,
+        proxy_name: input.context.proxy_name,
+        headers: input.context.headers.as_deref(),
+        selected_plan: input.context.selected_plan,
         cache_policy: input.cache_policy,
         request_headers_snapshot: request_headers_snapshot.as_ref(),
         cache_lookup_key: cache_lookup_key.as_ref(),
         cache_target_key: cache_target_key.as_ref(),
-        state: input.state,
+        state: input.context.state,
         http_modules: &mut http_modules,
-        audit: input.audit,
+        audit: input.context.audit,
     })
     .await?
     {
@@ -81,7 +63,7 @@ pub(super) async fn execute_forward_http_after_prepare(
             return Ok(
                 crate::http::capture::stream::emit_optional_response_for_export(
                     *response,
-                    input.selected_plan,
+                    input.context.selected_plan,
                     export_session.as_ref(),
                 )
                 .await,
@@ -91,18 +73,18 @@ pub(super) async fn execute_forward_http_after_prepare(
     }
     let cache_collapse_guard = match try_forward_cache_collapse(ForwardCacheCollapseInput {
         req: &mut req,
-        request_method: input.request_method,
-        client_version: input.client_version,
-        proxy_name: input.proxy_name,
-        headers: input.headers.as_deref(),
-        selected_plan: input.selected_plan,
+        request_method: input.context.request_method,
+        client_version: input.context.client_version,
+        proxy_name: input.context.proxy_name,
+        headers: input.context.headers.as_deref(),
+        selected_plan: input.context.selected_plan,
         request_headers_snapshot: request_headers_snapshot.as_ref(),
         cache_policy: input.cache_policy,
         cache_lookup_key: cache_lookup_key.as_ref(),
-        state: input.state,
+        state: input.context.state,
         http_modules: &mut http_modules,
         upstream_timeout,
-        audit: input.audit,
+        audit: input.context.audit,
         revalidation_state,
     })
     .await?
@@ -111,7 +93,7 @@ pub(super) async fn execute_forward_http_after_prepare(
             return Ok(
                 crate::http::capture::stream::emit_optional_response_for_export(
                     *response,
-                    input.selected_plan,
+                    input.context.selected_plan,
                     export_session.as_ref(),
                 )
                 .await,
@@ -126,32 +108,19 @@ pub(super) async fn execute_forward_http_after_prepare(
         }
     };
     execute_forward_upstream(ForwardUpstreamInput {
+        context: input.context,
         req,
         upstream: upstream.as_ref(),
         http_authority: http_authority.as_str(),
         upstream_timeout,
         http_modules: &mut http_modules,
         export_session: export_session.as_ref(),
-        request_method: input.request_method,
-        client_version: input.client_version,
-        proxy_name: input.proxy_name,
-        headers: input.headers,
         cache_policy: input.cache_policy.cloned(),
         request_headers_snapshot: request_headers_snapshot.as_ref(),
         cache_lookup_key: cache_lookup_key.as_ref(),
         cache_target_key: cache_target_key.as_ref(),
         revalidation_state,
         cache_collapse_guard,
-        response_engine: input.response_engine,
-        selected_plan: input.selected_plan,
-        base: input.base,
-        destination: input.destination,
-        identity: input.identity,
-        host: input.host,
-        remote_addr: input.remote_addr,
-        state: input.state,
-        request_rpc: input.request_rpc,
-        audit: input.audit,
     })
     .await
 }
