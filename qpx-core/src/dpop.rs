@@ -482,7 +482,7 @@ pub fn access_token_hash(access_token: &str) -> Result<String, DpopError> {
 }
 
 fn extract_dpop_header(headers: &Headers) -> Result<&str, DpopError> {
-    let name = OrdinaryHeaderName::try_from(DPOP_HEADER).expect("DPoP is ordinary");
+    let name = OrdinaryHeaderName::from_static(DPOP_HEADER);
     let mut values = headers.get_all(&name);
     let Some(value) = values.next() else {
         return Err(DpopError::MissingHeader);

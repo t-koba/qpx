@@ -219,7 +219,7 @@ fn parse_single_header<'a>(
     name: &'static str,
 ) -> Result<Option<&'a str>> {
     let name_key = crate::http_message::OrdinaryHeaderName::try_from(name)
-        .expect("ordinary Fetch Metadata field");
+        .map_err(|_| invalid(name, "field name is not an ordinary header"))?;
     let mut values = headers.get_all(&name_key);
     let Some(value) = values.next() else {
         return Ok(None);
@@ -2568,6 +2568,25 @@ mod tests {
         assert_eq!(
             FetchMetadataRequest::parse(&headers),
             Err(invalid(SEC_FETCH_USER, "only ?1 is valid"))
+        );
+    }
+
+    #[test]
+    fn fetch_metadata_rejects_non_ordinary_field_names() {
+        let headers = crate::http_message::Headers::new();
+        assert_eq!(
+            parse_single_header(&headers, "content-length"),
+            Err(invalid(
+                "content-length",
+                "field name is not an ordinary header"
+            ))
+        );
+        assert_eq!(
+            parse_single_header(&headers, "not a field name"),
+            Err(invalid(
+                "not a field name",
+                "field name is not an ordinary header"
+            ))
         );
     }
 
