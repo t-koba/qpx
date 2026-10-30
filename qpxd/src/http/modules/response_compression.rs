@@ -4,13 +4,17 @@ use super::{
     HttpModuleFactory, HttpModuleRequestView, HttpModuleResponse, HttpModuleResponseView,
     HttpModuleStage, ModuleStages,
 };
-use crate::http::media_type::{media_type_without_parameters, raw_media_type};
+use crate::http::media_type::media_type_without_parameters;
+#[cfg(any(feature = "http3", test))]
+use crate::http::media_type::raw_media_type;
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
+#[cfg(any(feature = "http3", test))]
+use http::HeaderMap;
 #[cfg(test)]
 use http::StatusCode;
 use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_RANGE, ETAG, VARY};
-use http::{HeaderMap, HeaderValue, Method};
+use http::{HeaderValue, Method};
 use qpx_core::config::{HttpModuleConfig, ResponseCompressionModuleConfig};
 use qpx_core::http_message::{Headers, OrdinaryHeaderMut, OrdinaryHeaderName, Response};
 use qpx_http::body::{Body, to_bytes};
@@ -459,6 +463,7 @@ fn append_vary_token(headers: &mut impl OrdinaryHeaderMut, token: &str) -> Resul
 }
 
 /// Standard-header predicate retained for the specialized HTTP/3 stream boundary.
+#[cfg(any(feature = "http3", test))]
 pub(crate) fn is_event_stream_headers(headers: &HeaderMap) -> bool {
     raw_media_type(headers)
         .map(|value| value.eq_ignore_ascii_case("text/event-stream"))

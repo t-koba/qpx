@@ -6,7 +6,9 @@
 //! policy stay with the callers: RPC lowercases an owned copy for its prefix
 //! checks, while compression matches case-insensitively against its
 //! configured (possibly wildcard) patterns.
+#[cfg(any(feature = "http3", test))]
 use http::HeaderMap;
+#[cfg(any(feature = "http3", test))]
 use http::header::CONTENT_TYPE;
 
 /// Strips any `;` parameters from a raw `Content-Type` value and trims
@@ -19,6 +21,7 @@ pub(crate) fn media_type_without_parameters(raw: &str) -> &str {
 ///
 /// `None` when no field is present or the first field value is not valid header text.
 /// No case folding is applied; see the module docs for caller policy.
+#[cfg(any(feature = "http3", test))]
 pub(crate) fn raw_media_type(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(CONTENT_TYPE)
