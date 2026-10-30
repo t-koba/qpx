@@ -159,11 +159,13 @@ pub struct HttpModuleResponseView<'a> {
 }
 
 enum ResponseViewInner<'a> {
+    #[cfg(test)]
     Standard(&'a Response<Body>),
     Owned(&'a OwnerResponse<Body>),
 }
 
 impl<'a> HttpModuleResponseView<'a> {
+    #[cfg(test)]
     pub(super) fn from_response(response: &'a Response<Body>) -> Self {
         Self {
             response: ResponseViewInner::Standard(response),
@@ -173,6 +175,7 @@ impl<'a> HttpModuleResponseView<'a> {
     /// Returns the response status.
     pub fn status(&self) -> StatusCode {
         match self.response {
+            #[cfg(test)]
             ResponseViewInner::Standard(response) => response.status(),
             ResponseViewInner::Owned(response) => response.status(),
         }
@@ -181,6 +184,7 @@ impl<'a> HttpModuleResponseView<'a> {
     /// Returns the response HTTP version.
     pub fn version(&self) -> Version {
         match self.response {
+            #[cfg(test)]
             ResponseViewInner::Standard(response) => response.version(),
             ResponseViewInner::Owned(response) => response.version(),
         }
@@ -189,6 +193,7 @@ impl<'a> HttpModuleResponseView<'a> {
     /// Returns whether this response contains the named header.
     pub fn has_header(&self, name: &HeaderName) -> bool {
         match self.response {
+            #[cfg(test)]
             ResponseViewInner::Standard(response) => response.headers().contains_key(name),
             ResponseViewInner::Owned(response) => {
                 match OrdinaryHeaderName::try_from(name.clone()) {
@@ -209,6 +214,8 @@ pub(crate) trait ModuleResponseCarrier: ResponseCarrier {
     fn from_module_response(response: OwnerResponse<Body>) -> Self;
 }
 
+/// Explicit standard-carrier parity is test-only; production hooks require owned responses.
+#[cfg(test)]
 impl ModuleResponseCarrier for Response<Body> {
     fn module_view(&self) -> HttpModuleResponseView<'_> {
         HttpModuleResponseView::from_response(self)
