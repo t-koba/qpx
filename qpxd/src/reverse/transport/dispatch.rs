@@ -185,7 +185,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
                 )
                 .await?;
                 apply_reverse_route_metadata(route, secure_transport, &mut response)?;
-                return Ok((interim, R::from_finalized_http(response)));
+                return Ok((interim, R::from_finalized_owner(response)));
             }
             Ok(None) => {
                 return Err(anyhow!("no route matched"));
@@ -452,7 +452,7 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
             connection_pool,
         )
         .await
-        .map(|(interim, response)| (interim, R::from_finalized_http(response)));
+        .map(|(interim, response)| (interim, R::from_finalized_owner(response)));
     }
     let resolution_override = route.plan.destination_resolution.as_ref();
     let route_http_guard = route.plan.guard.as_deref();

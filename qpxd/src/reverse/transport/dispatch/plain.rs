@@ -15,8 +15,7 @@ use crate::upstream::origin::{
     proxy_direct_plain_http1_raw_response_with_interim_on_connection,
 };
 use anyhow::{Result, anyhow};
-use hyper::Response;
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -79,7 +78,7 @@ pub(in crate::reverse::transport) async fn try_dispatch_unconditional_plain_reve
     )
     .await?;
     apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
-    Ok(Ok((interim, R::from_finalized_http(response))))
+    Ok(Ok((interim, R::from_finalized_owner(response))))
 }
 
 pub(super) async fn dispatch_plain_reverse_http(
@@ -90,7 +89,7 @@ pub(super) async fn dispatch_plain_reverse_http(
     request_version: http::Version,
     proxy_name: &str,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
-) -> Result<(InterimList, Response<Body>)> {
+) -> Result<(InterimList, OwnerResponse<Body>)> {
     let selected_upstream = route
         .available_plain_http_upstream()
         .ok_or_else(|| anyhow!("plain HTTP fast path requires one static HTTP upstream"))?;
@@ -136,7 +135,8 @@ pub(super) async fn dispatch_plain_reverse_http(
     let (interim, response, response_finalized) = match response {
         Ok(Ok(response)) => (
             response.interim,
-            response.response,
+            // Import once from the network adapter; all remaining mutations use the owner.
+            OwnerResponse::from_http(response.response),
             response.response_finalized,
         ),
         Ok(Err(err)) => {
@@ -161,7 +161,7 @@ pub(super) async fn dispatch_plain_reverse_http(
 fn finalize_plain_reverse_response(
     request_method: &http::Method,
     proxy_name: &str,
-    response: &mut Response<Body>,
+    response: &mut OwnerResponse<Body>,
 ) {
     // RFC 9110 §7.6.3: Via records the upstream response protocol, independently
     // of the downstream request version used for wire encoding.
@@ -178,6 +178,7 @@ fn finalize_plain_reverse_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::Response;
 
     fn via_values(response: &Response<Body>) -> Vec<String> {
         response
@@ -211,14 +212,16 @@ mod tests {
             .version(http::Version::HTTP_2)
             .body(Body::empty())
             .expect("downstream request");
-        let mut response = Response::builder()
+        let response = Response::builder()
             .version(http::Version::HTTP_11)
             .header(http::header::VIA, "1.0 first")
             .header(http::header::VIA, "1.1 second")
             .body(Body::from("ok"))
             .expect("upstream response");
 
+        let mut response = OwnerResponse::from_http(response);
         finalize_plain_reverse_response(request.method(), "qpx", &mut response);
+        let response = response.into_http_for_library();
 
         assert_eq!(
             via_values(&response),
@@ -234,14 +237,16 @@ mod tests {
             .version(http::Version::HTTP_11)
             .body(Body::empty())
             .expect("downstream request");
-        let mut response = Response::builder()
+        let response = Response::builder()
             .version(http::Version::HTTP_10)
             .header(http::header::VIA, "1.0 first")
             .header(http::header::VIA, "1.1 second")
             .body(Body::from("ok"))
             .expect("upstream response");
 
+        let mut response = OwnerResponse::from_http(response);
         finalize_plain_reverse_response(request.method(), "qpx", &mut response);
+        let response = response.into_http_for_library();
 
         assert_eq!(
             via_values(&response),
@@ -265,8 +270,9 @@ mod tests {
                     .body(Body::from("ok"))
                     .expect("upstream response")
             };
-            let mut fast = build_upstream();
+            let mut fast = OwnerResponse::from_http(build_upstream());
             finalize_plain_reverse_response(&http::Method::GET, "qpx", &mut fast);
+            let fast = fast.into_http_for_library();
             let mut full = build_upstream();
             finalize_full_dispatch_reference(&http::Method::GET, &mut full);
             assert_eq!(fast.version(), upstream);
@@ -286,6 +292,119 @@ mod tests {
                     downstream_via.as_deref(),
                     "downstream {downstream:?} must not supply Via for upstream {upstream:?}"
                 );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plain_owned_finalization_matches_standard_headers_body_and_trailers() {
+        use crate::http::capture::stream::limit_response_body_to_max_bytes;
+        use bytes::Bytes;
+        use http::{HeaderMap, HeaderValue, Method, StatusCode};
+
+        for lengths in [
+            vec![],
+            vec!["0"],
+            vec!["5"],
+            vec!["05", "5"],
+            vec!["invalid"],
+            vec!["5", "6"],
+        ] {
+            for (method, status) in [
+                (Method::GET, StatusCode::OK),
+                (Method::HEAD, StatusCode::OK),
+                (Method::GET, StatusCode::NO_CONTENT),
+                (Method::GET, StatusCode::NOT_MODIFIED),
+            ] {
+                for max_bytes in [3, 8] {
+                    let build = || {
+                        let mut trailers = HeaderMap::new();
+                        trailers.append("x-checksum", HeaderValue::from_static("first"));
+                        trailers.append("x-checksum", HeaderValue::from_static("second"));
+                        trailers
+                            .insert(http::header::CONTENT_LENGTH, HeaderValue::from_static("5"));
+                        let mut response = Response::builder()
+                            .version(http::Version::HTTP_11)
+                            .status(status)
+                            .header(http::header::VIA, "1.0 previous")
+                            .header(http::header::CONNECTION, "x-hop")
+                            .header("x-hop", "remove")
+                            .header(http::header::TRAILER, "x-checksum")
+                            .header("x-bytes", HeaderValue::from_bytes(b"a\x80b").unwrap())
+                            .body(Body::replay(Bytes::from_static(b"hello"), Some(trailers)))
+                            .unwrap();
+                        for length in &lengths {
+                            response.headers_mut().append(
+                                http::header::CONTENT_LENGTH,
+                                HeaderValue::from_str(length).unwrap(),
+                            );
+                        }
+                        for value in ["first", "second"] {
+                            let mut value = HeaderValue::from_static(value);
+                            value.set_sensitive(true);
+                            response.headers_mut().append("x-duplicate", value);
+                        }
+                        response.extensions_mut().insert(42_u32);
+                        response
+                    };
+                    let mut owned = OwnerResponse::from_http(build());
+                    limit_response_body_to_max_bytes(&mut owned, max_bytes);
+                    finalize_plain_reverse_response(&method, "qpx", &mut owned);
+                    // Export only for comparison with the standard library reference.
+                    let mut owned = owned.into_http_for_library();
+                    let mut standard = build();
+                    limit_response_body_to_max_bytes(&mut standard, max_bytes);
+                    finalize_full_dispatch_reference(&method, &mut standard);
+
+                    assert_eq!(owned.status(), standard.status());
+                    assert_eq!(owned.version(), standard.version());
+                    assert_eq!(owned.headers(), standard.headers());
+                    assert!(
+                        owned
+                            .headers()
+                            .get_all("x-duplicate")
+                            .iter()
+                            .all(HeaderValue::is_sensitive)
+                    );
+                    assert_eq!(owned.extensions().get::<u32>(), Some(&42));
+                    let mut bodies = Vec::new();
+                    for response in [&mut owned, &mut standard] {
+                        let mut bytes = Vec::new();
+                        let mut error = None;
+                        while let Some(data) = response.body_mut().data().await {
+                            match data {
+                                Ok(data) => bytes.extend_from_slice(&data),
+                                Err(err) => {
+                                    error = Some(err.to_string());
+                                    break;
+                                }
+                            }
+                        }
+                        let trailers = response
+                            .body_mut()
+                            .trailers()
+                            .await
+                            .map_err(|err| err.to_string());
+                        bodies.push((bytes, error, trailers));
+                    }
+                    if method == Method::GET && status == StatusCode::OK {
+                        if max_bytes < 5 {
+                            assert_eq!(
+                                bodies[0].1.as_deref(),
+                                Some("response body limit exceeded")
+                            );
+                        } else {
+                            assert_eq!(bodies[0].0, b"hello");
+                            let trailers = bodies[0].2.as_ref().unwrap().as_ref().unwrap();
+                            assert!(!trailers.contains_key(http::header::CONTENT_LENGTH));
+                            assert_eq!(trailers.get_all("x-checksum").iter().count(), 2);
+                        }
+                    }
+                    assert_eq!(
+                        bodies[0], bodies[1],
+                        "{method} {status} {lengths:?} limit={max_bytes}"
+                    );
+                }
             }
         }
     }
