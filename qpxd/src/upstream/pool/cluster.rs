@@ -179,7 +179,7 @@ impl ManagedUpstreamEndpoint {
         let scaled_ms = (duration.as_millis() as u64).saturating_mul(1u64 << shift);
         let until = now_millis().saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
-        self.reset_adaptive_stats();
+        self.adaptive.reset();
         super::metrics::ejection(reason.as_label());
     }
 
@@ -207,10 +207,6 @@ impl ManagedUpstreamEndpoint {
         } else {
             self.adaptive.maybe_trim();
         }
-    }
-
-    fn reset_adaptive_stats(&self) {
-        self.adaptive.reset();
     }
 }
 

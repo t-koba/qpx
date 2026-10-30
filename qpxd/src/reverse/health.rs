@@ -314,7 +314,7 @@ impl UpstreamEndpoint {
         let until = now_ms.saturating_add(scaled_ms);
         self.unhealthy_until_ms.fetch_max(until, Ordering::Relaxed);
         self.admission_state_active.store(true, Ordering::Release);
-        self.reset_adaptive_stats();
+        self.adaptive.reset();
         super::metrics::upstream_ejection(reason.as_label());
     }
 
@@ -421,10 +421,6 @@ impl UpstreamEndpoint {
         } else {
             self.adaptive.maybe_trim();
         }
-    }
-
-    fn reset_adaptive_stats(&self) {
-        self.adaptive.reset();
     }
 }
 
