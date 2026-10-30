@@ -188,14 +188,13 @@ fn paired_finalization_date_and_invalid_proxy_status_repair() {
                 .body(Body::empty())
                 .unwrap()
         };
-        let standard = make();
+        let mut standard = make();
         let mut owner = OwnerResponse::from_http(make());
-        let mut standard = finalize_response_with_headers(
+        finalize_response_in_place(
             &Method::GET,
             http::Version::HTTP_11,
             "qpx",
-            standard,
-            None,
+            &mut standard,
             false,
         );
         finalize_response_in_place(
@@ -235,12 +234,12 @@ async fn paired_finalization_stream_backpressure_trailers_and_errors() {
             let mut owner = if owned {
                 OwnerResponse::from_http(make)
             } else {
-                let standard = finalize_response_with_headers(
+                let mut standard = make;
+                finalize_response_in_place(
                     &Method::GET,
                     http::Version::HTTP_11,
                     "qpx",
-                    make,
-                    None,
+                    &mut standard,
                     false,
                 );
                 OwnerResponse::from_http(standard)
@@ -321,12 +320,11 @@ fn paired_finalization_raw_head_extension_is_finalized_once() {
         let mut standard = make();
         let mut owner = OwnerResponse::from_http(make());
         for _ in 0..2 {
-            standard = finalize_response_with_headers(
+            finalize_response_in_place(
                 &Method::GET,
                 http::Version::HTTP_11,
                 "qpx",
-                standard,
-                None,
+                &mut standard,
                 false,
             );
             finalize_response_in_place(
