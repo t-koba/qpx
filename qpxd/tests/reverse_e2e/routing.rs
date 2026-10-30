@@ -26,7 +26,12 @@ edges:
     target:
       type: upstream
       upstreams:
-      - ws://{backend_addr}"#
+      - ws://{backend_addr}
+    headers:
+      response_set:
+        x-route: controlled
+      response_add:
+        set-cookie: third"#
             )
         })?;
 
@@ -55,6 +60,20 @@ Sec-WebSocket-Version: 13\r\n\
     assert!(
         head_text.contains("\r\nconnection: upgrade\r\n"),
         "missing connection header:\n{head_text}"
+    );
+
+    assert!(head_text.contains("\r\nx-route: controlled\r\n"));
+    let cookies: Vec<_> = head_text
+        .lines()
+        .filter(|line| line.starts_with("set-cookie:"))
+        .collect();
+    assert_eq!(
+        cookies,
+        [
+            "set-cookie: first",
+            "set-cookie: second",
+            "set-cookie: third"
+        ]
     );
 
     stream.write_all(b"ping").await?;

@@ -292,3 +292,5 @@ mod path_rewrite_tests;
 mod response_policy_context_tests;
 mod response_policy_rpc_tests;
 mod route_selection_tests;
+
+mod service_response_owner_tests;

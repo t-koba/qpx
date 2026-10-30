@@ -269,6 +269,8 @@ fn run_websocket_origin_once(
 Connection: Upgrade\r\n\
 Upgrade: websocket\r\n\
 Sec-WebSocket-Accept: {accept}\r\n\
+Set-Cookie: first\r\n\
+Set-Cookie: second\r\n\
 \r\n"
         );
         std::io::Write::write_all(&mut stream, response.as_bytes())?;

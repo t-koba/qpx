@@ -1,7 +1,6 @@
 use crate::reverse::router::HttpRoute;
 use anyhow::{Result, anyhow};
-use hyper::Response;
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::sync::Arc;
 
@@ -46,7 +45,7 @@ pub(super) struct ReverseWebDavDispatch<'a> {
 
 pub(super) async fn dispatch_reverse_webdav(
     input: ReverseWebDavDispatch<'_>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let ReverseWebDavDispatch {
         req,
         service,
@@ -87,7 +86,7 @@ pub(super) async fn execute_webdav_service(
     max_request_body_bytes: usize,
     allow_file_backed: bool,
     request_resource: Option<qpx_webdav::ResourceId>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let request_resource = match request_resource {
         Some(resource) => resource,
         None => service.resource_for_path(req.uri().path())?,
@@ -110,15 +109,17 @@ pub(super) async fn execute_webdav_service(
     })
     .await
     .map_err(|error| anyhow!("WebDAV worker failed: {error}"))??;
-    let (mut parts, body) = response.into_parts();
-    let file_region = parts.extensions.remove::<qpx_webdav::ResourceFileRegion>();
+    let (mut head, body) = OwnerResponse::from_http(response).into_head_and_body();
+    let file_region = head
+        .extensions_mut()
+        .remove::<qpx_webdav::ResourceFileRegion>();
     let body_len = body.len() as u64;
     let body = Body::from(body).mark_trailers_sanitized();
     if let Some(region) = file_region {
         let body = apply_webdav_file_region(body, body_len, region)?;
-        return Ok(Response::from_parts(parts, body));
+        return Ok(head.map_body(|()| body));
     }
-    Ok(Response::from_parts(parts, body))
+    Ok(head.map_body(|()| body))
 }
 
 async fn collect_webdav_request(

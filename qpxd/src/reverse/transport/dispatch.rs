@@ -272,7 +272,7 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
                     false,
                 );
                 apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
-                return Ok((Vec::new(), R::from_finalized_http(response)));
+                return Ok((Vec::new(), R::from_finalized_owner(response)));
             }
             Ok(None) => return Err(anyhow!("no route matched")),
             Err((interim, response)) => return Ok((interim, R::from_finalized_owner(response))),
@@ -706,7 +706,7 @@ async fn complete_reverse_after_modules<R: ReverseTerminalResponse>(
             allow_file_backed: request_version == http::Version::HTTP_11 && !conn.tls_terminated,
         })
         .await?;
-        return Ok((Vec::new(), R::from_finalized_http(response)));
+        return Ok((Vec::new(), R::from_finalized_owner(response)));
     }
     if is_websocket_upgrade(req.method(), req.headers())? {
         return handle_reverse_websocket_upgrade::<R>(ReverseWebsocketDispatch {
