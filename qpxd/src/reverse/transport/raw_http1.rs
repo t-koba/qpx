@@ -616,7 +616,11 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     }
     session.recycle_response_globally(&mut proxied);
     let proxied = proxied.into_http_response()?;
-    let mut response = proxied.response;
+    let interim = proxied.interim;
+    // This conversion is the parsed upstream HTTP response boundary. Keep the
+    // fallback response owner-backed through capture limits and finalization;
+    // only the specialized in-memory serializer path needs standard parts.
+    let mut response = OwnerResponse::from_http(proxied.response);
     crate::http::capture::stream::limit_response_body_for_plan_in_place(&mut response, &route.plan);
     // RFC 9110 §7.6.3: Via received-protocol is the parsed upstream version,
     // not the downstream request version.
@@ -629,18 +633,15 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         None,
         false,
     );
-    if let Some(body) = take_in_memory_body(&proxied.interim, &mut response) {
-        let (parts, _) = response.into_parts();
+    if let Some(body) = take_in_memory_body(&interim, &mut response) {
+        let (parts, _) = response.into_http_for_library().into_parts();
         return Ok(PreparedRawHttp1Response::InMemory {
             status: parts.status,
             headers: parts.headers,
             body,
         });
     }
-    Ok(PreparedRawHttp1Response::Generic(
-        proxied.interim,
-        OwnerResponse::from_http(response),
-    ))
+    Ok(PreparedRawHttp1Response::Generic(interim, response))
 }
 
 fn take_in_memory_body(
@@ -1081,10 +1082,83 @@ mod tests {
 
     #[test]
     fn in_memory_response_fast_path_takes_only_a_trailerless_frame() {
-        let mut response = Response::new(Body::from(Bytes::from_static(b"body")));
+        let mut response =
+            OwnerResponse::from_http(Response::new(Body::from(Bytes::from_static(b"body"))));
         let body = take_in_memory_body(&[], &mut response).expect("single body frame");
         assert_eq!(body, Bytes::from_static(b"body"));
         assert!(take_in_memory_body(&[], &mut response).is_none());
+    }
+
+    #[tokio::test]
+    async fn parsed_fallback_owner_finalization_matches_standard_response() {
+        let make = || {
+            Response::builder()
+                .version(Version::HTTP_10)
+                .status(StatusCode::OK)
+                .header("date", "Thu, 01 Jan 1970 00:00:00 GMT")
+                .header("connection", "x-private")
+                .header("x-private", "remove")
+                .header("via", "1.0 upstream")
+                .header("x-duplicate", "first")
+                .header("x-duplicate", "second")
+                .body(Body::from("fallback body"))
+                .expect("response")
+        };
+        let mut standard = make();
+        let mut owned = OwnerResponse::from_http(make());
+        let upstream_version = owned.version();
+        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            &Method::GET,
+            upstream_version,
+            "qpx",
+            &mut standard,
+            None,
+            false,
+        );
+        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            &Method::GET,
+            upstream_version,
+            "qpx",
+            &mut owned,
+            None,
+            false,
+        );
+
+        let standard = standard;
+        let owned = owned.into_http_for_library();
+        assert_eq!(standard.status(), owned.status());
+        assert_eq!(standard.version(), owned.version());
+        let standard_fields: Vec<_> = standard
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes(), value.is_sensitive()))
+            .collect();
+        let owned_fields: Vec<_> = owned
+            .headers()
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_bytes(), value.is_sensitive()))
+            .collect();
+        assert_eq!(standard_fields, owned_fields);
+        assert_eq!(
+            owned
+                .headers()
+                .get_all("via")
+                .iter()
+                .map(|value| value.to_str().expect("Via"))
+                .collect::<Vec<_>>(),
+            ["1.0 upstream", "1.0 qpx"]
+        );
+        assert!(!owned.headers().contains_key("x-private"));
+        let (_, standard_body) = standard.into_parts();
+        let (_, owned_body) = owned.into_parts();
+        assert_eq!(
+            qpx_http::body::to_bytes(standard_body)
+                .await
+                .expect("standard body"),
+            qpx_http::body::to_bytes(owned_body)
+                .await
+                .expect("owned body")
+        );
     }
 
     #[test]
