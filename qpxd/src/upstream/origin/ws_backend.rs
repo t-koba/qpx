@@ -83,7 +83,7 @@ fn prepare_websocket_request(
     prepare_request_with_headers_in_place(&mut req, proxy_name, None, true);
     *req.version_mut() = http::Version::HTTP_11;
     crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
-    let host = OrdinaryHeaderName::try_from(http::header::HOST).expect("host is an ordinary field");
+    let host = OrdinaryHeaderName::try_from(http::header::HOST)?;
     req.headers_mut()
         .insert(host, HeaderValue::from_str(host_authority)?);
     Ok(req)
