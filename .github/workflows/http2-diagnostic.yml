@@ -13,7 +13,6 @@ jobs:
     runs-on: ubuntu-latest
     env:
       QPX_PERF_ASSESSMENT: shared
-      QPX_HTTP2_DIAGNOSTIC_OUT: ${{ runner.temp }}/qpx-http2-diagnostic
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
@@ -49,6 +48,7 @@ jobs:
           echo "QPX_PREVIOUS_BIN=$RUNNER_TEMP/qpx-perf-previous-target/release/qpxd" >> "$GITHUB_ENV"
       - name: paired HTTP/2 diagnostic (not an acceptance gate)
         run: |
+          export QPX_HTTP2_DIAGNOSTIC_OUT="$RUNNER_TEMP/qpx-http2-diagnostic"
           python3 scripts/perf-audit-policy.py diagnostic-http2 "$QPX_HTTP2_DIAGNOSTIC_OUT" \
             --previous-bin "$QPX_PREVIOUS_BIN" --previous-sha "$QPX_PREVIOUS_SOURCE_SHA"
       - name: upload HTTP/2 diagnostic artifact
