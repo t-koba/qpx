@@ -6,6 +6,18 @@ pub(crate) fn test_env_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
+macro_rules! instrument_request_span {
+    ($span:expr, $future:expr $(,)?) => {{
+        if qpx_observability::request_spans_enabled() {
+            use tracing::Instrument as _;
+            let span = $span;
+            ($future).instrument(span).await
+        } else {
+            ($future).await
+        }
+    }};
+}
+
 #[cfg(all(feature = "http3", not(feature = "tls-rustls")))]
 compile_error!("qpxd: feature http3 requires tls-rustls");
 

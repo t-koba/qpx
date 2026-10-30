@@ -96,27 +96,15 @@ pub(super) async fn dispatch_reverse_request<R: ReverseTerminalResponse>(
     state: Arc<crate::runtime::RuntimeState>,
     connection_pool: Option<&PreparedPlainHttp1ConnectionAffinity>,
 ) -> Result<(InterimList, R)> {
-    use tracing::Instrument as _;
-    if qpx_observability::request_spans_enabled() {
-        let span = tracing::info_span!(
+    instrument_request_span!(
+        tracing::info_span!(
             "dispatch_reverse_request",
             kind = "reverse",
             host = %qpx_core::redaction::redact_authority_userinfo(base.host().unwrap_or("")),
             method = %base.method,
-        );
-        return execute_reverse_dispatch::<R>(
-            req,
-            base,
-            reverse,
-            runtime,
-            conn,
-            state,
-            connection_pool,
-        )
-        .instrument(span)
-        .await;
-    }
-    execute_reverse_dispatch::<R>(req, base, reverse, runtime, conn, state, connection_pool).await
+        ),
+        execute_reverse_dispatch::<R>(req, base, reverse, runtime, conn, state, connection_pool),
+    )
 }
 
 async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(

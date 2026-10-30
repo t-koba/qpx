@@ -45,35 +45,22 @@ pub(super) async fn dispatch_forward_request(
     remote_addr: std::net::SocketAddr,
     ftp_credentials: crate::ftp::FtpCredentials,
 ) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
-    use tracing::Instrument as _;
-    if qpx_observability::request_spans_enabled() {
-        let span = tracing::info_span!(
+    instrument_request_span!(
+        tracing::info_span!(
             "dispatch_forward_request",
             kind = "forward",
             host = %qpx_core::redaction::redact_authority_userinfo(base.host().unwrap_or("")),
             method = %base.method,
-        );
+        ),
         execute_forward_request(
             req,
             base,
             runtime,
             listener_name,
             remote_addr,
-            ftp_credentials,
-        )
-        .instrument(span)
-        .await
-    } else {
-        execute_forward_request(
-            req,
-            base,
-            runtime,
-            listener_name,
-            remote_addr,
-            ftp_credentials,
-        )
-        .await
-    }
+            ftp_credentials
+        ),
+    )
 }
 
 async fn execute_forward_request(

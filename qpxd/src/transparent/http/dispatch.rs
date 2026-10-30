@@ -38,20 +38,15 @@ pub(super) async fn dispatch_transparent_request(
     original_target: Option<ConnectTarget>,
     listener_name: &str,
 ) -> Result<OwnerResponse<Body>> {
-    use tracing::Instrument as _;
-    if qpx_observability::request_spans_enabled() {
-        let span = tracing::info_span!(
+    instrument_request_span!(
+        tracing::info_span!(
             "dispatch_transparent_request",
             kind = "transparent",
             host = tracing::field::Empty,
             method = %req.method(),
-        );
-        execute_transparent_request(req, runtime, remote_addr, original_target, listener_name)
-            .instrument(span)
-            .await
-    } else {
-        execute_transparent_request(req, runtime, remote_addr, original_target, listener_name).await
-    }
+        ),
+        execute_transparent_request(req, runtime, remote_addr, original_target, listener_name),
+    )
 }
 
 async fn execute_transparent_request(

@@ -54,19 +54,15 @@ pub(super) async fn dispatch_mitm_request(
     sender: Arc<Mutex<SendRequest<Body>>>,
     route: MitmRouteContext<'_>,
 ) -> Result<qpx_core::http_message::Response<Body>> {
-    use tracing::Instrument as _;
-    if qpx_observability::request_spans_enabled() {
-        let span = tracing::info_span!(
+    instrument_request_span!(
+        tracing::info_span!(
             "dispatch_mitm_request",
             kind = "mitm",
             host = %route.host,
             method = %base.method,
-        );
-        return execute_mitm_request(req, base, runtime, sender, route)
-            .instrument(span)
-            .await;
-    }
-    execute_mitm_request(req, base, runtime, sender, route).await
+        ),
+        execute_mitm_request(req, base, runtime, sender, route),
+    )
 }
 
 async fn execute_mitm_request(
