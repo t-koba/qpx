@@ -20,13 +20,8 @@ use qpx_http::body::Body;
 use qpxd_cache::CacheRequestKey;
 use std::time::Duration;
 
-pub(super) struct ForwardCacheLookupInput<'a> {
-    pub(super) req: &'a mut Request<Body>,
-    pub(super) runtime: &'a Runtime,
-    pub(super) action: &'a qpx_core::config::ActionConfig,
-    pub(super) listener_name: &'a str,
-    pub(super) http_authority: &'a str,
-    pub(super) upstream_timeout: Duration,
+#[derive(Clone, Copy)]
+pub(super) struct ForwardCacheContext<'a> {
     pub(super) request_method: &'a Method,
     pub(super) client_version: http::Version,
     pub(super) proxy_name: &'a str,
@@ -35,47 +30,57 @@ pub(super) struct ForwardCacheLookupInput<'a> {
     pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
     pub(super) request_headers_snapshot: Option<&'a Request<()>>,
     pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
-    pub(super) cache_target_key: Option<&'a CacheRequestKey>,
     pub(super) state: &'a crate::runtime::RuntimeState,
-    pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
+    pub(super) upstream_timeout: Duration,
     pub(super) audit: &'a DispatchAuditContext,
+}
+
+pub(super) struct ForwardCacheLookupInput<'a> {
+    pub(super) context: ForwardCacheContext<'a>,
+    pub(super) req: &'a mut Request<Body>,
+    pub(super) runtime: &'a Runtime,
+    pub(super) action: &'a qpx_core::config::ActionConfig,
+    pub(super) listener_name: &'a str,
+    pub(super) http_authority: &'a str,
+    pub(super) cache_target_key: Option<&'a CacheRequestKey>,
+    pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
 }
 
 pub(super) async fn try_forward_cache_lookup(
     input: ForwardCacheLookupInput<'_>,
 ) -> Result<DispatchCacheLookupOutcome> {
-    let Some(snapshot) = input.request_headers_snapshot else {
+    let Some(snapshot) = input.context.request_headers_snapshot else {
         return Ok(DispatchCacheLookupOutcome::Continue(None));
     };
-    if input.cache_policy.is_none() {
+    if input.context.cache_policy.is_none() {
         return Ok(DispatchCacheLookupOutcome::Continue(None));
     }
     let lookup_started = std::time::Instant::now();
     let lookup_result = lookup_with_revalidation(
         input.req,
         snapshot,
-        input.cache_lookup_key,
-        input.cache_policy,
-        &input.state.cache.backends,
-        &input.state.cache.background_revalidations,
-        input.state.messages.cache_miss.as_str(),
+        input.context.cache_lookup_key,
+        input.context.cache_policy,
+        &input.context.state.cache.backends,
+        &input.context.state.cache.background_revalidations,
+        input.context.state.messages.cache_miss.as_str(),
     )
     .await;
-    record_cache_lookup_duration(input.audit.kind, lookup_started.elapsed());
+    record_cache_lookup_duration(input.context.audit.kind, lookup_started.elapsed());
     let (lookup_decision, lookup_revalidation_state) = lookup_result?;
     input
         .http_modules
         .on_cache_lookup(cache_decision_is_hit(&lookup_decision))
         .await?;
     let response_version = matches!(lookup_decision, CacheLookupDecision::OnlyIfCachedMiss(_))
-        .then_some(input.client_version);
+        .then_some(input.context.client_version);
     match &lookup_decision {
         CacheLookupDecision::Hit(_) | CacheLookupDecision::OnlyIfCachedMiss(_) => {}
         CacheLookupDecision::StaleWhileRevalidate(_, state) => {
             maybe_spawn_forward_background_revalidation(&input, state);
         }
         CacheLookupDecision::Miss => {
-            record_cache_lookup_result(input.audit.kind, "miss");
+            record_cache_lookup_result(input.context.audit.kind, "miss");
             return Ok(DispatchCacheLookupOutcome::Continue(
                 lookup_revalidation_state.map(Box::new),
             ));
@@ -85,13 +90,13 @@ pub(super) async fn try_forward_cache_lookup(
         decision: lookup_decision,
         hit_outcome: DispatchOutcome::CacheHit,
         stale_outcome: DispatchOutcome::CacheStale,
-        plan: input.selected_plan,
-        request_method: input.request_method,
+        plan: input.context.selected_plan,
+        request_method: input.context.request_method,
         response_version,
-        proxy_name: input.proxy_name,
-        headers: input.headers,
+        proxy_name: input.context.proxy_name,
+        headers: input.context.headers,
         http_modules: input.http_modules,
-        audit: input.audit,
+        audit: input.context.audit,
     })
     .await?;
     Ok(match response {
@@ -104,13 +109,13 @@ fn maybe_spawn_forward_background_revalidation(
     input: &ForwardCacheLookupInput<'_>,
     state: &qpxd_cache::RevalidationState,
 ) {
-    if *input.request_method != Method::GET {
+    if *input.context.request_method != Method::GET {
         return;
     }
     let (Some(policy), Some(_snapshot), Some(lookup_key), Some(target_key)) = (
-        input.cache_policy,
-        input.request_headers_snapshot,
-        input.cache_lookup_key,
+        input.context.cache_policy,
+        input.context.request_headers_snapshot,
+        input.context.cache_lookup_key,
         input.cache_target_key,
     ) else {
         return;
@@ -127,7 +132,7 @@ fn maybe_spawn_forward_background_revalidation(
     let target_key = target_key.clone();
     let bg_req = clone_request_head_for_revalidation(input.req);
     let snapshot = clone_request_head_for_revalidation(&bg_req);
-    let upstream_timeout = input.upstream_timeout;
+    let upstream_timeout = input.context.upstream_timeout;
     let state = state.clone();
     tokio::spawn(async move {
         let _guard = guard;
@@ -174,19 +179,9 @@ fn maybe_spawn_forward_background_revalidation(
 }
 
 pub(super) struct ForwardCacheCollapseInput<'a> {
+    pub(super) context: ForwardCacheContext<'a>,
     pub(super) req: &'a mut Request<Body>,
-    pub(super) request_method: &'a Method,
-    pub(super) client_version: http::Version,
-    pub(super) proxy_name: &'a str,
-    pub(super) headers: Option<&'a qpx_core::rules::CompiledHeaderControl>,
-    pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
-    pub(super) request_headers_snapshot: Option<&'a Request<()>>,
-    pub(super) cache_policy: Option<&'a qpx_core::config::CachePolicyConfig>,
-    pub(super) cache_lookup_key: Option<&'a CacheRequestKey>,
-    pub(super) state: &'a crate::runtime::RuntimeState,
     pub(super) http_modules: &'a mut crate::http::modules::HttpModuleExecution,
-    pub(super) upstream_timeout: Duration,
-    pub(super) audit: &'a DispatchAuditContext,
     pub(super) revalidation_state: Option<qpxd_cache::RevalidationState>,
 }
 
@@ -195,28 +190,28 @@ pub(super) async fn try_forward_cache_collapse(
 ) -> Result<DispatchCacheCollapseOutcome<OwnerResponse<Body>>> {
     let mut revalidation_state = input.revalidation_state.clone();
     let mut guard = None;
-    if input.request_method != Method::GET {
+    if input.context.request_method != Method::GET {
         return Ok(dispatch_cache_collapse_continue(revalidation_state, guard));
     }
     let (Some(snapshot), Some(policy), Some(lookup_key)) = (
-        input.request_headers_snapshot,
-        input.cache_policy,
-        input.cache_lookup_key,
+        input.context.request_headers_snapshot,
+        input.context.cache_policy,
+        input.context.cache_lookup_key,
     ) else {
         return Ok(dispatch_cache_collapse_continue(revalidation_state, guard));
     };
-    match input.state.cache.begin_request_collapse(lookup_key) {
+    match input.context.state.cache.begin_request_collapse(lookup_key) {
         qpxd_cache::RequestCollapseJoin::Leader(leader) => guard = Some(leader),
         qpxd_cache::RequestCollapseJoin::Follower(waiter) => {
-            if waiter.wait(input.upstream_timeout).await {
+            if waiter.wait(input.context.upstream_timeout).await {
                 let (lookup_decision, next_revalidation_state) = lookup_with_revalidation(
                     input.req,
                     snapshot,
-                    input.cache_lookup_key,
+                    input.context.cache_lookup_key,
                     Some(policy),
-                    &input.state.cache.backends,
-                    &input.state.cache.background_revalidations,
-                    input.state.messages.cache_miss.as_str(),
+                    &input.context.state.cache.backends,
+                    &input.context.state.cache.background_revalidations,
+                    input.context.state.messages.cache_miss.as_str(),
                 )
                 .await?;
                 revalidation_state = next_revalidation_state;
@@ -240,16 +235,16 @@ async fn finalize_forward_collapsed_cache_decision(
     lookup_decision: CacheLookupDecision,
 ) -> Result<Option<OwnerResponse<Body>>> {
     let response_version = matches!(lookup_decision, CacheLookupDecision::OnlyIfCachedMiss(_))
-        .then_some(input.client_version);
+        .then_some(input.context.client_version);
     finalize_dispatch_collapsed_cache_decision(DispatchCollapsedCacheDecisionInput {
         decision: lookup_decision,
-        plan: input.selected_plan,
-        request_method: input.request_method,
+        plan: input.context.selected_plan,
+        request_method: input.context.request_method,
         response_version,
-        proxy_name: input.proxy_name,
-        headers: input.headers,
+        proxy_name: input.context.proxy_name,
+        headers: input.context.headers,
         http_modules: input.http_modules,
-        audit: input.audit,
+        audit: input.context.audit,
     })
     .await
 }

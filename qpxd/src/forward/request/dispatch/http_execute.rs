@@ -1,6 +1,6 @@
 use super::request_dispatch_cache::{
-    ForwardCacheCollapseInput, ForwardCacheLookupInput, try_forward_cache_collapse,
-    try_forward_cache_lookup,
+    ForwardCacheCollapseInput, ForwardCacheContext, ForwardCacheLookupInput,
+    try_forward_cache_collapse, try_forward_cache_lookup,
 };
 use super::request_dispatch_upstream::{
     ForwardRequestContext, ForwardUpstreamInput, execute_forward_upstream,
@@ -36,14 +36,7 @@ pub(super) async fn execute_forward_http_after_prepare(
         export_session,
         _concurrency_permits,
     } = input.ready;
-    let mut revalidation_state;
-    match try_forward_cache_lookup(ForwardCacheLookupInput {
-        req: &mut req,
-        runtime: input.runtime,
-        action: input.action,
-        listener_name: input.listener_name,
-        http_authority: http_authority.as_str(),
-        upstream_timeout,
+    let cache_context = ForwardCacheContext {
         request_method: input.context.request_method,
         client_version: input.context.client_version,
         proxy_name: input.context.proxy_name,
@@ -52,10 +45,20 @@ pub(super) async fn execute_forward_http_after_prepare(
         cache_policy: input.cache_policy,
         request_headers_snapshot: request_headers_snapshot.as_ref(),
         cache_lookup_key: cache_lookup_key.as_ref(),
-        cache_target_key: cache_target_key.as_ref(),
         state: input.context.state,
-        http_modules: &mut http_modules,
+        upstream_timeout,
         audit: input.context.audit,
+    };
+    let mut revalidation_state;
+    match try_forward_cache_lookup(ForwardCacheLookupInput {
+        context: cache_context,
+        req: &mut req,
+        runtime: input.runtime,
+        action: input.action,
+        listener_name: input.listener_name,
+        http_authority: http_authority.as_str(),
+        cache_target_key: cache_target_key.as_ref(),
+        http_modules: &mut http_modules,
     })
     .await?
     {
@@ -72,19 +75,9 @@ pub(super) async fn execute_forward_http_after_prepare(
         DispatchCacheLookupOutcome::Continue(state) => revalidation_state = state.map(|s| *s),
     }
     let cache_collapse_guard = match try_forward_cache_collapse(ForwardCacheCollapseInput {
+        context: cache_context,
         req: &mut req,
-        request_method: input.context.request_method,
-        client_version: input.context.client_version,
-        proxy_name: input.context.proxy_name,
-        headers: input.context.headers.as_deref(),
-        selected_plan: input.context.selected_plan,
-        request_headers_snapshot: request_headers_snapshot.as_ref(),
-        cache_policy: input.cache_policy,
-        cache_lookup_key: cache_lookup_key.as_ref(),
-        state: input.context.state,
         http_modules: &mut http_modules,
-        upstream_timeout,
-        audit: input.context.audit,
         revalidation_state,
     })
     .await?
