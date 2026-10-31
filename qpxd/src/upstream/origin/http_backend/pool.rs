@@ -181,17 +181,13 @@ impl<T> Http1IdleShards<T> {
     where
         F: FnMut(&T) -> bool,
     {
-        for offset in 0..HTTP1_IDLE_POOL_SHARDS {
-            let shard = (preferred + offset) % HTTP1_IDLE_POOL_SHARDS;
-            let mut entries = self.shards[shard].lock();
-            let Some(index) = entries.iter().rposition(&mut predicate) else {
-                continue;
-            };
+        (0..HTTP1_IDLE_POOL_SHARDS).find_map(|offset| {
+            let mut entries = self.shards[(preferred + offset) % HTTP1_IDLE_POOL_SHARDS].lock();
+            let index = entries.iter().rposition(&mut predicate)?;
             let entry = entries.swap_remove(index);
             self.len.fetch_sub(1, Ordering::Relaxed);
-            return Some(entry);
-        }
-        None
+            Some(entry)
+        })
     }
 
     fn remove_matching<F>(&self, mut predicate: F)
