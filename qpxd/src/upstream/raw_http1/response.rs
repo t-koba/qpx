@@ -333,11 +333,10 @@ fn try_parse_response_head_with<T>(
     }
 }
 
-fn finish_raw_response_head(
+fn validate_response_head_status(
     response: &httparse::Response<'_, '_>,
     consumed: usize,
-    request_method: &Method,
-) -> Result<RawParsedResponseHeadTuple> {
+) -> Result<(Version, StatusCode)> {
     if consumed > MAX_HEADER_BYTES {
         return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
     }
@@ -348,7 +347,15 @@ fn finish_raw_response_head(
     if !(100..=599).contains(&code) {
         return Err(anyhow!("upstream response status is out of range: {code}"));
     }
-    let status = StatusCode::from_u16(code)?;
+    Ok((version, StatusCode::from_u16(code)?))
+}
+
+fn finish_raw_response_head(
+    response: &httparse::Response<'_, '_>,
+    consumed: usize,
+    request_method: &Method,
+) -> Result<RawParsedResponseHeadTuple> {
+    let (version, status) = validate_response_head_status(response, consumed)?;
     if status.is_informational() && status != StatusCode::SWITCHING_PROTOCOLS {
         return Ok((
             consumed,
@@ -377,17 +384,7 @@ fn finish_parsed_response_head(
     consumed: usize,
     request_method: &Method,
 ) -> Result<ParsedResponseHeadTuple> {
-    if consumed > MAX_HEADER_BYTES {
-        return Err(anyhow!("HTTP/1 header block exceeded configured limit"));
-    }
-    let version = parse_version(response.version, "missing upstream HTTP version")?;
-    let code = response
-        .code
-        .ok_or_else(|| anyhow!("upstream response missing status code"))?;
-    if !(100..=599).contains(&code) {
-        return Err(anyhow!("upstream response status is out of range: {code}"));
-    }
-    let status = StatusCode::from_u16(code)?;
+    let (version, status) = validate_response_head_status(response, consumed)?;
     let headers = parse_header_map_recycled(response.headers)?;
     let body_kind = determine_response_body_kind(request_method, status, &headers)?;
     Ok((consumed, version, status, headers, body_kind))
