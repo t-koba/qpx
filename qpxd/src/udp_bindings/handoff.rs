@@ -40,11 +40,14 @@ impl UdpBindings {
                     {
                         continue;
                     }
-                    let listen = listener
-                        .http3
-                        .as_ref()
-                        .and_then(|cfg| cfg.listen.clone())
-                        .unwrap_or_else(|| listener.listen.clone());
+                    let listen = super::effective_http3_listen(
+                        listener
+                            .http3
+                            .as_ref()
+                            .and_then(|cfg| cfg.listen.as_deref()),
+                        &listener.listen,
+                    )
+                    .to_owned();
                     let socket = self.listener_udp.get(&listener.name).ok_or_else(|| {
                         anyhow!("udp listener binding not found for {}", listener.name)
                     })?;
@@ -64,11 +67,14 @@ impl UdpBindings {
                     {
                         continue;
                     }
-                    let listen = reverse_edge
-                        .http3
-                        .as_ref()
-                        .and_then(|cfg| cfg.listen.clone())
-                        .unwrap_or_else(|| reverse_edge.listen.clone());
+                    let listen = super::effective_http3_listen(
+                        reverse_edge
+                            .http3
+                            .as_ref()
+                            .and_then(|cfg| cfg.listen.as_deref()),
+                        &reverse_edge.listen,
+                    )
+                    .to_owned();
                     let socket = self.reverse_udp.get(&reverse_edge.name).ok_or_else(|| {
                         anyhow!(
                             "udp reverse_edge binding not found for {}",
@@ -116,11 +122,14 @@ impl UdpBindings {
                             .unwrap_or(false)
                     })
                     .map(|listener| {
-                        let listen = listener
-                            .http3
-                            .as_ref()
-                            .and_then(|cfg| cfg.listen.clone())
-                            .unwrap_or_else(|| listener.listen.clone());
+                        let listen = super::effective_http3_listen(
+                            listener
+                                .http3
+                                .as_ref()
+                                .and_then(|cfg| cfg.listen.as_deref()),
+                            &listener.listen,
+                        )
+                        .to_owned();
                         let socket = self
                             .listener_udp
                             .get(&listener.name)
@@ -153,11 +162,14 @@ impl UdpBindings {
                             .unwrap_or(false)
                     })
                     .map(|reverse_edge| {
-                        let listen = reverse_edge
-                            .http3
-                            .as_ref()
-                            .and_then(|cfg| cfg.listen.clone())
-                            .unwrap_or_else(|| reverse_edge.listen.clone());
+                        let listen = super::effective_http3_listen(
+                            reverse_edge
+                                .http3
+                                .as_ref()
+                                .and_then(|cfg| cfg.listen.as_deref()),
+                            &reverse_edge.listen,
+                        )
+                        .to_owned();
                         let socket = self
                             .reverse_udp
                             .get(&reverse_edge.name)

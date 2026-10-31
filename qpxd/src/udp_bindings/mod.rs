@@ -80,11 +80,8 @@ impl UdpBindings {
                 let Some(http3) = listener.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
-                let listen = http3
-                    .listen
-                    .clone()
-                    .unwrap_or_else(|| listener.listen.clone());
-                let socket = bind_udp_for_listener(listener, config, listen.as_str())?;
+                let listen = effective_http3_listen(http3.listen.as_deref(), &listener.listen);
+                let socket = bind_udp_for_listener(listener, config, listen)?;
                 listener_udp.insert(listener.name.clone(), socket);
             }
 
@@ -92,11 +89,8 @@ impl UdpBindings {
                 let Some(http3) = reverse_edge.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
-                let listen = http3
-                    .listen
-                    .clone()
-                    .unwrap_or_else(|| reverse_edge.listen.clone());
-                let socket = bind_udp_for_reverse(reverse_edge, config, listen.as_str())?;
+                let listen = effective_http3_listen(http3.listen.as_deref(), &reverse_edge.listen);
+                let socket = bind_udp_for_reverse(reverse_edge, config, listen)?;
                 reverse_udp.insert(reverse_edge.name.clone(), socket);
             }
 
@@ -127,18 +121,15 @@ impl UdpBindings {
                 let Some(http3) = listener.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
-                let listen = http3
-                    .listen
-                    .clone()
-                    .unwrap_or_else(|| listener.listen.clone());
+                let listen = effective_http3_listen(http3.listen.as_deref(), &listener.listen);
                 let socket = previous
-                    .udp_socket_for_listen(previous_config, listen.as_str())
+                    .udp_socket_for_listen(previous_config, listen)
                     .map(|socket| {
                         socket.with_context(|| {
                             format!("failed to clone udp listener binding for {}", listener.name)
                         })
                     })
-                    .unwrap_or_else(|| bind_udp_for_listener(listener, config, listen.as_str()))?;
+                    .unwrap_or_else(|| bind_udp_for_listener(listener, config, listen))?;
                 listener_udp.insert(listener.name.clone(), socket);
             }
 
@@ -146,12 +137,9 @@ impl UdpBindings {
                 let Some(http3) = reverse_edge.http3.as_ref().filter(|cfg| cfg.enabled) else {
                     continue;
                 };
-                let listen = http3
-                    .listen
-                    .clone()
-                    .unwrap_or_else(|| reverse_edge.listen.clone());
+                let listen = effective_http3_listen(http3.listen.as_deref(), &reverse_edge.listen);
                 let socket = previous
-                    .udp_socket_for_listen(previous_config, listen.as_str())
+                    .udp_socket_for_listen(previous_config, listen)
                     .map(|socket| {
                         socket.with_context(|| {
                             format!(
@@ -160,9 +148,7 @@ impl UdpBindings {
                             )
                         })
                     })
-                    .unwrap_or_else(|| {
-                        bind_udp_for_reverse(reverse_edge, config, listen.as_str())
-                    })?;
+                    .unwrap_or_else(|| bind_udp_for_reverse(reverse_edge, config, listen))?;
                 reverse_udp.insert(reverse_edge.name.clone(), socket);
             }
 
@@ -186,12 +172,8 @@ impl UdpBindings {
                 .http3
                 .as_ref()
                 .filter(|cfg| cfg.enabled)
-                .map(|cfg| {
-                    cfg.listen
-                        .clone()
-                        .unwrap_or_else(|| listener.listen.clone())
-                });
-            if old_listen.as_deref() == Some(listen)
+                .map(|cfg| effective_http3_listen(cfg.listen.as_deref(), &listener.listen));
+            if old_listen == Some(listen)
                 && let Some(socket) = self.listener_udp.get(&listener.name)
             {
                 return Some(socket.try_clone().context("failed to clone udp listener"));
@@ -202,12 +184,8 @@ impl UdpBindings {
                 .http3
                 .as_ref()
                 .filter(|cfg| cfg.enabled)
-                .map(|cfg| {
-                    cfg.listen
-                        .clone()
-                        .unwrap_or_else(|| reverse_edge.listen.clone())
-                });
-            if old_listen.as_deref() == Some(listen)
+                .map(|cfg| effective_http3_listen(cfg.listen.as_deref(), &reverse_edge.listen));
+            if old_listen == Some(listen)
                 && let Some(socket) = self.reverse_udp.get(&reverse_edge.name)
             {
                 return Some(
@@ -250,11 +228,7 @@ impl UdpBindings {
                     .http3
                     .as_ref()
                     .filter(|cfg| cfg.enabled)
-                    .map(|cfg| {
-                        cfg.listen
-                            .clone()
-                            .unwrap_or_else(|| listener.listen.clone())
-                    });
+                    .map(|cfg| effective_http3_listen(cfg.listen.as_deref(), &listener.listen));
                 if let Some(socket) =
                     inherited_udp_socket(maybe, &listener.name, "listener", listen)?
                 {
@@ -271,11 +245,7 @@ impl UdpBindings {
                     .http3
                     .as_ref()
                     .filter(|cfg| cfg.enabled)
-                    .map(|cfg| {
-                        cfg.listen
-                            .clone()
-                            .unwrap_or_else(|| reverse_edge.listen.clone())
-                    });
+                    .map(|cfg| effective_http3_listen(cfg.listen.as_deref(), &reverse_edge.listen));
                 if let Some(socket) =
                     inherited_udp_socket(maybe, &reverse_edge.name, "reverse_edge", listen)?
                 {
@@ -322,11 +292,16 @@ impl UdpBindings {
 }
 
 #[cfg(feature = "http3")]
+fn effective_http3_listen<'a>(configured: Option<&'a str>, fallback: &'a str) -> &'a str {
+    configured.unwrap_or(fallback)
+}
+
+#[cfg(feature = "http3")]
 fn inherited_udp_socket(
     inherited: Option<&InheritedUdpSocket>,
     name: &str,
     kind: &str,
-    listen: Option<String>,
+    listen: Option<&str>,
 ) -> Result<Option<UdpSocket>> {
     let Some(listen) = listen else {
         if inherited.is_some() {
@@ -379,4 +354,18 @@ fn bind_udp_for_reverse(
         .parse()
         .with_context(|| format!("reverse_edge {} http3.listen is invalid", reverse_edge.name))?;
     crate::tcp_bindings::net::bind_udp_std_socket(addr, &config.runtime)
+}
+
+#[cfg(all(test, feature = "http3"))]
+mod listen_tests {
+    use super::effective_http3_listen;
+
+    #[test]
+    fn configured_h3_listen_overrides_edge_listen() {
+        assert_eq!(
+            effective_http3_listen(Some("127.0.0.1:8443"), "0.0.0.0:443"),
+            "127.0.0.1:8443"
+        );
+        assert_eq!(effective_http3_listen(None, "0.0.0.0:443"), "0.0.0.0:443");
+    }
 }
