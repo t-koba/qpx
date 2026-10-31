@@ -25,16 +25,7 @@ use windows_sys::Win32::System::Threading::{
 pub(crate) const HANDOFF_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 const SYNCHRONIZE: u32 = 0x0010_0000;
 
-pub(crate) fn handoff_dir(config: &Config) -> PathBuf {
-    config
-        .state_dir
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(default_handoff_root)
-        .join("upgrade")
-}
-
-fn default_handoff_root() -> PathBuf {
+pub(crate) fn default_handoff_root() -> PathBuf {
     if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
         return PathBuf::from(local_app_data)
             .join("qpx")
@@ -51,7 +42,7 @@ fn default_handoff_root() -> PathBuf {
 }
 
 pub(crate) fn create_handoff_path(config: &Config, prefix: &str) -> Result<PathBuf> {
-    let dir = handoff_dir(config);
+    let dir = super::handoff_dir(config);
     ensure_secure_handoff_dir(&dir)?;
     Ok(dir.join(format!("{prefix}-{}.json", Uuid::new_v4())))
 }
