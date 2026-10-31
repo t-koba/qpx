@@ -1,7 +1,5 @@
 use crate::http3::stream_limits::timeout_or_deadline;
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
-use http::HeaderMap;
 use qpx_http::body::Sender;
 use tokio::time::{Duration, Instant};
 
@@ -20,40 +18,11 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
     mut sender: Sender,
     options: QpxRequestBodyRelayOptions<'_>,
 ) -> Result<(u64, Option<crate::http::rpc::FramedBodySummary>)> {
-    relay_qpx_request_body_observed_inner(
-        QpxRequestBodyReader::Recv(req_stream),
-        &mut sender,
-        options,
-    )
-    .await
-}
-
-enum QpxRequestBodyReader<'a> {
-    Recv(&'a mut qpx_h3::RequestRecvStream),
-}
-
-impl QpxRequestBodyReader<'_> {
-    async fn recv_data(&mut self) -> Result<Option<Bytes>> {
-        match self {
-            Self::Recv(stream) => stream.recv_data().await.map_err(Into::into),
-        }
-    }
-
-    async fn recv_trailers(&mut self) -> Result<Option<HeaderMap>> {
-        match self {
-            Self::Recv(stream) => stream.recv_trailers().await.map_err(Into::into),
-        }
-    }
-
-    fn abort_message_stream(&mut self) {
-        match self {
-            Self::Recv(stream) => stream.abort_message_stream(),
-        }
-    }
+    relay_qpx_request_body_observed_inner(req_stream, &mut sender, options).await
 }
 
 async fn relay_qpx_request_body_observed_inner(
-    mut req_stream: QpxRequestBodyReader<'_>,
+    req_stream: &mut qpx_h3::RequestRecvStream,
     sender: &mut Sender,
     options: QpxRequestBodyRelayOptions<'_>,
 ) -> Result<(u64, Option<crate::http::rpc::FramedBodySummary>)> {
