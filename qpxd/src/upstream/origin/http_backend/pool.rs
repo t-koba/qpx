@@ -162,10 +162,7 @@ impl<T> Http1IdleShards<T> {
     }
 
     fn pop_preferred_with_fallback(&self, preferred: usize) -> Option<T> {
-        if let Some(entry) = self.pop_preferred(preferred) {
-            return Some(entry);
-        }
-        for offset in 1..HTTP1_IDLE_POOL_SHARDS {
+        for offset in 0..HTTP1_IDLE_POOL_SHARDS {
             let shard = (preferred + offset) % HTTP1_IDLE_POOL_SHARDS;
             if let Some(entry) = self.pop_preferred(shard) {
                 return Some(entry);
