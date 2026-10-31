@@ -246,42 +246,19 @@ impl UdpBindings {
                     .forward_edges
                     .iter()
                     .find(|entry| entry.name == listener.name);
-                let expect_socket = listener
+                let listen = listener
                     .http3
                     .as_ref()
-                    .map(|cfg| cfg.enabled)
-                    .unwrap_or(false);
-                if expect_socket {
-                    let listen = listener
-                        .http3
-                        .as_ref()
-                        .and_then(|cfg| cfg.listen.clone())
-                        .unwrap_or_else(|| listener.listen.clone());
-                    let entry = maybe.ok_or_else(|| {
-                        anyhow!(
-                            "missing inherited udp listener binding for {}",
-                            listener.name
-                        )
-                    })?;
-                    if entry.listen != listen {
-                        return Err(anyhow!(
-                            "inherited udp listener binding for {} does not match listen {}",
-                            listener.name,
-                            listen
-                        ));
-                    }
-                    listener_udp.insert(
-                        listener.name.clone(),
-                        #[cfg(unix)]
-                        adopt_inherited_udp_socket(entry.fd)?,
-                        #[cfg(windows)]
-                        adopt_inherited_udp_socket_windows(entry.socket.as_slice())?,
-                    );
-                } else if maybe.is_some() {
-                    return Err(anyhow!(
-                        "unexpected inherited udp listener binding for {}",
-                        listener.name
-                    ));
+                    .filter(|cfg| cfg.enabled)
+                    .map(|cfg| {
+                        cfg.listen
+                            .clone()
+                            .unwrap_or_else(|| listener.listen.clone())
+                    });
+                if let Some(socket) =
+                    inherited_udp_socket(maybe, &listener.name, "listener", listen)?
+                {
+                    listener_udp.insert(listener.name.clone(), socket);
                 }
             }
 
@@ -290,42 +267,19 @@ impl UdpBindings {
                     .reverse_edge
                     .iter()
                     .find(|entry| entry.name == reverse_edge.name);
-                let expect_socket = reverse_edge
+                let listen = reverse_edge
                     .http3
                     .as_ref()
-                    .map(|cfg| cfg.enabled)
-                    .unwrap_or(false);
-                if expect_socket {
-                    let listen = reverse_edge
-                        .http3
-                        .as_ref()
-                        .and_then(|cfg| cfg.listen.clone())
-                        .unwrap_or_else(|| reverse_edge.listen.clone());
-                    let entry = maybe.ok_or_else(|| {
-                        anyhow!(
-                            "missing inherited udp reverse_edge binding for {}",
-                            reverse_edge.name
-                        )
-                    })?;
-                    if entry.listen != listen {
-                        return Err(anyhow!(
-                            "inherited udp reverse_edge binding for {} does not match listen {}",
-                            reverse_edge.name,
-                            listen
-                        ));
-                    }
-                    reverse_udp.insert(
-                        reverse_edge.name.clone(),
-                        #[cfg(unix)]
-                        adopt_inherited_udp_socket(entry.fd)?,
-                        #[cfg(windows)]
-                        adopt_inherited_udp_socket_windows(entry.socket.as_slice())?,
-                    );
-                } else if maybe.is_some() {
-                    return Err(anyhow!(
-                        "unexpected inherited udp reverse_edge binding for {}",
-                        reverse_edge.name
-                    ));
+                    .filter(|cfg| cfg.enabled)
+                    .map(|cfg| {
+                        cfg.listen
+                            .clone()
+                            .unwrap_or_else(|| reverse_edge.listen.clone())
+                    });
+                if let Some(socket) =
+                    inherited_udp_socket(maybe, &reverse_edge.name, "reverse_edge", listen)?
+                {
+                    reverse_udp.insert(reverse_edge.name.clone(), socket);
                 }
             }
 
@@ -365,6 +319,35 @@ impl UdpBindings {
             })
             .transpose()
     }
+}
+
+#[cfg(feature = "http3")]
+fn inherited_udp_socket(
+    inherited: Option<&InheritedUdpSocket>,
+    name: &str,
+    kind: &str,
+    listen: Option<String>,
+) -> Result<Option<UdpSocket>> {
+    let Some(listen) = listen else {
+        if inherited.is_some() {
+            return Err(anyhow!(
+                "unexpected inherited udp {kind} binding for {name}"
+            ));
+        }
+        return Ok(None);
+    };
+    let entry =
+        inherited.ok_or_else(|| anyhow!("missing inherited udp {kind} binding for {name}"))?;
+    if entry.listen != listen {
+        return Err(anyhow!(
+            "inherited udp {kind} binding for {name} does not match listen {listen}"
+        ));
+    }
+    #[cfg(unix)]
+    let socket = adopt_inherited_udp_socket(entry.fd)?;
+    #[cfg(windows)]
+    let socket = adopt_inherited_udp_socket_windows(entry.socket.as_slice())?;
+    Ok(Some(socket))
 }
 
 #[cfg(feature = "http3")]
