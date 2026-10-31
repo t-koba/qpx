@@ -57,10 +57,7 @@ enum PreparedRawHttp1Target {
         endpoint: Arc<crate::reverse::health::UpstreamEndpoint>,
     },
     LocalResponse,
-    Generic {
-        uri: Uri,
-        headers: HeaderMap,
-    },
+    Generic(Request<()>),
 }
 
 pub(in crate::reverse) enum PreparedRawHttp1Response {
@@ -83,19 +80,14 @@ impl PreparedRawHttp1Request {
     }
 
     pub(in crate::reverse) fn generic_request(&self) -> Option<Request<Body>> {
-        let PreparedRawHttp1Target::Generic { uri, headers } = &self.target else {
+        let PreparedRawHttp1Target::Generic(request) = &self.target else {
             return None;
         };
-        let mut request = Request::new(Body::empty());
-        *request.method_mut() = self.method.clone();
-        *request.uri_mut() = uri.clone();
-        *request.version_mut() = Version::HTTP_11;
-        *request.headers_mut() = headers.clone();
-        Some(request)
+        Some(request.clone().map(|()| Body::empty()))
     }
 
     pub(in crate::reverse) fn raw_access_log_request(&self) -> Option<&Request<()>> {
-        if matches!(&self.target, PreparedRawHttp1Target::Generic { .. }) {
+        if matches!(&self.target, PreparedRawHttp1Target::Generic(..)) {
             return None;
         }
         self.raw_access_log_request.as_ref()
@@ -366,13 +358,18 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
     } else {
         let uri = request.target.parse::<Uri>().ok()?;
         let headers = crate::http::codec::h1_common::parse_header_map(request.headers).ok()?;
-        PreparedRawHttp1Target::Generic { uri, headers }
+        let mut generic = Request::new(());
+        *generic.method_mut() = method.clone();
+        *generic.uri_mut() = uri;
+        *generic.version_mut() = Version::HTTP_11;
+        *generic.headers_mut() = headers;
+        PreparedRawHttp1Target::Generic(generic)
     };
     // The cache-hit fast path only applies to routes that fell through to the
     // generic target (cache routes never qualify for raw upstream dispatch)
     // and only when the request shape is one the fast path can serve exactly
     // like the generic chain would.
-    let cache_hit = if matches!(target, PreparedRawHttp1Target::Generic { .. }) {
+    let cache_hit = if matches!(target, PreparedRawHttp1Target::Generic(..)) {
         build_raw_cache_hit_fast_path(
             &compiled,
             &state,
