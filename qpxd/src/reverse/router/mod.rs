@@ -603,7 +603,7 @@ impl ReverseRouter {
         };
         self.tls_prefilter.find_first(&prefilter_ctx, |idx| {
             let route = &self.tls_routes[idx];
-            if route.matches(&ctx) {
+            if route.matcher.matches(&ctx) {
                 let sticky_seed = route.affinity.seed_tls_passthrough(remote_ip, sni);
                 return route.select_upstream(tls_seed, sticky_seed);
             }

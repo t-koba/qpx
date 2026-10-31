@@ -28,8 +28,6 @@ use qpx_core::config::{PathRewriteConfig, ReverseRouteConfig};
 use qpx_core::http_message::Request as OwnerRequest;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::prefilter::StringInterner;
-#[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
-use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use regex::Regex;
 use std::collections::{HashMap, HashSet};
@@ -337,10 +335,6 @@ impl TlsPassthroughRoute {
             },
             hint,
         ))
-    }
-
-    pub(in crate::reverse) fn matches(&self, ctx: &RuleMatchContext<'_>) -> bool {
-        self.matcher.matches(ctx)
     }
 
     pub(in crate::reverse) fn select_upstream(
