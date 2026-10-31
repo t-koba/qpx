@@ -200,7 +200,7 @@ pub(crate) async fn send_h2_response_with_interim(
     let yield_after_initial = active_streams > 1;
     let mut head = Http1Response::new(());
     *head.status_mut() = status;
-    *head.headers_mut() = http_headers_into_h1(headers);
+    *head.headers_mut() = headers;
 
     let body_ends_immediately = http_body::Body::is_end_stream(&body);
     let end_stream_on_headers =
@@ -399,7 +399,7 @@ pub(crate) async fn send_h2_response_with_interim(
             {
                 return Ok(());
             }
-            let result = send_stream.send_trailers(http_headers_into_h1(trailers));
+            let result = send_stream.send_trailers(trailers);
             if !handle_h2_send_result(&mut send_stream, result).await? {
                 return Ok(());
             }
@@ -650,10 +650,6 @@ fn h1_headers_into_http(src: ::http::HeaderMap) -> Result<http::HeaderMap> {
 
 pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
     Ok(src.clone())
-}
-
-fn http_headers_into_h1(src: http::HeaderMap) -> ::http::HeaderMap {
-    src
 }
 
 pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
