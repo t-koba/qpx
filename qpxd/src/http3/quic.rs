@@ -105,9 +105,13 @@ pub(crate) const H3_STREAM_RECEIVE_WINDOW_BYTES: u32 = 1024 * 1024;
 pub(crate) const H3_CONNECTION_RECEIVE_WINDOW_BYTES: u32 = 4 * 1024 * 1024;
 pub(crate) const H3_SEND_WINDOW_BYTES: u64 = 4 * 1024 * 1024;
 
+fn h3_bidi_stream_limit(configured: usize) -> u32 {
+    (configured.min(u32::MAX as usize) as u32).max(1)
+}
+
 pub(crate) fn build_h3_server_config_from_tls(
     mut tls: quinn::rustls::ServerConfig,
-    max_bidi_streams: u32,
+    max_bidi_streams: usize,
     max_uni_streams: u32,
 ) -> Result<quinn::ServerConfig> {
     tls.alpn_protocols = vec![b"h3".to_vec()];
@@ -119,7 +123,7 @@ pub(crate) fn build_h3_server_config_from_tls(
     let mut server_config = quinn::ServerConfig::with_crypto(Arc::new(quic_crypto));
     let transport = Arc::get_mut(&mut server_config.transport)
         .ok_or_else(|| anyhow!("failed to configure QUIC transport"))?;
-    transport.max_concurrent_bidi_streams(max_bidi_streams.into());
+    transport.max_concurrent_bidi_streams(h3_bidi_stream_limit(max_bidi_streams).into());
     transport.max_concurrent_uni_streams(max_uni_streams.into());
     transport.stream_receive_window(H3_STREAM_RECEIVE_WINDOW_BYTES.into());
     transport.receive_window(H3_CONNECTION_RECEIVE_WINDOW_BYTES.into());
@@ -141,5 +145,18 @@ mod tests {
         assert_eq!(H3_STREAM_RECEIVE_WINDOW_BYTES, 1024 * 1024);
         assert_eq!(H3_CONNECTION_RECEIVE_WINDOW_BYTES, 4 * 1024 * 1024);
         assert_eq!(H3_SEND_WINDOW_BYTES, 4 * 1024 * 1024);
+    }
+
+    #[test]
+    fn h3_bidi_stream_limit_is_bounded_and_nonzero() {
+        assert_eq!(h3_bidi_stream_limit(0), 1);
+        assert_eq!(h3_bidi_stream_limit(17), 17);
+        assert_eq!(
+            h3_bidi_stream_limit(usize::MAX),
+            u32::try_from(usize::MAX).unwrap_or(u32::MAX)
+        );
+        if let Ok(over_u32) = usize::try_from(u64::from(u32::MAX) + 1) {
+            assert_eq!(h3_bidi_stream_limit(over_u32), u32::MAX);
+        }
     }
 }

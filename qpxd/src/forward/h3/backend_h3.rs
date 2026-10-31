@@ -33,14 +33,8 @@ pub(crate) async fn run_http3_listener(
     let connect_udp = resolve_connect_udp(http3_cfg.connect_udp);
 
     let tls_config = build_forward_tls_config(&listener, &runtime, listen_addr)?;
-    let max_bidi = runtime
-        .state()
-        .plan
-        .limits
-        .h3
-        .max_h3_streams_per_connection
-        .min(u32::MAX as usize) as u32;
-    let quic_config = build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 256)?;
+    let max_bidi = runtime.state().plan.limits.h3.max_h3_streams_per_connection;
+    let quic_config = build_h3_server_config_from_tls(tls_config, max_bidi, 256)?;
     let endpoint = build_server_endpoint(endpoint_socket, quic_config)?;
 
     let semaphore = runtime.state().connection_semaphore.clone();

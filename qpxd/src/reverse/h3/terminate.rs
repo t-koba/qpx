@@ -38,9 +38,8 @@ pub(crate) async fn run_http3_terminate(
         .plan
         .limits
         .h3
-        .max_h3_streams_per_connection
-        .min(u32::MAX as usize) as u32;
-    let server_config = build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 1024)?;
+        .max_h3_streams_per_connection;
+    let server_config = build_h3_server_config_from_tls(tls_config, max_bidi, 1024)?;
     let endpoint = build_server_endpoint(endpoint_socket, server_config)?;
 
     let semaphore = reverse_rt.runtime.state().connection_semaphore.clone();

@@ -69,15 +69,9 @@ pub(crate) async fn run_http3_listener(
     });
 
     let tls_config = build_forward_tls_config(&listener, &runtime, listen_addr)?;
-    let max_bidi = runtime
-        .state()
-        .plan
-        .limits
-        .h3
-        .max_h3_streams_per_connection
-        .min(u32::MAX as usize) as u32;
+    let max_bidi = runtime.state().plan.limits.h3.max_h3_streams_per_connection;
     let quic_config =
-        crate::http3::quic::build_h3_server_config_from_tls(tls_config, max_bidi.max(1), 16)?;
+        crate::http3::quic::build_h3_server_config_from_tls(tls_config, max_bidi, 16)?;
     let endpoint = build_server_endpoint(endpoint_socket, quic_config)?;
 
     let handler = ForwardQpxHandler {
