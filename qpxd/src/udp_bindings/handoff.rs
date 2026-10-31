@@ -7,7 +7,7 @@ use super::{WindowsInheritedUdpSocket, WindowsUdpBindingHandoff};
 use crate::udp_socket_handoff::duplicate_std_udp_socket_for_child;
 #[cfg(all(feature = "http3", unix))]
 use crate::udp_socket_handoff::duplicate_std_udp_socket_for_handoff;
-#[cfg(any(unix, all(windows, feature = "http3")))]
+#[cfg(unix)]
 use anyhow::Context;
 use anyhow::Result;
 #[cfg(any(feature = "http3", not(any(unix, windows))))]
