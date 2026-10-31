@@ -329,13 +329,6 @@ fn is_supported_https_svc_param(key: u16) -> bool {
     matches!(key, 0 | 1 | 3 | 4 | 6)
 }
 
-pub(super) fn h3_upstream_for_logical_origin(logical_host: &str, logical_port: u16) -> String {
-    format!(
-        "h3://{}",
-        qpx_http::protocol::address::format_authority_host_port(logical_host, logical_port)
-    )
-}
-
 struct AnswerRecord {
     pub(super) owner_name: String,
     pub(super) qtype: u16,

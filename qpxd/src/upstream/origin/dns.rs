@@ -315,7 +315,10 @@ async fn resolve_https_h3_endpoints(
             .target
             .as_deref()
             .unwrap_or(record.owner_name.as_str());
-        let h3_upstream = h3_upstream_for_logical_origin(logical_host, logical_port);
+        let h3_upstream = format!(
+            "h3://{}",
+            qpx_http::protocol::address::format_authority_host_port(logical_host, logical_port)
+        );
         ttl = Some(match ttl {
             Some(current) => current.min(Duration::from_secs(record.ttl_secs as u64)),
             None => Duration::from_secs(record.ttl_secs as u64),
@@ -484,9 +487,8 @@ fn random_dns_query_id() -> Result<u16> {
 mod parser;
 use self::parser::{
     DnsARecord, DnsHttpsRecord, DnsResponseStatus, DnsSrvRecord, dns_response_is_truncated_match,
-    dns_response_query_status, encode_dns_name as encode_dns_name_inner,
-    h3_upstream_for_logical_origin, normalize_dns_name, parse_address_records, parse_https_records,
-    parse_srv_records,
+    dns_response_query_status, encode_dns_name as encode_dns_name_inner, normalize_dns_name,
+    parse_address_records, parse_https_records, parse_srv_records,
 };
 #[cfg(test)]
 pub(super) use self::parser::{dns_response_matches_query, encode_dns_name, parse_dns_name};
