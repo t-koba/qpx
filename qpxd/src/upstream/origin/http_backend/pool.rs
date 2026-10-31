@@ -243,17 +243,11 @@ impl<T> Http1IdleShards<T> {
     fn trim(&self, max: usize) {
         let mut removed = Vec::new();
         while self.len.load(Ordering::Relaxed) > max {
-            let mut found = None;
-            for shard in self.shards.iter() {
-                if let Some(entry) = shard.lock().pop() {
-                    found = Some(entry);
-                    break;
-                }
-            }
-            let Some(entry) = found else {
+            let Some(entry) =
+                (0..HTTP1_IDLE_POOL_SHARDS).find_map(|shard| self.pop_preferred(shard))
+            else {
                 break;
             };
-            self.len.fetch_sub(1, Ordering::Relaxed);
             removed.push(entry);
         }
         drop(removed);
