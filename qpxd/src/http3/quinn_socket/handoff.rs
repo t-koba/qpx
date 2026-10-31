@@ -97,11 +97,9 @@ impl QuinnBrokerRestoreSet {
 
         #[cfg(windows)]
         {
-            let path = PathBuf::from(raw);
             let inherited: InheritedQuicBrokers =
-                crate::windows_handoff::read_json_wait(path.as_path())
+                crate::windows_handoff::read_json_wait_and_remove(PathBuf::from(raw))
                     .context("invalid inherited QUIC broker manifest")?;
-            let _ = std::fs::remove_file(&path);
             let mut restore = Self::default();
             for entry in inherited.forward {
                 restore.forward.insert(

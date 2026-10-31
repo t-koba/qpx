@@ -236,12 +236,8 @@ impl UdpBindings {
                 serde_json::from_str(raw.to_string_lossy().as_ref())
                     .context("invalid inherited udp bindings")?;
             #[cfg(windows)]
-            let inherited: InheritedUdpBindings = {
-                let path = PathBuf::from(raw);
-                let inherited = crate::windows_handoff::read_json_wait(path.as_path())?;
-                let _ = std::fs::remove_file(&path);
-                inherited
-            };
+            let inherited: InheritedUdpBindings =
+                crate::windows_handoff::read_json_wait_and_remove(PathBuf::from(raw))?;
             let mut listener_udp = HashMap::new();
             let mut reverse_udp = HashMap::new();
 

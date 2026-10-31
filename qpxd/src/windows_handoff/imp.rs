@@ -96,6 +96,12 @@ pub(crate) fn read_json_wait<T: DeserializeOwned>(path: &Path) -> Result<T> {
     }
 }
 
+pub(crate) fn read_json_wait_and_remove<T: DeserializeOwned>(path: PathBuf) -> Result<T> {
+    let value = read_json_wait(path.as_path())?;
+    let _ = std::fs::remove_file(path);
+    Ok(value)
+}
+
 fn ensure_secure_handoff_dir(dir: &Path) -> Result<()> {
     let mut current = PathBuf::new();
     for component in dir.components() {
@@ -392,5 +398,31 @@ pub(crate) fn wait_for_event_raw(handle: HANDLE, timeout: Duration) -> Result<bo
             "WaitForSingleObject failed: {}",
             std::io::Error::last_os_error()
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::read_json_wait_and_remove;
+    use anyhow::Result;
+
+    #[test]
+    fn read_json_wait_and_remove_only_removes_after_success() -> Result<()> {
+        let dir = std::env::temp_dir().join(format!("qpx-handoff-reader-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir)?;
+
+        let valid = dir.join("valid.json");
+        std::fs::write(&valid, br#"{"ready":true}"#)?;
+        let value: serde_json::Value = read_json_wait_and_remove(valid.clone())?;
+        assert_eq!(value, serde_json::json!({"ready": true}));
+        assert!(!valid.exists());
+
+        let invalid = dir.join("invalid.json");
+        std::fs::write(&invalid, b"{")?;
+        assert!(read_json_wait_and_remove::<serde_json::Value>(invalid.clone()).is_err());
+        assert!(invalid.exists());
+
+        std::fs::remove_dir_all(dir)?;
+        Ok(())
     }
 }

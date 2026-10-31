@@ -282,12 +282,8 @@ impl TcpBindings {
         let inherited: InheritedTcpBindings = serde_json::from_str(raw.to_string_lossy().as_ref())
             .context("invalid inherited tcp bindings")?;
         #[cfg(windows)]
-        let inherited: InheritedTcpBindings = {
-            let path = PathBuf::from(raw);
-            let inherited = crate::windows_handoff::read_json_wait(path.as_path())?;
-            let _ = std::fs::remove_file(&path);
-            inherited
-        };
+        let inherited: InheritedTcpBindings =
+            crate::windows_handoff::read_json_wait_and_remove(PathBuf::from(raw))?;
 
         let mut listener_tcp = HashMap::new();
         let mut reverse_tcp = HashMap::new();
