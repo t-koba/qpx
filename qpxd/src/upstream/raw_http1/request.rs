@@ -270,13 +270,6 @@ fn announced_request_trailer_names(trailers: &HeaderMap) -> Option<String> {
     }
     let mut names = Vec::new();
     for name in trailers.keys() {
-        if name == TRAILER
-            || name == CONTENT_LENGTH
-            || name == TRANSFER_ENCODING
-            || name == CONNECTION
-        {
-            continue;
-        }
         names.push(name.as_str().to_string());
     }
     (!names.is_empty()).then(|| names.join(", "))
@@ -302,11 +295,28 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{classify_bodyless_http1_request, serialize_bodyless_http1_request};
+    use super::{
+        announced_request_trailer_names, classify_bodyless_http1_request,
+        serialize_bodyless_http1_request,
+    };
     use bytes::BytesMut;
-    use hyper::header::{CONTENT_LENGTH, HeaderValue};
+    use hyper::header::{CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue};
     use hyper::{Method, Request};
     use qpx_http::body::Body;
+
+    #[test]
+    fn announced_request_trailer_names_reject_prohibited_fields() {
+        for name in [
+            "connection",
+            "content-length",
+            "trailer",
+            "transfer-encoding",
+        ] {
+            let mut trailers = HeaderMap::new();
+            trailers.insert(HeaderName::from_static(name), HeaderValue::from_static("x"));
+            assert_eq!(announced_request_trailer_names(&trailers), None, "{name}");
+        }
+    }
 
     #[test]
     fn classifies_and_serializes_empty_request_once() {
