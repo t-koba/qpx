@@ -172,12 +172,16 @@ async fn read_finalized_raw_response_head_with_interim_inner(
             if buf.is_empty() {
                 fill_raw_response_head_buffer(stream, &mut buf, enforce_idle_timeout).await?;
             }
-            if let Some(cached) = cached_finalized_raw_response_head(
-                &buf,
-                request_method,
-                request_version,
-                proxy_name,
-            ) {
+            if let Some(cached) = FINALIZED_RAW_RESPONSE_HEAD.with_borrow(|cache| {
+                let cached = cache.as_ref()?;
+                let consumed = cached.wire_head.len();
+                (cached.request_method == *request_method
+                    && cached.request_version == request_version
+                    && cached.proxy_name == proxy_name
+                    && buf.len() >= consumed
+                    && &buf[..consumed] == cached.wire_head.as_ref())
+                .then(|| (consumed, cached.parsed.clone()))
+            }) {
                 break (
                     cached.0,
                     cached.1.version,
@@ -259,24 +263,6 @@ async fn fill_raw_response_head_buffer(
         return Err(super::UpstreamConnectionClosed.into());
     }
     Ok(())
-}
-
-fn cached_finalized_raw_response_head(
-    buf: &[u8],
-    request_method: &Method,
-    request_version: Version,
-    proxy_name: &str,
-) -> Option<(usize, RawParsedResponseHead)> {
-    FINALIZED_RAW_RESPONSE_HEAD.with_borrow(|cache| {
-        let cached = cache.as_ref()?;
-        let consumed = cached.wire_head.len();
-        (cached.request_method == *request_method
-            && cached.request_version == request_version
-            && cached.proxy_name == proxy_name
-            && buf.len() >= consumed
-            && &buf[..consumed] == cached.wire_head.as_ref())
-        .then(|| (consumed, cached.parsed.clone()))
-    })
 }
 
 fn cache_finalized_raw_response_head(
