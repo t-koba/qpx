@@ -1,7 +1,8 @@
 use anyhow::{Result, anyhow};
 use bytes::BytesMut;
-use hyper::header::HeaderMap;
 use hyper::{Request, Response, StatusCode};
+// Keep raw HTTP/1 on qpx-core's shared Content-Length parser.
+use qpx_core::http_content_length::declared_content_length as parse_declared_content_length;
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::fmt;
@@ -489,14 +490,4 @@ where
         upstream_cert: None,
         response_finalized: false,
     })
-}
-
-/// The Content-Length that the upstream header map declares.
-///
-/// The declaration has one owner, so the upstream path reads the field the
-/// same way the codecs, the cache and the request validation read it: a
-/// value that is not text, a member that is not a digit sequence and two
-/// members that declare different lengths are the three failures it is.
-fn parse_declared_content_length(headers: &HeaderMap) -> Result<Option<u64>> {
-    qpx_core::http_content_length::declared_content_length(headers).map_err(anyhow::Error::new)
 }
