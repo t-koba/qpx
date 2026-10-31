@@ -90,7 +90,15 @@ impl RawHttp1ResponseHead {
         status: StatusCode,
         version: Version,
     ) -> Result<Self> {
-        validate_field_values(headers)?;
+        for header in headers {
+            if header
+                .value
+                .iter()
+                .any(|byte| (*byte < 0x20 && *byte != b'\t') || *byte == 0x7f)
+            {
+                return Err(anyhow!("invalid upstream HTTP field value"));
+            }
+        }
         let content_length = parse_content_length(headers)?;
         let no_body = request_method == Method::HEAD || response_status_has_no_body(status, false);
         let chunked = if no_body {
@@ -315,19 +323,6 @@ fn take_header_buffer(required_capacity: usize) -> BytesMut {
         buffer.reserve(required_capacity);
         buffer
     })
-}
-
-fn validate_field_values(headers: &[httparse::Header<'_>]) -> Result<()> {
-    for header in headers {
-        if header
-            .value
-            .iter()
-            .any(|byte| (*byte < 0x20 && *byte != b'\t') || *byte == 0x7f)
-        {
-            return Err(anyhow!("invalid upstream HTTP field value"));
-        }
-    }
-    Ok(())
 }
 
 /// The Content-Length that the raw header lines declare.
