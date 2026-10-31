@@ -1,6 +1,6 @@
 use crate::http::codec::h1_common::{
-    MAX_HEADER_BYTES, has_only_chunked_transfer_encoding, parse_header_map,
-    parse_header_map_recycled, parse_version, request_keep_alive,
+    MAX_HEADER_BYTES, has_only_chunked_transfer_encoding, http1_keep_alive, parse_header_map,
+    parse_header_map_recycled, parse_version,
 };
 use crate::http::codec::h1_request_body::{
     forward_chunked_request_body, forward_content_length_request_body,
@@ -500,7 +500,7 @@ fn finish_parsed_http1_request(
     let version = parse_version(request.version, "missing HTTP version")?;
     let headers = parse_header_map_recycled(request.headers)?;
     let body_kind = determine_request_body_kind(&headers, version)?;
-    let keep_alive = request_keep_alive(version, &headers);
+    let keep_alive = http1_keep_alive(version, &headers);
     let upgrade = request_has_upgrade(&headers);
     // Owner validation at the genuine H1 codec boundary: snapshot the parsed
     // head once via `from_http` so the shared Expect policy sees the same
@@ -568,7 +568,7 @@ pub(crate) fn fuzz_parse_http1_request_head(bytes: &[u8]) {
         let _ = parse_version(request.version, "missing HTTP version");
         if let Ok(headers) = parse_header_map(request.headers) {
             let _ = determine_request_body_kind(&headers, Version::HTTP_11);
-            let _ = request_keep_alive(Version::HTTP_11, &headers);
+            let _ = http1_keep_alive(Version::HTTP_11, &headers);
             let _ = request_has_upgrade(&headers);
         }
     }

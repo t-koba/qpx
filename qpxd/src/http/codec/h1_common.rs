@@ -11,7 +11,7 @@ use std::cell::RefCell;
 
 pub(crate) const MAX_HEADER_BYTES: usize = 128 * 1024;
 
-pub(crate) fn request_keep_alive(version: Version, headers: &HeaderMap) -> bool {
+pub(crate) fn http1_keep_alive(version: Version, headers: &HeaderMap) -> bool {
     match version {
         Version::HTTP_10 => {
             qpx_core::http_token::header_values_contain_token(headers, &CONNECTION, "keep-alive")

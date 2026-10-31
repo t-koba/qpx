@@ -1,7 +1,4 @@
-use super::io::{
-    determine_response_body_kind, fill_buffer_capped, response_body_allows_reuse,
-    response_keep_alive,
-};
+use super::io::{determine_response_body_kind, fill_buffer_capped, response_body_allows_reuse};
 #[cfg(test)]
 use super::io::{
     fill_buffer, read_buf_with_timeout, read_crlf_line, read_limited_with_timeout,
@@ -13,7 +10,7 @@ use super::{
 };
 #[cfg(test)]
 use super::{MAX_CHUNKED_BODY_BYTES, READ_BUF_SIZE};
-use crate::http::codec::h1_common::{parse_header_map_recycled, parse_version};
+use crate::http::codec::h1_common::{http1_keep_alive, parse_header_map_recycled, parse_version};
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
 use hyper::header::CONTENT_LENGTH;
@@ -351,7 +348,7 @@ where
         head.headers.remove(CONTENT_LENGTH);
     }
     let upstream_reusable = head.status != StatusCode::SWITCHING_PROTOCOLS
-        && response_keep_alive(head.version, &head.headers);
+        && http1_keep_alive(head.version, &head.headers);
     let body = match head.body_kind {
         ResponseBodyKind::Empty => {
             if let Some(recycler) = recycler.filter(|_| upstream_reusable && prefix.is_empty()) {
