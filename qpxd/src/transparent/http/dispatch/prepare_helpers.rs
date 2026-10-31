@@ -15,7 +15,6 @@ use hyper::StatusCode;
 use qpx_core::http_message::Request;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 #[expect(
     clippy::too_many_arguments,
@@ -118,10 +117,6 @@ pub(super) fn request_observation_limit(
         state.plan.limits.body.max_observed_request_body_bytes,
     );
     edge.request_body_observation_limit(default_limit)
-}
-
-pub(super) fn body_read_timeout(edge: &CompiledTransparentEdge) -> Duration {
-    Duration::from_millis(edge.default_plan.streaming.body_read_timeout_ms)
 }
 
 pub(super) fn destination(

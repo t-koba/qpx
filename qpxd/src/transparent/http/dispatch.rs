@@ -23,8 +23,8 @@ use self::policy::{
     evaluate_transparent_policy, evaluate_transparent_policy_staged, transparent_prefilter_context,
 };
 use self::prepare_helpers::{
-    body_read_timeout as transparent_body_read_timeout, destination as transparent_destination,
-    guard_input as transparent_guard_input, preflight_result as transparent_preflight_result,
+    destination as transparent_destination, guard_input as transparent_guard_input,
+    preflight_result as transparent_preflight_result,
     request_observation_limit as transparent_request_observation_limit,
     response_request_observation as transparent_response_request_observation,
 };
@@ -118,7 +118,8 @@ async fn prepare_transparent_request(
         .unwrap_or_default();
     let max_observed_request_body_bytes =
         transparent_request_observation_limit(compiled_edge, http_guard, &state);
-    let body_read_timeout = transparent_body_read_timeout(compiled_edge);
+    let body_read_timeout =
+        std::time::Duration::from_millis(compiled_edge.default_plan.streaming.body_read_timeout_ms);
     let request_version_for_observation = req.version();
     let PreparedDispatchRequest {
         req: prepared_req,
