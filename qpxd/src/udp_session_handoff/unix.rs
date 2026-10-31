@@ -102,10 +102,6 @@ pub(super) fn finalize_handoff_for_child(
     Ok(())
 }
 
-pub(super) fn cleanup_handoff_file(handoff: &UdpSessionPreparedHandoff) {
-    let _ = std::fs::remove_file(&handoff.cleanup_path);
-}
-
 fn from_persisted_handoff(persisted: PersistedUdpSessionHandoff) -> Result<UdpSessionRestoreState> {
     let mut state = UdpSessionRestoreState::default();
 

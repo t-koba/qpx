@@ -132,7 +132,8 @@ impl UdpSessionRestoreState {
     }
 
     pub(crate) fn cleanup_handoff_file(handoff: &UdpSessionPreparedHandoff) {
-        platform::cleanup_handoff_file(handoff);
+        #[cfg(any(unix, windows))]
+        let _ = std::fs::remove_file(&handoff.cleanup_path);
     }
 }
 

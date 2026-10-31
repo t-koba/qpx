@@ -5,6 +5,7 @@ use qpx_core::config::{
     RuntimeConfig, SystemLogConfig,
 };
 use std::fs;
+
 fn test_config() -> Config {
     Config {
         state_dir: None,
@@ -115,4 +116,22 @@ fn udp_session_handoff_round_trip_restores_connected_sockets() {
 
 fn duplicate_std_udp_socket_for_test(socket: &std::net::UdpSocket) -> std::net::UdpSocket {
     crate::udp_socket_handoff::duplicate_std_udp_socket(socket).expect("duplicate socket")
+}
+
+#[test]
+fn cleanup_handoff_file_removes_artifact() {
+    let cleanup_path = std::env::temp_dir().join(format!(
+        "qpx-udp-session-handoff-{}.json",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::write(&cleanup_path, b"handoff").expect("write handoff file");
+
+    let handoff = UdpSessionPreparedHandoff {
+        env_value: String::new(),
+        cleanup_path: cleanup_path.clone(),
+        kept_fds: Vec::new(),
+    };
+    UdpSessionRestoreState::cleanup_handoff_file(&handoff);
+
+    assert!(!cleanup_path.exists());
 }

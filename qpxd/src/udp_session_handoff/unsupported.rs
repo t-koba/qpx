@@ -26,5 +26,3 @@ pub(super) fn finalize_handoff_for_child(
         "UDP session handoff is only supported on unix and windows"
     ))
 }
-
-pub(super) fn cleanup_handoff_file(_handoff: &UdpSessionPreparedHandoff) {}
