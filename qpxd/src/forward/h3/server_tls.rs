@@ -1,7 +1,16 @@
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
-use qpx_core::config::IngressEdgeConfig;
+use qpx_core::config::{ConnectUdpConfig, IngressEdgeConfig};
 use std::net::SocketAddr;
+
+pub(super) fn resolve_connect_udp(config: Option<ConnectUdpConfig>) -> ConnectUdpConfig {
+    config.unwrap_or(ConnectUdpConfig {
+        enabled: false,
+        idle_timeout_secs: 30,
+        max_capsule_buffer_bytes: 256 * 1024,
+        uri_template: None,
+    })
+}
 
 pub(super) fn build_forward_tls_config(
     listener: &IngressEdgeConfig,

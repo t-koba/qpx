@@ -1,13 +1,11 @@
-use super::server_tls::build_forward_tls_config;
+use super::server_tls::{build_forward_tls_config, resolve_connect_udp};
 use crate::http3::qpx_listener::serve_qpx_h3_endpoint;
 use crate::http3::quinn_socket::{QuinnEndpointSocket, build_server_endpoint};
 use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::Result;
 use bytes::Bytes;
-use qpx_core::config::{
-    ConnectIpConfig, ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig,
-};
+use qpx_core::config::{ConnectIpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
 use std::sync::Arc;
 use tokio::sync::watch;
 use tracing::info;
@@ -57,12 +55,7 @@ pub(crate) async fn run_http3_listener(
         .as_deref()
         .unwrap_or(&listener.listen)
         .parse()?;
-    let connect_udp = http3_cfg.connect_udp.unwrap_or(ConnectUdpConfig {
-        enabled: false,
-        idle_timeout_secs: 30,
-        max_capsule_buffer_bytes: 256 * 1024,
-        uri_template: None,
-    });
+    let connect_udp = resolve_connect_udp(http3_cfg.connect_udp);
     let connect_ip = http3_cfg.connect_ip.unwrap_or(ConnectIpConfig {
         enabled: false,
         uri_template: "https://invalid/.well-known/masque/ip/{target}/{ipproto}/".to_owned(),

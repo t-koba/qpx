@@ -1,4 +1,4 @@
-use super::server_tls::build_forward_tls_config;
+use super::server_tls::{build_forward_tls_config, resolve_connect_udp};
 use crate::http3::listener::{
     H3ConnInfo, H3ConnectKind, H3HttpResponse, H3Limits, H3RequestHandler,
 };
@@ -30,12 +30,7 @@ pub(crate) async fn run_http3_listener(
         .as_deref()
         .unwrap_or(&listener.listen)
         .parse()?;
-    let connect_udp = http3_cfg.connect_udp.unwrap_or(ConnectUdpConfig {
-        enabled: false,
-        idle_timeout_secs: 30,
-        max_capsule_buffer_bytes: 256 * 1024,
-        uri_template: None,
-    });
+    let connect_udp = resolve_connect_udp(http3_cfg.connect_udp);
 
     let tls_config = build_forward_tls_config(&listener, &runtime, listen_addr)?;
     let max_bidi = runtime
