@@ -453,7 +453,9 @@ async fn complete_forward_request(
         observation,
         mode,
     } = prepared;
-    let runtime = context.runtime.ok_or_else(missing_forward_runtime)?;
+    let runtime = context.runtime.ok_or_else(|| {
+        DispatchError::Internal(anyhow!("forward prepared request missing runtime"))
+    })?;
     let state = context.state;
     let proxy_name = context.proxy_name;
     let listener_name = context.listener_name;
@@ -679,10 +681,6 @@ async fn complete_forward_request(
     })
     .await
     .map_err(DispatchError::from)
-}
-
-fn missing_forward_runtime() -> DispatchError {
-    DispatchError::Internal(anyhow::anyhow!("forward prepared request missing runtime"))
 }
 
 fn forward_payload_too_large_response(
