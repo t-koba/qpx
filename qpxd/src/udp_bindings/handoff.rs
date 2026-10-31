@@ -130,19 +130,9 @@ impl UdpBindings {
                             &listener.listen,
                         )
                         .to_owned();
-                        let socket = self
-                            .listener_udp
-                            .get(&listener.name)
-                            .ok_or_else(|| {
-                                anyhow!("udp listener binding not found for {}", listener.name)
-                            })?
-                            .try_clone()
-                            .with_context(|| {
-                                format!(
-                                    "failed to clone udp listener binding for {}",
-                                    listener.name
-                                )
-                            })?;
+                        let socket = self.clone_listener(&listener.name)?.ok_or_else(|| {
+                            anyhow!("udp listener binding not found for {}", listener.name)
+                        })?;
                         Ok(WindowsInheritedUdpSocket {
                             name: listener.name.clone(),
                             listen,
@@ -170,22 +160,12 @@ impl UdpBindings {
                             &reverse_edge.listen,
                         )
                         .to_owned();
-                        let socket = self
-                            .reverse_udp
-                            .get(&reverse_edge.name)
-                            .ok_or_else(|| {
-                                anyhow!(
-                                    "udp reverse_edge binding not found for {}",
-                                    reverse_edge.name
-                                )
-                            })?
-                            .try_clone()
-                            .with_context(|| {
-                                format!(
-                                    "failed to clone udp reverse_edge binding for {}",
-                                    reverse_edge.name
-                                )
-                            })?;
+                        let socket = self.clone_reverse(&reverse_edge.name)?.ok_or_else(|| {
+                            anyhow!(
+                                "udp reverse_edge binding not found for {}",
+                                reverse_edge.name
+                            )
+                        })?;
                         Ok(WindowsInheritedUdpSocket {
                             name: reverse_edge.name.clone(),
                             listen,
