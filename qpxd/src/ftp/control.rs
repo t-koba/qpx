@@ -160,7 +160,7 @@ impl BasicFtpClient {
         const MAX_FTP_REPLY_LINES: usize = 64;
         const MAX_FTP_REPLY_BYTES: usize = 32 * 1024;
 
-        let first = self.read_control_line().await?;
+        let first = read_ftp_control_line(&mut self.reader, self.deadline).await?;
         let code = parse_ftp_status_code(&first)?;
         let mut total_bytes = first.len();
         let mut lines = vec![first.clone()];
@@ -170,7 +170,7 @@ impl BasicFtpClient {
                 if lines.len() >= MAX_FTP_REPLY_LINES {
                     return Err(anyhow!("FTP multiline reply exceeded line limit"));
                 }
-                let line = self.read_control_line().await?;
+                let line = read_ftp_control_line(&mut self.reader, self.deadline).await?;
                 total_bytes = total_bytes
                     .checked_add(line.len())
                     .ok_or_else(|| anyhow!("FTP multiline reply length overflow"))?;
@@ -185,10 +185,6 @@ impl BasicFtpClient {
             }
         }
         Ok(FtpReply { code, lines })
-    }
-
-    async fn read_control_line(&mut self) -> Result<String> {
-        read_ftp_control_line(&mut self.reader, self.deadline).await
     }
 }
 
