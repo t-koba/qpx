@@ -480,30 +480,7 @@ where
     )
 }
 
-pub(super) fn build_materialized_raw_response<S>(
-    stream: S,
-    head: RawParsedResponseHead,
-    prefix: BytesMut,
-    write_buf: BytesMut,
-    recycler: Option<Http1ConnectionRecycler<S>>,
-    max_body_frame_size: usize,
-) -> Result<Response<Body>>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let headers = head.raw.materialized_headers()?;
-    Ok(build_raw_response_inner(
-        stream,
-        head,
-        prefix,
-        write_buf,
-        recycler,
-        Some(headers),
-        max_body_frame_size,
-    ))
-}
-
-fn build_raw_response_inner<S>(
+pub(super) fn build_raw_response_inner<S>(
     stream: S,
     head: RawParsedResponseHead,
     mut prefix: BytesMut,

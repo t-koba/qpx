@@ -211,7 +211,8 @@ where
             active_permit,
         } = self;
         let stream = stream.ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
-        let mut response = response::build_materialized_raw_response(
+        let headers = raw.materialized_headers()?;
+        let mut response = response::build_raw_response_inner(
             stream,
             response::RawParsedResponseHead {
                 version,
@@ -221,8 +222,9 @@ where
             read_buf,
             write_buf,
             recycler,
+            Some(headers),
             max_body_frame_size,
-        )?;
+        );
         retain_active_permit(response.body_mut(), active_permit);
         Ok(Http1ResponseWithInterim {
             interim,
