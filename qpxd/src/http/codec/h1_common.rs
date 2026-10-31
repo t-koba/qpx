@@ -161,7 +161,7 @@ pub(crate) fn parse_header_map(headers: &[httparse::Header<'_>]) -> Result<Heade
 }
 
 pub(crate) fn parse_header_map_recycled(headers: &[httparse::Header<'_>]) -> Result<HeaderMap> {
-    let mut out = super::header_pool::take(headers.len().saturating_add(4));
+    let mut out = qpx_http::header_pool::take(headers.len().saturating_add(4));
     parse_header_map_into(headers, &mut out, true)?;
     Ok(out)
 }

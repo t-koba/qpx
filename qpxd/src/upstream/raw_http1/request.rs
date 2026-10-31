@@ -88,7 +88,7 @@ where
     serialize_headers(&headers, head)?;
     head.extend_from_slice(b"\r\n");
     stream.write_all(head).await?;
-    crate::http::codec::header_pool::recycle(headers);
+    qpx_http::header_pool::recycle(headers);
 
     match declared_length {
         Some(length) => write_content_length_body(stream, &mut body, length).await?,
@@ -158,7 +158,7 @@ pub(crate) fn serialize_bodyless_http1_request(
     head.extend_from_slice(b" HTTP/1.1\r\n");
     serialize_headers(&parts.headers, head)?;
     head.extend_from_slice(b"\r\n");
-    crate::http::codec::header_pool::recycle(parts.headers);
+    qpx_http::header_pool::recycle(parts.headers);
     Ok(method)
 }
 

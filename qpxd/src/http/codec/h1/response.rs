@@ -156,7 +156,7 @@ pub(crate) async fn send_static_http1_response(
         &headers,
         connection_mode,
     );
-    crate::http::codec::header_pool::recycle(headers);
+    qpx_http::header_pool::recycle(headers);
     let body = if no_body { Bytes::new() } else { body };
     if body.is_empty() {
         write_all_with_timeout(writer, head_buf).await?;
@@ -371,7 +371,7 @@ where
             connection_mode,
         );
     }
-    crate::http::codec::header_pool::recycle(headers);
+    qpx_http::header_pool::recycle(headers);
     let head = head_buf.as_ref();
 
     if let (ResponseBodyKind::ContentLength(length), Some(chunk)) = (&body_kind, single_frame) {
