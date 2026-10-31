@@ -216,15 +216,19 @@ async fn read_finalized_raw_response_head_with_interim_inner(
             Arc::make_mut(&mut raw).finalize(proxy_name);
             let wire_head = wire_head
                 .ok_or_else(|| anyhow!("new raw response is missing its serialized head"))?;
-            cache_finalized_raw_response_head(
-                wire_head,
-                request_method,
-                request_version,
-                proxy_name,
-                version,
-                status,
-                raw.clone(),
-            );
+            FINALIZED_RAW_RESPONSE_HEAD.with_borrow_mut(|cache| {
+                *cache = Some(CachedFinalizedRawResponseHead {
+                    wire_head,
+                    request_method: request_method.clone(),
+                    request_version,
+                    proxy_name: proxy_name.to_owned(),
+                    parsed: RawParsedResponseHead {
+                        version,
+                        status,
+                        raw: raw.clone(),
+                    },
+                });
+            });
         }
         return Ok((
             interim,
@@ -263,30 +267,6 @@ async fn fill_raw_response_head_buffer(
         return Err(super::UpstreamConnectionClosed.into());
     }
     Ok(())
-}
-
-fn cache_finalized_raw_response_head(
-    wire_head: Box<[u8]>,
-    request_method: &Method,
-    request_version: Version,
-    proxy_name: &str,
-    version: Version,
-    status: StatusCode,
-    raw: Arc<RawHttp1ResponseHead>,
-) {
-    FINALIZED_RAW_RESPONSE_HEAD.with_borrow_mut(|cache| {
-        *cache = Some(CachedFinalizedRawResponseHead {
-            wire_head,
-            request_method: request_method.clone(),
-            request_version,
-            proxy_name: proxy_name.to_owned(),
-            parsed: RawParsedResponseHead {
-                version,
-                status,
-                raw,
-            },
-        });
-    });
 }
 
 const COMMON_HTTP1_RESPONSE_HEADERS: usize = 32;
