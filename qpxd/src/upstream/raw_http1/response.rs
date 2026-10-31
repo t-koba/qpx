@@ -40,13 +40,6 @@ pub(super) struct ParsedResponseHead {
     pub(super) body_kind: ResponseBodyKind,
 }
 
-#[derive(Clone)]
-pub(super) struct RawParsedResponseHead {
-    pub(super) version: Version,
-    pub(super) status: StatusCode,
-    pub(super) raw: Arc<RawHttp1ResponseHead>,
-}
-
 struct CachedFinalizedRawResponseHead {
     // The complete upstream head includes its protocol/version. Keep the existing
     // downstream-version partition, but it no longer supplies response Via.
@@ -54,7 +47,7 @@ struct CachedFinalizedRawResponseHead {
     request_method: Method,
     request_version: Version,
     proxy_name: String,
-    parsed: RawParsedResponseHead,
+    raw: Arc<RawHttp1ResponseHead>,
 }
 
 thread_local! {
@@ -132,7 +125,11 @@ pub(super) async fn read_finalized_raw_response_head_with_interim(
     request_version: Version,
     proxy_name: &str,
     deadline: RawResponseHeadDeadline,
-) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)> {
+) -> Result<(
+    Vec<InterimResponseHead>,
+    Arc<RawHttp1ResponseHead>,
+    BytesMut,
+)> {
     let enforce_idle_timeout = matches!(deadline, RawResponseHeadDeadline::PerReadIdleTimeout);
     buf.clear();
     buf.reserve(INITIAL_READ_BUF_SIZE);
@@ -150,15 +147,10 @@ pub(super) async fn read_finalized_raw_response_head_with_interim(
                     && cached.proxy_name == proxy_name
                     && buf.len() >= consumed
                     && &buf[..consumed] == cached.wire_head.as_ref())
-                .then(|| (consumed, cached.parsed.clone()))
+                .then(|| (consumed, cached.raw.clone()))
             }) {
-                break (
-                    cached.0,
-                    cached.1.version,
-                    cached.1.status,
-                    None,
-                    Some(cached.1.raw),
-                );
+                let status = cached.1.status();
+                break (cached.0, status, None, Some(cached.1));
             }
             match try_parse_raw_response_head(&buf, request_method)? {
                 Some(parsed) => break parsed,
@@ -168,7 +160,7 @@ pub(super) async fn read_finalized_raw_response_head_with_interim(
             }
         };
 
-        let (consumed, version, status, headers, raw) = parsed;
+        let (consumed, status, headers, raw) = parsed;
         let wire_head = raw
             .as_ref()
             .is_some_and(|head| !head.is_finalized())
@@ -192,23 +184,11 @@ pub(super) async fn read_finalized_raw_response_head_with_interim(
                     request_method: request_method.clone(),
                     request_version,
                     proxy_name: proxy_name.to_owned(),
-                    parsed: RawParsedResponseHead {
-                        version,
-                        status,
-                        raw: raw.clone(),
-                    },
+                    raw: raw.clone(),
                 });
             });
         }
-        return Ok((
-            interim,
-            RawParsedResponseHead {
-                version,
-                status,
-                raw,
-            },
-            buf,
-        ));
+        return Ok((interim, raw, buf));
     }
 }
 
@@ -245,7 +225,6 @@ const MAX_HTTP1_RESPONSE_HEADERS: usize = 128;
 type ParsedResponseHeadTuple = (usize, Version, StatusCode, HeaderMap, ResponseBodyKind);
 type RawParsedResponseHeadTuple = (
     usize,
-    Version,
     StatusCode,
     Option<HeaderMap>,
     Option<Arc<RawHttp1ResponseHead>>,
@@ -329,7 +308,6 @@ fn finish_raw_response_head(
     if status.is_informational() && status != StatusCode::SWITCHING_PROTOCOLS {
         return Ok((
             consumed,
-            version,
             status,
             Some(parse_header_map_recycled(response.headers)?),
             None,
@@ -337,7 +315,6 @@ fn finish_raw_response_head(
     }
     Ok((
         consumed,
-        version,
         status,
         None,
         Some(Arc::new(RawHttp1ResponseHead::from_parsed(
@@ -408,7 +385,7 @@ where
 
 pub(super) fn build_raw_response<S>(
     stream: S,
-    head: RawParsedResponseHead,
+    head: Arc<RawHttp1ResponseHead>,
     prefix: BytesMut,
     write_buf: BytesMut,
     recycler: Option<Http1ConnectionRecycler<S>>,
@@ -429,7 +406,7 @@ where
 
 pub(super) fn build_raw_response_inner<S>(
     stream: S,
-    head: RawParsedResponseHead,
+    head: Arc<RawHttp1ResponseHead>,
     mut prefix: BytesMut,
     write_buf: BytesMut,
     recycler: Option<Http1ConnectionRecycler<S>>,
@@ -439,14 +416,14 @@ pub(super) fn build_raw_response_inner<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let body_kind = match head.raw.framing() {
+    let body_kind = match head.framing() {
         RawHttp1BodyFraming::Empty => ResponseBodyKind::Empty,
         RawHttp1BodyFraming::ContentLength(length) => ResponseBodyKind::ContentLength(length),
         RawHttp1BodyFraming::Chunked => ResponseBodyKind::Chunked,
         RawHttp1BodyFraming::CloseDelimited => ResponseBodyKind::CloseDelimited,
     };
     let upstream_reusable =
-        head.status != StatusCode::SWITCHING_PROTOCOLS && head.raw.upstream_keep_alive();
+        head.status() != StatusCode::SWITCHING_PROTOCOLS && head.upstream_keep_alive();
     let body = match body_kind {
         ResponseBodyKind::Empty => {
             if let Some(recycler) = recycler.filter(|_| upstream_reusable && prefix.is_empty()) {
@@ -473,12 +450,12 @@ where
     .mark_read_timeout_enforced()
     .mark_trailers_sanitized();
     let mut response = Response::new(body);
-    *response.status_mut() = head.status;
-    *response.version_mut() = head.version;
+    *response.status_mut() = head.status();
+    *response.version_mut() = head.upstream_version();
     if let Some(headers) = materialized_headers {
         *response.headers_mut() = headers;
     } else {
-        response.extensions_mut().insert(head.raw);
+        response.extensions_mut().insert(head);
     }
     response
 }

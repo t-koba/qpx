@@ -1,7 +1,7 @@
 use super::io::{determine_response_body_kind, response_body_allows_reuse};
 use super::response::{
-    ParsedResponseHead, RawParsedResponseHead, RawResponseHeadDeadline, ResponseBodyKind,
-    build_raw_response, build_response, forward_chunked_body, forward_close_delimited_body,
+    ParsedResponseHead, RawResponseHeadDeadline, ResponseBodyKind, build_raw_response,
+    build_response, forward_chunked_body, forward_close_delimited_body,
     read_finalized_raw_response_head_with_interim, read_response_head_with_interim,
 };
 use super::{
@@ -149,7 +149,7 @@ async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
     .await
     .expect("read fragmented raw response head");
     assert!(interim.is_empty());
-    assert_eq!(parsed.status, StatusCode::OK);
+    assert_eq!(parsed.status(), StatusCode::OK);
     assert_eq!(remainder.as_ref(), b"BODY");
     assert!(raw_reader.read_polls > 1);
 
@@ -274,7 +274,7 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
     .await
     .expect("read fragmented raw response head under external deadline");
     assert!(interim.is_empty());
-    assert_eq!(parsed.status, StatusCode::OK);
+    assert_eq!(parsed.status(), StatusCode::OK);
     assert_eq!(remainder.as_ref(), b"BODY");
     assert!(segmented_reader.read_polls > 1);
 
@@ -513,11 +513,7 @@ async fn inline_raw_content_length_response_recycles_before_body_release() {
     raw.finalize("qpx");
     let response = build_raw_response(
         stream,
-        RawParsedResponseHead {
-            version: Version::HTTP_11,
-            status: StatusCode::OK,
-            raw: Arc::new(raw),
-        },
+        Arc::new(raw),
         prefix,
         BytesMut::with_capacity(512),
         Some(Http1ConnectionRecycler::new(
@@ -927,9 +923,9 @@ async fn finalized_raw_head_cache_preserves_upstream_via_protocol() {
             .await
             .expect("read finalized upstream head");
             assert!(interim.is_empty());
-            assert_eq!(parsed.version, upstream_version);
+            assert_eq!(parsed.upstream_version(), upstream_version);
             assert_eq!(remainder.as_ref(), b"BODY");
-            let headers = parsed.raw.materialized_headers().expect("headers");
+            let headers = parsed.materialized_headers().expect("headers");
             let via: Vec<_> = headers
                 .get_all("via")
                 .iter()
@@ -951,9 +947,9 @@ async fn finalized_raw_head_cache_preserves_upstream_via_protocol() {
                 )
                 .await
                 .expect("read cached upstream head");
-            assert!(Arc::ptr_eq(&parsed.raw, &cached.raw), "finalized cache hit");
-            assert_eq!(cached.version, upstream_version);
-            assert_eq!(cached.raw.materialized_headers().expect("cached headers"), headers);
+            assert!(Arc::ptr_eq(&parsed, &cached), "finalized cache hit");
+            assert_eq!(cached.upstream_version(), upstream_version);
+            assert_eq!(cached.materialized_headers().expect("cached headers"), headers);
             assert_eq!(remainder.as_ref(), b"BODY");
         }
     }
@@ -978,8 +974,6 @@ async fn raw_direct_relay_finalization_preserves_upstream_via_protocol() {
     let (stream, _peer) = tokio::io::duplex(64);
     let mut relay = super::RawHttp1ResponseRelay {
         interim: Vec::new(),
-        version: Version::HTTP_10,
-        status: StatusCode::OK,
         raw: raw.clone(),
         stream: Some(stream),
         read_buf: BytesMut::new(),
@@ -1019,7 +1013,6 @@ async fn finalized_raw_head_cache_key_coheres_across_versions() {
         .await
         .expect("read finalized head");
         parsed
-            .raw
             .materialized_headers()
             .expect("headers")
             .get_all("via")

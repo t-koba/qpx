@@ -485,7 +485,7 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
     };
     let keep_alive = request_keep_alive
         && request_version == Version::HTTP_11
-        && response.status != StatusCode::SWITCHING_PROTOCOLS
+        && response.status() != StatusCode::SWITCHING_PROTOCOLS
         && request_method != Method::CONNECT;
     let connection_mode = if keep_alive {
         ConnectionHeaderMode::Omit
@@ -501,7 +501,7 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
             serialize_status_and_raw_headers(
                 head_buf,
                 request_version,
-                response.status,
+                response.status(),
                 response.raw.header_lines(),
                 &HeaderMap::new(),
                 connection_mode,

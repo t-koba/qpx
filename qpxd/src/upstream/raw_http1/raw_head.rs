@@ -293,6 +293,14 @@ impl RawHttp1ResponseHead {
         self.finalized
     }
 
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    pub(crate) fn upstream_version(&self) -> Version {
+        self.upstream_version
+    }
+
     pub(crate) fn serialized_http11_head(&self) -> Bytes {
         debug_assert!(self.finalized);
         self.serialized_http11_head

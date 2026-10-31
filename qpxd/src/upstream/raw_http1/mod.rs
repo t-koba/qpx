@@ -59,8 +59,6 @@ pub(crate) struct Http1ResponseWithInterim {
 
 pub(crate) struct RawHttp1ResponseRelay<S> {
     pub(crate) interim: Vec<InterimResponseHead>,
-    pub(crate) version: http::Version,
-    pub(crate) status: StatusCode,
     pub(crate) raw: Arc<RawHttp1ResponseHead>,
     pub(crate) stream: Option<S>,
     pub(crate) read_buf: BytesMut,
@@ -122,7 +120,7 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     pub(crate) fn status(&self) -> StatusCode {
-        self.status
+        self.raw.status()
     }
 
     pub(crate) fn content_length(&self) -> Option<u64> {
@@ -145,7 +143,7 @@ where
     }
 
     pub(crate) fn supports_direct_relay(&self, max_response_body_bytes: usize) -> bool {
-        self.status != StatusCode::SWITCHING_PROTOCOLS
+        self.raw.status() != StatusCode::SWITCHING_PROTOCOLS
             && match self.raw.framing() {
                 RawHttp1BodyFraming::Empty => true,
                 RawHttp1BodyFraming::ContentLength(length) => {
@@ -165,8 +163,6 @@ where
     pub(crate) fn into_http_response(self) -> Result<Http1ResponseWithInterim> {
         let Self {
             interim,
-            version,
-            status,
             raw,
             stream,
             read_buf,
@@ -175,17 +171,7 @@ where
             active_permit,
         } = self;
         let stream = stream.ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
-        let mut response = response::build_raw_response(
-            stream,
-            response::RawParsedResponseHead {
-                version,
-                status,
-                raw,
-            },
-            read_buf,
-            write_buf,
-            recycler,
-        );
+        let mut response = response::build_raw_response(stream, raw, read_buf, write_buf, recycler);
         retain_active_permit(response.body_mut(), active_permit);
         Ok(Http1ResponseWithInterim {
             interim,
@@ -201,8 +187,6 @@ where
     ) -> Result<Http1ResponseWithInterim> {
         let Self {
             interim,
-            version,
-            status,
             raw,
             stream,
             read_buf,
@@ -214,11 +198,7 @@ where
         let headers = raw.materialized_headers()?;
         let mut response = response::build_raw_response_inner(
             stream,
-            response::RawParsedResponseHead {
-                version,
-                status,
-                raw,
-            },
+            raw,
             read_buf,
             write_buf,
             recycler,
@@ -380,9 +360,7 @@ where
         .await?;
     Ok(RawHttp1ResponseRelay {
         interim,
-        version: final_head.version,
-        status: final_head.status,
-        raw: final_head.raw,
+        raw: final_head,
         stream: Some(stream),
         read_buf: buffered_body,
         write_buf,
@@ -429,9 +407,7 @@ where
     write_buf.clear();
     Ok(RawHttp1ResponseRelay {
         interim,
-        version: final_head.version,
-        status: final_head.status,
-        raw: final_head.raw,
+        raw: final_head,
         stream: Some(stream),
         read_buf: buffered_body,
         write_buf,

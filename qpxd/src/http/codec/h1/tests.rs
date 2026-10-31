@@ -646,8 +646,6 @@ async fn check_raw_relay_with_interim(with_interim: bool) {
         } else {
             Vec::new()
         },
-        version: Version::HTTP_11,
-        status: StatusCode::OK,
         raw: Arc::new(raw_head),
         stream: Some(upstream),
         read_buf: BytesMut::new(),
