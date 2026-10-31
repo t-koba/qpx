@@ -4,7 +4,6 @@ use socket2::{Domain, Protocol, Socket, Type};
 #[cfg(feature = "http3")]
 use std::net::UdpSocket as StdUdpSocket;
 use std::net::{SocketAddr, TcpListener as StdTcpListener};
-use tokio::net::TcpListener;
 use tracing::warn;
 
 pub(crate) fn worker_threads(cfg: &RuntimeConfig) -> usize {
@@ -50,10 +49,6 @@ pub(crate) fn bind_tcp_std_listeners(
         forward_edges.push(bind_single_std(addr, runtime, effective > 1)?);
     }
     Ok(forward_edges)
-}
-
-pub(crate) fn tokio_listener_from_std(listener: StdTcpListener) -> Result<TcpListener> {
-    TcpListener::from_std(listener).context("tokio listener conversion failed")
 }
 
 #[cfg(feature = "http3")]

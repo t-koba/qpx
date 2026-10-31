@@ -471,9 +471,8 @@ fn clone_named_tcp_group(
         .ok_or_else(|| anyhow!("{kind} binding not found for {name}"))?
         .iter()
         .map(|listener| {
-            crate::tcp_bindings::net::tokio_listener_from_std(clone_tcp_listener(
-                listener, kind, name,
-            )?)
+            tokio::net::TcpListener::from_std(clone_tcp_listener(listener, kind, name)?)
+                .context("tokio listener conversion failed")
         })
         .collect()
 }
