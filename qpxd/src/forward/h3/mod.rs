@@ -1,3 +1,6 @@
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+use qpx_core::config::ConnectUdpConfig;
+
 #[cfg(all(
     feature = "http3",
     feature = "http3-backend-h3",
@@ -35,6 +38,16 @@ pub(crate) use backend_h3::*;
 pub(crate) use invalid::*;
 #[cfg(all(feature = "http3", feature = "http3-backend-qpx"))]
 pub(crate) use qpx::*;
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(super) fn resolve_connect_udp(config: Option<ConnectUdpConfig>) -> ConnectUdpConfig {
+    config.unwrap_or(ConnectUdpConfig {
+        enabled: false,
+        idle_timeout_secs: 30,
+        max_capsule_buffer_bytes: 256 * 1024,
+        uri_template: None,
+    })
+}
 
 #[cfg(feature = "http3")]
 pub(crate) fn prepare_http3_listener_socket(
