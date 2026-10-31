@@ -96,7 +96,16 @@ impl RawHttp1ResponseHead {
         let chunked = if no_body {
             false
         } else {
-            has_only_chunked_transfer_encoding(headers)?
+            has_only_chunked_transfer_encoding_values(
+                headers
+                    .iter()
+                    .filter(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
+                    .map(|header| {
+                        std::str::from_utf8(header.value)
+                            .map_err(|_| TransferEncodingClassificationError::InvalidHeader)
+                    }),
+            )
+            .map_err(anyhow::Error::new)?
         };
         let framing = if no_body || content_length == Some(0) {
             RawHttp1BodyFraming::Empty
@@ -331,19 +340,6 @@ fn validate_field_values(headers: &[httparse::Header<'_>]) -> Result<()> {
 fn parse_content_length(headers: &[httparse::Header<'_>]) -> Result<Option<u64>> {
     qpx_core::http_content_length::declared_content_length_in_named_values(
         headers.iter().map(|header| (header.name, header.value)),
-    )
-    .map_err(anyhow::Error::new)
-}
-
-fn has_only_chunked_transfer_encoding(headers: &[httparse::Header<'_>]) -> Result<bool> {
-    has_only_chunked_transfer_encoding_values(
-        headers
-            .iter()
-            .filter(|header| header.name.eq_ignore_ascii_case("transfer-encoding"))
-            .map(|header| {
-                std::str::from_utf8(header.value)
-                    .map_err(|_| TransferEncodingClassificationError::InvalidHeader)
-            }),
     )
     .map_err(anyhow::Error::new)
 }
