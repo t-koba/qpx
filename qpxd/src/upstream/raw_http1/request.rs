@@ -93,14 +93,7 @@ where
     match declared_length {
         Some(length) => write_content_length_body(stream, &mut body, length).await?,
         None if use_chunked => {
-            write_chunked_body(
-                stream,
-                &mut body,
-                first_chunk,
-                first_trailers,
-                use_chunked || announced_trailers.is_some(),
-            )
-            .await?
+            write_chunked_body(stream, &mut body, first_chunk, first_trailers).await?
         }
         None => {}
     }
@@ -232,7 +225,6 @@ async fn write_chunked_body<S>(
     body: &mut Body,
     first_chunk: Option<Bytes>,
     first_trailers: Option<HeaderMap>,
-    allow_trailers: bool,
 ) -> Result<()>
 where
     S: AsyncWrite + Unpin,
@@ -249,11 +241,6 @@ where
     };
     stream.write_all(b"0\r\n").await?;
     if let Some(trailers) = trailers {
-        if !allow_trailers {
-            return Err(anyhow!(
-                "request trailers require Trailer metadata before forwarding"
-            ));
-        }
         qpx_http::protocol::semantics::validate_request_trailers(&trailers)
             .map_err(|err| anyhow!("invalid HTTP/1 request trailers: {err:?}"))?;
         let mut trailer_block = Vec::with_capacity(256);
