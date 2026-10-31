@@ -13,7 +13,6 @@ use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConf
 use qpx_core::http_message::Request;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
-use std::net::SocketAddr;
 use std::sync::Arc;
 use tokio::sync::watch;
 use tokio::time::Duration;
@@ -26,10 +25,10 @@ pub(crate) async fn run_http3_listener(
     shutdown: watch::Receiver<SidecarControl>,
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
-    let listen_addr: SocketAddr = http3_cfg
+    let listen_addr = http3_cfg
         .listen
-        .clone()
-        .unwrap_or_else(|| listener.listen.clone())
+        .as_deref()
+        .unwrap_or(&listener.listen)
         .parse()?;
     let connect_udp = http3_cfg.connect_udp.unwrap_or(ConnectUdpConfig {
         enabled: false,
