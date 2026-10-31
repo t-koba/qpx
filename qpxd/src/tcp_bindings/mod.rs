@@ -416,31 +416,11 @@ impl TcpBindings {
     }
 
     pub(crate) fn clone_listener(&self, name: &str) -> Result<Vec<tokio::net::TcpListener>> {
-        self.listener_tcp
-            .get(name)
-            .ok_or_else(|| anyhow!("listener binding not found for {}", name))?
-            .iter()
-            .map(|listener| {
-                let cloned = listener
-                    .try_clone()
-                    .with_context(|| format!("failed to clone listener binding for {}", name))?;
-                crate::tcp_bindings::net::tokio_listener_from_std(cloned)
-            })
-            .collect()
+        clone_named_tcp_group(&self.listener_tcp, name, "listener")
     }
 
     pub(crate) fn clone_reverse(&self, name: &str) -> Result<Vec<tokio::net::TcpListener>> {
-        self.reverse_tcp
-            .get(name)
-            .ok_or_else(|| anyhow!("reverse_edge binding not found for {}", name))?
-            .iter()
-            .map(|listener| {
-                let cloned = listener.try_clone().with_context(|| {
-                    format!("failed to clone reverse_edge binding for {}", name)
-                })?;
-                crate::tcp_bindings::net::tokio_listener_from_std(cloned)
-            })
-            .collect()
+        clone_named_tcp_group(&self.reverse_tcp, name, "reverse_edge")
     }
 
     pub(crate) fn clone_metrics(&self) -> Result<Option<TcpListener>> {
@@ -478,10 +458,29 @@ fn bind_tcp_group(listen: &str, config: &Config, kind: &str) -> Result<Vec<TcpLi
 fn clone_std_tcp_group(group: &[TcpListener], kind: &str, name: &str) -> Result<Vec<TcpListener>> {
     group
         .iter()
+        .map(|listener| clone_tcp_listener(listener, kind, name))
+        .collect()
+}
+
+fn clone_tcp_listener(listener: &TcpListener, kind: &str, name: &str) -> Result<TcpListener> {
+    listener
+        .try_clone()
+        .with_context(|| format!("failed to clone {kind} binding for {name}"))
+}
+
+fn clone_named_tcp_group(
+    groups: &HashMap<String, Vec<TcpListener>>,
+    name: &str,
+    kind: &str,
+) -> Result<Vec<tokio::net::TcpListener>> {
+    groups
+        .get(name)
+        .ok_or_else(|| anyhow!("{kind} binding not found for {name}"))?
+        .iter()
         .map(|listener| {
-            listener
-                .try_clone()
-                .with_context(|| format!("failed to clone {kind} binding for {name}"))
+            crate::tcp_bindings::net::tokio_listener_from_std(clone_tcp_listener(
+                listener, kind, name,
+            )?)
         })
         .collect()
 }
