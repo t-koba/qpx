@@ -3,6 +3,7 @@ use super::pool::{
     HttpsConnectionAcquisition, HttpsOriginSlot, TlsHttp1OriginConnection,
     acquire_https_connection, https_origin_pool_key,
 };
+use crate::http::dispatcher::attach_interim_response_heads;
 use crate::upstream::raw_http1::{
     Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
 };
@@ -50,17 +51,13 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
                 Some(shared.inflight_streams.clone()),
             )
             .await?;
-            if !proxied.interim.is_empty() {
-                proxied.response.extensions_mut().insert(proxied.interim);
-            }
+            attach_interim_response_heads(&mut proxied.response, proxied.interim);
             Ok(proxied.response)
         }
         HttpsConnectionAcquisition::H1(entry) => {
             let req = prepare_internal_http1_request(req, authority.as_str())?;
             let mut proxied = send_tls_http1_with_recycle(slot, entry, req).await?;
-            if !proxied.interim.is_empty() {
-                proxied.response.extensions_mut().insert(proxied.interim);
-            }
+            attach_interim_response_heads(&mut proxied.response, proxied.interim);
             Ok(proxied.response)
         }
     }

@@ -11,6 +11,7 @@ use crate::http::dispatch::{
     prepare_http_module_local_response, record_upstream_request_duration,
     request_body_too_large_response as body_too_large_response,
 };
+use crate::http::dispatcher::attach_interim_response_heads;
 use crate::http::policy::response_policy::ResponseBodyObservationLimits;
 use crate::http::policy::rule_context::{
     ResponseRuleContextInput, build_response_rule_match_context,
@@ -364,9 +365,7 @@ pub(super) async fn proxy_transparent_http1(
         }
     };
     let mut response = proxied.response;
-    if !proxied.interim.is_empty() {
-        response.extensions_mut().insert(proxied.interim);
-    }
+    attach_interim_response_heads(&mut response, proxied.interim);
     let mut response = http_modules
         .on_upstream_response(OwnerResponse::from_http(response))
         .await?;

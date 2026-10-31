@@ -6,6 +6,7 @@ use crate::http::dispatch::{
     finalize_dispatch_stale_if_error_response, record_upstream_request_duration,
     write_dispatch_cache_result,
 };
+use crate::http::dispatcher::attach_interim_response_heads;
 use crate::http::policy::response_policy::ResponseBodyObservationLimits;
 use crate::http::policy::rule_context::{
     ResponseRuleContextInput, build_response_rule_match_context,
@@ -133,9 +134,7 @@ pub(super) async fn execute_forward_upstream(
         }
     };
     let mut response = proxied.response;
-    if !proxied.interim.is_empty() {
-        response.extensions_mut().insert(proxied.interim);
-    }
+    attach_interim_response_heads(&mut response, proxied.interim);
     let mut response = http_modules
         .on_upstream_response(OwnerResponse::from_http(response))
         .await?;

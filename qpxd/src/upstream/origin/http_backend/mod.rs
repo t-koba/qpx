@@ -10,6 +10,7 @@ use tokio::net::TcpStream;
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 use tracing::warn;
 
+use crate::http::dispatcher::attach_interim_response_heads;
 use crate::http::protocol::l7::prepare_request_for_fixed_authority_in_place;
 use crate::upstream::raw_http1::{
     BodylessHttp1Request, Http1ConnectionRecycler, Http1ResponseWithInterim,
@@ -202,9 +203,7 @@ pub(crate) async fn proxy_http(
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
     let mut proxied = proxy_http_with_interim(pools, req, origin, proxy_name, trust).await?;
-    if !proxied.interim.is_empty() {
-        proxied.response.extensions_mut().insert(proxied.interim);
-    }
+    attach_interim_response_heads(&mut proxied.response, proxied.interim);
     Ok(proxied.response)
 }
 
