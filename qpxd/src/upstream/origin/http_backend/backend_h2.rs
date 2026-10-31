@@ -1,6 +1,6 @@
 use crate::http::codec::h2::{
-    InflightCounterGuard, h2_response_to_hyper_with_inflight, http_headers_to_h1,
-    http_uri_to_http1_uri, parse_declared_content_length,
+    InflightCounterGuard, h2_response_to_hyper_with_inflight, http_uri_to_http1_uri,
+    parse_declared_content_length,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::upstream::raw_http1::Http1ResponseWithInterim;
@@ -77,7 +77,7 @@ pub(super) async fn send_h2_request_with_sender(
             "invalid HTTP/2 upstream URI",
         )?)
         .body(())?;
-    *request.headers_mut() = http_headers_to_h1(&parts.headers)?;
+    *request.headers_mut() = parts.headers;
     // RFC 9110 section 8.6: the value a sender writes is one decimal, so
     // the declaration leaves in the field's canonical form. RFC 9113
     // section 8.1.1 makes a comma list of lengths malformed in HTTP/2, so
@@ -138,7 +138,7 @@ async fn stream_request_body_to_h2(
     if let Some(trailers) = trailers {
         qpx_http::protocol::semantics::validate_request_trailers(&trailers)
             .map_err(|err| anyhow!("{}", err))?;
-        send_stream.send_trailers(http_headers_to_h1(&trailers)?)?;
+        send_stream.send_trailers(trailers)?;
     } else {
         send_stream.send_data(Bytes::new(), true)?;
     }

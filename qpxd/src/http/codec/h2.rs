@@ -648,10 +648,6 @@ fn h1_headers_into_http(src: ::http::HeaderMap) -> Result<http::HeaderMap> {
     h1_headers_to_http(&src)
 }
 
-pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
-    Ok(src.clone())
-}
-
 pub(crate) fn parse_declared_content_length(headers: &http::HeaderMap) -> Result<Option<u64>> {
     qpx_core::http_content_length::declared_content_length(headers).map_err(anyhow::Error::new)
 }

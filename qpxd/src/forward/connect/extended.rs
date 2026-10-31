@@ -1,6 +1,4 @@
-use crate::http::codec::h2::{
-    h1_headers_to_http, http_headers_to_h1, http_uri_to_http1_uri, tuned_h2_client_builder,
-};
+use crate::http::codec::h2::{h1_headers_to_http, http_uri_to_http1_uri, tuned_h2_client_builder};
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use ::http::{Method, Response as Http1Response, StatusCode, Uri};
 use anyhow::{Result, anyhow};
@@ -437,13 +435,6 @@ async fn finish_h2_extended_connect_upload(
         warn!(error = ?err, "dropping forbidden HTTP/2 extended CONNECT request trailers");
         return send_empty_h2_end_stream(upstream_send, sender);
     }
-    let trailers = match http_headers_to_h1(&trailers) {
-        Ok(trailers) => trailers,
-        Err(err) => {
-            warn!(error = ?err, "invalid HTTP/2 extended CONNECT request trailers");
-            return send_empty_h2_end_stream(upstream_send, sender);
-        }
-    };
     if upstream_send.send_trailers(trailers).is_err() {
         abort_downstream(sender);
         return false;
