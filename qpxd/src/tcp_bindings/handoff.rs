@@ -10,6 +10,11 @@ use anyhow::{Context, Result, anyhow};
 use qpx_core::config::Config;
 use std::net::TcpListener;
 
+#[cfg(windows)]
+fn clone_handoff(listener: &TcpListener, context: &'static str) -> Result<TcpListener> {
+    listener.try_clone().context(context)
+}
+
 impl TcpBindings {
     pub(crate) fn prepare_handoff(&self, config: &Config) -> Result<TcpBindingHandoff> {
         #[cfg(not(any(unix, windows)))]
@@ -110,9 +115,7 @@ impl TcpBindings {
                         listen: listener.listen.clone(),
                         forward_edges: sockets
                             .iter()
-                            .map(|listener| {
-                                listener.try_clone().context("failed to clone listener")
-                            })
+                            .map(|listener| clone_handoff(listener, "failed to clone listener"))
                             .collect::<Result<Vec<_>>>()?,
                     })
                 })
@@ -132,9 +135,7 @@ impl TcpBindings {
                         forward_edges: sockets
                             .iter()
                             .map(|listener| {
-                                listener
-                                    .try_clone()
-                                    .context("failed to clone reverse_edge listener")
+                                clone_handoff(listener, "failed to clone reverse_edge listener")
                             })
                             .collect::<Result<Vec<_>>>()?,
                     })
@@ -149,9 +150,7 @@ impl TcpBindings {
                         .ok_or_else(|| anyhow!("metrics binding not found"))?;
                     Some(WindowsSingleTcp {
                         listen: metrics.listen.clone(),
-                        listener: listener
-                            .try_clone()
-                            .context("failed to clone metrics listener")?,
+                        listener: clone_handoff(listener, "failed to clone metrics listener")?,
                     })
                 }
                 None => None,
@@ -174,9 +173,7 @@ impl TcpBindings {
                         .ok_or_else(|| anyhow!("acme http-01 binding not found"))?;
                     Some(WindowsSingleTcp {
                         listen: listen.clone(),
-                        listener: listener
-                            .try_clone()
-                            .context("failed to clone acme listener")?,
+                        listener: clone_handoff(listener, "failed to clone acme listener")?,
                     })
                 }
                 None => None,
