@@ -285,42 +285,24 @@ fn try_parse_response_head(
     buf: &[u8],
     request_method: &Method,
 ) -> Result<Option<ParsedResponseHeadTuple>> {
-    let mut common_headers =
-        [const { std::mem::MaybeUninit::uninit() }; COMMON_HTTP1_RESPONSE_HEADERS];
-    let mut response = httparse::Response::new(&mut []);
-    match httparse::ParserConfig::default().parse_response_with_uninit_headers(
-        &mut response,
-        buf,
-        &mut common_headers,
-    ) {
-        Ok(httparse::Status::Complete(consumed)) => {
-            return finish_parsed_response_head(&response, consumed, request_method).map(Some);
-        }
-        Ok(httparse::Status::Partial) => return Ok(None),
-        Err(httparse::Error::TooManyHeaders) => {}
-        Err(error) => return Err(error.into()),
-    }
-
-    let mut maximum_headers =
-        [const { std::mem::MaybeUninit::uninit() }; MAX_HTTP1_RESPONSE_HEADERS];
-    let mut response = httparse::Response::new(&mut []);
-    match httparse::ParserConfig::default().parse_response_with_uninit_headers(
-        &mut response,
-        buf,
-        &mut maximum_headers,
-    ) {
-        Ok(httparse::Status::Complete(consumed)) => {
-            finish_parsed_response_head(&response, consumed, request_method).map(Some)
-        }
-        Ok(httparse::Status::Partial) => Ok(None),
-        Err(error) => Err(error.into()),
-    }
+    try_parse_response_head_with(buf, |response, consumed| {
+        finish_parsed_response_head(response, consumed, request_method)
+    })
 }
 
 fn try_parse_raw_response_head(
     buf: &[u8],
     request_method: &Method,
 ) -> Result<Option<RawParsedResponseHeadTuple>> {
+    try_parse_response_head_with(buf, |response, consumed| {
+        finish_raw_response_head(response, consumed, request_method)
+    })
+}
+
+fn try_parse_response_head_with<T>(
+    buf: &[u8],
+    finish: impl FnOnce(&httparse::Response<'_, '_>, usize) -> Result<T>,
+) -> Result<Option<T>> {
     let mut common_headers =
         [const { std::mem::MaybeUninit::uninit() }; COMMON_HTTP1_RESPONSE_HEADERS];
     let mut response = httparse::Response::new(&mut []);
@@ -330,7 +312,7 @@ fn try_parse_raw_response_head(
         &mut common_headers,
     ) {
         Ok(httparse::Status::Complete(consumed)) => {
-            return finish_raw_response_head(&response, consumed, request_method).map(Some);
+            return finish(&response, consumed).map(Some);
         }
         Ok(httparse::Status::Partial) => return Ok(None),
         Err(httparse::Error::TooManyHeaders) => {}
@@ -345,9 +327,7 @@ fn try_parse_raw_response_head(
         buf,
         &mut maximum_headers,
     ) {
-        Ok(httparse::Status::Complete(consumed)) => {
-            finish_raw_response_head(&response, consumed, request_method).map(Some)
-        }
+        Ok(httparse::Status::Complete(consumed)) => finish(&response, consumed).map(Some),
         Ok(httparse::Status::Partial) => Ok(None),
         Err(error) => Err(error.into()),
     }
