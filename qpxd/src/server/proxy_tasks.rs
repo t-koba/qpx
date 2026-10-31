@@ -182,36 +182,22 @@ impl ProxyTasks {
             .send(control::SidecarControl::Stop);
         let _ = self.tcp_shutdown_tx.send(true);
         if let Some(exportable_sidecar_task) = self.exportable_sidecar_task {
-            match exportable_sidecar_task.await {
-                Ok(Ok(())) => {}
-                Ok(Err(err)) => {
-                    return Err(err).context("exportable UDP sidecar set failed while stopping");
-                }
-                Err(err) => {
-                    return Err(anyhow::anyhow!(
-                        "exportable UDP sidecar join failed while stopping: {err}"
-                    ));
-                }
-            }
+            server_set_result(
+                exportable_sidecar_task.await,
+                "exportable UDP sidecar set failed while stopping",
+                "exportable UDP sidecar join failed while stopping",
+            )?;
         }
-        match self.brokered_h3_task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                return Err(err).context("brokered HTTP/3 sidecar set failed while stopping");
-            }
-            Err(err) => {
-                return Err(anyhow::anyhow!(
-                    "brokered HTTP/3 sidecar join failed while stopping: {err}"
-                ));
-            }
-        }
-        match self.tcp_task.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(err).context("tcp listener/reverse set failed while stopping"),
-            Err(err) => Err(anyhow::anyhow!(
-                "tcp listener/reverse join failed while stopping: {err}"
-            )),
-        }
+        server_set_result(
+            self.brokered_h3_task.await,
+            "brokered HTTP/3 sidecar set failed while stopping",
+            "brokered HTTP/3 sidecar join failed while stopping",
+        )?;
+        server_set_result(
+            self.tcp_task.await,
+            "tcp listener/reverse set failed while stopping",
+            "tcp listener/reverse join failed while stopping",
+        )
     }
 
     pub(crate) async fn prepare_binary_upgrade(
@@ -251,17 +237,11 @@ impl ProxyTasks {
         let _ = self
             .exportable_sidecar_control_tx
             .send(control::SidecarControl::ExportForUpgrade);
-        match task.await {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                return Err(err).context("exportable UDP sidecar set failed while exporting");
-            }
-            Err(err) => {
-                return Err(anyhow::anyhow!(
-                    "exportable UDP sidecar join failed while exporting: {err}"
-                ));
-            }
-        }
+        server_set_result(
+            task.await,
+            "exportable UDP sidecar set failed while exporting",
+            "exportable UDP sidecar join failed while exporting",
+        )?;
         let exported = std::mem::take(
             &mut *self
                 .exportable_sidecar_export
@@ -317,13 +297,22 @@ impl ProxyTasks {
 
     pub(crate) async fn shutdown_tcp(self) -> Result<()> {
         let _ = self.tcp_shutdown_tx.send(true);
-        match self.tcp_task.await {
-            Ok(Ok(())) => Ok(()),
-            Ok(Err(err)) => Err(err).context("tcp listener/reverse set failed while draining"),
-            Err(err) => Err(anyhow::anyhow!(
-                "tcp listener/reverse join failed while draining: {err}"
-            )),
-        }
+        server_set_result(
+            self.tcp_task.await,
+            "tcp listener/reverse set failed while draining",
+            "tcp listener/reverse join failed while draining",
+        )
+    }
+}
+
+fn server_set_result(
+    joined: std::result::Result<Result<()>, tokio::task::JoinError>,
+    set_context: &'static str,
+    join_context: &'static str,
+) -> Result<()> {
+    match joined {
+        Ok(result) => result.context(set_context),
+        Err(err) => Err(anyhow::anyhow!("{join_context}: {err}")),
     }
 }
 
@@ -479,4 +468,28 @@ fn brokered_reverse_h3_sockets(
             Ok((reverse.name.clone(), prepared.endpoint_socket))
         })
         .collect::<Result<std::collections::HashMap<_, _>>>()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::server_set_result;
+    use anyhow::anyhow;
+
+    #[test]
+    fn server_set_result_preserves_success_and_set_context() {
+        assert!(server_set_result(Ok(Ok(())), "set context", "join context").is_ok());
+
+        let error = server_set_result(Ok(Err(anyhow!("failure"))), "set context", "join context")
+            .unwrap_err();
+        assert_eq!(error.to_string(), "set context");
+        assert_eq!(error.root_cause().to_string(), "failure");
+    }
+
+    #[tokio::test]
+    async fn server_set_result_preserves_join_context() {
+        let task = tokio::spawn(std::future::pending::<super::Result<()>>());
+        task.abort();
+        let error = server_set_result(task.await, "set context", "join context").unwrap_err();
+        assert!(error.to_string().starts_with("join context: task "));
+    }
 }
