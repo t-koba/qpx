@@ -1,7 +1,7 @@
 use crate::http::protocol::common::trim_http_ows;
 use hyper_util::rt::TokioIo;
 use qpx_core::http_message::{Headers, OrdinaryHeaderName};
-use qpx_core::http_token::{header_values_contain_token, is_http_token};
+use qpx_core::http_token::{header_values_contain_token, is_http_token, value_members};
 use qpx_http::body::Body;
 use std::collections::HashSet;
 use std::future::Future;
@@ -9,11 +9,8 @@ use std::time::Duration;
 use tokio::time::timeout;
 
 fn request_has_token(headers: &Headers, name: &str, token: &str) -> bool {
-    headers
-        .get_all(&OrdinaryHeaderName::try_from(name).expect("ordinary field"))
-        .filter_map(|value| value.to_str().ok())
-        .flat_map(|raw| raw.split(','))
-        .any(|member| member.trim().eq_ignore_ascii_case(token))
+    let name = OrdinaryHeaderName::try_from(name).expect("ordinary field");
+    value_members(headers.get_all(&name)).any(|member| member.eq_ignore_ascii_case(token))
 }
 
 pub(crate) fn is_websocket_upgrade(
