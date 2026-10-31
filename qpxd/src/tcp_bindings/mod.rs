@@ -180,16 +180,14 @@ impl TcpBindings {
             .metrics
             .as_ref()
             .map(|metrics| {
-                previous
-                    .metrics_for_listen(previous_config, metrics.listen.as_str())
-                    .map(|listener| {
-                        listener
-                            .try_clone()
-                            .context("failed to clone metrics binding")
-                    })
-                    .unwrap_or_else(|| {
-                        bind_admin_listener(metrics.listen.as_str(), "metrics.listen")
-                    })
+                clone_optional_tcp_listener(
+                    previous.metrics_for_listen(previous_config, metrics.listen.as_str()),
+                    "failed to clone metrics binding",
+                )?
+                .map_or_else(
+                    || bind_admin_listener(metrics.listen.as_str(), "metrics.listen"),
+                    Ok,
+                )
             })
             .transpose()?;
 
@@ -205,14 +203,11 @@ impl TcpBindings {
                 .and_then(|acme| acme.http01_listen.as_deref())
                 .ok_or_else(|| anyhow!("acme.http01_listen missing"))?;
             Some(
-                previous
-                    .acme_for_listen(previous_config, listen)
-                    .map(|listener| {
-                        listener
-                            .try_clone()
-                            .context("failed to clone acme http-01 binding")
-                    })
-                    .unwrap_or_else(|| bind_admin_listener(listen, "acme.http01_listen"))?,
+                clone_optional_tcp_listener(
+                    previous.acme_for_listen(previous_config, listen),
+                    "failed to clone acme http-01 binding",
+                )?
+                .map_or_else(|| bind_admin_listener(listen, "acme.http01_listen"), Ok)?,
             )
         } else {
             None
@@ -424,26 +419,15 @@ impl TcpBindings {
     }
 
     pub(crate) fn clone_metrics(&self) -> Result<Option<TcpListener>> {
-        self.metrics
-            .as_ref()
-            .map(|listener| {
-                listener
-                    .try_clone()
-                    .context("failed to clone metrics binding")
-            })
-            .transpose()
+        clone_optional_tcp_listener(self.metrics.as_ref(), "failed to clone metrics binding")
     }
 
     #[cfg(feature = "acme")]
     pub(crate) fn clone_acme_http01(&self) -> Result<Option<TcpListener>> {
-        self.acme_http01
-            .as_ref()
-            .map(|listener| {
-                listener
-                    .try_clone()
-                    .context("failed to clone acme http-01 binding")
-            })
-            .transpose()
+        clone_optional_tcp_listener(
+            self.acme_http01.as_ref(),
+            "failed to clone acme http-01 binding",
+        )
     }
 }
 
@@ -460,6 +444,15 @@ fn clone_std_tcp_group(group: &[TcpListener], kind: &str, name: &str) -> Result<
         .iter()
         .map(|listener| clone_tcp_listener(listener, kind, name))
         .collect()
+}
+
+fn clone_optional_tcp_listener(
+    listener: Option<&TcpListener>,
+    context: &'static str,
+) -> Result<Option<TcpListener>> {
+    listener
+        .map(|listener| listener.try_clone().context(context))
+        .transpose()
 }
 
 fn clone_tcp_listener(listener: &TcpListener, kind: &str, name: &str) -> Result<TcpListener> {
@@ -508,4 +501,26 @@ fn bind_admin_listener(listen: &str, field: &str) -> Result<TcpListener> {
         .set_nonblocking(true)
         .with_context(|| format!("failed to set {field} nonblocking"))?;
     Ok(listener)
+}
+
+#[cfg(test)]
+mod clone_tests {
+    use super::clone_optional_tcp_listener;
+    use std::net::TcpListener;
+
+    #[test]
+    fn optional_clone_preserves_absence_and_listener_address() {
+        assert!(
+            clone_optional_tcp_listener(None, "clone failed")
+                .expect("absent listener")
+                .is_none()
+        );
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind listener");
+        let address = listener.local_addr().expect("listener address");
+        let cloned = clone_optional_tcp_listener(Some(&listener), "clone failed")
+            .expect("clone listener")
+            .expect("cloned listener");
+        assert_eq!(cloned.local_addr().expect("cloned address"), address);
+    }
 }
