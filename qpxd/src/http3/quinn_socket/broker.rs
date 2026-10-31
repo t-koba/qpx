@@ -161,7 +161,7 @@ impl LocalBrokerSocket {
                 // flood cap; handshakes and unknown peers stay limited below.
                 // Bounded queues and QUIC flow control still bound bypassed flows.
                 if !this.bypass_source_limiter(addr, payload.as_ref())
-                    && !this.allow_source_datagram(addr, "local")
+                    && !allow_source_datagram(&this.source_limiter, addr, "local")
                 {
                     continue;
                 }
@@ -373,7 +373,7 @@ impl RemoteBrokerSocket {
                 // Fail-closed: direct mode has no route state to distinguish
                 // established peers, so the per-source handshake cap still
                 // applies to every datagram here.
-                if !this.allow_source_datagram(addr, "remote_direct") {
+                if !allow_source_datagram(&this.source_limiter, addr, "remote_direct") {
                     continue;
                 }
                 this.enqueue_payload_bytes(addr, payload, "remote_endpoint");
@@ -584,10 +584,6 @@ impl LocalBrokerSocket {
         )
     }
 
-    fn allow_source_datagram(&self, addr: SocketAddr, queue: &'static str) -> bool {
-        allow_source_datagram(&self.source_limiter, addr, queue)
-    }
-
     fn enqueue_packet(&self, packet: InjectedPacket, queue: &'static str) {
         if self.recv_tx.capacity() == 0 {
             record_broker_drop(queue, "queue_full");
@@ -598,10 +594,6 @@ impl LocalBrokerSocket {
 }
 
 impl RemoteBrokerSocket {
-    fn allow_source_datagram(&self, addr: SocketAddr, queue: &'static str) -> bool {
-        allow_source_datagram(&self.source_limiter, addr, queue)
-    }
-
     fn enqueue_payload_bytes(&self, addr: SocketAddr, payload: Bytes, queue: &'static str) {
         if self.recv_tx.capacity() == 0 {
             record_broker_drop(queue, "queue_full");
