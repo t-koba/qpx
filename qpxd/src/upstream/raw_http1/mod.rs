@@ -161,28 +161,19 @@ where
     }
 
     pub(crate) fn into_http_response(self) -> Result<Http1ResponseWithInterim> {
-        let Self {
-            interim,
-            raw,
-            stream,
-            read_buf,
-            write_buf,
-            recycler,
-            active_permit,
-        } = self;
-        let stream = stream.ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
-        let mut response = response::build_raw_response(stream, raw, read_buf, write_buf, recycler);
-        retain_active_permit(response.body_mut(), active_permit);
-        Ok(Http1ResponseWithInterim {
-            interim,
-            response,
-            upstream_cert: None,
-            response_finalized: false,
-        })
+        self.into_http_response_inner(false, MAX_EMITTED_BODY_FRAME_SIZE)
     }
 
     pub(crate) fn into_materialized_http_response(
         self,
+        max_body_frame_size: usize,
+    ) -> Result<Http1ResponseWithInterim> {
+        self.into_http_response_inner(true, max_body_frame_size)
+    }
+
+    fn into_http_response_inner(
+        self,
+        materialize_headers: bool,
         max_body_frame_size: usize,
     ) -> Result<Http1ResponseWithInterim> {
         let Self {
@@ -195,14 +186,16 @@ where
             active_permit,
         } = self;
         let stream = stream.ok_or_else(|| anyhow!("raw HTTP/1 relay stream is unavailable"))?;
-        let headers = raw.materialized_headers()?;
+        let headers = materialize_headers
+            .then(|| raw.materialized_headers())
+            .transpose()?;
         let mut response = response::build_raw_response_inner(
             stream,
             raw,
             read_buf,
             write_buf,
             recycler,
-            Some(headers),
+            headers,
             max_body_frame_size,
         );
         retain_active_permit(response.body_mut(), active_permit);
@@ -210,7 +203,7 @@ where
             interim,
             response,
             upstream_cert: None,
-            response_finalized: true,
+            response_finalized: materialize_headers,
         })
     }
 }
