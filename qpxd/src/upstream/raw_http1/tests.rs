@@ -1,10 +1,8 @@
 use super::io::{determine_response_body_kind, response_body_allows_reuse};
 use super::response::{
-    ParsedResponseHead, RawParsedResponseHead, ResponseBodyKind, build_raw_response,
-    build_response, forward_chunked_body, forward_close_delimited_body,
-    read_finalized_raw_response_head_with_interim,
-    read_finalized_raw_response_head_with_interim_under_external_deadline,
-    read_response_head_with_interim,
+    ParsedResponseHead, RawParsedResponseHead, RawResponseHeadDeadline, ResponseBodyKind,
+    build_raw_response, build_response, forward_chunked_body, forward_close_delimited_body,
+    read_finalized_raw_response_head_with_interim, read_response_head_with_interim,
 };
 use super::{
     Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, MAX_HEADER_BYTES,
@@ -146,6 +144,7 @@ async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
         &Method::GET,
         Version::HTTP_11,
         "segmented-timed-test",
+        RawResponseHeadDeadline::PerReadIdleTimeout,
     )
     .await
     .expect("read fragmented raw response head");
@@ -179,6 +178,7 @@ async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
         &Method::GET,
         Version::HTTP_11,
         "partial-at-limit-test",
+        RawResponseHeadDeadline::PerReadIdleTimeout,
     )
     .await
     {
@@ -227,6 +227,7 @@ async fn raw_upstream_response_head_yields_on_stall_and_fails_closed() {
         &Method::GET,
         Version::HTTP_11,
         "spin-raw-eof-test",
+        RawResponseHeadDeadline::PerReadIdleTimeout,
     )
     .await
     {
@@ -245,6 +246,7 @@ async fn raw_upstream_response_head_yields_on_stall_and_fails_closed() {
             &Method::GET,
             Version::HTTP_11,
             "spin-raw-stall-test",
+            RawResponseHeadDeadline::PerReadIdleTimeout,
         ),
     )
     .await;
@@ -261,16 +263,16 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
         b"HTTP/1.1 200 OK\r\nX-Partial: segmented\r\nContent-Length: 4\r\n\r\nBODY",
     );
     let mut segmented_reader = RecordingStream::segmented(response_bytes, 11, false);
-    let (interim, parsed, remainder) =
-        read_finalized_raw_response_head_with_interim_under_external_deadline(
-            &mut segmented_reader,
-            BytesMut::new(),
-            &Method::GET,
-            Version::HTTP_11,
-            "spin-ext-segmented-test",
-        )
-        .await
-        .expect("read fragmented raw response head under external deadline");
+    let (interim, parsed, remainder) = read_finalized_raw_response_head_with_interim(
+        &mut segmented_reader,
+        BytesMut::new(),
+        &Method::GET,
+        Version::HTTP_11,
+        "spin-ext-segmented-test",
+        RawResponseHeadDeadline::CallerManaged,
+    )
+    .await
+    .expect("read fragmented raw response head under external deadline");
     assert!(interim.is_empty());
     assert_eq!(parsed.status, StatusCode::OK);
     assert_eq!(remainder.as_ref(), b"BODY");
@@ -280,12 +282,13 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
     let mut stalled_reader = RecordingStream::segmented(partial.clone(), usize::MAX, true);
     let result = tokio::time::timeout(
         Duration::from_millis(50),
-        read_finalized_raw_response_head_with_interim_under_external_deadline(
+        read_finalized_raw_response_head_with_interim(
             &mut stalled_reader,
             BytesMut::new(),
             &Method::GET,
             Version::HTTP_11,
             "spin-ext-stall-test",
+            RawResponseHeadDeadline::CallerManaged,
         ),
     )
     .await;
@@ -299,12 +302,13 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
     incomplete_head.resize(MAX_HEADER_BYTES, b'x');
     let mut limited_reader =
         RecordingStream::segmented(Bytes::from(incomplete_head), usize::MAX, false);
-    let error = match read_finalized_raw_response_head_with_interim_under_external_deadline(
+    let error = match read_finalized_raw_response_head_with_interim(
         &mut limited_reader,
         BytesMut::with_capacity(MAX_HEADER_BYTES * 2),
         &Method::GET,
         Version::HTTP_11,
         "spin-ext-cap-test",
+        RawResponseHeadDeadline::CallerManaged,
     )
     .await
     {
@@ -319,12 +323,13 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
     assert_eq!(limited_reader.read_polls, 1);
 
     let mut eof_reader = RecordingStream::segmented(partial, usize::MAX, false);
-    let error = match read_finalized_raw_response_head_with_interim_under_external_deadline(
+    let error = match read_finalized_raw_response_head_with_interim(
         &mut eof_reader,
         BytesMut::new(),
         &Method::GET,
         Version::HTTP_11,
         "spin-ext-eof-test",
+        RawResponseHeadDeadline::CallerManaged,
     )
     .await
     {
@@ -917,6 +922,7 @@ async fn finalized_raw_head_cache_preserves_upstream_via_protocol() {
                 &Method::GET,
                 downstream_version,
                 "via-cache-test",
+                RawResponseHeadDeadline::PerReadIdleTimeout,
             )
             .await
             .expect("read finalized upstream head");
@@ -935,12 +941,13 @@ async fn finalized_raw_head_cache_preserves_upstream_via_protocol() {
             // reuse the same finalized head for an identical cache key.
             let mut stream = wire;
             let (_, cached, remainder) =
-                super::response::read_finalized_raw_response_head_with_interim_under_external_deadline(
+                super::response::read_finalized_raw_response_head_with_interim(
                     &mut stream,
                     BytesMut::new(),
                     &Method::GET,
                     downstream_version,
                     "via-cache-test",
+                    RawResponseHeadDeadline::CallerManaged,
                 )
                 .await
                 .expect("read cached upstream head");
@@ -1007,6 +1014,7 @@ async fn finalized_raw_head_cache_key_coheres_across_versions() {
             &Method::GET,
             downstream,
             "via-coherence",
+            RawResponseHeadDeadline::PerReadIdleTimeout,
         )
         .await
         .expect("read finalized head");

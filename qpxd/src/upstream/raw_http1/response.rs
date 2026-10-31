@@ -120,50 +120,20 @@ pub(super) async fn read_response_head_with_interim(
     }
 }
 
+pub(super) enum RawResponseHeadDeadline {
+    PerReadIdleTimeout,
+    CallerManaged,
+}
+
 pub(super) async fn read_finalized_raw_response_head_with_interim(
-    stream: &mut (dyn AsyncRead + Unpin + Send),
-    buf: BytesMut,
-    request_method: &Method,
-    request_version: Version,
-    proxy_name: &str,
-) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)> {
-    read_finalized_raw_response_head_with_interim_inner(
-        stream,
-        buf,
-        request_method,
-        request_version,
-        proxy_name,
-        true,
-    )
-    .await
-}
-
-pub(super) async fn read_finalized_raw_response_head_with_interim_under_external_deadline(
-    stream: &mut (dyn AsyncRead + Unpin + Send),
-    buf: BytesMut,
-    request_method: &Method,
-    request_version: Version,
-    proxy_name: &str,
-) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)> {
-    read_finalized_raw_response_head_with_interim_inner(
-        stream,
-        buf,
-        request_method,
-        request_version,
-        proxy_name,
-        false,
-    )
-    .await
-}
-
-async fn read_finalized_raw_response_head_with_interim_inner(
     stream: &mut (dyn AsyncRead + Unpin + Send),
     mut buf: BytesMut,
     request_method: &Method,
     request_version: Version,
     proxy_name: &str,
-    enforce_idle_timeout: bool,
+    deadline: RawResponseHeadDeadline,
 ) -> Result<(Vec<InterimResponseHead>, RawParsedResponseHead, BytesMut)> {
+    let enforce_idle_timeout = matches!(deadline, RawResponseHeadDeadline::PerReadIdleTimeout);
     buf.clear();
     buf.reserve(INITIAL_READ_BUF_SIZE);
     let mut interim = Vec::new();

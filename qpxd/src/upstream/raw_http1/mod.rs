@@ -369,12 +369,13 @@ where
     // The reverse raw path wraps the full upstream exchange in the route deadline.
     // A second timer for the same response-head wait only adds per-request work.
     let (interim, final_head, buffered_body) =
-        response::read_finalized_raw_response_head_with_interim_under_external_deadline(
+        response::read_finalized_raw_response_head_with_interim(
             &mut stream,
             read_buf,
             response_context.request_method,
             response_context.request_version,
             response_context.proxy_name,
+            response::RawResponseHeadDeadline::CallerManaged,
         )
         .await?;
     Ok(RawHttp1ResponseRelay {
@@ -410,12 +411,13 @@ where
     }
     // The reverse fast path wraps this entire operation in the route deadline.
     // Avoid registering a second timer for the same response-head wait.
-    let result = response::read_finalized_raw_response_head_with_interim_under_external_deadline(
+    let result = response::read_finalized_raw_response_head_with_interim(
         &mut stream,
         read_buf,
         request_method,
         request_version,
         proxy_name,
+        response::RawResponseHeadDeadline::CallerManaged,
     )
     .await;
     let (interim, final_head, buffered_body) = match result {
@@ -482,6 +484,7 @@ where
             &request_method,
             request_version,
             proxy_name,
+            response::RawResponseHeadDeadline::PerReadIdleTimeout,
         )
         .await?;
     let response =
