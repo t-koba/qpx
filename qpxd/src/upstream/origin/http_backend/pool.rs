@@ -458,18 +458,8 @@ impl DirectOriginPools {
     }
 
     pub(crate) fn clear(&self) {
-        for shard in &self.plain {
-            shard
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clear();
-        }
-        for shard in &self.https {
-            shard
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clear();
-        }
+        clear_pool(&self.plain);
+        clear_pool(&self.https);
         self.generation.fetch_add(1, Ordering::Relaxed);
     }
 
@@ -555,6 +545,15 @@ impl DirectOriginPools {
     fn trim_http1_idle(&self, max: usize) {
         for_each_pool_slot(&self.plain, |slot| slot.idle.trim(max));
         for_each_pool_slot(&self.https, |slot| slot.http1_idle.trim(max));
+    }
+}
+
+fn clear_pool<K, V>(pool: &[RwLock<HashMap<K, Arc<V>>>]) {
+    for shard in pool {
+        shard
+            .write()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 }
 
