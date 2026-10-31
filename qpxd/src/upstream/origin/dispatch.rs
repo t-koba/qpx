@@ -21,11 +21,7 @@ pub(super) fn origin_scheme(origin: &OriginEndpoint) -> Result<OriginScheme> {
         return Ok(OriginScheme::Ipc);
     }
     let parsed = origin.parsed()?;
-    scheme_from_parsed(parsed.scheme.as_deref())
-}
-
-fn scheme_from_parsed(scheme: Option<&str>) -> Result<OriginScheme> {
-    match scheme {
+    match parsed.scheme.as_deref() {
         Some("http") | Some("h2c") => Ok(OriginScheme::Http),
         Some("https") | Some("h2") => Ok(OriginScheme::Https),
         Some("h3") => Ok(OriginScheme::H3),
