@@ -122,6 +122,12 @@ impl<S> Http1ResponseBody<S> {
     fn body_error(message: impl Into<String>) -> BodyError {
         BodyError::new(message)
     }
+
+    fn fail_read(&mut self, error: BodyError) -> Poll<Option<Result<Frame<Bytes>, BodyError>>> {
+        self.state = BodyState::Done;
+        self.discard();
+        Poll::Ready(Some(Err(error)))
+    }
 }
 
 impl<S> Drop for Http1ResponseBody<S> {
@@ -178,11 +184,7 @@ where
                             ))));
                         }
                         Poll::Ready(Ok(_)) => {}
-                        Poll::Ready(Err(err)) => {
-                            this.state = BodyState::Done;
-                            this.discard();
-                            return Poll::Ready(Some(Err(err)));
-                        }
+                        Poll::Ready(Err(err)) => return this.fail_read(err),
                         Poll::Pending => return Poll::Pending,
                     }
                 }
@@ -200,11 +202,7 @@ where
                             return Poll::Ready(None);
                         }
                         Poll::Ready(Ok(_)) => {}
-                        Poll::Ready(Err(err)) => {
-                            this.state = BodyState::Done;
-                            this.discard();
-                            return Poll::Ready(Some(Err(err)));
-                        }
+                        Poll::Ready(Err(err)) => return this.fail_read(err),
                         Poll::Pending => return Poll::Pending,
                     }
                 }
@@ -250,11 +248,7 @@ where
                                 ))));
                             }
                             Poll::Ready(Ok(_)) => {}
-                            Poll::Ready(Err(err)) => {
-                                this.state = BodyState::Done;
-                                this.discard();
-                                return Poll::Ready(Some(Err(err)));
-                            }
+                            Poll::Ready(Err(err)) => return this.fail_read(err),
                             Poll::Pending => return Poll::Pending,
                         }
                     }
@@ -280,11 +274,7 @@ where
                                 ))));
                             }
                             Poll::Ready(Ok(_)) => {}
-                            Poll::Ready(Err(err)) => {
-                                this.state = BodyState::Done;
-                                this.discard();
-                                return Poll::Ready(Some(Err(err)));
-                            }
+                            Poll::Ready(Err(err)) => return this.fail_read(err),
                             Poll::Pending => return Poll::Pending,
                         }
                     }
@@ -311,11 +301,7 @@ where
                                 ))));
                             }
                             Poll::Ready(Ok(_)) => {}
-                            Poll::Ready(Err(err)) => {
-                                this.state = BodyState::Done;
-                                this.discard();
-                                return Poll::Ready(Some(Err(err)));
-                            }
+                            Poll::Ready(Err(err)) => return this.fail_read(err),
                             Poll::Pending => return Poll::Pending,
                         }
                     }
@@ -372,11 +358,7 @@ where
                                         ))));
                                     }
                                     Poll::Ready(Ok(_)) => {}
-                                    Poll::Ready(Err(err)) => {
-                                        this.state = BodyState::Done;
-                                        this.discard();
-                                        return Poll::Ready(Some(Err(err)));
-                                    }
+                                    Poll::Ready(Err(err)) => return this.fail_read(err),
                                     Poll::Pending => return Poll::Pending,
                                 }
                             }
