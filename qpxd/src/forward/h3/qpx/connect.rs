@@ -11,11 +11,11 @@ use super::response::{
     finalize_qpx_connect_head_response, send_qpx_policy_response, send_qpx_response_stream,
     send_qpx_static_response, upstream_qpx_extended_connect_error_response,
 };
+use crate::forward::h3::connect::finalize_h3_connect_response;
 use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
 use crate::forward::request::resolve_upstream;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
-use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::rate_limit::TransportScope;
 use crate::upstream::connect::connect_tunnel_target;
 use anyhow::{Result, anyhow};
@@ -176,13 +176,10 @@ async fn run_qpx_traditional_connect_tunnel(
         action.kind,
         ActionKind::Inspect | ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
     ) {
-        let response = finalize_response_with_headers(
-            &http::Method::CONNECT,
-            http::Version::HTTP_3,
+        let response = finalize_h3_connect_response(
             proxy_name.as_str(),
             blocked(state.messages.blocked.as_str()),
             response_headers.as_deref(),
-            false,
         );
         send_policy!(&mut req_stream, response, DispatchOutcome::Block).await?;
         return Ok(());
@@ -212,15 +209,12 @@ async fn run_qpx_traditional_connect_tunnel(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 qpx-h3 CONNECT upstream resolution failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_response(
                 proxy_name.as_str(),
                 crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),
-                false,
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());
@@ -238,15 +232,12 @@ async fn run_qpx_traditional_connect_tunnel(
         Ok(server) => server,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 qpx-h3 CONNECT establish failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_response(
                 proxy_name.as_str(),
                 crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),
-                false,
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());
@@ -396,13 +387,10 @@ async fn handle_qpx_extended_connect_stream(
         action.kind,
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
     ) {
-        let response = finalize_response_with_headers(
-            &http::Method::CONNECT,
-            http::Version::HTTP_3,
+        let response = finalize_h3_connect_response(
             proxy_name.as_str(),
             blocked(state.messages.blocked.as_str()),
             response_headers.as_deref(),
-            false,
         );
         send_policy!(&mut req_stream, response, DispatchOutcome::Block).await?;
         return Ok(());
@@ -430,15 +418,12 @@ async fn handle_qpx_extended_connect_stream(
 
     if connect_ip_policies.is_some() && action.kind != ActionKind::Proxy {
         let Some(device_name) = handler.connect_ip.device.as_deref() else {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_response(
                 proxy_name.as_str(),
                 Response::builder()
                     .status(StatusCode::NOT_IMPLEMENTED)
                     .body(Body::from("CONNECT-IP local termination requires a device"))?,
                 response_headers.as_deref(),
-                false,
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());
@@ -500,15 +485,12 @@ async fn handle_qpx_extended_connect_stream(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 qpx-h3 extended CONNECT establish failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_response(
                 proxy_name.as_str(),
                 crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),
-                false,
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());

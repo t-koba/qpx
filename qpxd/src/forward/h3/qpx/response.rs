@@ -1,5 +1,6 @@
+use crate::forward::h3::connect::finalize_h3_connect_response;
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
-use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
+use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use anyhow::Result;
 use bytes::Bytes;
@@ -89,14 +90,7 @@ pub(super) fn finalize_qpx_connect_head_response(
     )?;
     let mut downstream = Response::builder().status(status).body(Body::empty())?;
     *downstream.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    let downstream = finalize_response_with_headers(
-        &http::Method::CONNECT,
-        http::Version::HTTP_3,
-        proxy_name,
-        downstream,
-        header_control,
-        false,
-    );
+    let downstream = finalize_h3_connect_response(proxy_name, downstream, header_control);
     let status = qpx_http::protocol::semantics::validate_http_status_class(
         downstream.status(),
         "QPX HTTP/3 extended CONNECT response",
@@ -122,13 +116,10 @@ pub(super) fn upstream_qpx_extended_connect_error_response(
         .status(status)
         .body(body_from_upstream_qpx_stream(upstream, body_read_timeout))?;
     *downstream.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    Ok(finalize_response_with_headers(
-        &http::Method::CONNECT,
-        http::Version::HTTP_3,
+    Ok(finalize_h3_connect_response(
         proxy_name,
         downstream,
         header_control,
-        false,
     ))
 }
 

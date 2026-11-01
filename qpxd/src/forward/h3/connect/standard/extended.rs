@@ -1,8 +1,7 @@
+use super::super::finalize_h3_connect_response;
 use super::super::parse::parse_extended_connect_upstream;
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
-use crate::http::protocol::l7::{
-    finalize_response_with_headers, prepare_request_with_headers_in_place,
-};
+use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
 use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
@@ -219,14 +218,7 @@ pub(super) fn finalize_h3_connect_head_response(
     )?;
     let mut downstream = Response::builder().status(status).body(Body::empty())?;
     *downstream.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    let downstream = finalize_response_with_headers(
-        &http::Method::CONNECT,
-        http::Version::HTTP_3,
-        proxy_name,
-        downstream,
-        header_control,
-        false,
-    );
+    let downstream = finalize_h3_connect_response(proxy_name, downstream, header_control);
     let status = qpx_http::protocol::semantics::validate_http_status_class(
         downstream.status(),
         "HTTP/3 extended CONNECT response",
@@ -252,13 +244,10 @@ pub(super) fn upstream_extended_connect_error_response(
         .status(status)
         .body(body_from_upstream_h3_stream(upstream, body_read_timeout))?;
     *downstream.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    Ok(finalize_response_with_headers(
-        &http::Method::CONNECT,
-        http::Version::HTTP_3,
+    Ok(finalize_h3_connect_response(
         proxy_name,
         downstream,
         header_control,
-        false,
     ))
 }
 

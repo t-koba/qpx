@@ -1,4 +1,5 @@
 use super::super::super::backend_h3::ForwardH3Handler;
+use super::super::finalize_h3_connect_response;
 use super::extended::{
     OpenUpstreamExtendedConnectInput, UpstreamExtendedConnectStream,
     finalize_h3_connect_head_response, open_upstream_extended_connect_stream,
@@ -9,7 +10,6 @@ use super::{
 };
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
-use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
@@ -108,13 +108,10 @@ pub(crate) async fn handle_h3_extended_connect(
         action.kind,
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
     ) {
-        let response = finalize_response_with_headers(
-            &http::Method::CONNECT,
-            http::Version::HTTP_3,
+        let response = finalize_h3_connect_response(
             proxy_name.as_str(),
             blocked(state.messages.blocked.as_str()),
             response_headers.as_deref(),
-            false,
         );
         send_policy!(&mut req_stream, response, DispatchOutcome::Block).await?;
         return Ok(());
@@ -162,15 +159,12 @@ pub(crate) async fn handle_h3_extended_connect(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, protocol = ?protocol, "forward HTTP/3 extended CONNECT establish failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_response(
                 proxy_name.as_str(),
                 super::super::super::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),
-                false,
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());

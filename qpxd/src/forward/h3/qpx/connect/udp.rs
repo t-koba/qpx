@@ -5,10 +5,10 @@ use super::super::connect_upstream::{
 use super::super::relay::{relay_qpx_connect_udp_stream, relay_qpx_connect_udp_stream_chained};
 use super::super::response::send_qpx_policy_response;
 use super::prepare::PreparedQpxConnect;
+use crate::forward::h3::connect::finalize_h3_connect_response;
 use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
 use crate::forward::request::resolve_upstream_url;
 use crate::http::dispatch::DispatchOutcome;
-use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
 use hyper::Response;
@@ -321,12 +321,9 @@ fn connect_udp_bad_gateway_response(
     body: String,
     response_headers: Option<&CompiledHeaderControl>,
 ) -> Result<Response<Body>> {
-    Ok(finalize_response_with_headers(
-        &http::Method::CONNECT,
-        http::Version::HTTP_3,
+    Ok(finalize_h3_connect_response(
         proxy_name,
         crate::forward::h3::h3_bad_gateway_base_response(body)?,
         response_headers,
-        false,
     ))
 }

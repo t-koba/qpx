@@ -8,6 +8,7 @@ use super::connect_upstream::{
 use super::response::{send_qpx_response_stream, send_qpx_static_response};
 #[cfg(feature = "auth-basic")]
 use crate::forward::h3::connect::finalize_h3_connect_auth_response;
+use crate::forward::h3::connect::finalize_h3_connect_response;
 use crate::forward::h3::connect::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
@@ -15,7 +16,6 @@ use crate::forward::request::proxy_auth_required;
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::{blocked_response as blocked, forbidden_response as forbidden};
-use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::policy_context::{
     DecisionServiceEnforcement, DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
     authentication_response_for_error, enforce_decision_service, prepare_decision_service_allow,
@@ -350,13 +350,10 @@ pub(super) async fn handle_qpx_webtransport_connect(
 
     match action.kind {
         ActionKind::Block | ActionKind::Inspect => {
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_response(
                 proxy_name.as_str(),
                 blocked(state.messages.blocked.as_str()),
                 response_headers.as_deref(),
-                false,
             );
             return_with_policy!(
                 response,
@@ -436,15 +433,12 @@ pub(super) async fn handle_qpx_webtransport_connect(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 WebTransport CONNECT establish failed");
-            let response = finalize_response_with_headers(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_response(
                 proxy_name.as_str(),
                 crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
                 )?,
                 response_headers.as_deref(),
-                false,
             );
             return_with_policy!(
                 response,

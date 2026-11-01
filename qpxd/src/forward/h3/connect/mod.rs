@@ -48,8 +48,28 @@ pub(super) fn build_h3_connect_rule_context<'a>(
     })
 }
 
-/// Finalizes a local auth-policy response for an HTTP/3 CONNECT request.
-#[cfg(feature = "auth-basic")]
+/// Finalizes a local response for an HTTP/3 CONNECT request.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(super) fn finalize_h3_connect_response(
+    proxy_name: &str,
+    response: http::Response<qpx_http::body::Body>,
+    header_control: Option<&qpx_core::rules::CompiledHeaderControl>,
+) -> http::Response<qpx_http::body::Body> {
+    crate::http::protocol::l7::finalize_response_with_headers(
+        &http::Method::CONNECT,
+        http::Version::HTTP_3,
+        proxy_name,
+        response,
+        header_control,
+        false,
+    )
+}
+
+/// Finalizes a local auth-policy response without applying response-header controls.
+#[cfg(all(
+    feature = "auth-basic",
+    any(feature = "http3-backend-h3", feature = "http3-backend-qpx")
+))]
 pub(super) fn finalize_h3_connect_auth_response(
     proxy_name: &str,
     response: http::Response<qpx_http::body::Body>,
@@ -170,13 +190,10 @@ pub(super) fn h3_connect_rate_limited_response(
     request_limits: &crate::rate_limit::AppliedRateLimits,
     retry_after: Option<std::time::Duration>,
 ) -> http::Response<qpx_http::body::Body> {
-    let mut response = crate::http::protocol::l7::finalize_response_with_headers(
-        &http::Method::CONNECT,
-        http::Version::HTTP_3,
+    let mut response = finalize_h3_connect_response(
         proxy_name,
         crate::http::protocol::common::too_many_requests_response(retry_after),
         response_headers,
-        false,
     );
     request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
     response

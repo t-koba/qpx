@@ -1,11 +1,11 @@
 use super::super::super::backend_h3::ForwardH3Handler;
+use super::super::finalize_h3_connect_response;
 use super::established::{EstablishedH3Connect, finish_h3_connect};
 use super::{
     H3ConnectAuditContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
 };
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
-use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::H3ServerRequestStream;
 use crate::upstream::connect::connect_tunnel_target;
@@ -87,13 +87,10 @@ pub(crate) async fn handle_h3_connect(
     macro_rules! send_finalized {
         ($base:expr, $outcome:expr) => {
             send_policy!(
-                finalize_response_with_headers(
-                    &http::Method::CONNECT,
-                    http::Version::HTTP_3,
+                finalize_h3_connect_response(
                     proxy_name.as_str(),
                     $base,
                     response_headers.as_deref(),
-                    false,
                 ),
                 $outcome
             )
