@@ -8,7 +8,7 @@ use crate::http3::quic::{
 };
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_request_trailers;
@@ -405,22 +405,8 @@ fn prepare_h3_origin_request(
     authority: &str,
     proxy_name: &str,
 ) -> Result<(::http::Request<()>, Body, Option<u64>)> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/")
-        .to_string();
     prepare_request_with_headers_in_place(&mut req, proxy_name, None, false);
-    req.headers_mut().remove(
-        &OrdinaryHeaderName::try_from(http::header::HOST).expect("host is an ordinary field"),
-    );
-    *req.version_mut() = http::Version::HTTP_3;
-    *req.uri_mut() = http::Uri::builder()
-        .scheme("https")
-        .authority(authority)
-        .path_and_query(path.as_str())
-        .build()?;
+    let req = super::prepare_origin_request_head(req, "https", authority, http::Version::HTTP_3)?;
     let hyper_req = req.into_http_for_codec().map_err(|err| anyhow!("{err}"))?;
     let (parts, body) = hyper_req.into_parts();
     let declared_length = parse_declared_content_length(&parts.headers)?;

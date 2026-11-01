@@ -7,9 +7,7 @@ use crate::upstream::raw_http1::Http1ResponseWithInterim;
 use ::http::{Request as Http1Request, Response as Http1Response};
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use hyper::Uri;
-use hyper::header::HOST;
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::future::poll_fn;
@@ -33,24 +31,10 @@ pub(super) fn prepare_h2_request(
     authority: &str,
     proxy_name: Option<&str>,
 ) -> Result<OwnerRequest<Body>> {
-    let path = req
-        .uri()
-        .path_and_query()
-        .map(|value| value.as_str())
-        .unwrap_or("/")
-        .to_string();
     if let Some(proxy_name) = proxy_name {
         prepare_request_with_headers_in_place(&mut req, proxy_name, None, false);
     }
-    req.headers_mut()
-        .remove(&OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field"));
-    *req.version_mut() = http::Version::HTTP_2;
-    *req.uri_mut() = Uri::builder()
-        .scheme(scheme)
-        .authority(authority)
-        .path_and_query(path.as_str())
-        .build()?;
-    Ok(req)
+    super::prepare_origin_request_head(req, scheme, authority, http::Version::HTTP_2)
 }
 
 pub(super) async fn send_h2_request_with_sender(
@@ -186,7 +170,8 @@ async fn recv_h2_response_with_interim(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use hyper::header::VIA;
+    use hyper::header::{HOST, VIA};
+    use qpx_core::http_message::OrdinaryHeaderName;
 
     #[test]
     fn h2_request_preparation_keeps_proxy_headers_out_of_internal_path() -> Result<()> {

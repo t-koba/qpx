@@ -195,6 +195,29 @@ pub(crate) use self::pool::DirectOriginPools;
 use self::pool::{HttpsConnectionAcquisition, acquire_https_connection, https_origin_pool_key};
 pub(crate) use self::shared::shared_reverse_https_request_with_trust;
 
+fn prepare_origin_request_head(
+    mut req: OwnerRequest<Body>,
+    scheme: &str,
+    authority: &str,
+    version: http::Version,
+) -> Result<OwnerRequest<Body>> {
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|value| value.as_str())
+        .unwrap_or("/")
+        .to_string();
+    req.headers_mut()
+        .remove(&OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field"));
+    *req.version_mut() = version;
+    *req.uri_mut() = hyper::Uri::builder()
+        .scheme(scheme)
+        .authority(authority)
+        .path_and_query(path.as_str())
+        .build()?;
+    Ok(req)
+}
+
 pub(crate) async fn proxy_http(
     pools: &crate::pool::PoolRegistry,
     req: OwnerRequest<Body>,
