@@ -44,7 +44,7 @@ pub(super) struct PreparedH3Connect {
     pub(super) identity: crate::policy_context::ResolvedIdentity,
 }
 
-pub(super) use super::H3ConnectPolicyResponseContext;
+pub(super) use super::H3ConnectAuditContext;
 
 pub(super) fn build_h3_connect_success_response(
     proxy_name: &str,
@@ -79,9 +79,9 @@ pub(super) fn build_h3_connect_success_response(
 pub(super) async fn send_h3_policy_response<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut H3ServerRequestStream,
     response: R,
-    ctx: H3ConnectPolicyResponseContext<'_>,
+    ctx: H3ConnectAuditContext<'_>,
 ) -> Result<()> {
-    super::emit_h3_connect_policy_audit(&ctx, response.status().as_u16());
+    super::emit_h3_connect_audit(&ctx, response.status().as_u16());
     send_h3_response(
         response.into_owner(),
         &http::Method::CONNECT,

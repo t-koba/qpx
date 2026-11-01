@@ -8,11 +8,10 @@ use super::relay::{
     relay_qpx_extended_connect_stream,
 };
 use super::response::{
-    H3ConnectPolicyResponseContext, finalize_qpx_connect_head_response, send_qpx_policy_response,
-    send_qpx_response_stream, send_qpx_static_response,
-    upstream_qpx_extended_connect_error_response,
+    finalize_qpx_connect_head_response, send_qpx_policy_response, send_qpx_response_stream,
+    send_qpx_static_response, upstream_qpx_extended_connect_error_response,
 };
-use crate::forward::h3::connect::{H3ConnectAllowAuditContext, emit_h3_connect_allow_audit};
+use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
 use crate::forward::request::resolve_upstream;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
@@ -158,7 +157,7 @@ async fn run_qpx_traditional_connect_tunnel(
             send_qpx_policy_response(
                 $req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
@@ -262,16 +261,20 @@ async fn run_qpx_traditional_connect_tunnel(
     )
     .await
     .map_err(|_| anyhow!("qpx-h3 CONNECT response head send timed out"))??;
-    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
-        state: &state,
-        listener_name: handler.listener_name.as_ref(),
-        remote_ip: conn.remote_addr.ip(),
-        host: host.as_str(),
-        path: audit_path.as_deref(),
-        matched_rule: matched_rule_name,
-        decision_service_policy_id: decision_service_policy_id.as_deref(),
-        log_context: &log_context,
-    });
+    emit_h3_connect_audit(
+        &H3ConnectAuditContext {
+            state: &state,
+            listener_name: handler.listener_name.as_ref(),
+            remote_ip: conn.remote_addr.ip(),
+            host: host.as_str(),
+            path: audit_path.as_deref(),
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            matched_rule: matched_rule_name,
+            decision_service_policy_id: decision_service_policy_id.as_deref(),
+            log_context: &log_context,
+        },
+        http::StatusCode::OK.as_u16(),
+    );
 
     let (client_write, client_read) = req_stream.split();
     let (server_read, server_write) = tokio::io::split(server.io);
@@ -374,7 +377,7 @@ async fn handle_qpx_extended_connect_stream(
             send_qpx_policy_response(
                 $req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
@@ -637,16 +640,20 @@ async fn finish_qpx_extended_connect_stream(
     timeout(h3_timeout, req_stream.send_response_head(&established))
         .await
         .map_err(|_| anyhow!("qpx-h3 CONNECT response head send timed out"))??;
-    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
-        state,
-        listener_name: handler.listener_name.as_ref(),
-        remote_ip: conn.remote_addr.ip(),
-        host,
-        path: audit_path,
-        matched_rule,
-        decision_service_policy_id,
-        log_context,
-    });
+    emit_h3_connect_audit(
+        &H3ConnectAuditContext {
+            state,
+            listener_name: handler.listener_name.as_ref(),
+            remote_ip: conn.remote_addr.ip(),
+            host,
+            path: audit_path,
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            matched_rule,
+            decision_service_policy_id,
+            log_context,
+        },
+        http::StatusCode::OK.as_u16(),
+    );
     let relay = if let Some(policies) = connect_ip_policies {
         relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
             downstream: req_stream,

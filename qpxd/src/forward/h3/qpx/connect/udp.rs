@@ -3,9 +3,9 @@ use super::super::connect_upstream::{
     build_qpx_connect_success_head, open_upstream_qpx_connect_udp_stream,
 };
 use super::super::relay::{relay_qpx_connect_udp_stream, relay_qpx_connect_udp_stream_chained};
-use super::super::response::{H3ConnectPolicyResponseContext, send_qpx_policy_response};
+use super::super::response::send_qpx_policy_response;
 use super::prepare::PreparedQpxConnect;
-use crate::forward::h3::connect::{H3ConnectAllowAuditContext, emit_h3_connect_allow_audit};
+use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
 use crate::forward::request::resolve_upstream_url;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::l7::finalize_response_with_headers;
@@ -78,7 +78,7 @@ pub(super) async fn run_connect_udp_relay(
             send_qpx_policy_response(
                 $req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
@@ -293,16 +293,20 @@ async fn send_connect_udp_success_head(
 ) -> Result<()> {
     let proxy_name = ctx.state.plan.identity.proxy_name.as_ref();
     let response = build_qpx_connect_success_head(proxy_name, true, ctx.response_headers)?;
-    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
-        state: ctx.state,
-        listener_name: ctx.handler.listener_name.as_ref(),
-        remote_ip: ctx.conn.remote_addr.ip(),
-        host: ctx.host,
-        path: ctx.audit_path,
-        matched_rule: ctx.matched_rule,
-        decision_service_policy_id: ctx.decision_service_policy_id,
-        log_context: ctx.log_context,
-    });
+    emit_h3_connect_audit(
+        &H3ConnectAuditContext {
+            state: ctx.state,
+            listener_name: ctx.handler.listener_name.as_ref(),
+            remote_ip: ctx.conn.remote_addr.ip(),
+            host: ctx.host,
+            path: ctx.audit_path,
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            matched_rule: ctx.matched_rule,
+            decision_service_policy_id: ctx.decision_service_policy_id,
+            log_context: ctx.log_context,
+        },
+        http::StatusCode::OK.as_u16(),
+    );
     timeout(
         ctx.send_timeouts.1,
         req_stream.send_response_head(&response),

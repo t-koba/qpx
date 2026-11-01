@@ -62,9 +62,9 @@ pub(super) async fn send_qpx_response_stream<R: crate::http::response_carrier::R
 pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut qpx_h3::RequestStream,
     response: R,
-    ctx: H3ConnectPolicyResponseContext<'_>,
+    ctx: H3ConnectAuditContext<'_>,
 ) -> Result<()> {
-    crate::forward::h3::connect::emit_h3_connect_policy_audit(&ctx, response.status().as_u16());
+    crate::forward::h3::connect::emit_h3_connect_audit(&ctx, response.status().as_u16());
     send_qpx_response_stream(
         req_stream,
         response,
@@ -75,7 +75,7 @@ pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::R
     .await
 }
 
-pub(super) use crate::forward::h3::connect::H3ConnectPolicyResponseContext;
+pub(super) use crate::forward::h3::connect::H3ConnectAuditContext;
 
 pub(super) fn finalize_qpx_connect_head_response(
     response: http::Response<()>,

@@ -1,6 +1,6 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::{
-    H3ConnectPolicyResponseContext, build_h3_connect_success_response,
+    H3ConnectAuditContext, build_h3_connect_success_response,
     normalize_h3_upstream_connect_headers, prepare_h3_connect_request,
     recv_upstream_h3_response_with_interim, send_h3_policy_response,
 };
@@ -84,7 +84,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             send_h3_policy_response(
                 &mut req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
@@ -216,16 +216,20 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             true,
             response_headers.as_deref(),
         )?;
-        super::super::emit_h3_connect_allow_audit(super::super::H3ConnectAllowAuditContext {
-            state: &state,
-            listener_name: handler.listener_name.as_ref(),
-            remote_ip: conn.remote_addr.ip(),
-            host: host.as_str(),
-            path: audit_path.as_deref(),
-            matched_rule: matched_rule_name,
-            decision_service_policy_id: decision_service_policy_id.as_deref(),
-            log_context: &log_context,
-        });
+        super::super::emit_h3_connect_audit(
+            &super::super::H3ConnectAuditContext {
+                state: &state,
+                listener_name: handler.listener_name.as_ref(),
+                remote_ip: conn.remote_addr.ip(),
+                host: host.as_str(),
+                path: audit_path.as_deref(),
+                outcome: crate::http::dispatch::DispatchOutcome::Allow,
+                matched_rule: matched_rule_name,
+                decision_service_policy_id: decision_service_policy_id.as_deref(),
+                log_context: &log_context,
+            },
+            http::StatusCode::OK.as_u16(),
+        );
         let response_send_timeout = Duration::from_secs(connect_udp_cfg.idle_timeout_secs.max(1));
         timeout(response_send_timeout, req_stream.send_response(response))
             .await
@@ -302,16 +306,20 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         true,
         response_headers.as_deref(),
     )?;
-    super::super::emit_h3_connect_allow_audit(super::super::H3ConnectAllowAuditContext {
-        state: &state,
-        listener_name: handler.listener_name.as_ref(),
-        remote_ip: conn.remote_addr.ip(),
-        host: host.as_str(),
-        path: audit_path.as_deref(),
-        matched_rule: matched_rule_name,
-        decision_service_policy_id: decision_service_policy_id.as_deref(),
-        log_context: &log_context,
-    });
+    super::super::emit_h3_connect_audit(
+        &super::super::H3ConnectAuditContext {
+            state: &state,
+            listener_name: handler.listener_name.as_ref(),
+            remote_ip: conn.remote_addr.ip(),
+            host: host.as_str(),
+            path: audit_path.as_deref(),
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            matched_rule: matched_rule_name,
+            decision_service_policy_id: decision_service_policy_id.as_deref(),
+            log_context: &log_context,
+        },
+        http::StatusCode::OK.as_u16(),
+    );
     let response_send_timeout = Duration::from_secs(connect_udp_cfg.idle_timeout_secs.max(1));
     timeout(response_send_timeout, req_stream.send_response(response))
         .await

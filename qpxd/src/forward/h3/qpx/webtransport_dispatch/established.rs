@@ -7,7 +7,7 @@ use super::super::webtransport::{
     QpxWebTransportRelayContext, WebTransportFlowLimits, relay_qpx_webtransport_session,
 };
 use super::ForwardQpxHandler;
-use crate::forward::h3::connect::{H3ConnectAllowAuditContext, emit_h3_connect_allow_audit};
+use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
 use crate::http3::codec::sanitize_interim_response_for_h3;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::RuntimeState;
@@ -124,16 +124,20 @@ pub(super) async fn relay_established_webtransport(
     )
     .await
     .map_err(|_| anyhow!("forward qpx-h3 extended CONNECT response send timeout"))??;
-    emit_h3_connect_allow_audit(H3ConnectAllowAuditContext {
-        state,
-        listener_name: handler.listener_name.as_ref(),
-        remote_ip: conn.remote_addr.ip(),
-        host,
-        path: audit_path,
-        matched_rule,
-        decision_service_policy_id,
-        log_context,
-    });
+    emit_h3_connect_audit(
+        &H3ConnectAuditContext {
+            state,
+            listener_name: handler.listener_name.as_ref(),
+            remote_ip: conn.remote_addr.ip(),
+            host,
+            path: audit_path,
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            matched_rule,
+            decision_service_policy_id,
+            log_context,
+        },
+        http::StatusCode::OK.as_u16(),
+    );
 
     let flow_limits =
         collect_webtransport_flow_limits(state, handler, matched_rule, rate_limit_profile)?;

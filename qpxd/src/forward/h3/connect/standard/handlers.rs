@@ -1,8 +1,7 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::established::{EstablishedH3Connect, finish_h3_connect};
 use super::{
-    H3ConnectPolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request,
-    send_h3_policy_response,
+    H3ConnectAuditContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
 };
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
@@ -71,7 +70,7 @@ pub(crate) async fn handle_h3_connect(
             send_h3_policy_response(
                 &mut req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),

@@ -2,7 +2,7 @@ use super::super::super::backend_h3::ForwardH3Handler;
 use super::super::parse::{format_authority, validate_h3_connect_head};
 use super::super::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use super::target::{H3ConnectTargetInput, prepare_h3_connect_target};
-use super::{H3ConnectPolicyResponseContext, PreparedH3Connect, send_h3_policy_response};
+use super::{H3ConnectAuditContext, PreparedH3Connect, send_h3_policy_response};
 use crate::destination::DestinationInputs;
 use crate::forward::connect::apply_connect_decision_service;
 #[cfg(feature = "auth-basic")]
@@ -173,7 +173,7 @@ pub(crate) async fn prepare_h3_connect_request(
             send_h3_policy_response(
                 req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),

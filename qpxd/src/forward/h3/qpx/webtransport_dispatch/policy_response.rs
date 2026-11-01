@@ -1,4 +1,4 @@
-use super::super::response::{H3ConnectPolicyResponseContext, send_qpx_policy_response};
+use super::super::response::{H3ConnectAuditContext, send_qpx_policy_response};
 use anyhow::Result;
 use qpx_observability::access_log::RequestLogContext;
 
@@ -23,7 +23,7 @@ impl WebTransportPolicyResponder<'_> {
         send_qpx_policy_response(
             req_stream,
             response,
-            H3ConnectPolicyResponseContext {
+            H3ConnectAuditContext {
                 state: self.state,
                 listener_name: self.listener_name,
                 remote_ip: self.conn.remote_addr.ip(),

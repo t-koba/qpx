@@ -170,16 +170,20 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
             .io,
         );
     }
-    super::super::emit_h3_connect_allow_audit(super::super::H3ConnectAllowAuditContext {
-        state: &state,
-        listener_name: handler.listener_name.as_ref(),
-        remote_ip: conn.remote_addr.ip(),
-        host: host.as_str(),
-        path: audit_path.as_deref(),
-        matched_rule: matched_rule.as_deref(),
-        decision_service_policy_id: decision_service_policy_id.as_deref(),
-        log_context: &log_context,
-    });
+    super::super::emit_h3_connect_audit(
+        &super::super::H3ConnectAuditContext {
+            state: &state,
+            listener_name: handler.listener_name.as_ref(),
+            remote_ip: conn.remote_addr.ip(),
+            host: host.as_str(),
+            path: audit_path.as_deref(),
+            outcome: crate::http::dispatch::DispatchOutcome::Allow,
+            matched_rule: matched_rule.as_deref(),
+            decision_service_policy_id: decision_service_policy_id.as_deref(),
+            log_context: &log_context,
+        },
+        http::StatusCode::OK.as_u16(),
+    );
     match action.kind {
         ActionKind::Block | ActionKind::Respond => {
             let _ = req_stream.finish().await;

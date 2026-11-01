@@ -5,8 +5,7 @@ use super::extended::{
     relay_h3_extended_connect_stream, upstream_extended_connect_error_response,
 };
 use super::{
-    H3ConnectPolicyResponseContext, PreparedH3Connect, prepare_h3_connect_request,
-    send_h3_policy_response,
+    H3ConnectAuditContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
 };
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
@@ -90,7 +89,7 @@ pub(crate) async fn handle_h3_extended_connect(
             send_h3_policy_response(
                 $req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),

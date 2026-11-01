@@ -49,7 +49,7 @@ pub(super) fn build_h3_connect_rule_context<'a>(
 }
 
 /// Backend-neutral metadata shared by the HTTP/3 CONNECT policy-response senders.
-pub(super) struct H3ConnectPolicyResponseContext<'a> {
+pub(super) struct H3ConnectAuditContext<'a> {
     pub(super) state: &'a crate::runtime::RuntimeState,
     pub(super) listener_name: &'a str,
     pub(super) remote_ip: std::net::IpAddr,
@@ -61,7 +61,7 @@ pub(super) struct H3ConnectPolicyResponseContext<'a> {
     pub(super) log_context: &'a qpx_observability::access_log::RequestLogContext,
 }
 
-pub(super) fn emit_h3_connect_policy_audit(ctx: &H3ConnectPolicyResponseContext<'_>, status: u16) {
+pub(super) fn emit_h3_connect_audit(ctx: &H3ConnectAuditContext<'_>, status: u16) {
     crate::policy_context::emit_audit_log(
         ctx.state,
         crate::policy_context::AuditRecord {
@@ -79,52 +79,6 @@ pub(super) fn emit_h3_connect_policy_audit(ctx: &H3ConnectPolicyResponseContext<
             decision_service_policy_id: ctx.decision_service_policy_id,
         },
         ctx.log_context,
-    );
-}
-
-/// Context for the shared successful forward-CONNECT audit event on either HTTP/3 backend.
-#[cfg(feature = "http3")]
-pub(super) struct H3ConnectAllowAuditContext<'a> {
-    pub(super) state: &'a crate::runtime::RuntimeState,
-    pub(super) listener_name: &'a str,
-    pub(super) remote_ip: std::net::IpAddr,
-    pub(super) host: &'a str,
-    pub(super) path: Option<&'a str>,
-    pub(super) matched_rule: Option<&'a str>,
-    pub(super) decision_service_policy_id: Option<&'a str>,
-    pub(super) log_context: &'a qpx_observability::access_log::RequestLogContext,
-}
-
-/// Emits the common successful forward-CONNECT audit fields for H3 implementations.
-#[cfg(feature = "http3")]
-pub(super) fn emit_h3_connect_allow_audit(ctx: H3ConnectAllowAuditContext<'_>) {
-    let H3ConnectAllowAuditContext {
-        state,
-        listener_name,
-        remote_ip,
-        host,
-        path,
-        matched_rule,
-        decision_service_policy_id,
-        log_context,
-    } = ctx;
-    crate::policy_context::emit_audit_log(
-        state,
-        crate::policy_context::AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Forward,
-            name: listener_name,
-            remote_ip,
-            host: Some(host),
-            sni: Some(host),
-            method: Some("CONNECT"),
-            path,
-            outcome: crate::http::dispatch::DispatchOutcome::Allow,
-            status: Some(http::StatusCode::OK.as_u16()),
-            matched_rule,
-            matched_route: None,
-            decision_service_policy_id,
-        },
-        log_context,
     );
 }
 

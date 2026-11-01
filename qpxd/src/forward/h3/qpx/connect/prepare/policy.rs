@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use super::super::super::response::{
-    H3ConnectPolicyResponseContext, send_qpx_policy_response, send_qpx_static_response,
+    H3ConnectAuditContext, send_qpx_policy_response, send_qpx_static_response,
 };
 
 pub(super) async fn evaluate_connect_policy(
@@ -76,7 +76,7 @@ pub(super) async fn evaluate_connect_policy(
             send_qpx_policy_response(
                 req_stream,
                 response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
@@ -104,7 +104,7 @@ pub(super) async fn evaluate_connect_policy(
             send_qpx_policy_response(
                 req_stream,
                 response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
@@ -173,7 +173,7 @@ pub(super) async fn apply_connect_rate_limits(
             send_qpx_policy_response(
                 req_stream,
                 $response,
-                H3ConnectPolicyResponseContext {
+                H3ConnectAuditContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
                     remote_ip: conn.remote_addr.ip(),
@@ -367,7 +367,7 @@ async fn send_connect_local_action(input: SendConnectLocalActionInput<'_>) -> Re
     send_qpx_policy_response(
         req_stream,
         response,
-        H3ConnectPolicyResponseContext {
+        H3ConnectAuditContext {
             state,
             listener_name: handler.listener_name.as_ref(),
             remote_ip: conn.remote_addr.ip(),
