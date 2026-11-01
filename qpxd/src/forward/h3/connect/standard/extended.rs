@@ -206,28 +206,6 @@ pub(super) async fn open_upstream_extended_connect_stream(
     })
 }
 
-pub(super) fn finalize_h3_connect_head_response(
-    response: ::http::Response<()>,
-    proxy_name: &str,
-    header_control: Option<&CompiledHeaderControl>,
-) -> Result<::http::Response<()>> {
-    let (parts, _) = response.into_parts();
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "HTTP/3 extended CONNECT response",
-    )?;
-    let mut downstream = Response::builder().status(status).body(Body::empty())?;
-    *downstream.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    let downstream = finalize_h3_connect_response(proxy_name, downstream, header_control);
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        downstream.status(),
-        "HTTP/3 extended CONNECT response",
-    )?;
-    let mut out = ::http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(downstream.headers())?;
-    Ok(out)
-}
-
 pub(super) fn upstream_extended_connect_error_response(
     response: ::http::Response<()>,
     upstream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,

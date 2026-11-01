@@ -1,13 +1,14 @@
 use super::super::h3_body_read_timeout;
 use super::super::response::{
-    finalize_qpx_connect_head_response, send_qpx_response_stream,
-    upstream_qpx_extended_connect_error_response,
+    send_qpx_response_stream, upstream_qpx_extended_connect_error_response,
 };
 use super::super::webtransport::{
     QpxWebTransportRelayContext, WebTransportFlowLimits, relay_qpx_webtransport_session,
 };
 use super::ForwardQpxHandler;
-use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
+use crate::forward::h3::connect::{
+    H3ConnectAuditContext, emit_h3_connect_audit, finalize_h3_connect_head_response,
+};
 use crate::http3::codec::sanitize_interim_response_for_h3;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::RuntimeState;
@@ -117,7 +118,12 @@ pub(super) async fn relay_established_webtransport(
         return Ok(());
     }
 
-    let established = finalize_qpx_connect_head_response(response, proxy_name, response_headers)?;
+    let established = finalize_h3_connect_head_response(
+        response,
+        proxy_name,
+        response_headers,
+        "QPX HTTP/3 extended CONNECT response",
+    )?;
     timeout(
         tunnel_idle_timeout,
         req_stream.send_response_head(&established),

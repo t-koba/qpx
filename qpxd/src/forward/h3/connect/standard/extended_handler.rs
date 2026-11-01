@@ -1,9 +1,9 @@
 use super::super::super::backend_h3::ForwardH3Handler;
-use super::super::finalize_h3_connect_response;
+use super::super::{finalize_h3_connect_head_response, finalize_h3_connect_response};
 use super::extended::{
     OpenUpstreamExtendedConnectInput, UpstreamExtendedConnectStream,
-    finalize_h3_connect_head_response, open_upstream_extended_connect_stream,
-    relay_h3_extended_connect_stream, upstream_extended_connect_error_response,
+    open_upstream_extended_connect_stream, relay_h3_extended_connect_stream,
+    upstream_extended_connect_error_response,
 };
 use super::{
     H3ConnectAuditContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
@@ -233,7 +233,12 @@ async fn finish_h3_extended_connect_stream(
         return Ok(());
     }
 
-    let established = finalize_h3_connect_head_response(response, proxy_name, response_headers)?;
+    let established = finalize_h3_connect_head_response(
+        response,
+        proxy_name,
+        response_headers,
+        "HTTP/3 extended CONNECT response",
+    )?;
     tokio::time::timeout(tunnel_idle_timeout, req_stream.send_response(established))
         .await
         .map_err(|_| anyhow!("forward HTTP/3 extended CONNECT response send timeout"))??;

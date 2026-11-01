@@ -8,11 +8,13 @@ use super::relay::{
     relay_qpx_extended_connect_stream,
 };
 use super::response::{
-    finalize_qpx_connect_head_response, send_qpx_policy_response, send_qpx_response_stream,
-    send_qpx_static_response, upstream_qpx_extended_connect_error_response,
+    send_qpx_policy_response, send_qpx_response_stream, send_qpx_static_response,
+    upstream_qpx_extended_connect_error_response,
 };
 use crate::forward::h3::connect::finalize_h3_connect_response;
-use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
+use crate::forward::h3::connect::{
+    H3ConnectAuditContext, emit_h3_connect_audit, finalize_h3_connect_head_response,
+};
 use crate::forward::request::resolve_upstream;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
@@ -618,7 +620,12 @@ async fn finish_qpx_extended_connect_stream(
         return Ok(());
     }
 
-    let established = finalize_qpx_connect_head_response(response, proxy_name, response_headers)?;
+    let established = finalize_h3_connect_head_response(
+        response,
+        proxy_name,
+        response_headers,
+        "QPX HTTP/3 extended CONNECT response",
+    )?;
     timeout(h3_timeout, req_stream.send_response_head(&established))
         .await
         .map_err(|_| anyhow!("qpx-h3 CONNECT response head send timed out"))??;

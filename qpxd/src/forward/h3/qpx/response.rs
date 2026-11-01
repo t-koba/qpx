@@ -1,7 +1,7 @@
 use crate::forward::h3::connect::finalize_h3_connect_response;
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
 use crate::http::protocol::l7::finalize_response_for_request;
-use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
+use crate::http3::codec::h1_headers_to_http;
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::{Response, StatusCode};
@@ -78,28 +78,6 @@ pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::R
 
 pub(super) use crate::forward::h3::connect::H3ConnectAuditContext;
 
-pub(super) fn finalize_qpx_connect_head_response(
-    response: http::Response<()>,
-    proxy_name: &str,
-    header_control: Option<&CompiledHeaderControl>,
-) -> Result<http::Response<()>> {
-    let (parts, _) = response.into_parts();
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "QPX HTTP/3 extended CONNECT response",
-    )?;
-    let mut downstream = Response::builder().status(status).body(Body::empty())?;
-    *downstream.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    let downstream = finalize_h3_connect_response(proxy_name, downstream, header_control);
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        downstream.status(),
-        "QPX HTTP/3 extended CONNECT response",
-    )?;
-    let mut out = http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(downstream.headers())?;
-    Ok(out)
-}
-
 pub(super) fn upstream_qpx_extended_connect_error_response(
     response: http::Response<()>,
     upstream: qpx_h3::RequestStream,
@@ -131,6 +109,7 @@ define_upstream_error_response_body!(
 
 #[cfg(test)]
 mod tests {
+    use crate::forward::h3::connect::finalize_h3_connect_head_response;
     use crate::forward::h3::qpx::response::*;
 
     #[test]
@@ -139,8 +118,13 @@ mod tests {
             .status(700)
             .body(())
             .expect("response");
-        let err = finalize_qpx_connect_head_response(response, "qpx-test", None)
-            .expect_err("status should be rejected");
+        let err = finalize_h3_connect_head_response(
+            response,
+            "qpx-test",
+            None,
+            "QPX HTTP/3 extended CONNECT response",
+        )
+        .expect_err("status should be rejected");
         assert!(err.to_string().contains("out of range"));
     }
 

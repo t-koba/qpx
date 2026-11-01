@@ -65,6 +65,29 @@ pub(super) fn finalize_h3_connect_response(
     )
 }
 
+/// Normalizes an upstream extended-CONNECT response head for downstream HTTP/3.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(super) fn finalize_h3_connect_head_response(
+    response: http::Response<()>,
+    proxy_name: &str,
+    header_control: Option<&qpx_core::rules::CompiledHeaderControl>,
+    status_context: &str,
+) -> anyhow::Result<http::Response<()>> {
+    use qpx_http::{body::Body, protocol::semantics::validate_http_status_class};
+
+    let (parts, _) = response.into_parts();
+    let status = validate_http_status_class(parts.status, status_context)?;
+    let mut downstream = http::Response::builder()
+        .status(status)
+        .body(Body::empty())?;
+    *downstream.headers_mut() = crate::http3::codec::h1_headers_to_http(&parts.headers)?;
+    let downstream = finalize_h3_connect_response(proxy_name, downstream, header_control);
+    let status = validate_http_status_class(downstream.status(), status_context)?;
+    let mut out = http::Response::builder().status(status).body(())?;
+    *out.headers_mut() = crate::http3::codec::http_headers_to_h1(downstream.headers())?;
+    Ok(out)
+}
+
 /// Finalizes a local auth-policy response without applying response-header controls.
 #[cfg(all(
     feature = "auth-basic",
