@@ -106,8 +106,9 @@ reload for compatible config edits.
 - `runtime.acceptor_tasks_per_listener` plus `runtime.reuse_port` enable
   multi-socket accept fan-out.
 - `runtime.tcp_backlog` controls listen queue depth.
-- `runtime.max_h3_streams_per_connection` caps concurrent HTTP/3 streams and
-  associated WebTransport sessions per QUIC connection. Values above the QUIC
+- `runtime.max_h3_streams_per_connection` caps concurrent HTTP/3 request
+  (bidirectional) streams and associated WebTransport sessions per QUIC
+  connection; it does not bound unidirectional streams. Values above the QUIC
   API's u32 stream-count ceiling are clamped. Changes restart listeners during
   configuration reload, because the cap is advertised by the QUIC transport.
 - `runtime.upstream_http_timeout_ms` is the default dial/request timeout for
@@ -143,8 +144,11 @@ reload for compatible config edits.
   memory measurements. Changes restart listeners during configuration reload.
 - Downstream HTTP/3 unidirectional streams are capped by
   `runtime.h3_max_uni_streams` (default 1024) on every forward and reverse
-  terminating H3 listener and either backend. Raise it for WebTransport
-  multiplexing; lower it, never below 3, to bound per-connection stream memory.
+  terminating H3 listener and either backend. On the QPX backend it also sizes
+  the accepted-unidirectional-stream semaphore, so raising it above
+  `runtime.max_h3_streams_per_connection` takes effect; on the standard backend
+  it is the transport-advertised cap. Raise it for WebTransport multiplexing;
+  lower it, never below 3, to bound per-connection stream memory.
   Values below 3 are rejected because HTTP/3 requires the control, QPACK
   encoder and QPACK decoder unidirectional streams. It does not apply to
   upstream/client transports or QUIC passthrough. Changes restart listeners

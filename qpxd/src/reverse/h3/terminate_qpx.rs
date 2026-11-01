@@ -85,6 +85,7 @@ impl qpx_h3::RequestHandler for ReverseQpxHandler {
             max_webtransport_sessions: 0,
             max_request_body_bytes: streaming.max_request_body_bytes,
             max_concurrent_streams_per_connection: limits.h3.max_h3_streams_per_connection,
+            max_concurrent_uni_streams: limits.h3.max_uni_streams,
             read_timeout: Duration::from_millis(limits.timeouts.h3_read_timeout_ms),
             datagram_channel_capacity: limits.h3.datagram_channel_capacity,
             webtransport_stream_channel_capacity: limits.h3.webtransport_stream_channel_capacity,

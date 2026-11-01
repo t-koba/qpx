@@ -33,9 +33,9 @@ fn parse_loc_budget_line(line_no: usize, line: &'static str) -> Result<LocBudget
 /// Measured whole-workspace baselines; `check_total_loc_budgets` reports
 /// growth above them.
 pub(crate) const TOTAL_LOC_BUDGETS: TotalLocBudgets = TotalLocBudgets {
-    production_rust: 151_401,
-    test_rust: 81_943,
-    docs_markdown: 3_660,
+    production_rust: 151_406,
+    test_rust: 81_981,
+    docs_markdown: 3_664,
 };
 
 pub(crate) struct TotalLocBudgets {

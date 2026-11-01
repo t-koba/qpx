@@ -107,3 +107,16 @@ fn sanitize_streaming_response_preserves_valid_content_length() {
     assert!(!response.headers().contains_key(http::header::TRAILER));
     assert!(!response.headers().contains_key(http::header::TE));
 }
+
+#[test]
+fn uni_stream_capacity_is_independent_of_the_request_cap() {
+    use super::{Settings, uni_stream_capacity};
+
+    let settings = Settings {
+        max_concurrent_uni_streams: 1024,
+        max_concurrent_streams_per_connection: 4,
+        ..Default::default()
+    };
+    assert_eq!(uni_stream_capacity(&settings), 1024);
+    assert_eq!(Settings::default().max_concurrent_uni_streams, 64);
+}

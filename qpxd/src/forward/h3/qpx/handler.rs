@@ -35,6 +35,7 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
             max_webtransport_sessions: limits.h3.max_h3_streams_per_connection.max(1) as u64,
             max_request_body_bytes: streaming.max_request_body_bytes,
             max_concurrent_streams_per_connection: limits.h3.max_h3_streams_per_connection,
+            max_concurrent_uni_streams: limits.h3.max_uni_streams,
             read_timeout: Duration::from_millis(limits.timeouts.h3_read_timeout_ms),
             datagram_channel_capacity: limits.h3.datagram_channel_capacity,
             webtransport_datagram_channel_capacity: limits
@@ -553,6 +554,34 @@ mod tests {
             )
             .expect("CONNECT-IP config"),
         }
+    }
+
+    #[test]
+    fn qpx_server_settings_keep_uni_and_bidi_limits_distinct() {
+        let config: Config = serde_yaml::from_str(
+            r#"runtime:
+  h3_max_uni_streams: 789
+  max_h3_streams_per_connection: 123
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action: {type: direct}
+"#,
+        )
+        .expect("config");
+        let handler = ForwardQpxHandler {
+            runtime: Runtime::new(config).expect("runtime"),
+            listener_name: Arc::from("forward"),
+            connect_udp: serde_yaml::from_str("{}").expect("CONNECT-UDP config"),
+            connect_ip: serde_yaml::from_str(
+                "uri_template: 'https://proxy.test/ip/{target}/{ipproto}/'",
+            )
+            .expect("CONNECT-IP config"),
+        };
+        let settings = <ForwardQpxHandler as qpx_h3::RequestHandler>::settings(&handler);
+        assert_eq!(settings.max_concurrent_uni_streams, 789);
+        assert_eq!(settings.max_concurrent_streams_per_connection, 123);
     }
 
     #[test]

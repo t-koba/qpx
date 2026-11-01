@@ -108,6 +108,8 @@ pub struct Settings {
     pub max_request_body_bytes: usize,
     /// Maximum concurrent request streams.
     pub max_concurrent_streams_per_connection: usize,
+    /// Maximum concurrent unidirectional streams accepted from the peer.
+    pub max_concurrent_uni_streams: usize,
     /// Read timeout.
     pub read_timeout: Duration,
     /// Maximum field section size.
@@ -126,6 +128,10 @@ pub struct Settings {
     pub webtransport_stream_channel_capacity: usize,
 }
 
+fn uni_stream_capacity(settings: &Settings) -> usize {
+    settings.max_concurrent_uni_streams.max(1)
+}
+
 impl Default for Settings {
     fn default() -> Self {
         Self {
@@ -137,6 +143,7 @@ impl Default for Settings {
             max_webtransport_sessions: 0,
             max_request_body_bytes: 16 * 1024 * 1024,
             max_concurrent_streams_per_connection: 64,
+            max_concurrent_uni_streams: 64,
             read_timeout: Duration::from_secs(30),
             max_field_section_size: DEFAULT_MAX_FIELD_SECTION_SIZE,
             max_frame_payload_bytes: 16 * 1024 * 1024,
@@ -266,9 +273,7 @@ pub async fn serve_connection<H: RequestHandler>(
     let uni_control_state = control_state.clone();
     let max_control_frame_payload_bytes = settings.max_control_frame_payload_bytes;
     let uni_read_timeout = settings.read_timeout;
-    let uni_stream_semaphore = Arc::new(Semaphore::new(
-        settings.max_concurrent_streams_per_connection.max(1),
-    ));
+    let uni_stream_semaphore = Arc::new(Semaphore::new(uni_stream_capacity(&settings)));
     tokio::spawn(async move {
         loop {
             let recv = match uni_conn.accept_uni().await {
