@@ -75,7 +75,7 @@ impl qpx_h3::RequestHandler for ForwardQpxHandler {
         conn: qpx_h3::ConnectionInfo,
         session: qpx_h3::WebTransportSession,
     ) -> qpx_h3::H3Result<()> {
-        self.handle_qpx_webtransport_connect(req_head, req_stream, conn, session)
+        dispatch_qpx_webtransport_connect(self, req_head, req_stream, conn, session)
             .await
             .map_err(Into::into)
     }
@@ -503,16 +503,6 @@ impl ForwardQpxHandler {
             h3_body_read_timeout(&self.runtime),
         )
         .await
-    }
-
-    async fn handle_qpx_webtransport_connect(
-        &self,
-        req_head: Request<()>,
-        req_stream: qpx_h3::RequestStream,
-        conn: qpx_h3::ConnectionInfo,
-        session: qpx_h3::WebTransportSession,
-    ) -> Result<()> {
-        dispatch_qpx_webtransport_connect(self, req_head, req_stream, conn, session).await
     }
 
     fn listener_streaming_limits(&self) -> ResolvedStreamingLimits {
