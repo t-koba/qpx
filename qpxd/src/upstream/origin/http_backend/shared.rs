@@ -17,7 +17,7 @@ use std::sync::Arc;
 
 pub(crate) async fn shared_reverse_https_request_with_trust(
     pools: &crate::pool::PoolRegistry,
-    req: OwnerRequest<Body>,
+    mut req: OwnerRequest<Body>,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
     let parsed = url::Url::parse(req.uri().to_string().as_str())?;
@@ -62,7 +62,13 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
             Ok(proxied.response)
         }
         HttpsConnectionAcquisition::H1(entry) => {
-            let req = prepare_internal_http1_request(req, authority.as_str())?;
+            *req.version_mut() = http::Version::HTTP_11;
+            crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
+            let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
+            if !req.headers().contains_key(&host) {
+                req.headers_mut()
+                    .insert(host, HeaderValue::from_str(authority.as_str())?);
+            }
             let mut proxied = send_tls_http1_with_recycle(slot, entry, req).await?;
             attach_interim_response_heads(&mut proxied.response, proxied.interim);
             Ok(proxied.response)
@@ -98,18 +104,4 @@ pub(super) async fn send_tls_http1_with_recycle(
     .await?;
     proxied.upstream_cert = Some(entry.upstream_cert);
     Ok(proxied)
-}
-
-fn prepare_internal_http1_request(
-    mut req: OwnerRequest<Body>,
-    authority: &str,
-) -> Result<OwnerRequest<Body>> {
-    *req.version_mut() = http::Version::HTTP_11;
-    crate::upstream::http1::ensure_origin_form_uri(&mut req)?;
-    let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
-    if !req.headers().contains_key(&host) {
-        req.headers_mut()
-            .insert(host, HeaderValue::from_str(authority)?);
-    }
-    Ok(req)
 }
