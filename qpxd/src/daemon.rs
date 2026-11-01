@@ -1,7 +1,7 @@
 use crate::cli::{Cli, Command, MatchConfigRequest};
 use crate::startup::{
-    check_with_runtime, explain_config, init_config_template, match_config, print_config_schema,
-    run, run_with_runtime,
+    check_with_runtime, explain_config, init_template_yaml, match_config, print_config_schema, run,
+    run_with_runtime,
 };
 use anyhow::Result;
 use clap::Parser;
@@ -36,7 +36,10 @@ impl Daemon {
         match cli.command {
             Command::Run { config } => self.run_with_runtime(config),
             Command::Check { config } => self.check_with_runtime(config),
-            Command::Init { template } => init_config_template(template),
+            Command::Init { template } => {
+                print!("{}", init_template_yaml(template));
+                Ok(())
+            }
             Command::Schema { format } => print_config_schema(format),
             Command::Explain {
                 config,

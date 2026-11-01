@@ -69,11 +69,6 @@ pub(crate) fn check_with_runtime(
     Ok(())
 }
 
-pub(crate) fn init_config_template(template: InitTemplate) -> Result<()> {
-    print!("{}", init_template_yaml(template));
-    Ok(())
-}
-
 pub(crate) fn init_template_yaml(template: InitTemplate) -> &'static str {
     match template {
         InitTemplate::ReverseBasic => include_str!("../config-templates/reverse-basic.yaml"),
