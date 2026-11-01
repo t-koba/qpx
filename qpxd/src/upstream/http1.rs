@@ -196,15 +196,9 @@ pub(crate) fn ensure_origin_form_uri(req: &mut OwnerRequest<Body>) -> Result<()>
 pub(crate) fn ensure_host_header(req: &mut OwnerRequest<Body>, authority: &str) -> Result<()> {
     let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
     if !req.headers().contains_key(&host) {
-        set_host_header(req, authority)?;
+        req.headers_mut()
+            .insert(host, HeaderValue::from_str(authority)?);
     }
-    Ok(())
-}
-
-pub(crate) fn set_host_header(req: &mut OwnerRequest<Body>, authority: &str) -> Result<()> {
-    let host = OrdinaryHeaderName::try_from(HOST).expect("host is an ordinary field");
-    req.headers_mut()
-        .insert(host, HeaderValue::from_str(authority)?);
     Ok(())
 }
 
