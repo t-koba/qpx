@@ -136,6 +136,17 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
             "runtime.max_h3_streams_per_connection must be >= 1"
         ));
     }
+    validate_quic_receive_window(
+        runtime.h3_stream_receive_window_bytes,
+        "runtime.h3_stream_receive_window_bytes",
+    )?;
+    validate_quic_receive_window(
+        runtime.h3_connection_receive_window_bytes,
+        "runtime.h3_connection_receive_window_bytes",
+    )?;
+    if runtime.h3_send_window_bytes == 0 {
+        return Err(anyhow!("runtime.h3_send_window_bytes must be >= 1"));
+    }
     if runtime.h3_origin_pool_max_connections_per_origin == 0 {
         return Err(anyhow!(
             "runtime.h3_origin_pool_max_connections_per_origin must be >= 1"
@@ -258,6 +269,15 @@ fn validate_h2_window_size(size: u32, name: &str) -> Result<()> {
     }
     if size > MAX_H2_WINDOW_SIZE {
         return Err(anyhow!("{name} must be <= {MAX_H2_WINDOW_SIZE}"));
+    }
+    Ok(())
+}
+
+fn validate_quic_receive_window(size: u64, name: &str) -> Result<()> {
+    // QUIC receive credit is a 62-bit variable-length integer (RFC 9000).
+    const MAX_QUIC_VARINT: u64 = (1 << 62) - 1;
+    if size == 0 || size > MAX_QUIC_VARINT {
+        return Err(anyhow!("{name} must be in 1..={MAX_QUIC_VARINT}"));
     }
     Ok(())
 }

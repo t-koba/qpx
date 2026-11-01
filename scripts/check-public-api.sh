@@ -45,6 +45,7 @@ check_crate() {
   fi
 }
 
+# RuntimeConfig also exposes downstream H3 receive/send window policy as three u64 fields.
 # qpx-core exposes opaque owner-backed request/header carriers, owner-safe ordinary-field
 # mutation, policy/Vary operations, and `value_members` for parsing borrowed values without
 # projecting an owner-backed header map. CORS preflight field mutation accepts owner-backed
@@ -52,7 +53,7 @@ check_crate() {
 # lossless, separate from the validating codec export. The closed opaque cache-field carrier is
 # the fixed-format cache persistence boundary; no generic serde or arbitrary field-pair
 # projection is public. Revalidation merging stays within the owner.
-check_crate qpx-core b09cf75eb77ac15ffa5c73ae03be7208e4bad131d1986e6b8739b86f198239ff
+check_crate qpx-core 69e9f32640bf22ed62ba9421504a24c987324d873689ef19909b666011f7a8fb
 check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
 check_crate qpx-h3 01aecfccd1ef9f622ca8a78e2a6859d06b73060d2e18159ec59a4305523f0d61
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a

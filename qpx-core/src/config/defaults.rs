@@ -298,6 +298,18 @@ pub(super) fn default_runtime_max_h3_streams_per_connection() -> usize {
     128
 }
 
+pub(super) fn default_runtime_h3_stream_receive_window_bytes() -> u64 {
+    1024 * 1024
+}
+
+pub(super) fn default_runtime_h3_connection_receive_window_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
+pub(super) fn default_runtime_h3_send_window_bytes() -> u64 {
+    4 * 1024 * 1024
+}
+
 pub(super) fn default_runtime_h3_origin_pool_max_connections_per_origin() -> usize {
     4
 }

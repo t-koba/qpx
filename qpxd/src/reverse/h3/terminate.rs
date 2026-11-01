@@ -32,14 +32,8 @@ pub(crate) async fn run_http3_terminate(
     endpoint_socket: QuinnEndpointSocket,
 ) -> Result<()> {
     let tls_config = build_reverse_tls_config(&reverse)?;
-    let max_bidi = reverse_rt
-        .runtime
-        .state()
-        .plan
-        .limits
-        .h3
-        .max_h3_streams_per_connection;
-    let server_config = build_h3_server_config_from_tls(tls_config, max_bidi, 1024)?;
+    let h3_limits = reverse_rt.runtime.state().plan.limits.h3;
+    let server_config = build_h3_server_config_from_tls(tls_config, &h3_limits, 1024)?;
     let endpoint = build_server_endpoint(endpoint_socket, server_config)?;
 
     let semaphore = reverse_rt.runtime.state().connection_semaphore.clone();

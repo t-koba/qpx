@@ -117,6 +117,17 @@ reload for compatible config edits.
   `runtime.h2_initial_connection_window_size_bytes` tune HTTP/2 flow-control
   windows for downstream H2 listeners and direct HTTPS/H2 origin connections.
   Defaults favor high-throughput proxying without requiring per-route tuning.
+- Downstream HTTP/3 QUIC flow-control windows are configured in bytes with
+  `runtime.h3_stream_receive_window_bytes` (default 1048576 / 1 MiB),
+  `runtime.h3_connection_receive_window_bytes` (default 4194304 / 4 MiB), and
+  `runtime.h3_send_window_bytes` (default 4194304 / 4 MiB). These apply to forward
+  and reverse terminating H3 listeners with either backend, not upstream/client
+  transports or QUIC passthrough. Receive windows must be in `1..=2^62-1`
+  (QUIC's variable-length integer range); the local send window accepts
+  `1..=2^64-1`. Larger windows can allow more data in flight on high-bandwidth,
+  high-latency links but increase potential per-connection buffering; smaller
+  windows constrain buffering but may limit throughput. Tune with workload and
+  memory measurements. Changes restart listeners during configuration reload.
 - FTP gateway concurrency is bounded by the listener/reverse worker topology and
   by FTP request/download limits. Tune `runtime.worker_threads`,
   `runtime.max_blocking_threads`, `runtime.acceptor_tasks_per_listener`,

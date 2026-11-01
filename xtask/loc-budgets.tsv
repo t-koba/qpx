@@ -11,7 +11,7 @@ qpxd/src/forward/request/mod.rs	125	r
 qpxd/src/forward/request/dispatch.rs	665	r
 qpx-core/src/config/validate/mod.rs	86	r
 qpx-core/src/config/types/mod.rs	152	r
-qpxd/src/runtime/mod.rs	265	r
+qpxd/src/runtime/mod.rs	267	r
 qpxd/src/upstream/origin/mod.rs	195	r
 qpxd/src/upstream/health.rs	253	r
 qpxd/src/transparent/http/mod.rs	111	r
@@ -52,8 +52,8 @@ qpxd/src/reverse/h3/passthrough.rs	554	r
 qpxd/src/reverse/h3/passthrough/index/shared.rs	461	r
 qpxd/src/reverse/h3/terminate_qpx.rs	405	r
 qpxd/src/udp_session_handoff/mod.rs	124	r
-qpxd/src/runtime/plan/mod.rs	12	r
-qpxd/src/runtime/plan/types.rs	565	r
+qpxd/src/runtime/plan/mod.rs	14	r
+qpxd/src/runtime/plan/types.rs	568	r
 qpxd/src/transparent/tls_path.rs	404	r
 qpxd/src/forward/h3/connect/standard/handlers.rs	214	r
 qpxd/src/upstream/pool/mod.rs	15	r

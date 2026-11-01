@@ -29,6 +29,8 @@ pub(crate) use obs_rt::{MetricNames, metric_names};
 pub(crate) use plan::CompiledPlaintextCapturePlan;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) use plan::CompiledTlsPassthroughRoute;
+#[cfg(feature = "http3")]
+pub(crate) use plan::H3ChannelLimits;
 pub(crate) use plan::{
     CompiledCapturePlan, CompiledEdge, CompiledForwardedHop, CompiledForwardedHopCache,
     CompiledForwardedPolicy, CompiledListenerSettings, CompiledReverseEdge, CompiledReverseRoute,

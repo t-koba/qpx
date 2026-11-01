@@ -6,6 +6,8 @@ pub use compiler::PlanCompiler;
 pub(crate) use types::CompiledPlaintextCapturePlan;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 pub(crate) use types::CompiledTlsPassthroughRoute;
+#[cfg(feature = "http3")]
+pub(crate) use types::H3ChannelLimits;
 pub(crate) use types::{
     CompiledCapturePlan, CompiledEdge, CompiledForwardedHop, CompiledForwardedHopCache,
     CompiledForwardedPolicy, CompiledListenerSettings, CompiledReverseEdge, CompiledReverseRoute,

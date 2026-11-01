@@ -171,3 +171,19 @@ fn hot_reload_requires_server_restart_for_reverse_http3_startup_change() {
         .expect("reverse_edges HTTP/3 startup change should be reload-safe with server restart");
     assert!(requires_server_restart(&old, &new));
 }
+
+#[test]
+fn hot_reload_restarts_listeners_for_h3_flow_control_changes() {
+    let old = base_config();
+    assert!(!requires_server_restart(&old, &old));
+    for field in 0..3 {
+        let mut new = old.clone();
+        match field {
+            0 => new.runtime.h3_stream_receive_window_bytes += 1,
+            1 => new.runtime.h3_connection_receive_window_bytes += 1,
+            _ => new.runtime.h3_send_window_bytes += 1,
+        }
+        ensure_hot_reload_compatible(&old, &new).expect("listener restart is reload-safe");
+        assert!(requires_server_restart(&old, &new));
+    }
+}

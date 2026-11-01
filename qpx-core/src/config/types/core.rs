@@ -207,6 +207,12 @@ pub struct RuntimeConfig {
     pub max_concurrent_connections: usize,
     #[serde(default = "default_runtime_max_h3_streams_per_connection")]
     pub max_h3_streams_per_connection: usize,
+    #[serde(default = "default_runtime_h3_stream_receive_window_bytes")]
+    pub h3_stream_receive_window_bytes: u64,
+    #[serde(default = "default_runtime_h3_connection_receive_window_bytes")]
+    pub h3_connection_receive_window_bytes: u64,
+    #[serde(default = "default_runtime_h3_send_window_bytes")]
+    pub h3_send_window_bytes: u64,
     #[serde(default = "default_runtime_h3_origin_pool_max_connections_per_origin")]
     pub h3_origin_pool_max_connections_per_origin: usize,
     #[serde(default = "default_runtime_h3_origin_pool_max_inflight_streams_per_connection")]
@@ -283,6 +289,10 @@ impl Default for RuntimeConfig {
             max_ftp_concurrency: default_runtime_max_ftp_concurrency(),
             max_concurrent_connections: default_runtime_max_concurrent_connections(),
             max_h3_streams_per_connection: default_runtime_max_h3_streams_per_connection(),
+            h3_stream_receive_window_bytes: default_runtime_h3_stream_receive_window_bytes(),
+            h3_connection_receive_window_bytes: default_runtime_h3_connection_receive_window_bytes(
+            ),
+            h3_send_window_bytes: default_runtime_h3_send_window_bytes(),
             h3_origin_pool_max_connections_per_origin:
                 default_runtime_h3_origin_pool_max_connections_per_origin(),
             h3_origin_pool_max_inflight_streams_per_connection:

@@ -79,11 +79,14 @@ fn runtime_process_signature(runtime: &RuntimeConfig) -> (Option<usize>, Option<
     (runtime.worker_threads, runtime.max_blocking_threads)
 }
 
-fn runtime_server_signature(runtime: &RuntimeConfig) -> (Option<usize>, bool, i32) {
+fn runtime_server_signature(runtime: &RuntimeConfig) -> (Option<usize>, bool, i32, u64, u64, u64) {
     (
         runtime.acceptor_tasks_per_listener,
         runtime.reuse_port,
         runtime.tcp_backlog,
+        runtime.h3_stream_receive_window_bytes,
+        runtime.h3_connection_receive_window_bytes,
+        runtime.h3_send_window_bytes,
     )
 }
 
