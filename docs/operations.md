@@ -107,7 +107,9 @@ reload for compatible config edits.
   multi-socket accept fan-out.
 - `runtime.tcp_backlog` controls listen queue depth.
 - `runtime.max_h3_streams_per_connection` caps concurrent HTTP/3 streams and
-  associated WebTransport sessions per QUIC connection.
+  associated WebTransport sessions per QUIC connection. Values above the QUIC
+  API's u32 stream-count ceiling are clamped. Changes restart listeners during
+  configuration reload, because the cap is advertised by the QUIC transport.
 - `runtime.upstream_http_timeout_ms` is the default dial/request timeout for
   upstream HTTP and reverse route proxying.
 - `runtime.upstream_max_idle_connections_per_origin` caps reusable direct
