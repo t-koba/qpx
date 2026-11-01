@@ -248,6 +248,25 @@ impl ModuleResponseCarrier for OwnerResponse<Body> {
     }
 }
 
+fn append_module_header(headers: &mut Headers, name: HeaderName, value: HeaderValue) {
+    match OrdinaryHeaderName::try_from(name) {
+        Ok(name) => headers.append(name, value),
+        Err(_) => headers.append_content_length_value(value),
+    }
+}
+
+fn remove_module_header(headers: &mut Headers, name: &HeaderName, present: bool) -> bool {
+    if present {
+        match OrdinaryHeaderName::try_from(name.clone()) {
+            Ok(name) => {
+                headers.remove(&name);
+            }
+            Err(_) => headers.remove_content_length(),
+        }
+    }
+    present
+}
+
 /// An opaque borrowed mutable HTTP request for module events.
 ///
 /// The [`OwnerRequest`] stays inside the module envelope; modules see only
@@ -375,24 +394,13 @@ impl<'a> HttpModuleRequest<'a> {
 
     /// Appends a value to the named request header, preserving order.
     pub fn append_header(&mut self, name: HeaderName, value: HeaderValue) {
-        match OrdinaryHeaderName::try_from(name) {
-            Ok(name) => self.inner.headers_mut().append(name, value),
-            Err(_) => self.inner.headers_mut().append_content_length_value(value),
-        }
+        append_module_header(self.inner.headers_mut(), name, value);
     }
 
     /// Removes the named request header, returning whether it was present.
     pub fn remove_header(&mut self, name: &HeaderName) -> bool {
         let present = self.as_view().has_header(name);
-        if present {
-            match OrdinaryHeaderName::try_from(name.clone()) {
-                Ok(name) => {
-                    self.inner.headers_mut().remove(&name);
-                }
-                Err(_) => self.inner.headers_mut().remove_content_length(),
-            }
-        }
-        present
+        remove_module_header(self.inner.headers_mut(), name, present)
     }
 
     /// Takes the request body, leaving an empty body behind.
@@ -491,24 +499,13 @@ impl HttpModuleResponse {
 
     /// Appends a value to the named response header, preserving order.
     pub fn append_header(&mut self, name: HeaderName, value: HeaderValue) {
-        match OrdinaryHeaderName::try_from(name) {
-            Ok(name) => self.inner.headers_mut().append(name, value),
-            Err(_) => self.inner.headers_mut().append_content_length_value(value),
-        }
+        append_module_header(self.inner.headers_mut(), name, value);
     }
 
     /// Removes the named response header, returning whether it was present.
     pub fn remove_header(&mut self, name: &HeaderName) -> bool {
         let present = self.has_header(name);
-        if present {
-            match OrdinaryHeaderName::try_from(name.clone()) {
-                Ok(name) => {
-                    self.inner.headers_mut().remove(&name);
-                }
-                Err(_) => self.inner.headers_mut().remove_content_length(),
-            }
-        }
-        present
+        remove_module_header(self.inner.headers_mut(), name, present)
     }
 
     /// Takes the response body, leaving an empty body behind.
