@@ -81,7 +81,7 @@ fn runtime_process_signature(runtime: &RuntimeConfig) -> (Option<usize>, Option<
 
 fn runtime_server_signature(
     runtime: &RuntimeConfig,
-) -> (Option<usize>, bool, i32, u64, u64, u64, usize, usize) {
+) -> (Option<usize>, bool, i32, u64, u64, u64, usize, usize, bool) {
     (
         runtime.acceptor_tasks_per_listener,
         runtime.reuse_port,
@@ -91,6 +91,7 @@ fn runtime_server_signature(
         runtime.h3_send_window_bytes,
         runtime.max_h3_streams_per_connection,
         runtime.h3_max_uni_streams,
+        runtime.h3_allow_connection_migration,
     )
 }
 

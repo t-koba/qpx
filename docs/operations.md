@@ -148,6 +148,13 @@ reload for compatible config edits.
   apply to upstream/client transports or QUIC passthrough. Changes restart
   listeners during configuration reload because the cap is advertised by the
   QUIC transport.
+- Downstream HTTP/3 client address migration is refused by default;
+  `runtime.h3_allow_connection_migration: true` accepts QUIC path changes (keeps
+  connections alive across NAT rebinding or network changes but lets the peer
+  address change mid-connection); applies to forward and reverse terminating H3
+  listeners with either backend, not upstream/client transports or QUIC
+  passthrough; changes restart listeners during configuration reload because the
+  QUIC transport is built once per listener.
 - FTP gateway concurrency is bounded by the listener/reverse worker topology and
   by FTP request/download limits. Tune `runtime.worker_threads`,
   `runtime.max_blocking_threads`, `runtime.acceptor_tasks_per_listener`,

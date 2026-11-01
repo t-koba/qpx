@@ -372,6 +372,7 @@ fn compile_runtime_limits(config: &RuntimeResources) -> CompiledRuntimeLimits {
             send_window_bytes: runtime.h3_send_window_bytes,
             max_h3_streams_per_connection: runtime.max_h3_streams_per_connection,
             max_uni_streams: runtime.h3_max_uni_streams,
+            allow_connection_migration: runtime.h3_allow_connection_migration,
             datagram_channel_capacity: runtime.datagram_channel_capacity,
             webtransport_datagram_channel_capacity: runtime.webtransport_datagram_channel_capacity,
             webtransport_stream_channel_capacity: runtime.webtransport_stream_channel_capacity,

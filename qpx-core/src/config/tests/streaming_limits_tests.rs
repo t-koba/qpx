@@ -452,6 +452,31 @@ fn load_config_h3_max_uni_streams_defaults_and_overrides() {
 }
 
 #[test]
+fn load_config_h3_allow_connection_migration_defaults_and_overrides() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("h3-allow-migration.yaml");
+    assert!(!RuntimeConfig::default().h3_allow_connection_migration);
+    for (runtime, expected) in [
+        (String::new(), false),
+        (
+            "runtime:\n  h3_allow_connection_migration: true\n".to_string(),
+            true,
+        ),
+    ] {
+        write_config(&cfg, &format!("{runtime}edges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:18080\n  default_action:\n    type: direct\n")).expect("write");
+        let loaded = load_config(&cfg).expect("load config");
+        assert_eq!(loaded.runtime.h3_allow_connection_migration, expected);
+    }
+    write_config(&cfg, "runtime:\n  h3_allow_connection_migration: 1\nedges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:18080\n  default_action:\n    type: direct\n").expect("write");
+    assert!(
+        load_config(&cfg).is_err(),
+        "h3_allow_connection_migration=1 must be rejected"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn load_config_rejects_invalid_h3_flow_control_windows() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");

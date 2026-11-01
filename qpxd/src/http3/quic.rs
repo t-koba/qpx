@@ -134,7 +134,8 @@ pub(crate) fn build_h3_server_config_from_tls(
     transport.stream_receive_window(stream_receive);
     transport.receive_window(connection_receive);
     transport.send_window(send);
-    server_config.migration(false);
+    // Quinn enables client address migration by default; the configured value preserves the product's chosen posture.
+    server_config.migration(limits.allow_connection_migration);
     Ok(server_config)
 }
 
@@ -208,9 +209,12 @@ mod tests {
     fn h3_server_config_applies_compiled_runtime_window_overrides() -> Result<()> {
         let mut config: qpx_core::config::Config = serde_yaml::from_str("edges: []")?;
         config.runtime = serde_yaml::from_str(
-            "h3_stream_receive_window_bytes: 123\nh3_connection_receive_window_bytes: 234\nh3_send_window_bytes: 345\nh3_max_uni_streams: 789",
+            "h3_stream_receive_window_bytes: 123\nh3_connection_receive_window_bytes: 234\nh3_send_window_bytes: 345\nh3_max_uni_streams: 789\nh3_allow_connection_migration: true",
         )?;
         let plan = crate::runtime::RuntimeState::compile_plan(config)?;
+        assert!(plan.limits.h3.allow_connection_migration);
+        // Quinn exposes no getter for the migration flag; assert the compiled value
+        // and keep inspecting the transport Debug output for the window settings.
         let server =
             build_h3_server_config_from_tls(test_h3_server_tls_config()?, &plan.limits.h3)?;
 
