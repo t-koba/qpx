@@ -12,7 +12,9 @@ whole-workspace inventory with exact counts, a new or raised occurrence fails
 lowered or deleted. Update the baseline in the same change that changes the
 inventory; the recorded debt only goes down. Workspace-wide gates read the
 crate list from the root `Cargo.toml`, so a new or split-out member is covered
-without editing a second list. The declared Content-Length single-owner
+without editing a second list. Members must be literal directories at the
+workspace root; a pattern member or a member without a directory fails the
+gates closed instead of being skipped. The declared Content-Length single-owner
 analyzer is ratcheted the same way by `xtask/content-length-baseline.txt`
 until the accepted structural-owner replacement removes the analyzer and its
 debt.

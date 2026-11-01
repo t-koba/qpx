@@ -3932,6 +3932,16 @@ fn workspace_member_crates(root: &Path) -> Result<Vec<String>> {
     if members.is_empty() {
         bail!("the workspace manifest has no members list");
     }
+    for member in &members {
+        if member.contains('*') || member.contains('?') || member.contains('[') {
+            bail!(
+                "the workspace manifest member {member} is a pattern; list each member explicitly"
+            );
+        }
+        if !root.join(member).is_dir() {
+            bail!("the workspace manifest member {member} has no directory at the workspace root");
+        }
+    }
     Ok(members)
 }
 
@@ -6799,6 +6809,35 @@ mod tests {
             message.contains("sample-member") && message.contains("unwrap() in authority_host"),
             "unexpected error: {message}"
         );
+    }
+
+    #[test]
+    fn workspace_member_crates_rejects_unreadable_members() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qpx-xtask-members-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).expect("create the fixture workspace");
+        let manifest = root.join("Cargo.toml");
+        fs::write(&manifest, "[workspace]\nmembers = [\"crates/*\"]\n")
+            .expect("write the pattern manifest");
+        let error = workspace_member_crates(&root).expect_err("a pattern member must fail closed");
+        assert!(
+            error.to_string().contains("crates/*"),
+            "unexpected error: {error}"
+        );
+        fs::write(&manifest, "[workspace]\nmembers = [\"missing-member\"]\n")
+            .expect("write the missing-member manifest");
+        let error =
+            workspace_member_crates(&root).expect_err("a missing directory must fail closed");
+        assert!(
+            error.to_string().contains("missing-member"),
+            "unexpected error: {error}"
+        );
+        fs::remove_dir_all(&root).expect("remove the fixture workspace");
     }
 
     #[test]
