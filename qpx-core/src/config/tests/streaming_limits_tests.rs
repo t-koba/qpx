@@ -431,6 +431,7 @@ fn load_config_h3_max_uni_streams_defaults_and_overrides() {
     assert_eq!(RuntimeConfig::default().h3_max_uni_streams, 1024);
     for (runtime, expected) in [
         (String::new(), 1024usize),
+        ("runtime:\n  h3_max_uni_streams: 3\n".to_string(), 3),
         ("runtime:\n  h3_max_uni_streams: 77\n".to_string(), 77),
         (
             format!("runtime:\n  h3_max_uni_streams: {}\n", u32::MAX),
@@ -441,7 +442,12 @@ fn load_config_h3_max_uni_streams_defaults_and_overrides() {
         let loaded = load_config(&cfg).expect("load config");
         assert_eq!(loaded.runtime.h3_max_uni_streams, expected);
     }
-    for invalid in ["0".to_string(), format!("{}", u64::from(u32::MAX) + 1)] {
+    for invalid in [
+        "0".to_string(),
+        "1".to_string(),
+        "2".to_string(),
+        format!("{}", u64::from(u32::MAX) + 1),
+    ] {
         write_config(&cfg, &format!("runtime:\n  h3_max_uni_streams: {invalid}\nedges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:18080\n  default_action:\n    type: direct\n")).expect("write");
         assert!(
             load_config(&cfg).is_err(),

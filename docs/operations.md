@@ -144,10 +144,12 @@ reload for compatible config edits.
 - Downstream HTTP/3 unidirectional streams are capped by
   `runtime.h3_max_uni_streams` (default 1024) on every forward and reverse
   terminating H3 listener and either backend. Raise it for WebTransport
-  multiplexing; lower it to bound per-connection stream memory. It does not
-  apply to upstream/client transports or QUIC passthrough. Changes restart
-  listeners during configuration reload because the cap is advertised by the
-  QUIC transport.
+  multiplexing; lower it, never below 3, to bound per-connection stream memory.
+  Values below 3 are rejected because HTTP/3 requires the control, QPACK
+  encoder and QPACK decoder unidirectional streams. It does not apply to
+  upstream/client transports or QUIC passthrough. Changes restart listeners
+  during configuration reload because the cap is advertised by the QUIC
+  transport.
 - Downstream HTTP/3 client address migration is refused by default;
   `runtime.h3_allow_connection_migration: true` accepts QUIC path changes (keeps
   connections alive across NAT rebinding or network changes but lets the peer

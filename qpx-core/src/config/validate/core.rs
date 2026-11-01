@@ -136,8 +136,10 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
             "runtime.max_h3_streams_per_connection must be >= 1"
         ));
     }
-    if runtime.h3_max_uni_streams == 0 {
-        return Err(anyhow!("runtime.h3_max_uni_streams must be >= 1"));
+    if runtime.h3_max_uni_streams < 3 {
+        return Err(anyhow!(
+            "runtime.h3_max_uni_streams must be >= 3 (HTTP/3 control, QPACK encoder and QPACK decoder streams)"
+        ));
     }
     if u32::try_from(runtime.h3_max_uni_streams).is_err() {
         return Err(anyhow!(
