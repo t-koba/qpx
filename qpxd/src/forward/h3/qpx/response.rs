@@ -1,7 +1,6 @@
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
-use crate::policy_context::{AuditRecord, emit_audit_log};
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::{Response, StatusCode};
@@ -65,41 +64,13 @@ pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::R
     response: R,
     ctx: H3ConnectPolicyResponseContext<'_>,
 ) -> Result<()> {
-    let H3ConnectPolicyResponseContext {
-        state,
-        listener_name,
-        remote_ip,
-        host,
-        path,
-        outcome,
-        matched_rule,
-        decision_service_policy_id,
-        log_context,
-    } = ctx;
-    emit_audit_log(
-        state,
-        AuditRecord {
-            kind: crate::http::dispatch::ProxyKind::Forward,
-            name: listener_name,
-            remote_ip,
-            host: Some(host),
-            sni: Some(host),
-            method: Some("CONNECT"),
-            path,
-            outcome,
-            status: Some(response.status().as_u16()),
-            matched_rule,
-            matched_route: None,
-            decision_service_policy_id,
-        },
-        log_context,
-    );
+    crate::forward::h3::connect::emit_h3_connect_policy_audit(&ctx, response.status().as_u16());
     send_qpx_response_stream(
         req_stream,
         response,
         &http::Method::CONNECT,
-        state.plan.limits.body.max_h3_response_body_bytes,
-        Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
+        ctx.state.plan.limits.body.max_h3_response_body_bytes,
+        Duration::from_millis(ctx.state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
     )
     .await
 }

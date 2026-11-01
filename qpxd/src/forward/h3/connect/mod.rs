@@ -61,6 +61,27 @@ pub(super) struct H3ConnectPolicyResponseContext<'a> {
     pub(super) log_context: &'a qpx_observability::access_log::RequestLogContext,
 }
 
+pub(super) fn emit_h3_connect_policy_audit(ctx: &H3ConnectPolicyResponseContext<'_>, status: u16) {
+    crate::policy_context::emit_audit_log(
+        ctx.state,
+        crate::policy_context::AuditRecord {
+            kind: crate::http::dispatch::ProxyKind::Forward,
+            name: ctx.listener_name,
+            remote_ip: ctx.remote_ip,
+            host: Some(ctx.host),
+            sni: Some(ctx.host),
+            method: Some("CONNECT"),
+            path: ctx.path,
+            outcome: ctx.outcome,
+            status: Some(status),
+            matched_rule: ctx.matched_rule,
+            matched_route: None,
+            decision_service_policy_id: ctx.decision_service_policy_id,
+        },
+        ctx.log_context,
+    );
+}
+
 /// Context for the shared successful forward-CONNECT audit event on either HTTP/3 backend.
 #[cfg(feature = "http3")]
 pub(super) struct H3ConnectAllowAuditContext<'a> {
