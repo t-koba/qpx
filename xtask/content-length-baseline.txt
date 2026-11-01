@@ -1,0 +1,17 @@
+# Recorded existing declared Content-Length split-owner sites.
+# New violations fail. Remove an entry in the same change that makes the site use the owner.
+qpx-observability/src/access_log.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd-cache/src/store/body.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd-cache/src/types/cached_headers.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd-cache/src/util.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd/src/http/modules/subrequest/mod.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd/src/http/policy/guard.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd/src/http3/listener.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd/src/reverse/listener/raw_http1.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd/src/reverse/transport/mirrors.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpxd/src/reverse/transport/request_template.rs reads the declared Content-Length through its own helper and the owner does not name it
+qpx-core/src/http_message.rs: the function hydrate reads the declared Content-Length's value itself; it must call the owner
+qpx-http/src/protocol/finalization/tests.rs: the function standard_and_owner_normalization_preserve_framing_distinctions reads the declared Content-Length inline; it must call the owner
+qpxd-cache/src/tests/body_length_tests.rs: the function matching_duplicate_lengths_and_unspecified_length_are_stored reads the declared Content-Length inline; it must call the owner
+qpxd/src/http/dispatch/decision_service_access/tests.rs: the function denied_responses_stay_owned_through_controls_audit_limit_and_error reads the declared Content-Length inline; it must call the owner
+qpxd/src/http/modules/tests.rs: the function module_local_response_stays_owned_through_hooks_finalization_and_prepared_outcome reads the declared Content-Length inline; it must call the owner

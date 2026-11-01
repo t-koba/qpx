@@ -5,6 +5,16 @@ per-file inventories go stale quickly, and `cargo xtask structure` /
 `xtask/loc-budgets.tsv` are the machine-checked source of truth for file-level
 budgets and structural gates.
 
+Production `unwrap()`/`expect()` debt is ratcheted by
+`xtask/production-unwraps-baseline.tsv`: the file records existing
+sites with exact counts, a new or raised occurrence fails
+`cargo xtask structure`, and removing a site also fails until its count is
+lowered or deleted. Update the baseline in the same change that changes the
+inventory; the recorded debt only goes down. The declared Content-Length
+single-owner analyzer is ratcheted the same way by
+`xtask/content-length-baseline.txt` until the accepted structural-owner
+replacement removes the analyzer and its debt.
+
 ## Architecture overview
 
 qpx is a Rust workspace with twelve product/runtime crates plus one developer

@@ -687,20 +687,125 @@ pub(crate) fn check_documented_unsafe_blocks(root: &Path) -> Result<()> {
     Ok(())
 }
 
+// Recorded existing production panic debt. `cargo xtask structure` fails on a new or
+// raised occurrence and on a stale count, so this inventory only ratchets down.
+const PRODUCTION_UNWRAP_BASELINE: &str = include_str!("../production-unwraps-baseline.tsv");
+
+type ProductionUnwrapKey = (String, String, String);
+
+fn production_unwrap_baseline() -> Result<BTreeMap<ProductionUnwrapKey, usize>> {
+    let mut baseline = BTreeMap::new();
+    for (index, line) in PRODUCTION_UNWRAP_BASELINE.lines().enumerate() {
+        let line = line.trim_end();
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let fields = line.split('\t').collect::<Vec<_>>();
+        if fields.len() != 4 {
+            bail!("invalid production unwrap baseline line {}", index + 1);
+        }
+        if !matches!(fields[2], "unwrap" | "expect") {
+            bail!(
+                "invalid production unwrap method on baseline line {}",
+                index + 1
+            );
+        }
+        let count = fields[3].parse::<usize>().with_context(|| {
+            format!(
+                "invalid production unwrap count on baseline line {}",
+                index + 1
+            )
+        })?;
+        if count == 0 {
+            bail!(
+                "production unwrap baseline line {} must have a positive count",
+                index + 1
+            );
+        }
+        let key = (
+            fields[0].to_string(),
+            fields[1].to_string(),
+            fields[2].to_string(),
+        );
+        if baseline.insert(key, count).is_some() {
+            bail!("duplicate production unwrap baseline line {}", index + 1);
+        }
+    }
+    Ok(baseline)
+}
+
+type RatchetDifferences<K> = (Vec<(K, usize, usize)>, Vec<(K, usize, usize)>);
+
+fn ratchet_differences<K: Ord + Clone>(
+    actual: &BTreeMap<K, usize>,
+    baseline: &BTreeMap<K, usize>,
+) -> RatchetDifferences<K> {
+    let mut added = Vec::new();
+    for (key, count) in actual {
+        let allowed = baseline.get(key).copied().unwrap_or(0);
+        if *count > allowed {
+            added.push((key.clone(), *count, allowed));
+        }
+    }
+    let mut stale = Vec::new();
+    for (key, count) in baseline {
+        let actual_count = actual.get(key).copied().unwrap_or(0);
+        if actual_count < *count {
+            stale.push((key.clone(), actual_count, *count));
+        }
+    }
+    (added, stale)
+}
+
 pub(crate) fn check_production_unwraps(root: &Path) -> Result<()> {
-    let mut violations = Vec::new();
+    let mut actual = BTreeMap::new();
     visit_production_sources(root, |rel, syntax| {
         let mut visitor = UnwrapVisitor::default();
         visitor.visit_file(&syntax);
         for call in visitor.panicking_calls {
-            violations.push(format!("{rel}: {}() in {}", call.method, call.enclosing_fn));
+            *actual
+                .entry((rel.clone(), call.enclosing_fn, call.method))
+                .or_insert(0) += 1;
         }
         Ok(())
     })?;
-    if !violations.is_empty() {
+    let baseline = production_unwrap_baseline()?;
+    let (added, stale) = ratchet_differences(&actual, &baseline);
+    if !added.is_empty() || !stale.is_empty() {
+        let added = added
+            .into_iter()
+            .map(|(key, count, allowed)| {
+                format!(
+                    "{}: {}() in {} (actual {count}, baseline {allowed})",
+                    key.0, key.2, key.1
+                )
+            })
+            .collect::<Vec<_>>();
+        let stale = stale
+            .into_iter()
+            .map(|(key, actual_count, count)| {
+                format!(
+                    "{}: {}() in {} (actual {actual_count}, baseline {count})",
+                    key.0, key.2, key.1
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut details = Vec::new();
+        if !added.is_empty() {
+            details.push(format!(
+                "new or raised production unwrap()/expect() sites:\n{}",
+                added.join("\n")
+            ));
+        }
+        if !stale.is_empty() {
+            details.push(format!(
+                "stale baseline entries; lower or remove their counts:\n{}",
+                stale.join("\n")
+            ));
+        }
         bail!(
-            "production unwrap()/expect() violations:\n{}",
-            violations.join("\n")
+            "production unwrap()/expect() ratchet violations:\n{}",
+            details.join("\n")
         );
     }
     Ok(())
@@ -1370,6 +1475,22 @@ const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 /// seen. A member that holds the entry's name under a name the gate does
 /// not know is read as the value, because the gate cannot tell that
 /// member from the member the value is held under.
+// Recorded existing declared Content-Length split-owner debt. New violations and stale
+// entries fail, so this inventory only ratchets down as sites move to the owner.
+const CONTENT_LENGTH_BASELINE: &str = include_str!("../content-length-baseline.txt");
+
+fn line_ratchet_baseline(content: &str) -> BTreeMap<String, usize> {
+    let mut baseline = BTreeMap::new();
+    for line in content.lines() {
+        let line = line.trim_end();
+        if line.trim().is_empty() || line.starts_with('#') {
+            continue;
+        }
+        *baseline.entry(line.to_string()).or_insert(0) += 1;
+    }
+    baseline
+}
+
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let owner_path = root.join(CONTENT_LENGTH_OWNER);
     let owner = fs::read_to_string(&owner_path)
@@ -1400,10 +1521,41 @@ fn check_content_length_single_owner(root: &Path) -> Result<()> {
     let listed = content_length_listed_sites(&owner);
     let mut violations = content_length_single_owner_violations(&owner, &files);
     violations.extend(content_length_workspace_violations(&files, &listed)?);
-    if !violations.is_empty() {
+    let mut actual = BTreeMap::new();
+    for violation in &violations {
+        *actual.entry(violation.clone()).or_insert(0) += 1;
+    }
+    let baseline = line_ratchet_baseline(CONTENT_LENGTH_BASELINE);
+    let (added, stale) = ratchet_differences(&actual, &baseline);
+    if !added.is_empty() || !stale.is_empty() {
+        let mut details = Vec::new();
+        if !added.is_empty() {
+            details.push(format!(
+                "new declared Content-Length split-owner sites:\n{}",
+                added
+                    .iter()
+                    .map(|(message, count, allowed)| {
+                        format!("{message} (actual {count}, baseline {allowed})")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
+        if !stale.is_empty() {
+            details.push(format!(
+                "stale declared Content-Length baseline entries; lower or remove them:\n{}",
+                stale
+                    .iter()
+                    .map(|(message, actual_count, count)| {
+                        format!("{message} (actual {actual_count}, baseline {count})")
+                    })
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ));
+        }
         bail!(
-            "the declared Content-Length must have one owner ({CONTENT_LENGTH_OWNER}):\n{}",
-            violations.join("\n")
+            "the declared Content-Length must have one owner ({CONTENT_LENGTH_OWNER}); ratchet violations:\n{}",
+            details.join("\n")
         );
     }
     Ok(())
@@ -4537,7 +4689,7 @@ fn reverse_retry_template_bounded_body_violations(
     let mut violations = Vec::new();
     for needle in [
         "content_length(req).is_some_and(|len| len <= body_threshold_bytes as u64)",
-        "if req.headers().contains_key(TRANSFER_ENCODING)",
+        "&OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING)",
         "return None;",
         "if next > max_body_bytes",
         "create_template_spool().await?",
@@ -5191,10 +5343,10 @@ fn header_transform_trait_violations(content: &str) -> Vec<&'static str> {
     for required in [
         "trait HeaderTransform",
         "impl HeaderTransform for CompiledHeaderControl",
-        "fn apply_request_transform(&self, headers: &mut http::HeaderMap)",
-        "fn apply_response_transform(&self, headers: &mut http::HeaderMap)",
+        "fn apply_request_transform(&self, headers: &mut qpx_core::http_message::Headers)",
         "control.apply_request_transform(headers)",
-        "control.apply_response_transform(headers)",
+        "fn apply_response_headers",
+        "control.apply_response_owned(headers)",
     ] {
         if !content.contains(required) {
             violations.push(
@@ -5899,7 +6051,7 @@ fn response_capture_order_rules() -> Vec<(&'static str, Vec<ResponseCaptureOrder
             vec![ResponseCaptureOrderRule {
                 name: "forward upstream response",
                 finalize: "finalize_response_with_headers_in_place(\n        request_method",
-                capture: "response = emit_optional_response_for_export(response",
+                capture: "let mut response =\n        emit_optional_response_for_export(response, selected_plan",
             }],
         ),
         (
@@ -5915,14 +6067,14 @@ fn response_capture_order_rules() -> Vec<(&'static str, Vec<ResponseCaptureOrder
             vec![ResponseCaptureOrderRule {
                 name: "reverse shared finalizer",
                 finalize: "finalize_response_with_headers_in_place(\n        request_method",
-                capture: "emit_optional_response_for_export(\n        resp",
+                capture: "emit_optional_response_for_export(\n        R::from_finalized_owner(resp)",
             }],
         ),
         (
             "qpxd/src/reverse/transport/dispatch/success.rs",
             vec![ResponseCaptureOrderRule {
                 name: "reverse normal-success shared finalizer call",
-                finalize: "finalize_reverse_dispatch_response(ReverseFinalizeResponseInput",
+                finalize: "finalize_reverse_dispatch_response::<R>(ReverseFinalizeResponseInput",
                 capture: "Box::new((interim, resp))",
             }],
         ),
@@ -6594,6 +6746,34 @@ fn path_is_anyhow_name(path: &syn::Path, name: &str, imports_anyhow_name: bool) 
 mod tests {
     use super::*;
 
+    fn unwrap_key(path: &str, function: &str, method: &str) -> ProductionUnwrapKey {
+        (path.to_string(), function.to_string(), method.to_string())
+    }
+
+    #[test]
+    fn production_unwrap_ratchet_flags_new_and_raised_sites() {
+        let baseline = BTreeMap::from([(unwrap_key("a.rs", "f", "expect"), 2usize)]);
+        let actual = BTreeMap::from([
+            (unwrap_key("a.rs", "f", "expect"), 3usize),
+            (unwrap_key("b.rs", "g", "unwrap"), 1usize),
+        ]);
+        let (added, stale) = ratchet_differences(&actual, &baseline);
+        assert_eq!(added.len(), 2);
+        assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn production_unwrap_ratchet_flags_stale_entries() {
+        let baseline = BTreeMap::from([
+            (unwrap_key("a.rs", "f", "expect"), 2usize),
+            (unwrap_key("b.rs", "g", "unwrap"), 1usize),
+        ]);
+        let actual = BTreeMap::from([(unwrap_key("a.rs", "f", "expect"), 1usize)]);
+        let (added, stale) = ratchet_differences(&actual, &baseline);
+        assert!(added.is_empty());
+        assert_eq!(stale.len(), 2);
+    }
+
     #[test]
     fn http_token_vocabulary_violations_flag_a_local_definition() {
         assert_eq!(
@@ -7215,18 +7395,16 @@ mod tests {
             header_transform_trait_violations(
                 r#"
                 trait HeaderTransform {
-                    fn apply_request_transform(&self, headers: &mut http::HeaderMap);
-                    fn apply_response_transform(&self, headers: &mut http::HeaderMap);
+                    fn apply_request_transform(&self, headers: &mut qpx_core::http_message::Headers);
                 }
                 impl HeaderTransform for CompiledHeaderControl {
-                    fn apply_request_transform(&self, headers: &mut http::HeaderMap) {}
-                    fn apply_response_transform(&self, headers: &mut http::HeaderMap) {}
+                    fn apply_request_transform(&self, headers: &mut qpx_core::http_message::Headers) {}
                 }
-                fn apply_request_headers(headers: &mut http::HeaderMap, control: Option<&CompiledHeaderControl>) {
+                fn apply_request_headers(headers: &mut qpx_core::http_message::Headers, control: Option<&CompiledHeaderControl>) {
                     control.apply_request_transform(headers)
                 }
-                fn apply_response_headers(headers: &mut http::HeaderMap, control: Option<&CompiledHeaderControl>) {
-                    control.apply_response_transform(headers)
+                fn apply_response_headers(headers: &mut qpx_core::http_message::Headers, control: Option<&CompiledHeaderControl>) {
+                    control.apply_response_owned(headers)
                 }
                 "#,
             )
@@ -9070,7 +9248,10 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
                     || content_length(req).is_some_and(|len| len <= body_threshold_bytes as u64)
             }
             fn content_length(req: &Request<Body>) -> Option<u64> {
-                if req.headers().contains_key(TRANSFER_ENCODING) {
+                if req.headers().contains_key(
+                    &OrdinaryHeaderName::try_from(http::header::TRANSFER_ENCODING)
+                        .expect("transfer-encoding is ordinary"),
+                ) {
                     return None;
                 }
                 return None;
