@@ -245,6 +245,10 @@ pub struct RuntimeConfig {
     pub upstream_proxy_max_concurrent_per_endpoint: usize,
     #[serde(default = "default_runtime_upstream_max_idle_connections_per_origin")]
     pub upstream_max_idle_connections_per_origin: usize,
+    #[serde(default = "default_runtime_h2_server_max_header_list_size_bytes")]
+    pub h2_server_max_header_list_size_bytes: u32,
+    #[serde(default = "default_runtime_h2_server_max_concurrent_streams")]
+    pub h2_server_max_concurrent_streams: u32,
     #[serde(default = "default_runtime_h2_initial_stream_window_size_bytes")]
     pub h2_initial_stream_window_size_bytes: u32,
     #[serde(default = "default_runtime_h2_initial_connection_window_size_bytes")]
@@ -314,6 +318,9 @@ impl Default for RuntimeConfig {
                 default_runtime_upstream_proxy_max_concurrent_per_endpoint(),
             upstream_max_idle_connections_per_origin:
                 default_runtime_upstream_max_idle_connections_per_origin(),
+            h2_server_max_header_list_size_bytes:
+                default_runtime_h2_server_max_header_list_size_bytes(),
+            h2_server_max_concurrent_streams: default_runtime_h2_server_max_concurrent_streams(),
             h2_initial_stream_window_size_bytes:
                 default_runtime_h2_initial_stream_window_size_bytes(),
             h2_initial_connection_window_size_bytes:

@@ -189,10 +189,7 @@ async fn run_forward_acceptor(
             let access_cfg = runtime.state().resources.access_log.clone();
             let limits = runtime.state().plan.limits;
             let body_channel_capacity = limits.body.body_channel_capacity;
-            let h2_tuning = crate::http::codec::h2::H2TransportTuning {
-                initial_stream_window_size: limits.h2.initial_stream_window_size_bytes,
-                initial_connection_window_size: limits.h2.initial_connection_window_size_bytes,
-            };
+            let h2_tuning = crate::http::codec::h2::H2ServerTuning::from(limits.h2);
             let access_name = Arc::<str>::from(listener_name.as_str());
             let request_runtime = runtime.clone();
             let service = handler_fn(move |req| {

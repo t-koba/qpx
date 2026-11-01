@@ -1,6 +1,4 @@
-use crate::http::codec::h2::{
-    H2_MAX_CONCURRENT_STREAMS, H2TransportTuning, send_h2_response_with_interim,
-};
+use crate::http::codec::h2::{H2ServerTuning, send_h2_response_with_interim};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::Result;
 use bytes::Bytes;
@@ -20,9 +18,6 @@ use tokio_util::sync::ReusableBoxFuture;
 use tracing::{debug, warn};
 
 pub(crate) const H2_PREFACE: &[u8] = b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n";
-// Keep request admission aligned with the protocol stream limit. This remains bounded while
-// avoiding an artificial half-capacity bottleneck for a single connection's stream fan-out.
-const H2_ACCEPT_BACKLOG: usize = H2_MAX_CONCURRENT_STREAMS;
 // Release response buffers promptly without letting a continuously ready completion queue
 // postpone admission until every previously admitted stream has finished.
 const H2_COMPLETION_BURST: usize = 8;
@@ -76,7 +71,7 @@ where
         enable_connect_protocol,
         idle_timeout,
         body_channel_capacity,
-        H2TransportTuning::default(),
+        H2ServerTuning::default(),
     )
     .await
 }
@@ -87,7 +82,7 @@ pub(crate) async fn serve_h2_with_interim_and_capacity_and_tuning<I, S>(
     enable_connect_protocol: bool,
     idle_timeout: Duration,
     body_channel_capacity: usize,
-    h2_tuning: H2TransportTuning,
+    h2_tuning: H2ServerTuning,
 ) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -96,6 +91,8 @@ where
         + Sync
         + 'static,
 {
+    // Bound queued handlers by the same effective ceiling advertised to the peer.
+    let accept_backlog = h2_tuning.max_concurrent_streams as usize;
     let mut builder = h2::server::Builder::new();
     crate::http::codec::h2::tune_h2_server_builder_with(&mut builder, h2_tuning);
     if enable_connect_protocol {
@@ -111,7 +108,7 @@ where
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
-        let accept_backlog_available = concurrent_streams.len() < H2_ACCEPT_BACKLOG;
+        let accept_backlog_available = concurrent_streams.len() < accept_backlog;
         if accepting_streams && !accept_backlog_available {
             let progress = poll_fn(|cx| {
                 Poll::Ready(match conn.poll_closed(cx) {
@@ -413,6 +410,70 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::sync::Notify;
     use tokio::time::{Duration, sleep, timeout};
+
+    #[tokio::test]
+    async fn h2_server_advertises_compiled_runtime_limits() -> anyhow::Result<()> {
+        use tokio::io::AsyncReadExt;
+
+        for (runtime, expected_headers, expected_streams) in [
+            ("", 128 * 1024, 256),
+            (
+                "h2_server_max_header_list_size_bytes: 12345\nh2_server_max_concurrent_streams: 7",
+                12345,
+                7,
+            ),
+        ] {
+            let mut config: qpx_core::config::Config = serde_yaml::from_str("edges: []")?;
+            if !runtime.is_empty() {
+                config.runtime = serde_yaml::from_str(runtime)?;
+            }
+            let plan = crate::runtime::RuntimeState::compile_plan(config)?;
+            let (mut client_io, server_io) = duplex(1024);
+            let server = tokio::spawn(super::serve_h2_with_interim_and_capacity_and_tuning(
+                server_io,
+                handler_fn(|_: Request<Body>| async {
+                    pending::<Result<OwnerResponse<Body>, Infallible>>().await
+                }),
+                false,
+                Duration::from_secs(5),
+                plan.limits.body.body_channel_capacity,
+                super::H2ServerTuning::from(plan.limits.h2),
+            ));
+            // Observe the real listener's initial SETTINGS rather than a copy of
+            // the tuning inputs or a Debug representation of the builder.
+            let settings = timeout(Duration::from_secs(5), async {
+                client_io.write_all(H2_PREFACE).await?;
+                client_io.write_all(&[0, 0, 0, 4, 0, 0, 0, 0, 0]).await?;
+                let mut frame = [0_u8; 9];
+                client_io.read_exact(&mut frame).await?;
+                assert_eq!(frame[3], 4, "initial frame must be SETTINGS");
+                assert_eq!(&frame[4..], &[0, 0, 0, 0, 0]);
+                let len = u32::from_be_bytes([0, frame[0], frame[1], frame[2]]) as usize;
+                let mut payload = vec![0; len];
+                client_io.read_exact(&mut payload).await?;
+                Ok::<_, std::io::Error>(payload)
+            })
+            .await;
+            server.abort();
+            let _ = server.await;
+            let settings = settings??;
+            let mut header_limit = None;
+            let mut stream_limit = None;
+            assert_eq!(settings.len() % 6, 0);
+            for setting in settings.as_chunks::<6>().0 {
+                let id = u16::from_be_bytes([setting[0], setting[1]]);
+                let value = u32::from_be_bytes(setting[2..].try_into()?);
+                match id {
+                    3 => stream_limit = Some(value),
+                    6 => header_limit = Some(value),
+                    _ => {}
+                }
+            }
+            assert_eq!(header_limit, Some(expected_headers));
+            assert_eq!(stream_limit, Some(expected_streams));
+        }
+        Ok(())
+    }
 
     #[test]
     fn h2_admission_priority_starts_after_a_bounded_completion_burst() {

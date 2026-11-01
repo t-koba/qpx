@@ -57,7 +57,7 @@ async fn serve_terminated_http<I, S>(
     negotiated_h2: bool,
     header_read_timeout: Duration,
     body_channel_capacity: usize,
-    h2_tuning: crate::http::codec::h2::H2TransportTuning,
+    h2_tuning: crate::http::codec::h2::H2ServerTuning,
 ) -> Result<()>
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -316,10 +316,7 @@ async fn handle_tls_connection(
     let reverse_name = reverse.name.clone();
     let service = ReverseInterimService::new(reverse.clone(), conn);
     let h2_limits = reverse.runtime.state().plan.limits.h2;
-    let h2_tuning = crate::http::codec::h2::H2TransportTuning {
-        initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
-        initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
-    };
+    let h2_tuning = crate::http::codec::h2::H2ServerTuning::from(h2_limits);
     let body_channel_capacity = reverse_body_channel_capacity(&reverse);
     if access_log_service_required(&access_cfg) {
         serve_terminated_http(
@@ -395,10 +392,7 @@ async fn handle_tls_connection(
     let reverse_name = reverse.name.clone();
     let service = ReverseInterimService::new(reverse.clone(), conn);
     let h2_limits = reverse.runtime.state().plan.limits.h2;
-    let h2_tuning = crate::http::codec::h2::H2TransportTuning {
-        initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
-        initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
-    };
+    let h2_tuning = crate::http::codec::h2::H2ServerTuning::from(h2_limits);
     let body_channel_capacity = reverse_body_channel_capacity(&reverse);
     if access_log_service_required(&access_cfg) {
         serve_terminated_http(

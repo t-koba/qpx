@@ -326,6 +326,14 @@ pub(super) fn default_runtime_upstream_max_idle_connections_per_origin() -> usiz
     128
 }
 
+pub(super) fn default_runtime_h2_server_max_header_list_size_bytes() -> u32 {
+    128 * 1024
+}
+
+pub(super) fn default_runtime_h2_server_max_concurrent_streams() -> u32 {
+    256
+}
+
 pub(super) fn default_runtime_h2_initial_stream_window_size_bytes() -> u32 {
     1024 * 1024
 }

@@ -170,6 +170,16 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
             "runtime.upstream_max_idle_connections_per_origin must be >= 1"
         ));
     }
+    if runtime.h2_server_max_header_list_size_bytes == 0 {
+        return Err(anyhow!(
+            "runtime.h2_server_max_header_list_size_bytes must be >= 1"
+        ));
+    }
+    if runtime.h2_server_max_concurrent_streams == 0 {
+        return Err(anyhow!(
+            "runtime.h2_server_max_concurrent_streams must be >= 1"
+        ));
+    }
     validate_h2_window_size(
         runtime.h2_initial_stream_window_size_bytes,
         "runtime.h2_initial_stream_window_size_bytes",

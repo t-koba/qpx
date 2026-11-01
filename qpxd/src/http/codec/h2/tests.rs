@@ -972,7 +972,7 @@ async fn h2_server_refuses_header_list_over_transport_cap() {
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.expect("accept");
         let mut builder = h2::server::Builder::new();
-        tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+        tune_h2_server_builder_with(&mut builder, H2ServerTuning::default());
         let mut conn = builder
             .handshake::<_, bytes::Bytes>(socket)
             .await
@@ -1025,7 +1025,7 @@ fn h2_reset_flood_caps_are_pinned_to_current_h2_defaults() {
     assert_eq!(H2_MAX_LOCAL_ERROR_RESET_STREAMS, 1024);
     assert_eq!(H2_MAX_CONCURRENT_RESET_STREAMS, 50);
     let mut builder = h2::server::Builder::new();
-    tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+    tune_h2_server_builder_with(&mut builder, H2ServerTuning::default());
 }
 
 #[test]
@@ -1043,7 +1043,7 @@ async fn h2_server_refuses_header_count_over_edge_cap() {
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.expect("accept");
         let mut builder = h2::server::Builder::new();
-        tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+        tune_h2_server_builder_with(&mut builder, H2ServerTuning::default());
         let mut conn = builder
             .handshake::<_, bytes::Bytes>(socket)
             .await
@@ -1130,7 +1130,7 @@ async fn h2_server_refuses_cookie_split_over_edge_cap() {
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.expect("accept");
         let mut builder = h2::server::Builder::new();
-        tune_h2_server_builder_with(&mut builder, H2TransportTuning::default());
+        tune_h2_server_builder_with(&mut builder, H2ServerTuning::default());
         let mut conn = builder
             .handshake::<_, bytes::Bytes>(socket)
             .await

@@ -90,10 +90,7 @@ where
     let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface.clone());
     if preface.as_ref() == H2_PREFACE {
         let h2_limits = state.plan.limits.h2;
-        let h2_tuning = crate::http::codec::h2::H2TransportTuning {
-            initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
-            initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
-        };
+        let h2_tuning = crate::http::codec::h2::H2ServerTuning::from(h2_limits);
         serve_h2_with_interim_and_capacity_and_tuning(
             stream,
             service,

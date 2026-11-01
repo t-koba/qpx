@@ -27,10 +27,7 @@ const H2_INITIAL_CONNECTION_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const H2_MAX_FRAME_SIZE: u32 = 64 * 1024;
 const H2_MAX_SEND_BUFFER_SIZE: usize = 16 * 1024;
 const H2_UPSTREAM_RESPONSE_FRAME_SIZE: usize = H2_MAX_FRAME_SIZE as usize;
-pub(crate) const H2_MAX_CONCURRENT_STREAMS: usize = 256;
-// Bound pre-decode header-block buffering at the transport, aligned with the
-// HTTP/1 edge cap (h1_common::MAX_HEADER_BYTES). The h2 crate defaults to
-// 16 MiB when unset, so an explicit cap is the fail-closed default.
+// Fixed upstream client header-list cap; downstream server policy is independent.
 pub(crate) const H2_MAX_HEADER_LIST_SIZE: u32 = 128 * 1024;
 // Bound decoded header field count at the transport, aligned with the HTTP/1
 // edge cap (MAX_HTTP1_REQUEST_HEADERS = 128, mapped to 431). Byte caps alone
@@ -69,6 +66,25 @@ impl Default for H2TransportTuning {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) struct H2ServerTuning {
+    pub(crate) transport: H2TransportTuning,
+    pub(crate) max_header_list_size: u32,
+    pub(crate) max_concurrent_streams: u32,
+}
+
+#[cfg(test)]
+impl Default for H2ServerTuning {
+    fn default() -> Self {
+        let runtime = qpx_core::config::RuntimeConfig::default();
+        Self {
+            transport: H2TransportTuning::default(),
+            max_header_list_size: runtime.h2_server_max_header_list_size_bytes,
+            max_concurrent_streams: runtime.h2_server_max_concurrent_streams,
+        }
+    }
+}
+
 pub(crate) fn http_uri_to_http1_uri(uri: &::http::Uri, error_context: &str) -> Result<::http::Uri> {
     uri.to_string()
         .parse::<::http::Uri>()
@@ -103,14 +119,14 @@ pub(crate) fn tuned_h2_client_builder_with(tuning: H2TransportTuning) -> h2::cli
 
 pub(crate) fn tune_h2_server_builder_with(
     builder: &mut h2::server::Builder,
-    tuning: H2TransportTuning,
+    tuning: H2ServerTuning,
 ) {
-    builder.initial_window_size(tuning.initial_stream_window_size);
-    builder.initial_connection_window_size(tuning.initial_connection_window_size);
+    builder.initial_window_size(tuning.transport.initial_stream_window_size);
+    builder.initial_connection_window_size(tuning.transport.initial_connection_window_size);
     builder.max_frame_size(H2_MAX_FRAME_SIZE);
     builder.max_send_buffer_size(H2_MAX_SEND_BUFFER_SIZE);
-    builder.max_header_list_size(H2_MAX_HEADER_LIST_SIZE);
-    builder.max_concurrent_streams(H2_MAX_CONCURRENT_STREAMS as u32);
+    builder.max_header_list_size(tuning.max_header_list_size);
+    builder.max_concurrent_streams(tuning.max_concurrent_streams);
     builder.max_pending_accept_reset_streams(H2_MAX_PENDING_ACCEPT_RESET_STREAMS);
     builder.max_local_error_reset_streams(Some(H2_MAX_LOCAL_ERROR_RESET_STREAMS));
     builder.max_concurrent_reset_streams(H2_MAX_CONCURRENT_RESET_STREAMS);

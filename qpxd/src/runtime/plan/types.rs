@@ -87,8 +87,24 @@ pub struct GrpcLimits {
 
 #[derive(Clone, Copy)]
 pub struct H2TransportLimits {
+    pub server_max_header_list_size_bytes: u32,
+    pub server_max_concurrent_streams: u32,
     pub initial_stream_window_size_bytes: u32,
     pub initial_connection_window_size_bytes: u32,
+}
+
+impl From<H2TransportLimits> for crate::http::codec::h2::H2ServerTuning {
+    fn from(limits: H2TransportLimits) -> Self {
+        use crate::http::codec::h2::{H2ServerTuning, H2TransportTuning};
+        H2ServerTuning {
+            transport: H2TransportTuning {
+                initial_stream_window_size: limits.initial_stream_window_size_bytes,
+                initial_connection_window_size: limits.initial_connection_window_size_bytes,
+            },
+            max_header_list_size: limits.server_max_header_list_size_bytes,
+            max_concurrent_streams: limits.server_max_concurrent_streams,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

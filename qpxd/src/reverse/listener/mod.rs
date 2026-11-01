@@ -209,10 +209,7 @@ pub(super) async fn run_reverse_http_acceptor(
                 let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface);
                 let access_cfg = reverse.runtime.state().resources.access_log.clone();
                 let h2_limits = reverse.runtime.state().plan.limits.h2;
-                let h2_tuning = crate::http::codec::h2::H2TransportTuning {
-                    initial_stream_window_size: h2_limits.initial_stream_window_size_bytes,
-                    initial_connection_window_size: h2_limits.initial_connection_window_size_bytes,
-                };
+                let h2_tuning = crate::http::codec::h2::H2ServerTuning::from(h2_limits);
                 let body_channel_capacity = reverse_body_channel_capacity(&reverse);
                 let result = if access_log_service_required(&access_cfg) {
                     let service = AccessLogService::new(

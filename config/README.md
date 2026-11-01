@@ -217,6 +217,20 @@ cargo build -p qpxd -p qpxf
 - `http.guard_profiles` is the reusable lightweight HTTP guard surface. Attach a profile with `edges[].http_guard_profile` or `edges[kind=reverse].routes[].http_guard_profile` to enable smuggling/framing checks and bounded path/query/header/body parsing.
 - Reverse-route CORS lives at `edges[kind=reverse].routes[].http.cors`. qpx answers matching preflights before the target and makes the configured policy authoritative over target response fields. See `reverse-cors-origin.yaml` and [`docs/cors.md`](../docs/cors.md).
 - Browser-origin request and response enforcement lives under `routes[].http.fetch_metadata`, `browser_security`, `cookies`, `reporting_collector`, and `client_certificate`. See [`docs/browser-origin-security.md`](../docs/browser-origin-security.md).
+- Downstream HTTP/2 servers (forward, transparent, and reverse plaintext/TLS) use
+  `runtime.h2_server_max_header_list_size_bytes` (default `131072`, 128 KiB) and
+  `runtime.h2_server_max_concurrent_streams` (default `256`). Both accept integers
+  from `1` through `4294967295`; the `u32` upper bound is intrinsic to HTTP/2
+  SETTINGS, while zero is rejected by qpx policy. The header-list budget bounds
+  decoded header-list size (including HTTP/2 per-field overhead), not just wire
+  bytes. The independent 128 decoded-field ceiling still applies. Increasing the
+  header budget admits larger request heads at a higher per-stream memory cost;
+  increasing concurrent streams allows more per-connection work and buffering.
+  Lower limits reduce those resource budgets but can reject requests or restrict
+  multiplexing. The accept backlog is bounded by the same effective stream limit
+  (default `256`), with no separate knob. These server settings do not change
+  upstream H2 client header limits, flow-control windows, frame/send sizes,
+  reset-flood limits, or HTTP/3 policy.
 - Runtime knobs worth calling out explicitly: `runtime.max_h3_streams_per_connection`, `runtime.upstream_http_timeout_ms`, `runtime.upstream_max_idle_connections_per_origin`, `runtime.h2_initial_stream_window_size_bytes`, `runtime.h2_initial_connection_window_size_bytes`, `runtime.max_observed_request_body_bytes`, `runtime.max_observed_response_body_bytes`, `runtime.trace_enabled`, and `runtime.trace_reflect_all_headers`. See `runtime-multicore-scaling.yaml` and `config/qpx.example.yaml`.
 - `forward-trace-debug.yaml` is the dedicated loopback-only sample for TRACE diagnostics. Keep `trace_reflect_all_headers: false` unless you explicitly need full header echo for local troubleshooting.
 - Optional built-in auth supports `auth.users[].ha1` for Digest HA1 preload, and LDAP supports `user_filter`, `group_filter`, and `group_attr`. These require explicit `qpxd` auth features. See `forward-local-auth-basic-digest.yaml` and `forward-ldap-group-policy.yaml`.

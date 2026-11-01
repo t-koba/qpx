@@ -117,6 +117,17 @@ reload for compatible config edits.
   `runtime.h2_initial_connection_window_size_bytes` tune HTTP/2 flow-control
   windows for downstream H2 listeners and direct HTTPS/H2 origin connections.
   Defaults favor high-throughput proxying without requiring per-route tuning.
+- `runtime.h2_server_max_header_list_size_bytes` (default 131072 / 128 KiB) and
+  `runtime.h2_server_max_concurrent_streams` (default 256) set the HTTP/2 SETTINGS
+  advertised by downstream forward, transparent and reverse listeners. Both accept
+  `1..=4294967295`; zero is rejected. The independent decoded-field ceiling still
+  applies. The header budget bounds decoded header-list size, including per-field
+  overhead, so raising it admits larger request heads at higher per-stream memory
+  cost. Raising concurrent streams admits more per-connection work and buffering;
+  the accept backlog follows the same value. These settings do not change upstream
+  H2 client limits, flow-control windows, frame/send sizes, reset-flood limits or
+  HTTP/3. New connections pick up changes on reload; existing H2 connections keep
+  their negotiated settings.
 - Downstream HTTP/3 QUIC flow-control windows are configured in bytes with
   `runtime.h3_stream_receive_window_bytes` (default 1048576 / 1 MiB),
   `runtime.h3_connection_receive_window_bytes` (default 4194304 / 4 MiB), and

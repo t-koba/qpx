@@ -189,6 +189,8 @@ pub(crate) async fn run(
             config.runtime.upstream_proxy_max_concurrent_per_endpoint,
         upstream_max_idle_connections_per_origin =
             config.runtime.upstream_max_idle_connections_per_origin,
+        h2_server_max_header_list_size_bytes = config.runtime.h2_server_max_header_list_size_bytes,
+        h2_server_max_concurrent_streams = config.runtime.h2_server_max_concurrent_streams,
         h2_initial_stream_window_size_bytes = config.runtime.h2_initial_stream_window_size_bytes,
         h2_initial_connection_window_size_bytes =
             config.runtime.h2_initial_connection_window_size_bytes,

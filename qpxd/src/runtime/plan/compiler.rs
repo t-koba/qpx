@@ -361,6 +361,8 @@ fn compile_runtime_limits(config: &RuntimeResources) -> CompiledRuntimeLimits {
             max_grpc_stream_duration_ms: runtime.max_grpc_stream_duration_ms,
         },
         h2: H2TransportLimits {
+            server_max_header_list_size_bytes: runtime.h2_server_max_header_list_size_bytes,
+            server_max_concurrent_streams: runtime.h2_server_max_concurrent_streams,
             initial_stream_window_size_bytes: runtime.h2_initial_stream_window_size_bytes,
             initial_connection_window_size_bytes: runtime.h2_initial_connection_window_size_bytes,
         },

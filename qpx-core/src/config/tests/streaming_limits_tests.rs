@@ -444,3 +444,51 @@ fn load_config_rejects_invalid_h3_flow_control_windows() {
     }
     fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn load_config_h2_server_limits_defaults_and_overrides() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("h2-server-limits.yaml");
+    let defaults = RuntimeConfig::default();
+    assert_eq!(defaults.h2_server_max_header_list_size_bytes, 128 * 1024);
+    assert_eq!(defaults.h2_server_max_concurrent_streams, 256);
+    for (runtime, expected) in [
+        (String::new(), (128 * 1024, 256)),
+        ("runtime: {}\n".to_string(), (128 * 1024, 256)),
+        ("runtime:\n  h2_server_max_header_list_size_bytes: 12345\n  h2_server_max_concurrent_streams: 7\n".to_string(), (12345, 7)),
+        ("runtime:\n  h2_server_max_header_list_size_bytes: 1\n  h2_server_max_concurrent_streams: 1\n".to_string(), (1, 1)),
+        (format!("runtime:\n  h2_server_max_header_list_size_bytes: {0}\n  h2_server_max_concurrent_streams: {0}\n", u32::MAX), (u32::MAX, u32::MAX)),
+    ] {
+        write_config(&cfg, &format!("{runtime}edges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:18080\n  default_action:\n    type: direct\n")).expect("write");
+        let loaded = load_config(&cfg).expect("load config");
+        assert_eq!(
+            (loaded.runtime.h2_server_max_header_list_size_bytes, loaded.runtime.h2_server_max_concurrent_streams),
+            expected
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
+fn load_config_rejects_invalid_h2_server_limits() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("h2-server-limits-invalid.yaml");
+    for field in [
+        "h2_server_max_header_list_size_bytes",
+        "h2_server_max_concurrent_streams",
+    ] {
+        for value in ["0", "-1", "4294967296"] {
+            write_config(&cfg, &format!("runtime:\n  {field}: {value}\nedges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:18080\n  default_action:\n    type: direct\n")).expect("write");
+            let err = load_config(&cfg).expect_err("invalid HTTP/2 server limit");
+            let diagnostic = if value == "0" {
+                format!("runtime.{field} must be >= 1")
+            } else {
+                "expected u32".to_string()
+            };
+            assert!(format!("{err:#}").contains(&diagnostic), "{err:#}");
+        }
+    }
+    fs::remove_dir_all(&dir).ok();
+}

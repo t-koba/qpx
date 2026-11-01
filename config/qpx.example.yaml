@@ -32,6 +32,9 @@ runtime:
   max_reverse_retry_template_body_bytes: 8388608
   upstream_http_timeout_ms: 30000
   upstream_max_idle_connections_per_origin: 128
+  # Downstream H2 only; nonzero u32 SETTINGS values (1..4294967295).
+  h2_server_max_header_list_size_bytes: 131072
+  h2_server_max_concurrent_streams: 256
   h2_initial_stream_window_size_bytes: 1048576
   h2_initial_connection_window_size_bytes: 4194304
 upstreams:
