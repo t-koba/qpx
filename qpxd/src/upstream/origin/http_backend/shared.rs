@@ -8,8 +8,8 @@ use crate::upstream::raw_http1::{
     Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
 };
 use anyhow::{Result, anyhow};
+use hyper::Response;
 use hyper::header::{HOST, HeaderValue};
-use hyper::{Response, Uri};
 use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
@@ -20,13 +20,20 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
     req: OwnerRequest<Body>,
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<Response<Body>> {
-    let target = absolute_request_target(req.uri())?;
-    let authority =
-        qpx_http::protocol::address::format_authority_host_port(&target.host, target.port);
+    let parsed = url::Url::parse(req.uri().to_string().as_str())?;
+    let scheme = parsed.scheme().to_string();
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| anyhow!("absolute request URI missing host"))?
+        .to_string();
+    let port = parsed
+        .port()
+        .unwrap_or_else(|| super::super::dispatch::default_port_for_scheme(scheme.as_str()));
+    let authority = qpx_http::protocol::address::format_authority_host_port(&host, port);
     let slot = pools.direct_origin.https_slot(https_origin_pool_key(
         authority.as_str(),
         authority.as_str(),
-        target.host.as_str(),
+        host.as_str(),
         true,
         trust,
     ));
@@ -34,7 +41,7 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
     match acquire_https_connection(
         &slot,
         authority.as_str(),
-        target.host.as_str(),
+        host.as_str(),
         true,
         trust,
         pools.direct_origin.h2_tuning(),
@@ -42,7 +49,7 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
     .await?
     {
         HttpsConnectionAcquisition::H2Ready { shared, ready } => {
-            let req = prepare_internal_h2_request(req, target.scheme.as_str(), authority.as_str())?;
+            let req = prepare_internal_h2_request(req, scheme.as_str(), authority.as_str())?;
             let hyper_req = req.into_http_for_codec().map_err(|err| anyhow!("{err}"))?;
             let mut proxied = send_h2_request_with_sender(
                 hyper_req,
@@ -93,12 +100,6 @@ pub(super) async fn send_tls_http1_with_recycle(
     Ok(proxied)
 }
 
-struct AbsoluteRequestTarget {
-    scheme: String,
-    host: String,
-    port: u16,
-}
-
 fn prepare_internal_http1_request(
     mut req: OwnerRequest<Body>,
     authority: &str,
@@ -111,17 +112,4 @@ fn prepare_internal_http1_request(
             .insert(host, HeaderValue::from_str(authority)?);
     }
     Ok(req)
-}
-
-fn absolute_request_target(uri: &Uri) -> Result<AbsoluteRequestTarget> {
-    let parsed = url::Url::parse(uri.to_string().as_str())?;
-    let scheme = parsed.scheme().to_string();
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| anyhow!("absolute request URI missing host"))?
-        .to_string();
-    let port = parsed
-        .port()
-        .unwrap_or_else(|| super::super::dispatch::default_port_for_scheme(scheme.as_str()));
-    Ok(AbsoluteRequestTarget { scheme, host, port })
 }
