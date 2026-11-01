@@ -247,7 +247,7 @@ impl ModuleResponseCarrier for OwnerResponse<Body> {
 fn request_host<'a>(uri: &'a http::Uri, headers: &'a Headers) -> Option<&'a str> {
     uri.host().or_else(|| {
         headers
-            .get(&OrdinaryHeaderName::try_from(HOST).expect("ordinary host"))
+            .get(&OrdinaryHeaderName::try_from(HOST).ok()?)
             .and_then(|value| value.to_str().ok())
     })
 }
@@ -814,8 +814,9 @@ impl HttpModuleContext {
         let mut minimal = OwnerRequest::new(());
         *minimal.method_mut() = request.method().clone();
         *minimal.uri_mut() = request.uri().clone();
-        let host = OrdinaryHeaderName::try_from(HOST).expect("ordinary host");
-        if let Some(value) = request.headers().get(&host).cloned() {
+        if let Ok(host) = OrdinaryHeaderName::try_from(HOST)
+            && let Some(value) = request.headers().get(&host).cloned()
+        {
             minimal.headers_mut().insert(host, value);
         }
         CacheRequestKey::for_target(&minimal, default_scheme)
