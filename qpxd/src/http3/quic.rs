@@ -185,6 +185,50 @@ mod tests {
         }
     }
 
+    fn test_h3_server_tls_config() -> Result<quinn::rustls::ServerConfig> {
+        use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".to_string()])?;
+        let provider = quinn::rustls::crypto::ring::default_provider();
+        Ok(
+            quinn::rustls::ServerConfig::builder_with_provider(provider.into())
+                .with_protocol_versions(&[&quinn::rustls::version::TLS13])?
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![cert.cert.der().clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        cert.signing_key.serialize_der(),
+                    )),
+                )?,
+        )
+    }
+
+    #[test]
+    fn h3_server_config_applies_compiled_runtime_window_overrides() -> Result<()> {
+        let mut config: qpx_core::config::Config = serde_yaml::from_str("edges: []")?;
+        config.runtime = serde_yaml::from_str(
+            "h3_stream_receive_window_bytes: 123\nh3_connection_receive_window_bytes: 234\nh3_send_window_bytes: 345",
+        )?;
+        let plan = crate::runtime::RuntimeState::compile_plan(config)?;
+        let server =
+            build_h3_server_config_from_tls(test_h3_server_tls_config()?, &plan.limits.h3, 1)?;
+
+        // Quinn has no public getters for these fields; inspect the transport object
+        // returned by the production builder rather than only testing its inputs.
+        let transport = format!("{:?}", server.transport);
+        for (field, value) in [
+            ("stream_receive_window", 123_u64),
+            ("receive_window", 234_u64),
+            ("send_window", 345_u64),
+        ] {
+            assert!(
+                transport.contains(&format!("{field}: {value}")),
+                "constructed transport did not apply {field}={value}: {transport}"
+            );
+        }
+        Ok(())
+    }
+
     #[test]
     fn h3_bidi_stream_limit_is_bounded_and_nonzero() {
         assert_eq!(h3_bidi_stream_limit(0), 1);
