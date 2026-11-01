@@ -47,18 +47,15 @@ bash ./scripts/check-ci-acceptance-gates.sh
 
 LOC budgets are advisory trend signals. `xtask` reports LOC drift as a notice, not a failure, so reviewers can ask why code grew without forcing arbitrary shortening. The next action is deliberately explicit: either reduce the drift by removing accidental duplication or update the advisory baseline in `xtask/src/budget.rs` / `xtask/loc-budgets.tsv` with a review rationale when the larger shape is intentional and improves correctness, coverage, or ownership. Do not contort code, delete useful behavior, or split modules only to satisfy a line-count target; prefer clear ownership, lower duplication, better tests, and measurable hot-path improvements. Function length is not separately baseline-gated; use the structural gates below when ownership, duplication, or hot-path resource behavior is the actual concern.
 
-Current workspace total LOC advisory baseline:
+The authoritative whole-workspace totals are the machine-checked
+`TOTAL_LOC_BUDGETS` constants in `xtask/src/budget.rs`; `cargo xtask budget`
+prints the measured values against them. Do not copy the numbers into this
+document: a second copy drifts from the gate.
 
-| Class | Current | Advisory Baseline |
-|---|---:|---:|
-| Production Rust | 108,297 | 108,297 |
-| Test Rust | 33,077 | 33,077 |
-| Markdown docs | 2,386 | 2,386 |
-
-The current values are intentionally above the initial advisory baseline. The
-increase comes from Phase 3/4 regression gates, acceptance checks, fuzz target
-coverage, boundary documentation, and targeted tests added to preserve behavior
-while consolidating hot paths. This drift is tracked as a review signal, not a
+Values are intentionally above the initial advisory baseline. The increase
+comes from Phase 3/4 regression gates, acceptance checks, fuzz target coverage,
+boundary documentation, and targeted tests added to preserve behavior while
+consolidating hot paths. This drift is tracked as a review signal, not a
 failure condition; ratchet the baseline downward only when redundant
 implementations are removed without losing behavior or performance.
 
