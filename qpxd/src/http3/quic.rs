@@ -222,7 +222,7 @@ mod tests {
             ("send_window", 345_u64),
         ] {
             assert!(
-                transport.contains(&format!("{field}: {value}")),
+                transport.contains(&format!("{field}: {value},")),
                 "constructed transport did not apply {field}={value}: {transport}"
             );
         }
