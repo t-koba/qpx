@@ -6784,9 +6784,10 @@ mod tests {
         .expect("write the fixture source");
         let error = check_production_unwraps(&root).expect_err("a member unwrap must be ratcheted");
         fs::remove_dir_all(&root).expect("remove the fixture workspace");
+        let message = error.to_string();
         assert!(
-            error.to_string().contains("sample-member/src/lib.rs"),
-            "unexpected error: {error}"
+            message.contains("sample-member") && message.contains("unwrap() in authority_host"),
+            "unexpected error: {message}"
         );
     }
 
