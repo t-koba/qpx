@@ -213,10 +213,14 @@ mod tests {
         )?;
         let plan = crate::runtime::RuntimeState::compile_plan(config)?;
         assert!(plan.limits.h3.allow_connection_migration);
-        // Quinn exposes no getter for the migration flag; assert the compiled value
-        // and keep inspecting the transport Debug output for the window settings.
+        // Quinn exposes no migration getter: read the configured flag from the
+        // ServerConfig Debug output and the window fields from TransportConfig.
         let server =
             build_h3_server_config_from_tls(test_h3_server_tls_config()?, &plan.limits.h3)?;
+        assert!(
+            format!("{server:?}").contains("migration: true"),
+            "constructed ServerConfig did not apply migration=true: {server:?}"
+        );
 
         // Quinn has no public getters for these fields; inspect the transport object
         // returned by the production builder rather than only testing its inputs.
@@ -232,6 +236,15 @@ mod tests {
                 "constructed transport did not apply {field}={value}: {transport}"
             );
         }
+
+        let default_config: qpx_core::config::Config = serde_yaml::from_str("edges: []")?;
+        let default_plan = crate::runtime::RuntimeState::compile_plan(default_config)?;
+        let default_server =
+            build_h3_server_config_from_tls(test_h3_server_tls_config()?, &default_plan.limits.h3)?;
+        assert!(
+            format!("{default_server:?}").contains("migration: false"),
+            "default ServerConfig did not keep migration disabled: {default_server:?}"
+        );
         Ok(())
     }
 
