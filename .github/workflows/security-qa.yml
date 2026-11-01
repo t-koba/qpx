@@ -17,8 +17,10 @@ jobs:
       RUSTFLAGS: -Zsanitizer=address
     steps:
       - uses: actions/checkout@v5
+      # Pinned: unpinned nightly regresses on the ldap3/lber async-drop query.
       - uses: dtolnay/rust-toolchain@nightly
         with:
+          toolchain: nightly-2026-07-15
           components: rust-src
       - name: install sanitizer toolchain
         run: |
@@ -35,7 +37,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v5
+      # Pinned: unpinned nightly regresses on the ldap3/lber async-drop query.
       - uses: dtolnay/rust-toolchain@nightly
+        with:
+          toolchain: nightly-2026-07-15
       - name: install fuzzing toolchain
         run: |
           sudo apt-get update
