@@ -424,6 +424,34 @@ fn load_config_h3_flow_control_defaults_and_overrides() {
 }
 
 #[test]
+fn load_config_h3_max_uni_streams_defaults_and_overrides() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("h3-uni-streams.yaml");
+    assert_eq!(RuntimeConfig::default().h3_max_uni_streams, 1024);
+    for (runtime, expected) in [
+        (String::new(), 1024usize),
+        ("runtime:\n  h3_max_uni_streams: 77\n".to_string(), 77),
+        (
+            format!("runtime:\n  h3_max_uni_streams: {}\n", u32::MAX),
+            u32::MAX as usize,
+        ),
+    ] {
+        write_config(&cfg, &format!("{runtime}edges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:18080\n  default_action:\n    type: direct\n")).expect("write");
+        let loaded = load_config(&cfg).expect("load config");
+        assert_eq!(loaded.runtime.h3_max_uni_streams, expected);
+    }
+    for invalid in ["0".to_string(), format!("{}", u64::from(u32::MAX) + 1)] {
+        write_config(&cfg, &format!("runtime:\n  h3_max_uni_streams: {invalid}\nedges:\n- kind: forward\n  name: forward\n  listen: 127.0.0.1:18080\n  default_action:\n    type: direct\n")).expect("write");
+        assert!(
+            load_config(&cfg).is_err(),
+            "h3_max_uni_streams={invalid} must be rejected"
+        );
+    }
+    fs::remove_dir_all(&dir).ok();
+}
+
+#[test]
 fn load_config_rejects_invalid_h3_flow_control_windows() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");

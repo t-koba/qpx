@@ -33,7 +33,7 @@ pub(crate) async fn run_http3_terminate(
 ) -> Result<()> {
     let tls_config = build_reverse_tls_config(&reverse)?;
     let h3_limits = reverse_rt.runtime.state().plan.limits.h3;
-    let server_config = build_h3_server_config_from_tls(tls_config, &h3_limits, 1024)?;
+    let server_config = build_h3_server_config_from_tls(tls_config, &h3_limits)?;
     let endpoint = build_server_endpoint(endpoint_socket, server_config)?;
 
     let semaphore = reverse_rt.runtime.state().connection_semaphore.clone();

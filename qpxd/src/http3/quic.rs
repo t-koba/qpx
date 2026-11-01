@@ -114,9 +114,10 @@ fn h3_bidi_stream_limit(configured: usize) -> u32 {
 pub(crate) fn build_h3_server_config_from_tls(
     mut tls: quinn::rustls::ServerConfig,
     limits: &H3ChannelLimits,
-    max_uni_streams: u32,
 ) -> Result<quinn::ServerConfig> {
     let (stream_receive, connection_receive, send) = h3_flow_control_windows(limits)?;
+    let max_uni_streams = u32::try_from(limits.max_uni_streams)
+        .map_err(|_| anyhow!("runtime.h3_max_uni_streams exceeds the QUIC API stream bound"))?;
     tls.alpn_protocols = vec![b"h3".to_vec()];
     // Disable 0-RTT by default to avoid replay risks on non-idempotent requests.
     tls.max_early_data_size = 0;
@@ -207,11 +208,11 @@ mod tests {
     fn h3_server_config_applies_compiled_runtime_window_overrides() -> Result<()> {
         let mut config: qpx_core::config::Config = serde_yaml::from_str("edges: []")?;
         config.runtime = serde_yaml::from_str(
-            "h3_stream_receive_window_bytes: 123\nh3_connection_receive_window_bytes: 234\nh3_send_window_bytes: 345",
+            "h3_stream_receive_window_bytes: 123\nh3_connection_receive_window_bytes: 234\nh3_send_window_bytes: 345\nh3_max_uni_streams: 789",
         )?;
         let plan = crate::runtime::RuntimeState::compile_plan(config)?;
         let server =
-            build_h3_server_config_from_tls(test_h3_server_tls_config()?, &plan.limits.h3, 1)?;
+            build_h3_server_config_from_tls(test_h3_server_tls_config()?, &plan.limits.h3)?;
 
         // Quinn has no public getters for these fields; inspect the transport object
         // returned by the production builder rather than only testing its inputs.
@@ -220,6 +221,7 @@ mod tests {
             ("stream_receive_window", 123_u64),
             ("receive_window", 234_u64),
             ("send_window", 345_u64),
+            ("max_concurrent_uni_streams", 789_u64),
         ] {
             assert!(
                 transport.contains(&format!("{field}: {value},")),

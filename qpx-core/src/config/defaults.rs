@@ -310,6 +310,10 @@ pub(super) fn default_runtime_h3_send_window_bytes() -> u64 {
     4 * 1024 * 1024
 }
 
+pub(super) fn default_runtime_h3_max_uni_streams() -> usize {
+    1024
+}
+
 pub(super) fn default_runtime_h3_origin_pool_max_connections_per_origin() -> usize {
     4
 }

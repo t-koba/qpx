@@ -141,6 +141,13 @@ reload for compatible config edits.
   high-latency links but increase potential per-connection buffering; smaller
   windows constrain buffering but may limit throughput. Tune with workload and
   memory measurements. Changes restart listeners during configuration reload.
+- Downstream HTTP/3 unidirectional streams are capped by
+  `runtime.h3_max_uni_streams` (default 1024) on every forward and reverse
+  terminating H3 listener and either backend. Raise it for WebTransport
+  multiplexing; lower it to bound per-connection stream memory. It does not
+  apply to upstream/client transports or QUIC passthrough. Changes restart
+  listeners during configuration reload because the cap is advertised by the
+  QUIC transport.
 - FTP gateway concurrency is bounded by the listener/reverse worker topology and
   by FTP request/download limits. Tune `runtime.worker_threads`,
   `runtime.max_blocking_threads`, `runtime.acceptor_tasks_per_listener`,

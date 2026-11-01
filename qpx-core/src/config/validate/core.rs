@@ -136,6 +136,15 @@ pub(super) fn validate_runtime_config(runtime: &RuntimeConfig) -> Result<()> {
             "runtime.max_h3_streams_per_connection must be >= 1"
         ));
     }
+    if runtime.h3_max_uni_streams == 0 {
+        return Err(anyhow!("runtime.h3_max_uni_streams must be >= 1"));
+    }
+    if u32::try_from(runtime.h3_max_uni_streams).is_err() {
+        return Err(anyhow!(
+            "runtime.h3_max_uni_streams must be <= {}",
+            u32::MAX
+        ));
+    }
     validate_quic_receive_window(
         runtime.h3_stream_receive_window_bytes,
         "runtime.h3_stream_receive_window_bytes",

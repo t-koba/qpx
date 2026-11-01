@@ -113,6 +113,7 @@ pub struct H3ChannelLimits {
     pub connection_receive_window_bytes: u64,
     pub send_window_bytes: u64,
     pub max_h3_streams_per_connection: usize,
+    pub max_uni_streams: usize,
     pub datagram_channel_capacity: usize,
     pub webtransport_datagram_channel_capacity: usize,
     pub webtransport_stream_channel_capacity: usize,
