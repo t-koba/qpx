@@ -3,7 +3,7 @@ use super::super::connect_upstream::{
     build_qpx_connect_success_head, open_upstream_qpx_connect_udp_stream,
 };
 use super::super::relay::{relay_qpx_connect_udp_stream, relay_qpx_connect_udp_stream_chained};
-use super::super::response::{QpxPolicyResponseContext, send_qpx_policy_response};
+use super::super::response::{H3ConnectPolicyResponseContext, send_qpx_policy_response};
 use super::prepare::PreparedQpxConnect;
 use crate::forward::h3::connect::{H3ConnectAllowAuditContext, emit_h3_connect_allow_audit};
 use crate::forward::request::resolve_upstream_url;
@@ -78,10 +78,10 @@ pub(super) async fn run_connect_udp_relay(
             send_qpx_policy_response(
                 $req_stream,
                 $response,
-                QpxPolicyResponseContext {
+                H3ConnectPolicyResponseContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
-                    conn: &conn,
+                    remote_ip: conn.remote_addr.ip(),
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,

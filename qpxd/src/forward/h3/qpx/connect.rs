@@ -8,7 +8,7 @@ use super::relay::{
     relay_qpx_extended_connect_stream,
 };
 use super::response::{
-    QpxPolicyResponseContext, finalize_qpx_connect_head_response, send_qpx_policy_response,
+    H3ConnectPolicyResponseContext, finalize_qpx_connect_head_response, send_qpx_policy_response,
     send_qpx_response_stream, send_qpx_static_response,
     upstream_qpx_extended_connect_error_response,
 };
@@ -158,10 +158,10 @@ async fn run_qpx_traditional_connect_tunnel(
             send_qpx_policy_response(
                 $req_stream,
                 $response,
-                QpxPolicyResponseContext {
+                H3ConnectPolicyResponseContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
-                    conn: &conn,
+                    remote_ip: conn.remote_addr.ip(),
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,
@@ -374,10 +374,10 @@ async fn handle_qpx_extended_connect_stream(
             send_qpx_policy_response(
                 $req_stream,
                 $response,
-                QpxPolicyResponseContext {
+                H3ConnectPolicyResponseContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
-                    conn: &conn,
+                    remote_ip: conn.remote_addr.ip(),
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,

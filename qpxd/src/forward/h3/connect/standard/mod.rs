@@ -1,8 +1,6 @@
-use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::connect_established_response as connect_established;
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::codec::http_headers_to_h1;
-use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response};
 use crate::policy_context::{AuditRecord, emit_audit_log};
 use crate::rate_limit::RateLimitContext;
@@ -47,18 +45,7 @@ pub(super) struct PreparedH3Connect {
     pub(super) identity: crate::policy_context::ResolvedIdentity,
 }
 
-pub(super) struct H3PolicyResponseContext<'a> {
-    pub(super) request_method: &'a http::Method,
-    pub(super) state: &'a crate::runtime::RuntimeState,
-    pub(super) listener_name: &'a str,
-    pub(super) conn: &'a H3ConnInfo,
-    pub(super) host: &'a str,
-    pub(super) path: Option<&'a str>,
-    pub(super) outcome: DispatchOutcome,
-    pub(super) matched_rule: Option<&'a str>,
-    pub(super) decision_service_policy_id: Option<&'a str>,
-    pub(super) log_context: &'a RequestLogContext,
-}
+pub(super) use super::H3ConnectPolicyResponseContext;
 
 pub(super) fn build_h3_connect_success_response(
     proxy_name: &str,
@@ -93,13 +80,12 @@ pub(super) fn build_h3_connect_success_response(
 pub(super) async fn send_h3_policy_response<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut H3ServerRequestStream,
     response: R,
-    ctx: H3PolicyResponseContext<'_>,
+    ctx: H3ConnectPolicyResponseContext<'_>,
 ) -> Result<()> {
-    let H3PolicyResponseContext {
-        request_method,
+    let H3ConnectPolicyResponseContext {
         state,
         listener_name,
-        conn,
+        remote_ip,
         host,
         path,
         outcome,
@@ -112,7 +98,7 @@ pub(super) async fn send_h3_policy_response<R: crate::http::response_carrier::Re
         AuditRecord {
             kind: crate::http::dispatch::ProxyKind::Forward,
             name: listener_name,
-            remote_ip: conn.remote_addr.ip(),
+            remote_ip,
             host: Some(host),
             sni: Some(host),
             method: Some("CONNECT"),
@@ -127,7 +113,7 @@ pub(super) async fn send_h3_policy_response<R: crate::http::response_carrier::Re
     );
     send_h3_response(
         response.into_owner(),
-        request_method,
+        &http::Method::CONNECT,
         req_stream,
         state.plan.limits.body.max_h3_response_body_bytes,
         Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),

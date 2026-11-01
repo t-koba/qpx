@@ -21,7 +21,7 @@ use std::sync::Arc;
 use tracing::warn;
 
 use super::super::super::response::{
-    QpxPolicyResponseContext, send_qpx_policy_response, send_qpx_static_response,
+    H3ConnectPolicyResponseContext, send_qpx_policy_response, send_qpx_static_response,
 };
 
 pub(super) async fn evaluate_connect_policy(
@@ -76,10 +76,10 @@ pub(super) async fn evaluate_connect_policy(
             send_qpx_policy_response(
                 req_stream,
                 response,
-                QpxPolicyResponseContext {
+                H3ConnectPolicyResponseContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
-                    conn,
+                    remote_ip: conn.remote_addr.ip(),
                     host: context.host.as_str(),
                     path: context.audit_path.as_deref(),
                     outcome: crate::http::dispatch::DispatchOutcome::Challenge,
@@ -104,10 +104,10 @@ pub(super) async fn evaluate_connect_policy(
             send_qpx_policy_response(
                 req_stream,
                 response,
-                QpxPolicyResponseContext {
+                H3ConnectPolicyResponseContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
-                    conn,
+                    remote_ip: conn.remote_addr.ip(),
                     host: context.host.as_str(),
                     path: context.audit_path.as_deref(),
                     outcome: crate::http::dispatch::DispatchOutcome::Forbidden,
@@ -173,10 +173,10 @@ pub(super) async fn apply_connect_rate_limits(
             send_qpx_policy_response(
                 req_stream,
                 $response,
-                QpxPolicyResponseContext {
+                H3ConnectPolicyResponseContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
-                    conn,
+                    remote_ip: conn.remote_addr.ip(),
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,
@@ -367,10 +367,10 @@ async fn send_connect_local_action(input: SendConnectLocalActionInput<'_>) -> Re
     send_qpx_policy_response(
         req_stream,
         response,
-        QpxPolicyResponseContext {
+        H3ConnectPolicyResponseContext {
             state,
             listener_name: handler.listener_name.as_ref(),
-            conn,
+            remote_ip: conn.remote_addr.ip(),
             host,
             path: audit_path,
             outcome,

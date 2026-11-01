@@ -1,5 +1,4 @@
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
-use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::policy_context::{AuditRecord, emit_audit_log};
@@ -8,7 +7,6 @@ use bytes::Bytes;
 use hyper::{Response, StatusCode};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
-use qpx_observability::access_log::RequestLogContext;
 use std::time::Duration;
 
 pub(super) async fn send_qpx_static_response(
@@ -65,12 +63,12 @@ pub(super) async fn send_qpx_response_stream<R: crate::http::response_carrier::R
 pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut qpx_h3::RequestStream,
     response: R,
-    ctx: QpxPolicyResponseContext<'_>,
+    ctx: H3ConnectPolicyResponseContext<'_>,
 ) -> Result<()> {
-    let QpxPolicyResponseContext {
+    let H3ConnectPolicyResponseContext {
         state,
         listener_name,
-        conn,
+        remote_ip,
         host,
         path,
         outcome,
@@ -83,7 +81,7 @@ pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::R
         AuditRecord {
             kind: crate::http::dispatch::ProxyKind::Forward,
             name: listener_name,
-            remote_ip: conn.remote_addr.ip(),
+            remote_ip,
             host: Some(host),
             sni: Some(host),
             method: Some("CONNECT"),
@@ -106,17 +104,7 @@ pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::R
     .await
 }
 
-pub(super) struct QpxPolicyResponseContext<'a> {
-    pub(super) state: &'a crate::runtime::RuntimeState,
-    pub(super) listener_name: &'a str,
-    pub(super) conn: &'a qpx_h3::ConnectionInfo,
-    pub(super) host: &'a str,
-    pub(super) path: Option<&'a str>,
-    pub(super) outcome: DispatchOutcome,
-    pub(super) matched_rule: Option<&'a str>,
-    pub(super) decision_service_policy_id: Option<&'a str>,
-    pub(super) log_context: &'a RequestLogContext,
-}
+pub(super) use crate::forward::h3::connect::H3ConnectPolicyResponseContext;
 
 pub(super) fn finalize_qpx_connect_head_response(
     response: http::Response<()>,

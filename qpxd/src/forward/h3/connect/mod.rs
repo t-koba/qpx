@@ -48,6 +48,19 @@ pub(super) fn build_h3_connect_rule_context<'a>(
     })
 }
 
+/// Backend-neutral metadata shared by the HTTP/3 CONNECT policy-response senders.
+pub(super) struct H3ConnectPolicyResponseContext<'a> {
+    pub(super) state: &'a crate::runtime::RuntimeState,
+    pub(super) listener_name: &'a str,
+    pub(super) remote_ip: std::net::IpAddr,
+    pub(super) host: &'a str,
+    pub(super) path: Option<&'a str>,
+    pub(super) outcome: crate::http::dispatch::DispatchOutcome,
+    pub(super) matched_rule: Option<&'a str>,
+    pub(super) decision_service_policy_id: Option<&'a str>,
+    pub(super) log_context: &'a qpx_observability::access_log::RequestLogContext,
+}
+
 /// Context for the shared successful forward-CONNECT audit event on either HTTP/3 backend.
 #[cfg(feature = "http3")]
 pub(super) struct H3ConnectAllowAuditContext<'a> {

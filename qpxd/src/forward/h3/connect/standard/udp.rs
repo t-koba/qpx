@@ -1,6 +1,6 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::{
-    H3PolicyResponseContext, build_h3_connect_success_response,
+    H3ConnectPolicyResponseContext, build_h3_connect_success_response,
     normalize_h3_upstream_connect_headers, prepare_h3_connect_request,
     recv_upstream_h3_response_with_interim, send_h3_policy_response,
 };
@@ -84,11 +84,10 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             send_h3_policy_response(
                 &mut req_stream,
                 $response,
-                H3PolicyResponseContext {
-                    request_method: &http::Method::CONNECT,
+                H3ConnectPolicyResponseContext {
                     state: &state,
                     listener_name: handler.listener_name.as_ref(),
-                    conn: &conn,
+                    remote_ip: conn.remote_addr.ip(),
                     host: host.as_str(),
                     path: audit_path.as_deref(),
                     outcome: $outcome,
