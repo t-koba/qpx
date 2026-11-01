@@ -27,15 +27,7 @@ pub(super) fn prepare_proxy_h2_request(
     prepare_h2_request(req, scheme, authority, Some(proxy_name))
 }
 
-pub(super) fn prepare_internal_h2_request(
-    req: OwnerRequest<Body>,
-    scheme: &str,
-    authority: &str,
-) -> Result<OwnerRequest<Body>> {
-    prepare_h2_request(req, scheme, authority, None)
-}
-
-fn prepare_h2_request(
+pub(super) fn prepare_h2_request(
     mut req: OwnerRequest<Body>,
     scheme: &str,
     authority: &str,
@@ -222,7 +214,7 @@ mod tests {
             Some("1.1 qpx-test")
         );
 
-        let internal = prepare_internal_h2_request(request()?, "https", "internal.invalid")?;
+        let internal = prepare_h2_request(request()?, "https", "internal.invalid", None)?;
         assert_eq!(internal.version(), http::Version::HTTP_2);
         assert_eq!(
             internal.uri().to_string(),

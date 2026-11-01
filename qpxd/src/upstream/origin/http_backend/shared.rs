@@ -1,4 +1,4 @@
-use super::backend_h2::{prepare_internal_h2_request, send_h2_request_with_sender};
+use super::backend_h2::{prepare_h2_request, send_h2_request_with_sender};
 use super::pool::{
     HttpsConnectionAcquisition, HttpsOriginSlot, TlsHttp1OriginConnection,
     acquire_https_connection, https_origin_pool_key,
@@ -49,7 +49,7 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
     .await?
     {
         HttpsConnectionAcquisition::H2Ready { shared, ready } => {
-            let req = prepare_internal_h2_request(req, scheme.as_str(), authority.as_str())?;
+            let req = prepare_h2_request(req, scheme.as_str(), authority.as_str(), None)?;
             let hyper_req = req.into_http_for_codec().map_err(|err| anyhow!("{err}"))?;
             let mut proxied = send_h2_request_with_sender(
                 hyper_req,
