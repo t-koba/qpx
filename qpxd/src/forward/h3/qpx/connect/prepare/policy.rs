@@ -2,6 +2,8 @@ use super::{
     ConnectPolicyContext, EvaluatedConnectPolicy, PrepareQpxConnectInput, PreparedQpxConnect,
 };
 use crate::forward::connect::apply_connect_decision_service;
+#[cfg(feature = "auth-basic")]
+use crate::forward::h3::connect::finalize_h3_connect_auth_response;
 use crate::forward::h3::connect::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
@@ -10,8 +12,6 @@ use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::blocked_response as blocked;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::common::forbidden_response as forbidden;
-#[cfg(feature = "auth-basic")]
-use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use anyhow::{Result, anyhow};
@@ -66,12 +66,9 @@ pub(super) async fn evaluate_connect_policy(
         #[cfg(feature = "auth-basic")]
         Ok(ForwardPolicyDecision::Challenge(challenge)) => {
             let log_context = context.identity.to_log_context(None, None, None);
-            let response = finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_auth_response(
                 proxy_name,
                 proxy_auth_required(challenge, state.messages.proxy_auth_required.as_str()),
-                false,
             );
             send_qpx_policy_response(
                 req_stream,
@@ -94,12 +91,9 @@ pub(super) async fn evaluate_connect_policy(
         #[cfg(feature = "auth-basic")]
         Ok(ForwardPolicyDecision::Forbidden) => {
             let log_context = context.identity.to_log_context(None, None, None);
-            let response = finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_auth_response(
                 proxy_name,
                 forbidden(state.messages.forbidden.as_str()),
-                false,
             );
             send_qpx_policy_response(
                 req_stream,

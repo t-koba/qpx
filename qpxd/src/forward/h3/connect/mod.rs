@@ -48,6 +48,21 @@ pub(super) fn build_h3_connect_rule_context<'a>(
     })
 }
 
+/// Finalizes a local auth-policy response for an HTTP/3 CONNECT request.
+#[cfg(feature = "auth-basic")]
+pub(super) fn finalize_h3_connect_auth_response(
+    proxy_name: &str,
+    response: http::Response<qpx_http::body::Body>,
+) -> http::Response<qpx_http::body::Body> {
+    crate::http::protocol::l7::finalize_response_for_request(
+        &http::Method::CONNECT,
+        http::Version::HTTP_3,
+        proxy_name,
+        response,
+        false,
+    )
+}
+
 /// Backend-neutral metadata shared by the HTTP/3 CONNECT policy-response senders.
 pub(super) struct H3ConnectAuditContext<'a> {
     pub(super) state: &'a crate::runtime::RuntimeState,

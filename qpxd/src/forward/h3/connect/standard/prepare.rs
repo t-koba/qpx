@@ -6,14 +6,14 @@ use super::{H3ConnectAuditContext, PreparedH3Connect, send_h3_policy_response};
 use crate::destination::DestinationInputs;
 use crate::forward::connect::apply_connect_decision_service;
 #[cfg(feature = "auth-basic")]
+use crate::forward::h3::connect::finalize_h3_connect_auth_response;
+#[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::common::blocked_response as blocked;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::common::forbidden_response as forbidden;
-#[cfg(feature = "auth-basic")]
-use crate::http::protocol::l7::finalize_response_for_request;
 use crate::http::protocol::l7::finalize_response_with_headers;
 use crate::http3::listener::H3ConnInfo;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
@@ -235,24 +235,18 @@ pub(crate) async fn prepare_h3_connect_request(
         #[cfg(feature = "auth-basic")]
         Ok(crate::forward::ForwardPolicyDecision::Challenge(challenge)) => {
             let log_context = identity.to_log_context(None, None, None);
-            let response = finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_auth_response(
                 proxy_name,
                 proxy_auth_required(challenge, state.messages.proxy_auth_required.as_str()),
-                false,
             );
             respond_with_unmatched_policy!(response, DispatchOutcome::Challenge, &log_context);
         }
         #[cfg(feature = "auth-basic")]
         Ok(crate::forward::ForwardPolicyDecision::Forbidden) => {
             let log_context = identity.to_log_context(None, None, None);
-            let response = finalize_response_for_request(
-                &http::Method::CONNECT,
-                http::Version::HTTP_3,
+            let response = finalize_h3_connect_auth_response(
                 proxy_name,
                 forbidden(state.messages.forbidden.as_str()),
-                false,
             );
             respond_with_unmatched_policy!(response, DispatchOutcome::Forbidden, &log_context);
         }
