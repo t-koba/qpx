@@ -111,11 +111,7 @@ impl<'a> HttpModuleRequestView<'a> {
         self.uri.scheme_str()
     }
     pub fn host(&self) -> Option<&str> {
-        self.uri.host().or_else(|| {
-            self.headers
-                .get(&OrdinaryHeaderName::try_from(HOST).expect("ordinary host"))
-                .and_then(|value| value.to_str().ok())
-        })
+        request_host(self.uri, self.headers)
     }
     pub fn path(&self) -> &str {
         self.uri.path()
@@ -248,6 +244,14 @@ impl ModuleResponseCarrier for OwnerResponse<Body> {
     }
 }
 
+fn request_host<'a>(uri: &'a http::Uri, headers: &'a Headers) -> Option<&'a str> {
+    uri.host().or_else(|| {
+        headers
+            .get(&OrdinaryHeaderName::try_from(HOST).expect("ordinary host"))
+            .and_then(|value| value.to_str().ok())
+    })
+}
+
 fn append_module_header(headers: &mut Headers, name: HeaderName, value: HeaderValue) {
     match OrdinaryHeaderName::try_from(name) {
         Ok(name) => headers.append(name, value),
@@ -344,12 +348,7 @@ impl<'a> HttpModuleRequest<'a> {
 
     /// Returns the request host, falling back to the Host header.
     pub fn host(&self) -> Option<&str> {
-        self.inner.uri().host().or_else(|| {
-            self.inner
-                .headers()
-                .get(&OrdinaryHeaderName::try_from(HOST).expect("ordinary host"))
-                .and_then(|value| value.to_str().ok())
-        })
+        request_host(self.inner.uri(), self.inner.headers())
     }
 
     /// Returns the request path.
