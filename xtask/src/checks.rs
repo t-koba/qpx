@@ -1347,6 +1347,14 @@ const CONTENT_LENGTH_READER_NAMES: [&str; 15] = [
 /// any of them has folded it.
 const CONTENT_LENGTH_OWNER_CALL: &str = "::declared_content_length";
 
+/// The owner-backed carrier accessor that reaches the owner.
+///
+/// `qpx-core`'s `Headers::declared_content_length` and
+/// `CacheFields::declared_content_length` are fixed delegations to the owner,
+/// and the raw header map they hide is not exposed. A site that calls this
+/// accessor has folded the declaration even though the call is a method call.
+const CONTENT_LENGTH_OWNER_ACCESSOR_CALL: &str = ".declared_content_length()";
+
 /// The declared Content-Length has one owner, and the owner names the sites
 /// that still read the declaration themselves.
 ///
@@ -1573,7 +1581,9 @@ fn content_length_single_owner_violations(owner: &str, files: &[(String, String)
             continue;
         }
         readers.push(path.clone());
-        if content.contains(CONTENT_LENGTH_OWNER_CALL) {
+        if content.contains(CONTENT_LENGTH_OWNER_CALL)
+            || content.contains(CONTENT_LENGTH_OWNER_ACCESSOR_CALL)
+        {
             continue;
         }
         if listed.iter().any(|site| site == path) {
@@ -9107,6 +9117,19 @@ pub fn declared_content_length(headers: &HeaderMap) -> Result<Option<u64>, Conte
             content_length_single_owner_violations(empty_owner, std::slice::from_ref(&folded))
                 .is_empty(),
             "a reader that calls the owner needs no entry"
+        );
+
+        // The owner-backed carrier exposes the declaration through a fixed
+        // method delegation, so that spelling needs no entry either.
+        let accessor = (
+            "qpx-observability/src/access_log.rs".to_string(),
+            "fn declared_response_bytes(headers: &Headers) -> u64 { headers.declared_content_length().ok().flatten().unwrap_or(0) }\n"
+                .to_string(),
+        );
+        assert!(
+            content_length_single_owner_violations(empty_owner, std::slice::from_ref(&accessor))
+                .is_empty(),
+            "an owner-backed accessor needs no entry"
         );
 
         // A reader that does not call the owner is a violation whether or not
