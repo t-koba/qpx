@@ -27,10 +27,6 @@ const DISPATCH_PARALLEL_FILE_BASELINES: &[(&str, usize)] = &[
     ("types.rs", 3),
     ("outcome.rs", 2),
 ];
-fn rust_workspace_crates() -> impl Iterator<Item = &'static str> {
-    include_str!("../workspace-crates.txt").lines()
-}
-
 fn duplicate_test_helpers() -> impl Iterator<Item = &'static str> {
     include_str!("../duplicate-test-helpers.txt").lines()
 }
@@ -449,7 +445,7 @@ struct TotalLoc {
 fn measure_total_loc(root: &Path) -> Result<TotalLoc> {
     let mut production_rust = 0usize;
     let mut test_rust = 0usize;
-    for crate_dir in rust_workspace_crates() {
+    for crate_dir in workspace_member_crates(root)? {
         let crate_root = root.join(crate_dir);
         if !crate_root.is_dir() {
             continue;
@@ -641,7 +637,10 @@ pub(crate) fn check_finalize_entrypoints(root: &Path) -> Result<()> {
 
 pub(crate) fn check_documented_unsafe_blocks(root: &Path) -> Result<()> {
     let mut violations = Vec::new();
-    for crate_dir in rust_workspace_crates().filter(|crate_dir| *crate_dir != "xtask") {
+    for crate_dir in workspace_member_crates(root)?
+        .into_iter()
+        .filter(|crate_dir| crate_dir != "xtask")
+    {
         let src = root.join(crate_dir).join("src");
         if !src.is_dir() {
             continue;
@@ -837,7 +836,7 @@ fn visit_production_sources(
     root: &Path,
     mut visit: impl FnMut(String, syn::File) -> Result<()>,
 ) -> Result<()> {
-    for crate_dir in rust_workspace_crates() {
+    for crate_dir in workspace_member_crates(root)? {
         let scan_root = root.join(crate_dir).join("src");
         for path in rust_files_under(scan_root.as_path())? {
             if is_test_file(&path) {
@@ -6210,7 +6209,7 @@ pub(crate) fn check_library_anyhow_boundaries(root: &Path) -> Result<()> {
 
 pub(crate) fn check_raw_metric_macro_baseline(root: &Path) -> Result<()> {
     let mut count = 0usize;
-    for crate_dir in rust_workspace_crates() {
+    for crate_dir in workspace_member_crates(root)? {
         let src = root.join(crate_dir).join("src");
         if !src.is_dir() {
             continue;
@@ -6274,7 +6273,7 @@ fn metric_cardinality_policy_violations_for_file(path: &Path, content: &str) -> 
 
 pub(crate) fn check_metric_cardinality_policy(root: &Path) -> Result<()> {
     let mut violations = Vec::new();
-    for crate_dir in rust_workspace_crates() {
+    for crate_dir in workspace_member_crates(root)? {
         let src = root.join(crate_dir).join("src");
         if !src.is_dir() {
             continue;
@@ -6324,12 +6323,12 @@ impl<'ast> Visit<'ast> for RawMetricMacroVisitor {
 pub(crate) fn check_test_helper_duplicate_baseline(root: &Path) -> Result<()> {
     let mut definitions = BTreeMap::<&'static str, Vec<String>>::new();
     let helper_names = duplicate_test_helpers().collect::<Vec<_>>();
-    for crate_dir in rust_workspace_crates() {
-        let tests_dir = root.join(crate_dir).join("tests");
+    for crate_dir in workspace_member_crates(root)? {
+        let tests_dir = root.join(&crate_dir).join("tests");
         if tests_dir.is_dir() {
             scan_duplicate_helpers_in_tests(root, &tests_dir, &helper_names, &mut definitions)?;
         }
-        let src_dir = root.join(crate_dir).join("src");
+        let src_dir = root.join(&crate_dir).join("src");
         if src_dir.is_dir() {
             scan_duplicate_helpers_in_src(root, &src_dir, &helper_names, &mut definitions)?;
         }
@@ -6760,6 +6759,35 @@ mod tests {
         let (added, stale) = ratchet_differences(&actual, &baseline);
         assert_eq!(added.len(), 2);
         assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn production_unwrap_ratchet_scans_every_workspace_member() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let root = std::env::temp_dir().join(format!(
+            "qpx-xtask-member-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let source = root.join("sample-member/src");
+        fs::create_dir_all(&source).expect("create the fixture workspace member");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"sample-member\"]\n",
+        )
+        .expect("write the fixture workspace manifest");
+        fs::write(
+            source.join("lib.rs"),
+            "pub fn authority_host(authority: &str) -> &str {\n    authority.split(':').next().unwrap()\n}\n",
+        )
+        .expect("write the fixture source");
+        let error = check_production_unwraps(&root).expect_err("a member unwrap must be ratcheted");
+        fs::remove_dir_all(&root).expect("remove the fixture workspace");
+        assert!(
+            error.to_string().contains("sample-member/src/lib.rs"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

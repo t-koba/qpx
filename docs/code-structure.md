@@ -6,14 +6,16 @@ per-file inventories go stale quickly, and `cargo xtask structure` /
 budgets and structural gates.
 
 Production `unwrap()`/`expect()` debt is ratcheted by
-`xtask/production-unwraps-baseline.tsv`: the file records existing
-sites with exact counts, a new or raised occurrence fails
+`xtask/production-unwraps-baseline.tsv`: the file records the existing
+whole-workspace inventory with exact counts, a new or raised occurrence fails
 `cargo xtask structure`, and removing a site also fails until its count is
 lowered or deleted. Update the baseline in the same change that changes the
-inventory; the recorded debt only goes down. The declared Content-Length
-single-owner analyzer is ratcheted the same way by
-`xtask/content-length-baseline.txt` until the accepted structural-owner
-replacement removes the analyzer and its debt.
+inventory; the recorded debt only goes down. Workspace-wide gates read the
+crate list from the root `Cargo.toml`, so a new or split-out member is covered
+without editing a second list. The declared Content-Length single-owner
+analyzer is ratcheted the same way by `xtask/content-length-baseline.txt`
+until the accepted structural-owner replacement removes the analyzer and its
+debt.
 
 ## Architecture overview
 
