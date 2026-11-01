@@ -1,3 +1,4 @@
+use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
 use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::l7::{finalize_response_for_request, finalize_response_with_headers};
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
@@ -9,8 +10,6 @@ use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpx_observability::access_log::RequestLogContext;
 use std::time::Duration;
-use tokio::time::timeout;
-use tracing::warn;
 
 pub(super) async fn send_qpx_static_response(
     req_stream: &mut qpx_h3::RequestStream,
@@ -174,61 +173,11 @@ pub(super) fn upstream_qpx_extended_connect_error_response(
     ))
 }
 
-fn body_from_upstream_qpx_stream(
-    mut upstream: qpx_h3::RequestStream,
-    body_read_timeout: Duration,
-) -> Body {
-    let (mut sender, body) = Body::channel_with_capacity(16);
-    tokio::spawn(async move {
-        loop {
-            let next = tokio::select! {
-                _ = sender.closed() => return,
-                recv = timeout(body_read_timeout, upstream.recv_data()) => recv,
-            };
-            match next {
-                Err(_) => {
-                    warn!("extended CONNECT upstream error body timed out");
-                    sender.abort();
-                    return;
-                }
-                Ok(Ok(Some(chunk))) => {
-                    if sender.send_data(chunk).await.is_err() {
-                        return;
-                    }
-                }
-                Ok(Ok(None)) => break,
-                Ok(Err(err)) => {
-                    warn!(error = ?err, "extended CONNECT upstream error body stream failed");
-                    sender.abort();
-                    return;
-                }
-            }
-        }
-        let trailers = tokio::select! {
-            _ = sender.closed() => return,
-            recv = timeout(body_read_timeout, upstream.recv_trailers()) => recv,
-        };
-        match trailers {
-            Err(_) => {
-                warn!("extended CONNECT upstream error trailers timed out");
-                sender.abort();
-            }
-            Ok(Ok(Some(trailers))) => match h1_headers_to_http(&trailers) {
-                Ok(trailers) => {
-                    let _ = sender.send_trailers(trailers).await;
-                }
-                Err(err) => {
-                    warn!(error = ?err, "extended CONNECT upstream trailers were invalid");
-                }
-            },
-            Ok(Ok(None)) => {}
-            Ok(Err(err)) => {
-                warn!(error = ?err, "extended CONNECT upstream error trailers failed");
-            }
-        }
-    });
-    body
-}
+define_upstream_error_response_body!(
+    body_from_upstream_qpx_stream,
+    qpx_h3::RequestStream,
+    |chunk| chunk,
+);
 
 #[cfg(test)]
 mod tests {

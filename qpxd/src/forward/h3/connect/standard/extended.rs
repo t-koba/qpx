@@ -1,10 +1,10 @@
 use super::super::parse::parse_extended_connect_upstream;
+use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
 use crate::http::protocol::l7::{
     finalize_response_with_headers, prepare_request_with_headers_in_place,
 };
 use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
 use crate::http3::datagram::{H3DatagramDispatch, H3StreamDatagrams};
-use crate::http3::h3_buf_to_bytes;
 use crate::http3::listener::H3_MAX_FIELD_SECTION_SIZE;
 use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use crate::upstream::raw_http1::InterimResponseHead;
@@ -262,62 +262,11 @@ pub(super) fn upstream_extended_connect_error_response(
     ))
 }
 
-fn body_from_upstream_h3_stream(
-    mut upstream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
-    body_read_timeout: Duration,
-) -> Body {
-    let (mut sender, body) = Body::channel_with_capacity(16);
-    tokio::spawn(async move {
-        loop {
-            let next = tokio::select! {
-                _ = sender.closed() => return,
-                recv = tokio::time::timeout(body_read_timeout, upstream.recv_data()) => recv,
-            };
-            match next {
-                Err(_) => {
-                    warn!("extended CONNECT upstream error body timed out");
-                    sender.abort();
-                    return;
-                }
-                Ok(Ok(Some(chunk))) => {
-                    let bytes = h3_buf_to_bytes(chunk);
-                    if sender.send_data(bytes).await.is_err() {
-                        return;
-                    }
-                }
-                Ok(Ok(None)) => break,
-                Ok(Err(err)) => {
-                    warn!(error = ?err, "extended CONNECT upstream error body stream failed");
-                    sender.abort();
-                    return;
-                }
-            }
-        }
-        let trailers = tokio::select! {
-            _ = sender.closed() => return,
-            recv = tokio::time::timeout(body_read_timeout, upstream.recv_trailers()) => recv,
-        };
-        match trailers {
-            Err(_) => {
-                warn!("extended CONNECT upstream error trailers timed out");
-                sender.abort();
-            }
-            Ok(Ok(Some(trailers))) => match h1_headers_to_http(&trailers) {
-                Ok(trailers) => {
-                    let _ = sender.send_trailers(trailers).await;
-                }
-                Err(err) => {
-                    warn!(error = ?err, "extended CONNECT upstream trailers were invalid");
-                }
-            },
-            Ok(Ok(None)) => {}
-            Ok(Err(err)) => {
-                warn!(error = ?err, "extended CONNECT upstream error trailers failed");
-            }
-        }
-    });
-    body
-}
+define_upstream_error_response_body!(
+    body_from_upstream_h3_stream,
+    ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    |chunk| crate::http3::h3_buf_to_bytes(chunk),
+);
 
 pub(super) async fn relay_h3_extended_connect_stream(
     downstream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,

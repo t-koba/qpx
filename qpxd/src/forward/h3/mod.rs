@@ -8,6 +8,8 @@ use qpx_core::config::ConnectUdpConfig;
 ))]
 mod backend_h3;
 mod connect;
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+mod connect_response_body;
 #[cfg(all(
     feature = "http3",
     not(any(
