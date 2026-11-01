@@ -416,10 +416,10 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
 
         match event {
             WebTransportSessionEvent::DownstreamBidi(stream) => {
-                let upstream = open_webtransport_bidi_with_timeout(
-                    &mut upstream_opener,
-                    session_id,
+                let upstream = open_webtransport_with_timeout(
+                    upstream_opener.open_webtransport_bidi(session_id),
                     idle_timeout,
+                    "forward HTTP/3 WebTransport bidi open timeout",
                 )
                 .await?;
                 relays.spawn(relay_bidi_pair(
@@ -430,10 +430,10 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
                 ));
             }
             WebTransportSessionEvent::DownstreamUni(stream) => {
-                let upstream = open_webtransport_uni_with_timeout(
-                    &mut upstream_opener,
-                    session_id,
+                let upstream = open_webtransport_with_timeout(
+                    upstream_opener.open_webtransport_uni(session_id),
                     idle_timeout,
+                    "forward HTTP/3 WebTransport uni open timeout",
                 )
                 .await?;
                 relays.spawn(relay_uni_stream(
@@ -444,10 +444,10 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
                 ));
             }
             WebTransportSessionEvent::UpstreamBidi(stream) => {
-                let downstream = open_webtransport_bidi_with_timeout(
-                    &mut downstream_opener,
-                    session_id,
+                let downstream = open_webtransport_with_timeout(
+                    downstream_opener.open_webtransport_bidi(session_id),
                     idle_timeout,
+                    "forward HTTP/3 WebTransport bidi open timeout",
                 )
                 .await?;
                 relays.spawn(relay_bidi_pair(
@@ -458,10 +458,10 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
                 ));
             }
             WebTransportSessionEvent::UpstreamUni(stream) => {
-                let downstream = open_webtransport_uni_with_timeout(
-                    &mut downstream_opener,
-                    session_id,
+                let downstream = open_webtransport_with_timeout(
+                    downstream_opener.open_webtransport_uni(session_id),
                     idle_timeout,
+                    "forward HTTP/3 WebTransport uni open timeout",
                 )
                 .await?;
                 relays.spawn(relay_uni_stream(
@@ -491,25 +491,17 @@ pub(super) async fn relay_qpx_webtransport_session(ctx: QpxWebTransportRelayCont
     Ok(())
 }
 
-async fn open_webtransport_bidi_with_timeout(
-    opener: &mut qpx_h3::OpenStreams,
-    session_id: u64,
+async fn open_webtransport_with_timeout<T, E>(
+    future: impl std::future::Future<Output = std::result::Result<T, E>>,
     idle_timeout: Duration,
-) -> Result<qpx_h3::BidiStream> {
-    tokio::time::timeout(idle_timeout, opener.open_webtransport_bidi(session_id))
+    timeout_message: &'static str,
+) -> Result<T>
+where
+    E: Into<anyhow::Error>,
+{
+    tokio::time::timeout(idle_timeout, future)
         .await
-        .map_err(|_| anyhow!("forward HTTP/3 WebTransport bidi open timeout"))?
-        .map_err(Into::into)
-}
-
-async fn open_webtransport_uni_with_timeout(
-    opener: &mut qpx_h3::OpenStreams,
-    session_id: u64,
-    idle_timeout: Duration,
-) -> Result<qpx_h3::UniSendStream> {
-    tokio::time::timeout(idle_timeout, opener.open_webtransport_uni(session_id))
-        .await
-        .map_err(|_| anyhow!("forward HTTP/3 WebTransport uni open timeout"))?
+        .map_err(|_| anyhow::Error::msg(timeout_message))?
         .map_err(Into::into)
 }
 
