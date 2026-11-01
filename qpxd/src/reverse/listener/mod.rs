@@ -210,7 +210,6 @@ pub(super) async fn run_reverse_http_acceptor(
                 let access_cfg = reverse.runtime.state().resources.access_log.clone();
                 let h2_limits = reverse.runtime.state().plan.limits.h2;
                 let h2_tuning = crate::http::codec::h2::H2ServerTuning::from(h2_limits);
-                let body_channel_capacity = reverse_body_channel_capacity(&reverse);
                 let result = if access_log_service_required(&access_cfg) {
                     let service = AccessLogService::new(
                         ReverseInterimService::new(reverse, conn),
@@ -226,7 +225,6 @@ pub(super) async fn run_reverse_http_acceptor(
                         service,
                         false,
                         header_read_timeout,
-                        body_channel_capacity,
                         h2_tuning,
                     )
                     .await
@@ -236,7 +234,6 @@ pub(super) async fn run_reverse_http_acceptor(
                         ReverseInterimService::new(reverse, conn),
                         false,
                         header_read_timeout,
-                        body_channel_capacity,
                         h2_tuning,
                     )
                     .await

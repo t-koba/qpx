@@ -1,7 +1,5 @@
 use super::*;
-use crate::http::codec::interim::{
-    H2_PREFACE, serve_h2_with_interim_and_capacity, sniff_h2_preface,
-};
+use crate::http::codec::interim::{H2_PREFACE, serve_h2_with_interim, sniff_h2_preface};
 use crate::runtime::Runtime;
 use crate::tls::TlsClientHelloInfo;
 use qpx_core::config::{
@@ -273,7 +271,7 @@ async fn reverse_h2_service_emits_early_hints() {
     );
     let server = tokio::spawn(async move {
         let (socket, _) = listener.accept().await.expect("accept reverse");
-        serve_h2_with_interim_and_capacity(socket, service, false, Duration::from_secs(5), 16)
+        serve_h2_with_interim(socket, service, false, Duration::from_secs(5))
             .await
             .expect("serve h2");
     });

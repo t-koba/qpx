@@ -7,8 +7,8 @@ qpx resolves streaming limits in this order:
 3. `runtime` defaults
 
 The resolved values are used by HTTP/3 request relays, HTTP/3 response senders,
-HTTP/1 and HTTP/2 ingress body channels, response compression, and RPC frame
-observers.
+HTTP/1 ingress body channels, response compression, and RPC frame observers.
+HTTP/2 uses transport stream flow control directly and has no body chunk channel.
 
 ## Runtime Defaults
 

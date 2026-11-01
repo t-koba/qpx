@@ -132,15 +132,7 @@ pub(crate) fn tune_h2_server_builder_with(
     builder.max_concurrent_reset_streams(H2_MAX_CONCURRENT_RESET_STREAMS);
 }
 
-#[cfg(test)]
 pub(crate) fn h2_request_to_hyper(req: Http1Request<RecvStream>) -> Result<Request<Body>> {
-    h2_request_to_hyper_with_capacity(req, 16)
-}
-
-pub(crate) fn h2_request_to_hyper_with_capacity(
-    req: Http1Request<RecvStream>,
-    body_channel_capacity: usize,
-) -> Result<Request<Body>> {
     let (mut parts, body) = req.into_parts();
     // Count decoded fields before policy, including every Cookie occurrence.
     if parts.headers.len() > H2_MAX_HEADER_COUNT {
@@ -151,7 +143,11 @@ pub(crate) fn h2_request_to_hyper_with_capacity(
     // header locally to reject conflicting field-values before handing the
     // request to Hyper, but body-length mismatches surface via the body stream.
     let _declared_length = parse_declared_content_length(&parts.headers)?;
-    let body = body_from_h2_stream(body, body_channel_capacity);
+    let body = if body.is_end_stream() {
+        Body::empty()
+    } else {
+        Body::wrap(H2RecvBody::request(body))
+    };
     parts.version = http::Version::HTTP_2;
     Ok(Request::from_parts(parts, body))
 }
@@ -728,13 +724,6 @@ pub(crate) fn h2_response_to_hyper_with_inflight(
         parts,
         h2_response_body_with_inflight(body, inflight),
     ))
-}
-
-fn body_from_h2_stream(body: RecvStream, _body_channel_capacity: usize) -> Body {
-    if body.is_end_stream() {
-        return Body::empty();
-    }
-    Body::wrap(H2RecvBody::request(body))
 }
 
 enum H2RecvBodyKind {

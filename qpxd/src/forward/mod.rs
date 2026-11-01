@@ -216,7 +216,6 @@ async fn run_forward_acceptor(
                     service,
                     true,
                     header_read_timeout,
-                    body_channel_capacity,
                     h2_tuning,
                 )
                 .await

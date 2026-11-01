@@ -47,30 +47,11 @@ where
         + Sync
         + 'static,
 {
-    serve_h2_with_interim_and_capacity(io, service, enable_connect_protocol, idle_timeout, 16).await
-}
-
-#[cfg(test)]
-pub(crate) async fn serve_h2_with_interim_and_capacity<I, S>(
-    io: I,
-    service: S,
-    enable_connect_protocol: bool,
-    idle_timeout: Duration,
-    body_channel_capacity: usize,
-) -> Result<()>
-where
-    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
-    S: RequestHandler<Request<Body>, Response = OwnerResponse<Body>, Error = Infallible>
-        + Send
-        + Sync
-        + 'static,
-{
     serve_h2_with_interim_and_capacity_and_tuning(
         io,
         service,
         enable_connect_protocol,
         idle_timeout,
-        body_channel_capacity,
         H2ServerTuning::default(),
     )
     .await
@@ -81,7 +62,6 @@ pub(crate) async fn serve_h2_with_interim_and_capacity_and_tuning<I, S>(
     service: S,
     enable_connect_protocol: bool,
     idle_timeout: Duration,
-    body_channel_capacity: usize,
     h2_tuning: H2ServerTuning,
 ) -> Result<()>
 where
@@ -211,7 +191,6 @@ where
                     request,
                     respond,
                     &service,
-                    body_channel_capacity,
                     idle_timeout,
                     active_stream,
                 ));
@@ -273,7 +252,6 @@ async fn serve_h2_stream<S>(
     request: Request<h2::RecvStream>,
     mut respond: h2::server::SendResponse<Bytes>,
     service: &S,
-    body_channel_capacity: usize,
     idle_timeout: Duration,
     active_stream: ActiveH2Stream<'_>,
 ) where
@@ -282,10 +260,7 @@ async fn serve_h2_stream<S>(
         + Sync
         + 'static,
 {
-    let request = match crate::http::codec::h2::h2_request_to_hyper_with_capacity(
-        request,
-        body_channel_capacity,
-    ) {
+    let request = match crate::http::codec::h2::h2_request_to_hyper(request) {
         Ok(request) => request,
         Err(err) => {
             warn!(error = ?err, "invalid HTTP/2 request");
@@ -436,7 +411,6 @@ mod tests {
                 }),
                 false,
                 Duration::from_secs(5),
-                plan.limits.body.body_channel_capacity,
                 super::H2ServerTuning::from(plan.limits.h2),
             ));
             // Observe the real listener's initial SETTINGS rather than a copy of

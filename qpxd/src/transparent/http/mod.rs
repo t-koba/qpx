@@ -96,7 +96,6 @@ where
             service,
             false,
             header_read_timeout,
-            body_channel_capacity,
             h2_tuning,
         )
         .await
