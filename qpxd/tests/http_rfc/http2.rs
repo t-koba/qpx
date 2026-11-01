@@ -239,3 +239,75 @@ runtime:
     }
     Ok(())
 }
+
+#[tokio::test]
+async fn http2_rejects_host_authority_mismatch() -> Result<()> {
+    let dir = temp_dir("qpxd-http-rfc-h2-authority")?;
+    let state_dir = dir.join("state");
+    fs::create_dir_all(&state_dir)?;
+    let cfg = dir.join("rev-h2c.yaml");
+    let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("rev-h2c.log"), |port| {
+        let state_dir_yaml = yaml_quote_path(&state_dir);
+        format!(
+            r#"edges:
+- kind: reverse
+  name: rev-h2c
+  listen: 127.0.0.1:{port}
+  routes:
+  - match:
+      host:
+      - reverse.local
+      path:
+      - /h2
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: ROUTE_EXECUTED
+state_dir: {state_dir_yaml}
+runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false"#
+        )
+    })?;
+
+    let stream = timeout(
+        Duration::from_secs(3),
+        TcpStream::connect(("127.0.0.1", port)),
+    )
+    .await??;
+    let (mut sender, conn) = handshake_http2(stream).await?;
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+
+    // The same URI reaches the local-response route when Host agrees.
+    for (host, status, body) in [
+        (
+            format!("reverse.local:{port}"),
+            StatusCode::OK,
+            "ROUTE_EXECUTED",
+        ),
+        (
+            format!("other.local:{port}"),
+            StatusCode::BAD_REQUEST,
+            "Host header does not match request authority",
+        ),
+    ] {
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("http://reverse.local:{port}/h2"))
+            .header("host", &host)
+            .body(empty_body())?;
+        let (actual_status, actual_body) = timeout(Duration::from_secs(5), async {
+            let resp = sender.send_request(req).await?;
+            let status = resp.status();
+            let body = collect_body(resp.into_body()).await?;
+            Ok::<_, anyhow::Error>((status, body))
+        })
+        .await??;
+        assert_eq!(actual_status, status, "Host: {host}");
+        assert_eq!(actual_body.as_ref(), body.as_bytes(), "Host: {host}");
+    }
+    Ok(())
+}

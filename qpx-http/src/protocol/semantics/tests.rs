@@ -265,18 +265,24 @@ fn absolute_form_uses_target_authority_over_host() {
 }
 
 #[test]
-fn validate_rejects_http2_host_authority_mismatch() {
-    let mut req = http::Request::builder()
-        .version(Version::HTTP_2)
-        .method(Method::GET)
-        .uri("http://example.com/path")
-        .body(())
-        .expect("request");
-    req.headers_mut()
-        .insert(HOST, HeaderValue::from_static("other.example"));
-    let req = OwnerRequest::from_http(req);
-    let err = validate_incoming_request(&req).expect_err("must fail");
-    assert_eq!(err, RequestValidationError::HostAuthorityMismatch);
+fn validate_rejects_h2_h3_host_authority_mismatch() {
+    for version in [Version::HTTP_2, Version::HTTP_3] {
+        let mut req = http::Request::builder()
+            .version(version)
+            .method(Method::GET)
+            .uri("http://example.com/path")
+            .body(())
+            .expect("request");
+        req.headers_mut()
+            .insert(HOST, HeaderValue::from_static("other.example"));
+        let req = OwnerRequest::from_http(req);
+        let err = validate_incoming_request(&req).expect_err("must fail");
+        assert_eq!(
+            err,
+            RequestValidationError::HostAuthorityMismatch,
+            "{version:?}"
+        );
+    }
 }
 
 #[test]
