@@ -646,6 +646,8 @@ checks = (
     ("min_cpu_efficiency_ratio", 1.15, "below"),
     ("max_p99_latency_ratio", 0.95, "above"),
     ("min_dominance_score", 1.1, "below"),
+    ("max_rss_peak_ratio", 1.7, "above"),
+    ("max_fd_peak_ratio", 1.08, "above"),
 )
 for index, lane in enumerate(lanes):
     if not isinstance(lane, dict):
