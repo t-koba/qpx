@@ -12,6 +12,7 @@
 - `qpx-acme`: ACME provisioning helpers.
 - `qpx-observability`: access logging, file logging, and tracing support.
 - `qpxd-cache`: RFC 9111 proxy cache implementation (entries, freshness, Vary, invalidation, in-memory / Redis / HTTP object-storage backends).
+- `qpx-webdav`: WebDAV and CalDAV origin semantics for `qpxd` (ACL, resource model, filesystem/Redb stores, locks and versions).
 - `qpxd`: the proxy daemon. It owns runtime plans, listeners, forwarding, reverse dispatch, cache orchestration, transparent mode, HTTP/3 broker, and upstream clients.
 - `qpxf`: IPC/CGI/FastCGI/SCGI/WASM backend executor.
 - `qpxr`: capture stream receiver.

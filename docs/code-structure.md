@@ -21,7 +21,7 @@ debt.
 
 ## Architecture overview
 
-qpx is a Rust workspace with twelve product/runtime crates plus one developer
+qpx is a Rust workspace with thirteen product/runtime crates plus one developer
 utility crate (`xtask`):
 
 ```
@@ -39,6 +39,8 @@ qpx-wasm          WASI/wasmtime executor used by qpxf's `wasm` feature
 qpx-observability logging init, metrics endpoint, trace context, access log
 qpxd-cache        RFC 9111 proxy cache: entries, freshness, Vary, invalidation,
                   in-memory / Redis / HTTP object-storage backends
+qpx-webdav        WebDAV / CalDAV origin semantics for qpxd: ACL, resource model,
+                  filesystem / Redb stores, locks and versions
 qpxd              daemon: forward / reverse / transparent HTTP proxy
 qpxf              executor: CGI / WASM / FastCGI / SCGI over QPX-IPC
 qpxr              reader: consumes capture events from qpxd's SHM ring, writes PCAPNG
