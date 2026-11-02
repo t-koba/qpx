@@ -52,13 +52,6 @@ The authoritative whole-workspace totals are the machine-checked
 prints the measured values against them. Do not copy the numbers into this
 document: a second copy drifts from the gate.
 
-Values are intentionally above the initial advisory baseline. The increase
-comes from Phase 3/4 regression gates, acceptance checks, fuzz target coverage,
-boundary documentation, and targeted tests added to preserve behavior while
-consolidating hot paths. This drift is tracked as a review signal, not a
-failure condition; ratchet the baseline downward only when redundant
-implementations are removed without losing behavior or performance.
-
 ## Phase Notes
 
 - Phase 0: gate scaffolding exists through `xtask`, CI structure workflow, and advisory LOC baselines.
