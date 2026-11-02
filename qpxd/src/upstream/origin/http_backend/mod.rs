@@ -395,8 +395,8 @@ async fn proxy_direct_plain_http1_with_interim_inner(
     *req.version_mut() = http::Version::HTTP_11;
     let local_target = connection_pool.map(|pool| pool.target_for(&slot));
     let pooled = match local_target.as_ref() {
-        Some(target) => take_reusable_plain_http_stream_from_target(target).await,
-        None => take_reusable_plain_http_stream(&slot).await,
+        Some(target) => take_reusable_plain_http_stream(|| target.pop_idle()).await,
+        None => take_reusable_plain_http_stream(|| slot.pop_idle()).await,
     };
     let connection = match pooled {
         Some(connection) => connection,
@@ -461,7 +461,7 @@ pub(crate) async fn proxy_direct_plain_http1_raw_response_with_interim(
         };
     }
     let active_permit = slot.acquire_active().await?;
-    let connection = match take_reusable_plain_http_stream(&slot).await {
+    let connection = match take_reusable_plain_http_stream(|| slot.pop_idle()).await {
         Some(connection) => connection,
         None => open_plain_http_origin_stream(connect_authority).await?,
     };
@@ -624,22 +624,10 @@ fn is_transport_error(error: &anyhow::Error) -> bool {
 }
 
 async fn take_reusable_plain_http_stream(
-    slot: &pool::PlainHttpOriginSlot,
+    mut pop_idle: impl FnMut() -> Option<pool::PlainHttp1OriginConnection>,
 ) -> Option<pool::PlainHttp1OriginConnection> {
     loop {
-        let mut connection = slot.pop_idle()?;
-        if idle_connection_closed_or_dirty(&mut connection.stream).await {
-            continue;
-        }
-        return Some(connection);
-    }
-}
-
-async fn take_reusable_plain_http_stream_from_target(
-    target: &Arc<PreparedPlainHttp1ConnectionAffinityTarget>,
-) -> Option<pool::PlainHttp1OriginConnection> {
-    loop {
-        let mut connection = target.pop_idle()?;
+        let mut connection = pop_idle()?;
         if idle_connection_closed_or_dirty(&mut connection.stream).await {
             continue;
         }
