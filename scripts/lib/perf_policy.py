@@ -58,6 +58,22 @@ def effective_limits_digest(config):
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def streaming_profile_digest(path):
+    """Stable digest of the streaming fast/slow/stability objectives."""
+    with open(path, encoding="utf-8") as handle:
+        config = json.load(handle)
+    if not isinstance(config, dict):
+        fail(f"{path}: expected a JSON object")
+    try:
+        profile = {"fast": config["fast"], "slow": config["slow"], "stability": config["stability"]}
+    except KeyError:
+        fail(f"{path}: streaming objectives are missing fast/slow/stability")
+    if not all(isinstance(section, dict) for section in profile.values()):
+        fail(f"{path}: streaming objectives fast/slow/stability must be objects")
+    payload = json.dumps(profile, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
 def load_json(path):
     with open(path, encoding="utf-8") as handle:
         value = json.load(handle)

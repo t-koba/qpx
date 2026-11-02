@@ -693,6 +693,25 @@ if actual != expected:
     )
 PY
 }
+require_streaming_profile_digest() {
+  local file="$1"
+  local expected="$2"
+  python3 - "$file" "$expected" <<'PY'
+import sys
+
+sys.path.insert(0, "scripts/lib")
+from perf_policy import streaming_profile_digest
+
+file_name, expected = sys.argv[1:3]
+actual = streaming_profile_digest(file_name)
+if actual != expected:
+    raise SystemExit(
+        f"{file_name}: streaming profile changed\n"
+        f"  expected digest {expected}\n"
+        f"  actual digest   {actual}\n"
+    )
+PY
+}
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_rss_peak_ratio 1.0
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_fd_peak_ratio 1.0
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_scheduler_queue_delay_ratio 1.0
@@ -831,6 +850,13 @@ require_json_number_at_least perf/streaming-performance-objectives.json stabilit
 require scripts/check-streaming-performance.sh 'min_measurement_noise_multiplier'
 require scripts/check-streaming-performance.sh 'max_tail_noise_multiplier'
 require_json_number_at_most perf/streaming-performance-objectives.json stability.max_lane_noise_multiplier 1.25
+# Streaming profile digest pins every graded fast/slow/stability value (fast:
+# min_direct_efficiency_ratio, min_total_cpu_efficiency_ratio, max_first_byte_ratio,
+# max_gap_ratio; slow: max_total_time_ratio, max_first_byte_ratio, max_gap_ratio,
+# max_total_rss_peak_ratio, max_total_fd_peak_ratio, max_scheduler_queue_delay_ratio;
+# stability: competitive_frontier_total_ratio, max_qpx_total_sample_spread_ratio,
+# max_reference_total_sample_spread_ratio). Any weakening changes the digest.
+require_streaming_profile_digest perf/streaming-performance-objectives.json e2ccc7e1f9f65f0e5b527e57b682f3d8971ef15019b4f3a75783ea05ea09e41e
 require scripts/check-streaming-performance.sh 'max_lane_noise_multiplier'
 require scripts/perf-audit-allocation-profile.sh '"qpxd_allocation_profile_http1_reverse"'
 require scripts/perf-audit-allocation-profile.sh '--tool=dhat'

@@ -18,8 +18,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
 from perf_policy import (bounded_measure, effective_limits, effective_limits_digest,
-                         evaluate, exit_code, load_jsonl, objectives, summary,
-                         write_json, write_jsonl)
+                         evaluate, exit_code, load_jsonl, objectives,
+                         streaming_profile_digest, summary, write_json, write_jsonl)
 
 ARTIFACTS = ROOT / "target/perf/policy-fixtures"
 ORDER = [["current", "previous"], ["previous", "current"], ["current", "previous"]]
@@ -101,6 +101,27 @@ def pair(lane, throughput=1.0, cpu=1.0, p99=1.0, spread=1.0, invalid_role="curre
 
 
 class PolicyTests(unittest.TestCase):
+    def test_streaming_profile_digest_tracks_graded_values(self):
+        profile = ROOT / "perf/streaming-performance-objectives.json"
+        baseline = streaming_profile_digest(profile)
+        cases = (("fast", "max_gap_ratio", 1000.0),
+                 ("slow", "max_total_fd_peak_ratio", 5.0),
+                 ("stability", "max_reference_total_sample_spread_ratio", 10.0))
+        for section, key, weakened in cases:
+            with self.subTest(section=section, key=key):
+                data = json.loads(profile.read_text())
+                self.assertIn(key, data[section])
+                data[section][key] = weakened
+                candidate = self.directory / ("streaming-" + section + ".json")
+                candidate.write_text(json.dumps(data))
+                self.assertNotEqual(baseline, streaming_profile_digest(candidate))
+        gate = (ROOT / "scripts/check-ci-acceptance-gates.sh").read_text()
+        match = re.search(
+            r"require_streaming_profile_digest\s+perf/streaming-performance-objectives\.json\s+([0-9a-f]{64})",
+            gate)
+        self.assertIsNotNone(match, "streaming profile digest pin is missing from the gate")
+        self.assertEqual(baseline, match.group(1))
+
     def test_effective_limits_digest_tracks_lane_overrides(self):
         base = {"defaults": {"min_throughput_ratio": 1.25, "max_p99_latency_ratio": 0.8},
                 "lanes": [{"min_throughput_ratio": 1.15}, {}]}
