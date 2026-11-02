@@ -430,6 +430,7 @@ fn split_inline_test_code_lines(content: &str) -> (usize, usize) {
     let mut in_test = false;
     let mut test_depth = 0isize;
     let mut pending_cfg_test = false;
+    let mut classifier = LineClassifier::default();
     for line in content.lines() {
         let trimmed = line.trim_start();
         if !in_test && trimmed.starts_with("#[cfg(test)]") {
@@ -445,7 +446,7 @@ fn split_inline_test_code_lines(content: &str) -> (usize, usize) {
         if pending_cfg_test {
             pending_cfg_test = false;
         }
-        if is_counted_code_line(line) {
+        if classifier.is_counted(line) {
             if in_test {
                 tests += 1;
             } else {
@@ -464,18 +465,121 @@ fn split_inline_test_code_lines(content: &str) -> (usize, usize) {
 }
 
 fn count_code_lines(content: &str) -> usize {
+    let mut classifier = LineClassifier::default();
     content
         .lines()
-        .filter(|line| is_counted_code_line(line))
+        .filter(|line| classifier.is_counted(line))
         .count()
 }
 
-fn is_counted_code_line(line: &str) -> bool {
-    let trimmed = line.trim();
-    !trimmed.is_empty()
-        && !trimmed.starts_with("//")
-        && !trimmed.starts_with("/*")
-        && !trimmed.starts_with('*')
+#[derive(Default)]
+struct LineClassifier {
+    in_block_comment: bool,
+}
+
+impl LineClassifier {
+    /// A line contributes to LOC when it has code outside `//` and `/* */`
+    /// comments. Block-comment state carries across lines, so a `*x = y;`
+    /// deref assignment counts while a `*`-prefixed comment continuation does
+    /// not.
+    fn is_counted(&mut self, line: &str) -> bool {
+        let line = blank_string_literals(line);
+        let mut rest = line.as_str();
+        let mut counted = false;
+        loop {
+            if self.in_block_comment {
+                match rest.find("*/") {
+                    Some(end) => {
+                        rest = &rest[end + 2..];
+                        self.in_block_comment = false;
+                    }
+                    None => break,
+                }
+                continue;
+            }
+            let block = rest.find("/*");
+            let line_comment = rest.find("//");
+            match (block, line_comment) {
+                (Some(block), Some(line_comment)) if line_comment < block => {
+                    counted |= has_code(&rest[..line_comment]);
+                    break;
+                }
+                (Some(block), _) => {
+                    counted |= has_code(&rest[..block]);
+                    rest = &rest[block + 2..];
+                    self.in_block_comment = true;
+                }
+                (None, Some(line_comment)) => {
+                    counted |= has_code(&rest[..line_comment]);
+                    break;
+                }
+                (None, None) => {
+                    counted |= has_code(rest);
+                    break;
+                }
+            }
+        }
+        counted
+    }
+}
+
+/// Blanks the contents of string and raw-string literals so comment markers
+/// inside them cannot open or close block comments. Char literals are left
+/// alone: they cannot contain the two-character `/*` or `//` sequences used
+/// here, and treating `'` as a quote would break Rust lifetimes.
+fn blank_string_literals(line: &str) -> String {
+    let bytes = line.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'"' {
+            out.push(b' ');
+            i += 1;
+            while i < bytes.len() {
+                if bytes[i] == b'\\' {
+                    i = (i + 2).min(bytes.len());
+                    continue;
+                }
+                i += 1;
+                if bytes.get(i - 1) == Some(&b'"') {
+                    break;
+                }
+            }
+            out.push(b' ');
+            continue;
+        }
+        if bytes[i] == b'r' {
+            let mut hashes = 0;
+            while bytes.get(i + 1 + hashes) == Some(&b'#') {
+                hashes += 1;
+            }
+            if bytes.get(i + 1 + hashes) == Some(&b'"') {
+                let mut j = i + 2 + hashes;
+                let mut closed = false;
+                while j < bytes.len() {
+                    if bytes[j] == b'"'
+                        && bytes.get(j + 1..j + 1 + hashes) == Some(&vec![b'#'; hashes][..])
+                    {
+                        j += 1 + hashes;
+                        closed = true;
+                        break;
+                    }
+                    j += 1;
+                }
+                let end = if closed { j } else { bytes.len() };
+                out.extend(std::iter::repeat_n(b' ', end - i));
+                i = end;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8(out).unwrap_or_default()
+}
+
+fn has_code(fragment: &str) -> bool {
+    !fragment.trim().is_empty()
 }
 
 fn brace_delta(line: &str) -> isize {
@@ -11706,5 +11810,41 @@ pub const LENGTH_HEADER: &str = "x-length";
             .is_empty(),
             "a name two files define is not followed"
         );
+    }
+}
+
+#[cfg(test)]
+mod loc_tests {
+    use super::{count_code_lines, split_inline_test_code_lines};
+
+    #[test]
+    fn deref_assignment_counts_as_code() {
+        assert_eq!(count_code_lines("*request.method_mut() = self.method;"), 1);
+    }
+
+    #[test]
+    fn block_comment_continuations_do_not_count() {
+        assert_eq!(count_code_lines("/* comment\n * continuation\n */"), 0);
+        assert_eq!(count_code_lines("/* comment */"), 0);
+    }
+
+    #[test]
+    fn inline_block_comments_keep_real_code() {
+        assert_eq!(count_code_lines("let x = 1; /* trailing */"), 1);
+        assert_eq!(count_code_lines("/* leading */ let x = 1;"), 1);
+    }
+
+    #[test]
+    fn string_literals_do_not_open_comments() {
+        assert_eq!(count_code_lines("let p = \"/*\"; let x = 1;"), 1);
+        assert_eq!(count_code_lines("let p = r#\"/*\"#;"), 1);
+        assert_eq!(count_code_lines("let p = \"*/\";"), 1);
+    }
+
+    #[test]
+    fn test_module_split_uses_the_same_rule() {
+        let (production, tests) =
+            split_inline_test_code_lines("#[cfg(test)]\nmod tests {\n *x = 1;\n}\nfn f() {}\n");
+        assert_eq!((production, tests), (1, 2));
     }
 }
