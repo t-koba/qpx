@@ -838,7 +838,7 @@ require_json_number_at_least perf/streaming-performance-objectives.json fast.min
 require_json_number_at_least perf/streaming-performance-objectives.json fast.min_dominance_score 1.25
 require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_rss_peak_ratio 1.7
 require_json_number_at_most perf/streaming-performance-objectives.json fast.max_total_fd_peak_ratio 1.2
-require_json_number_at_most perf/streaming-performance-objectives.json fast.max_scheduler_queue_delay_ratio 6.0
+require_json_number_at_most perf/streaming-performance-objectives.json paired.max_scheduler_queue_delay_ratio 1.25
 require_json_number_at_most perf/streaming-performance-objectives.json fast.max_p99_gap_ratio 3.2
 require_json_number_at_most perf/streaming-performance-objectives.json slow.max_p99_gap_ratio 1.5
 require_json_number_at_most perf/streaming-performance-objectives.json stability.max_qpx_metric_sample_spread_ratio 3.0
@@ -852,10 +852,11 @@ require_json_number_at_most perf/streaming-performance-objectives.json stability
 # Streaming profile digest pins every graded fast/slow/stability value (fast:
 # min_direct_efficiency_ratio, min_total_cpu_efficiency_ratio, max_first_byte_ratio,
 # max_gap_ratio; slow: max_total_time_ratio, max_first_byte_ratio, max_gap_ratio,
-# max_total_rss_peak_ratio, max_total_fd_peak_ratio, max_scheduler_queue_delay_ratio;
+# max_total_rss_peak_ratio, max_total_fd_peak_ratio;
+# paired: max_scheduler_queue_delay_ratio;
 # stability: competitive_frontier_total_ratio, max_qpx_total_sample_spread_ratio,
 # max_reference_total_sample_spread_ratio). Any weakening changes the digest.
-require_streaming_profile_digest perf/streaming-performance-objectives.json e2ccc7e1f9f65f0e5b527e57b682f3d8971ef15019b4f3a75783ea05ea09e41e
+require_streaming_profile_digest perf/streaming-performance-objectives.json bfed9b9dddbfadb793b436ad9e2b7ae57b3278fa118b2d20c90b33f2e2efbfca
 require scripts/check-streaming-performance.sh 'max_lane_noise_multiplier'
 require scripts/perf-audit-allocation-profile.sh '"qpxd_allocation_profile_http1_reverse"'
 require scripts/perf-audit-allocation-profile.sh '--tool=dhat'

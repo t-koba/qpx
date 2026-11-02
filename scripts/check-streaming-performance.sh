@@ -13,6 +13,7 @@ fi
 python3 - "$JSONL" "$OBJECTIVES" <<'PY'
 import json
 import math
+import os
 import sys
 
 JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
@@ -340,9 +341,11 @@ fast_checks = (
     ("total RSS peak ratio", total_rss_peak_ratio, ratio_limit(fast_objectives, "max_total_rss_peak_ratio"), "max"),
     ("total FD peak ratio", total_fd_peak_ratio, ratio_limit(fast_objectives, "max_total_fd_peak_ratio"), "max"),
 )
-# Scheduler queue delay is diagnostic-only in both assessment modes
-# (docs/performance.md): it stays in the printed summary and measured records
-# but never enters the failure or judgeability decisions.
+# The qpx-vs-external scheduler queue-delay ratio is visible-only in both
+# assessment modes (docs/performance.md): it stays in the printed summary and
+# measured records but never enters the failure or judgeability decisions.
+# The enforced tail verdict is the paired current-vs-pinned queue-delay
+# median from streaming-compare-reference.json, checked below.
 
 failures = []
 marginals = []
@@ -642,8 +645,9 @@ if slow_cpu_rate_spread > metric_spread_cap + 1e-12:
     )
 
 for field, current in slow_ratios.items():
-    # Scheduler queue delay is diagnostic-only in both modes; it stays in
-    # slow_ratios for the printed summary but never fails the run.
+    # The qpx-vs-external scheduler queue-delay ratio is visible-only in
+    # both modes; it stays in slow_ratios for the printed summary but never
+    # fails the run. The enforced verdict is the paired median below.
     if field == "max_scheduler_queue_delay_ratio":
         continue
     objective = ratio_limit(slow_objectives, field)
@@ -669,6 +673,82 @@ for field, current in slow_ratios.items():
                 f"{noise:.6f}; not a regression signal"
             )
 
+# Paired current-vs-pinned scheduler queue-delay verdict. The reference
+# report is required: it is written next to the final streaming JSONL by
+# scripts/perf-audit-streaming-compare.sh, and the gate judges the paired
+# current-over-reference median of scheduler_queue_delay_us_per_transfer in
+# each read mode against paired.max_scheduler_queue_delay_ratio. A missing
+# report, a mismatched comparison, or paired_rounds == 0 fails the gate
+# instead of passing silently, so a lost reference can never hide a 10x
+# queue-delay regression behind the visible-only external ratio.
+paired_objectives = objectives.get("paired", {})
+paired_queue_cap = ratio_limit(paired_objectives, "max_scheduler_queue_delay_ratio")
+reference_path = os.path.join(
+    os.path.dirname(os.path.abspath(JSONL_PATH)),
+    "streaming-compare-reference.json",
+)
+try:
+    with open(reference_path, "r", encoding="utf-8") as handle:
+        reference_report = json.load(handle)
+except (OSError, ValueError) as exc:
+    fail(
+        "streaming reference report is missing or unreadable at "
+        f"{reference_path}: {exc}; the paired queue-delay verdict requires "
+        "the reference report"
+    )
+if not isinstance(reference_report, dict) or (
+    reference_report.get("comparison") != "current_build_versus_pinned_previous_release"
+):
+    fail(
+        "streaming reference report has an unexpected comparison: the paired "
+        "queue-delay verdict requires "
+        "comparison == \"current_build_versus_pinned_previous_release\""
+    )
+paired_queue_medians = {}
+for paired_mode in ("fast", "slow"):
+    mode_report = (reference_report.get("read_modes") or {}).get(paired_mode)
+    if not isinstance(mode_report, dict):
+        fail(
+            f"streaming reference report is missing {paired_mode} mode: the "
+            "paired queue-delay verdict requires both read modes"
+        )
+    paired_metric = ((mode_report.get("metrics") or {}).get(
+        "scheduler_queue_delay_us_per_transfer"
+    ))
+    if not isinstance(paired_metric, dict):
+        fail(
+            f"streaming reference report is missing {paired_mode} "
+            "scheduler_queue_delay_us_per_transfer: the paired queue-delay "
+            "verdict requires that metric"
+        )
+    paired_rounds = paired_metric.get("paired_rounds")
+    if not isinstance(paired_rounds, int) or paired_rounds <= 0:
+        fail(
+            f"streaming reference report has no paired rounds for {paired_mode} "
+            "scheduler_queue_delay_us_per_transfer: the paired queue-delay "
+            "verdict requires paired_rounds > 0"
+        )
+    paired_median = paired_metric.get("median_current_over_reference")
+    if (
+        not isinstance(paired_median, (int, float))
+        or isinstance(paired_median, bool)
+        or not math.isfinite(paired_median)
+        or paired_median <= 0
+    ):
+        fail(
+            f"streaming reference report has an invalid {paired_mode} paired "
+            "scheduler queue-delay median: the paired queue-delay verdict "
+            "requires a positive finite median_current_over_reference"
+        )
+    paired_queue_medians[paired_mode] = (float(paired_median), paired_rounds)
+    if float(paired_median) > paired_queue_cap + 1e-12:
+        failures.append(
+            f"{paired_mode} streaming paired scheduler queue-delay ratio "
+            f"{float(paired_median):.6f} > objective {paired_queue_cap:.6f} "
+            f"(decisive: paired current-vs-pinned median over {paired_rounds} "
+            "paired rounds)"
+        )
+
 print(
     "streaming performance: "
     f"leader={leader_name}, throughput={throughput_ratio:.3f}, "
@@ -678,6 +758,10 @@ print(
     f", RSS={total_rss_peak_ratio:.3f}, "
     f"FD={total_fd_peak_ratio:.3f}, "
     f"queue={scheduler_queue_delay_ratio:.3f}"
+    f", paired-queue-fast={paired_queue_medians['fast'][0]:.3f} "
+    f"over {paired_queue_medians['fast'][1]} rounds, "
+    f"paired-queue-slow={paired_queue_medians['slow'][0]:.3f} "
+    f"over {paired_queue_medians['slow'][1]} rounds"
 )
 print(
     "streaming backpressure: "

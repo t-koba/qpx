@@ -106,7 +106,8 @@ class PolicyTests(unittest.TestCase):
         baseline = streaming_profile_digest(profile)
         cases = (("fast", "max_gap_ratio", 1000.0),
                  ("slow", "max_total_fd_peak_ratio", 5.0),
-                 ("stability", "max_reference_total_sample_spread_ratio", 10.0))
+                 ("stability", "max_reference_total_sample_spread_ratio", 10.0),
+                 ("paired", "max_scheduler_queue_delay_ratio", 2.0))
         for section, key, weakened in cases:
             with self.subTest(section=section, key=key):
                 data = json.loads(profile.read_text())

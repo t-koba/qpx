@@ -553,16 +553,20 @@ For a slow reader, total time, first byte, p99 gap, and maximum gap are bounded
 relative to the direct backend. This independently detects lost backpressure or
 event-loop starvation even when bulk throughput remains high.
 
-Every objective is judged against a measurement band. The tail objectives (p99
-chunk gap and scheduler queue delay) use the spread of their own metric, because
-a tail statistic moves further between samples than a total does. The
-remaining objectives - the time, CPU-rate, first-byte, max-gap, dominance and
+Every competitive objective is judged against a measurement band. The tail
+objective (p99 chunk gap) uses the spread of its own metric, because a tail
+statistic moves further between samples than a total does. The remaining
+objectives - the time, CPU-rate, first-byte, max-gap, dominance and
 resource-peak ones - use the lane's observed total-time and CPU-rate sample
 spread, because the benchmark publishes no per-sample spread for the metrics
 they measure. A miss inside that band is reported as a marginal objective and
 stays visible for trend review; a miss beyond it is a decisive failure.
 Reference spreads never widen the band, because competitor instability must not
-excuse a qpx miss.
+excuse a qpx miss. The qpx-vs-external scheduler queue-delay ratio is not an
+objective: it stays visible for trend review and never fails the gate. The
+enforced queue-delay verdict is the paired current-vs-pinned median, judged
+against the fixed `paired.max_scheduler_queue_delay_ratio` tolerance of 1.25
+with no measurement band.
 
 Every band is bounded by a named policy multiplier, so an objective's
 effective limit stays within a bounded factor of its documented cap: the
@@ -608,18 +612,25 @@ previous release this way, so the lane now performs the paired measurement
 the matched-source section describes, against the pinned release rather than
 against an arbitrary earlier commit.
 
-The pair is reported, never judged. `scripts/check-streaming-performance.sh`
-does not read the reference records, no objective mentions them, and a
-reference build that cannot start or that produces no valid sample leaves the
-lane without a reference instead of failing the audit. The comparison is
-written to `target/perf/streaming-compare-reference.json` and printed in the
-CI log. For each read mode it states how many rounds were paired and the
-median, minimum and maximum of the per-round current-over-reference ratio
-together with the median difference, for the total time, the CPU rate and the
-p99 chunk gap. A `total_ms` ratio above 1 means the current build was slower
-in that round, and a `requests_per_cpu_second` ratio below 1 means it was
-less efficient. The report names the reference build's source SHA, so every
-number can be traced to the build it was measured against.
+The comparison is a report, and the paired queue-delay median in it is the
+enforced tail verdict. `scripts/check-streaming-performance.sh` loads
+`target/perf/streaming-compare-reference.json` next to the streaming JSONL
+and judges the paired current-over-reference median of
+`scheduler_queue_delay_us_per_transfer` in each read mode against
+`paired.max_scheduler_queue_delay_ratio` (1.25). A missing report, a
+mismatched comparison, or `paired_rounds == 0` for that metric fails the
+gate instead of passing silently, so the reference is required for the
+verdict. The comparison is written to
+`target/perf/streaming-compare-reference.json` and printed in the CI log.
+For each read mode it states how many rounds were paired and the median,
+minimum and maximum of the per-round current-over-reference ratio together
+with the median difference, for the total time, the CPU rate, the p99 chunk
+gap and the scheduler queue delay. A `total_ms` ratio above 1 means the
+current build was slower in that round, and a `requests_per_cpu_second`
+ratio below 1 means it was less efficient. The qpx-vs-external queue-delay
+ratio stays in the printed summary for trend review but never in the failure
+or judgeability decisions. The report names the reference build's source
+SHA, so every number can be traced to the build it was measured against.
 `scripts/test-streaming-reference-comparison.py` exercises the pairing, the
 missing-reference case and the report against synthetic per-round records.
 The lane's own pairing is exercised as well:

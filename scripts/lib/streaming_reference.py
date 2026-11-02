@@ -7,9 +7,11 @@ collected in different runs; the paired per-round difference is the
 measurement that answers whether the reverse HTTP/1 path changed between the
 two builds.
 
-The comparison is a report, never a gate. It names the build each number
-belongs to, states how many rounds were paired, and no objective or check
-depends on any of its values.
+The comparison remains a report, but the streaming checker enforces the
+paired queue-delay median as the tail verdict. It names the build each number
+belongs to, states how many rounds were paired, and the scheduler
+queue-delay median is the enforced paired tail objective while the remaining
+values stay visible for trend review.
 """
 
 from __future__ import annotations
@@ -21,10 +23,16 @@ import statistics
 CURRENT_PROXY = "qpxd"
 REFERENCE_PROXY = "qpxd-previous"
 READ_MODES = ("fast", "slow")
-# The wall-clock time, the CPU efficiency and the tail gap are the three
-# numbers the reverse HTTP/1 question is about. Every metric name carries its
-# own unit, so a difference carries the unit of its metric.
-METRICS = ("total_ms", "requests_per_cpu_second", "p99_chunk_gap_ms")
+# The wall-clock time, the CPU efficiency, the tail gap and the scheduler
+# queue delay are the four numbers the reverse HTTP/1 question is about.
+# Every metric name carries its own unit, so a difference carries the unit
+# of its metric.
+METRICS = (
+    "total_ms",
+    "requests_per_cpu_second",
+    "p99_chunk_gap_ms",
+    "scheduler_queue_delay_us_per_transfer",
+)
 
 
 def load_records(path):

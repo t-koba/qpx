@@ -22,6 +22,7 @@ def record(proxy, read_mode, round_number, **overrides):
         "total_ms": 100.0,
         "requests_per_cpu_second": 10.0,
         "p99_chunk_gap_ms": 1.0,
+        "scheduler_queue_delay_us_per_transfer": 100.0,
     }
     payload.update(overrides)
     return payload
@@ -59,6 +60,22 @@ class PairedComparisonTest(unittest.TestCase):
         self.assertAlmostEqual(
             metrics["p99_chunk_gap_ms"]["median_current_over_reference"], 2.0
         )
+
+    def test_reports_the_paired_queue_delay_with_median_and_rounds(self):
+        records = [
+            record("qpxd", "fast", 1, scheduler_queue_delay_us_per_transfer=110.0),
+            record("qpxd-previous", "fast", 1, scheduler_queue_delay_us_per_transfer=100.0),
+            record("qpxd", "fast", 2, scheduler_queue_delay_us_per_transfer=130.0),
+            record("qpxd-previous", "fast", 2, scheduler_queue_delay_us_per_transfer=100.0),
+        ]
+        report = streaming_reference.compare(records)
+        queue = report["read_modes"]["fast"]["metrics"][
+            "scheduler_queue_delay_us_per_transfer"
+        ]
+        self.assertEqual(queue["paired_rounds"], 2)
+        self.assertAlmostEqual(queue["median_current_over_reference"], 1.2)
+        self.assertAlmostEqual(queue["min_current_over_reference"], 1.1)
+        self.assertAlmostEqual(queue["max_current_over_reference"], 1.3)
 
     def test_a_missing_reference_leaves_the_report_empty(self):
         records = [record("qpxd", "fast", 1)]
