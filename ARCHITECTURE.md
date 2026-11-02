@@ -70,7 +70,7 @@ Configuration is parsed in `qpx-core`, compiled into a `RuntimePlan` in `qpxd`, 
 - shared HTTP body, policy, module, cache, and protocol helpers under `qpxd/src/http/`
 - upstream origin and proxy clients under `qpxd/src/upstream/`
 
-Dispatch paths should keep ingress-specific code thin and delegate common behavior to `qpxd/src/http/dispatch`, `qpxd/src/http/body`, and shared policy helpers. `cargo xtask structure` enforces file-size and dependency-direction budgets so new code does not grow monolithic dispatch files again.
+Dispatch paths should keep ingress-specific code thin and delegate common behavior to `qpxd/src/http/dispatch`, `qpxd/src/http/body`, and shared policy helpers. `cargo xtask structure` enforces dependency-direction and structural baselines so shared dispatch, policy, and protocol behavior does not fragment into parallel copies.
 
 ## Streaming Contract
 
