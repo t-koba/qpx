@@ -3,23 +3,10 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
-DEFAULT_FILES=(
-  "qpxd/src/forward/h3_connect.rs"
-  "qpxd/src/reverse/transport.rs"
-  "qpx-core/src/config/validate.rs"
-  "qpxd/src/forward/connect.rs"
-  "qpxd/src/reverse/router.rs"
-  "qpxd/src/transparent/udp_path.rs"
-  "qpxd/src/forward/request.rs"
-  "qpx-core/src/config/types/mod.rs"
-  "qpxd/src/runtime.rs"
-  "qpxd/src/upstream/origin.rs"
-)
-
 if [ "$#" -gt 0 ]; then
   FILES=("$@")
 else
-  FILES=("${DEFAULT_FILES[@]}")
+  mapfile -t FILES < <(cut -f1 "${ROOT_DIR}/xtask/loc-budgets.tsv" | grep -v '^$')
 fi
 
 strip_inline_tests() {

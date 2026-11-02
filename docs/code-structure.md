@@ -182,9 +182,9 @@ internal compatibility re-exports.
 `cargo xtask structure` is the enforcement gate; the rules below are the
 intent behind it.
 
-- File-level Code LOC budgets live in `xtask/loc-budgets.tsv` and are
-  reported as advisory trend signals. New large modules must be visible in
-  review, but code is not split solely to satisfy a line count.
+- File-level Code LOC budgets live in `xtask/loc-budgets.tsv` and are reported as
+  advisory trend signals (production files only, each maximum at its exact measured LOC).
+  New large modules must be visible in review, but code is not split solely to satisfy a line count.
 - Production proxy code must not use `panic!`, `todo!`, `unimplemented!`, or
   unchecked `unwrap()`/`expect()` on request paths; `unsafe` blocks require
   `// SAFETY:` comments (denied via workspace lints).
@@ -204,5 +204,5 @@ intent behind it.
 - Operational dispatch failures use typed errors (`DispatchError`) at mode
   boundaries instead of stringly-typed routing.
 
-Run `scripts/measure-structure.sh` for the current measured LOC table and
-`cargo xtask budget` for workspace-level production/test/docs LOC baselines.
+Run `scripts/measure-structure.sh` (no arguments measures every `xtask/loc-budgets.tsv` row;
+explicit arguments measure just those paths) and `cargo xtask budget` for workspace baselines.

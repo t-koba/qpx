@@ -42,10 +42,10 @@ Run:
 cargo xtask structure
 cargo xtask budget
 bash ./scripts/check-ci-acceptance-gates.sh
-./scripts/measure-structure.sh $(cut -f1 xtask/loc-budgets.tsv)
+bash ./scripts/measure-structure.sh
 ```
 
-LOC budgets are advisory trend signals. `xtask` reports LOC drift as a notice, not a failure, so reviewers can ask why code grew without forcing arbitrary shortening. The next action is deliberately explicit: either reduce the drift by removing accidental duplication or update the advisory baseline in `xtask/src/budget.rs` / `xtask/loc-budgets.tsv` with a review rationale when the larger shape is intentional and improves correctness, coverage, or ownership. Do not contort code, delete useful behavior, or split modules only to satisfy a line-count target; prefer clear ownership, lower duplication, better tests, and measurable hot-path improvements. Function length is not separately baseline-gated; use the structural gates below when ownership, duplication, or hot-path resource behavior is the actual concern.
+LOC budgets are advisory trend signals. `xtask` reports LOC drift as a notice, not a failure, so reviewers can ask why code grew without forcing arbitrary shortening. The per-file table holds only production files, each maximum at its exact measured nonblank LOC (test files are covered by the total test baseline); `scripts/measure-structure.sh` with no arguments measures every table row because its default list is derived from the first column of `xtask/loc-budgets.tsv`, while explicit arguments measure just those paths. The next action is deliberately explicit: either reduce the drift by removing accidental duplication or update the advisory baseline in `xtask/src/budget.rs` / `xtask/loc-budgets.tsv` with a review rationale when the larger shape is intentional and improves correctness, coverage, or ownership. Do not contort code, delete useful behavior, or split modules only to satisfy a line-count target; prefer clear ownership, lower duplication, better tests, and measurable hot-path improvements. Function length is not separately baseline-gated; use the structural gates below when ownership, duplication, or hot-path resource behavior is the actual concern.
 
 The authoritative whole-workspace totals are the machine-checked
 `TOTAL_LOC_BUDGETS` constants in `xtask/src/budget.rs`; `cargo xtask budget`
