@@ -47,6 +47,134 @@ DIAGNOSTIC_NOTICE = (
 )
 
 
+CONFIRMATION_DIR_NAME = "paired-confirmation"
+
+
+def confirmation_metric_names(misses):
+    """Return the metric name (first token) of each paired miss string."""
+    names = []
+    for miss in misses or []:
+        if not isinstance(miss, str):
+            continue
+        parts = miss.split()
+        if parts:
+            names.append(parts[0])
+    return names
+
+
+def needs_confirmation(result, diagnostic):
+    """A paired REGRESSED result needs one confirmation, except diagnostics."""
+    return (not diagnostic
+            and result.get("assessment") == "paired"
+            and result.get("status") == "REGRESSED")
+
+
+def resolve_paired_confirmation(first, confirmation):
+    """Apply the option-A confirmation verdict without changing thresholds.
+
+    REGRESSED is final only when the same metric misses in both the first
+    and the confirmation sample. A PASSED confirmation, or a REGRESSED
+    confirmation on disjoint metrics, clears the candidate to PASSED while
+    keeping the first misses visible as ``unconfirmed_misses``. An invalid
+    confirmation (INCONCLUSIVE/ERROR and any other non-decisive status)
+    never clears a valid first regression.
+    """
+    first_misses = list(first.get("misses", []) or [])
+    first_metrics = set(confirmation_metric_names(first_misses))
+    status = confirmation.get("status")
+    raw_misses = confirmation.get("misses", [])
+    conf_misses = list(raw_misses) if isinstance(raw_misses, list) else []
+    if status == "REGRESSED":
+        conf_metrics = set(confirmation_metric_names(conf_misses))
+        confirmed = sorted(first_metrics & conf_metrics)
+        confirmed_set = set(confirmed)
+
+        def metric_of(miss):
+            parts = miss.split() if isinstance(miss, str) else []
+            return parts[0] if parts else ""
+
+        confirmed_misses = [m for m in first_misses if metric_of(m) in confirmed_set]
+        unconfirmed = [m for m in first_misses if metric_of(m) not in confirmed_set]
+        different = [m for m in conf_misses if metric_of(m) not in first_metrics]
+        confirmation_obj = {
+            "status": "REGRESSED",
+            "misses": conf_misses,
+            "confirmed_metrics": confirmed,
+            "attempt": confirmation.get("attempt"),
+            "different_metric_misses": different,
+            "ratios": confirmation.get("ratios"),
+            "per_round_ratios": confirmation.get("per_round_ratios"),
+        }
+        if confirmed:
+            return {**first, "status": "REGRESSED", "misses": confirmed_misses,
+                    "unconfirmed_misses": unconfirmed, "confirmation": confirmation_obj}
+        return {**first, "status": "PASSED", "misses": [],
+                "unconfirmed_misses": first_misses,
+                "candidate_ratios": first.get("ratios"),
+                "candidate_per_round_ratios": first.get("per_round_ratios"),
+                "ratios": confirmation.get("ratios", first.get("ratios")),
+                "per_round_ratios": confirmation.get("per_round_ratios", first.get("per_round_ratios")),
+                "confirmation": confirmation_obj}
+    if status == "PASSED":
+        confirmation_obj = {
+            "status": "PASSED",
+            "misses": [],
+            "confirmed_metrics": [],
+            "attempt": confirmation.get("attempt"),
+            "different_metric_misses": [],
+            "ratios": confirmation.get("ratios"),
+            "per_round_ratios": confirmation.get("per_round_ratios"),
+        }
+        return {**first, "status": "PASSED", "misses": [],
+                "unconfirmed_misses": first_misses,
+                "candidate_ratios": first.get("ratios"),
+                "candidate_per_round_ratios": first.get("per_round_ratios"),
+                "ratios": confirmation.get("ratios", first.get("ratios")),
+                "per_round_ratios": confirmation.get("per_round_ratios", first.get("per_round_ratios")),
+                "confirmation": confirmation_obj}
+    reasons = confirmation.get("reasons")
+    if reasons is None:
+        if confirmation.get("error") is not None:
+            reasons = [str(confirmation.get("error"))]
+        elif confirmation.get("reason") is not None:
+            reasons = [str(confirmation.get("reason"))]
+        else:
+            reasons = [f"confirmation {status} carries no measurement"]
+    if not isinstance(reasons, list):
+        reasons = [str(reasons)]
+    confirmation_obj = {
+        "status": status,
+        "misses": conf_misses,
+        "confirmed_metrics": [],
+        "attempt": confirmation.get("attempt"),
+        "different_metric_misses": [],
+        "reasons": reasons,
+        "ratios": confirmation.get("ratios"),
+        "per_round_ratios": confirmation.get("per_round_ratios"),
+    }
+    return {**first, "status": "REGRESSED", "confirmation": confirmation_obj}
+
+
+def confirm_paired_lane(lane, first, sampler, mode, lane_dir):
+    """Take the single confirmation sample for a regressed lane, if needed."""
+    if not needs_confirmation(first, False):
+        return first, None
+    directory = Path(lane_dir) / CONFIRMATION_DIR_NAME
+    confirmation = bounded_measure(lane, True, sampler, directory, mode, None)
+    final = resolve_paired_confirmation(first, confirmation)
+    write_json(directory / "confirmation.json", {
+        "lane": lane["name"],
+        "first_attempt": first.get("attempt"),
+        "confirmation_attempt": confirmation.get("attempt"),
+        "confirmation_status": confirmation.get("status"),
+        "final_status": final.get("status"),
+        "confirmed_metrics": final.get("confirmation", {}).get("confirmed_metrics", []),
+        "confirmation": final.get("confirmation"),
+        "unconfirmed_misses": final.get("unconfirmed_misses", []),
+    })
+    return final, confirmation
+
+
 def aggregate(samples, lane):
     # Every single sample is functionally validated before aggregation. No
     # failed/crashed/wrong-response sample can be discarded as an outlier.
@@ -327,6 +455,7 @@ def run(args, diagnostic=False):
         write_json(out / "diagnostic.json", metadata)
     results = []
     accepted = {"paired": []} if diagnostic else {"paired": [], "competitive": []}
+    pending = []
     for _, lanes in configs_lanes:
         for lane in lanes:
             for paired in ((True,) if diagnostic else (True, False)):
@@ -337,7 +466,24 @@ def run(args, diagnostic=False):
                 if result["status"] in ("PASSED", "REGRESSED", "REPORT_ONLY", "OBJECTIVE_MISS"):
                     attempt_file = out / lane["name"] / name / f'attempt-{result["attempt"]}' / "measurements.jsonl"
                     accepted[name] += load_jsonl(attempt_file)
+                    if name == "paired" and needs_confirmation(result, diagnostic):
+                        pending.append((len(results) - 1, lane))
                 write_json(out / "summary.json", {**summary(results), **metadata})
+    for index, lane in pending:
+        first = results[index]
+        lane_dir = out / lane["name"]
+        final, confirmation = confirm_paired_lane(lane, first, sampler, mode, lane_dir)
+        results[index] = final
+        if final["status"] == "PASSED" and confirmation is not None:
+            first_file = lane_dir / "paired" / f'attempt-{first["attempt"]}' / "measurements.jsonl"
+            conf_attempt = confirmation.get("attempt")
+            conf_file = lane_dir / CONFIRMATION_DIR_NAME / f"attempt-{conf_attempt}" / "measurements.jsonl"
+            if conf_attempt is not None and conf_file.is_file() and first_file.is_file():
+                first_records = load_jsonl(first_file)
+                conf_records = load_jsonl(conf_file)
+                accepted["paired"] = [record for record in accepted["paired"]
+                                      if record not in first_records] + conf_records
+        write_json(out / "summary.json", {**summary(results), **metadata})
     if args.suite == "http2" and not diagnostic:
         results.append(http2_aggregate(configs_lanes[0][0], results))
     for name, records in accepted.items():

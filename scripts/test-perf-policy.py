@@ -376,6 +376,128 @@ class PolicyTests(unittest.TestCase):
                     result, count = self.measure(lane, [bad, pair(lane)], f"{index}-{metric}")
                     self.assertEqual((result["status"], count, exit_code([result])), ("REGRESSED", 1, 1))
 
+    def test_paired_confirmation_cleared_by_pass_becomes_passed(self):
+        lane = self.pair_lanes[0]
+        first, first_calls = self.measure(lane, [pair(lane, p99=1.2)], "confirm-cleared-first")
+        self.assertEqual(first["status"], "REGRESSED")
+        self.assertTrue(DRIVER.needs_confirmation(first, False))
+        self.assertFalse(DRIVER.needs_confirmation(first, True))
+        confirmation, _ = self.measure(lane, [pair(lane)], "confirm-cleared-confirm")
+        self.assertEqual(confirmation["status"], "PASSED")
+        final = DRIVER.resolve_paired_confirmation(first, confirmation)
+        self.assertEqual(final["status"], "PASSED")
+        self.assertEqual(final["misses"], [])
+        self.assertEqual(final["unconfirmed_misses"], first["misses"])
+        self.assertEqual(final["confirmation"]["status"], "PASSED")
+        self.assertEqual(final["confirmation"]["confirmed_metrics"], [])
+        self.assertEqual(final["confirmation"]["attempt"], confirmation["attempt"])
+        self.assertEqual(final["confirmation"]["different_metric_misses"], [])
+        self.assertEqual(final["ratios"], confirmation["ratios"])
+        self.assertEqual(final["candidate_ratios"], first["ratios"])
+        self.assertEqual(final["confirmation"]["ratios"], confirmation["ratios"])
+        self.assertEqual(exit_code([final]), 0)
+
+    def test_paired_confirmation_same_metric_stays_regressed(self):
+        lane = self.pair_lanes[0]
+        first, _ = self.measure(lane, [pair(lane, p99=1.2)], "confirm-same-first")
+        confirmation, _ = self.measure(lane, [pair(lane, p99=1.3)], "confirm-same-confirm")
+        self.assertEqual((first["status"], confirmation["status"]), ("REGRESSED", "REGRESSED"))
+        final = DRIVER.resolve_paired_confirmation(first, confirmation)
+        self.assertEqual(final["status"], "REGRESSED")
+        self.assertEqual(final["confirmation"]["confirmed_metrics"], ["p99_latency_ratio"])
+        self.assertEqual(final["confirmation"]["status"], "REGRESSED")
+        self.assertEqual(final["confirmation"]["attempt"], confirmation["attempt"])
+        self.assertEqual(final["ratios"], first["ratios"])
+        self.assertEqual(final["confirmation"]["ratios"], confirmation["ratios"])
+        # Only the reproduced metric stays in misses; nothing else is confirmed.
+        self.assertTrue(all(m.split()[0] == "p99_latency_ratio" for m in final["misses"]))
+        self.assertEqual(final["misses"], first["misses"])
+        self.assertEqual(exit_code([final]), 1)
+        # A multi-miss first run keeps only the reproduced metric as a miss.
+        multi = dict(first)
+        multi["misses"] = list(first["misses"]) + ["throughput_ratio 0.100000 < 0.950000"]
+        cleared_part = DRIVER.resolve_paired_confirmation(multi, confirmation)
+        self.assertEqual(cleared_part["status"], "REGRESSED")
+        self.assertEqual(cleared_part["misses"], first["misses"])
+        self.assertEqual(cleared_part["unconfirmed_misses"], ["throughput_ratio 0.100000 < 0.950000"])
+        self.assertEqual(cleared_part["confirmation"]["different_metric_misses"], [])
+
+    def test_paired_confirmation_invalid_or_different_metric_never_confirms(self):
+        lane = self.pair_lanes[0]
+        first, _ = self.measure(lane, [pair(lane, p99=1.2)], "confirm-invalid-first")
+        # Different-metric regression is not a reproduction: final PASSED.
+        different, _ = self.measure(lane, [pair(lane, throughput=0.5)], "confirm-different-confirm")
+        self.assertEqual(different["status"], "REGRESSED")
+        final = DRIVER.resolve_paired_confirmation(first, different)
+        self.assertEqual(final["status"], "PASSED")
+        self.assertEqual(final["misses"], [])
+        self.assertEqual(final["unconfirmed_misses"], first["misses"])
+        self.assertEqual(final["confirmation"]["confirmed_metrics"], [])
+        self.assertEqual(final["confirmation"]["different_metric_misses"], different["misses"])
+        self.assertEqual(final["ratios"], different["ratios"])
+        self.assertEqual(final["candidate_ratios"], first["ratios"])
+        self.assertEqual(exit_code([final]), 0)
+        # Invalid confirmations never clear a valid first regression.
+        for invalid in ({"lane": lane["name"], "assessment": "paired", "mode": "shared",
+                         "status": "INCONCLUSIVE", "reasons": ["pinned reference missing"], "attempt": 1},
+                        {"lane": lane["name"], "assessment": "paired", "mode": "shared",
+                         "status": "ERROR", "error": "sampler crashed", "attempt": 1}):
+            with self.subTest(status=invalid["status"]):
+                kept = DRIVER.resolve_paired_confirmation(first, invalid)
+                self.assertEqual(kept["status"], "REGRESSED")
+                self.assertEqual(kept["misses"], first["misses"])
+                self.assertNotIn("unconfirmed_misses", kept)
+                self.assertEqual(kept["confirmation"]["status"], invalid["status"])
+                self.assertEqual(kept["confirmation"]["confirmed_metrics"], [])
+                self.assertTrue(kept["confirmation"]["reasons"])
+                self.assertEqual(kept["ratios"], first["ratios"])
+                self.assertEqual(exit_code([kept]), 1)
+
+    def test_confirm_paired_lane_writes_confirmation_and_switches_verdict(self):
+        lane = self.pair_lanes[0]
+        first, _ = self.measure(lane, [pair(lane, p99=1.2)], "confirm-helper-first")
+        self.assertEqual(first["status"], "REGRESSED")
+        calls = []
+
+        def confirm_measure(_lane, _paired, directory):
+            calls.append(directory)
+            return pair(lane)
+
+        lane_dir = self.directory / "confirm-helper-lane"
+        final, confirmation = DRIVER.confirm_paired_lane(
+            lane, first, confirm_measure, "shared", lane_dir)
+        self.assertEqual((final["status"], confirmation["status"]), ("PASSED", "PASSED"))
+        self.assertEqual(final["ratios"], confirmation["ratios"])
+        self.assertEqual(len(calls), 1)
+        evidence = lane_dir / "paired-confirmation" / "confirmation.json"
+        self.assertTrue(evidence.is_file())
+        self.assertTrue((lane_dir / "paired-confirmation" / "attempt-1" / "measurements.jsonl").is_file())
+        data = json.loads(evidence.read_text())
+        self.assertEqual((data["final_status"], data["confirmation_status"]), ("PASSED", "PASSED"))
+        self.assertEqual(data["confirmation"]["ratios"], confirmation["ratios"])
+
+    def test_paired_confirmation_never_runs_for_passed_or_competitive(self):
+        lane = self.pair_lanes[0]
+        passed, _ = self.measure(lane, [pair(lane)], "confirm-passed-first")
+        self.assertEqual(passed["status"], "PASSED")
+        self.assertFalse(DRIVER.needs_confirmation(passed, False))
+        calls = []
+
+        def counting_measure(_lane, _paired, directory):
+            calls.append(directory)
+            raise AssertionError("confirmation must not run for a PASSED pair")
+
+        final, confirmation = DRIVER.confirm_paired_lane(
+            lane, passed, counting_measure, "shared", self.directory / "confirm-passed-lane")
+        self.assertEqual((final, confirmation), (passed, None))
+        self.assertEqual(calls, [])
+        competitive = dict(passed)
+        competitive["assessment"] = "competitive"
+        competitive["status"] = "REGRESSED"
+        self.assertFalse(DRIVER.needs_confirmation(competitive, False))
+        regressed, _ = self.measure(lane, [pair(lane, p99=1.2)], "confirm-gate-first")
+        self.assertFalse(DRIVER.needs_confirmation(regressed, True))
+
     def test_only_invalid_pinned_reference_spread_is_retried(self):
         for index, lane in enumerate(self.pair_lanes):
             candidate_invalid = pair(lane, throughput=.5, spread=2000, invalid_role="current")
