@@ -432,14 +432,15 @@ fn split_inline_test_code_lines(content: &str) -> (usize, usize) {
     let mut pending_cfg_test = false;
     let mut classifier = LineClassifier::default();
     for line in content.lines() {
-        let trimmed = line.trim_start();
+        let blanked = blank_string_literals(line);
+        let trimmed = blanked.trim_start();
         if !in_test && trimmed.starts_with("#[cfg(test)]") {
             pending_cfg_test = true;
             continue;
         }
         if pending_cfg_test && trimmed.starts_with("mod tests") && trimmed.contains('{') {
             in_test = true;
-            test_depth = brace_delta(line);
+            test_depth = brace_delta(&blanked);
             pending_cfg_test = false;
             continue;
         }
@@ -454,7 +455,7 @@ fn split_inline_test_code_lines(content: &str) -> (usize, usize) {
             }
         }
         if in_test {
-            test_depth += brace_delta(line);
+            test_depth += brace_delta(&blanked);
             if test_depth <= 0 {
                 in_test = false;
                 test_depth = 0;
@@ -11846,5 +11847,11 @@ mod loc_tests {
         let (production, tests) =
             split_inline_test_code_lines("#[cfg(test)]\nmod tests {\n *x = 1;\n}\nfn f() {}\n");
         assert_eq!((production, tests), (1, 2));
+    }
+
+    #[test]
+    fn string_braces_do_not_end_the_test_module() {
+        let source = "#[cfg(test)]\nmod tests {\n    fn a() {\n        let s = \"}\";\n    }\n    fn b() {}\n}\n";
+        assert_eq!(split_inline_test_code_lines(source), (0, 5));
     }
 }
