@@ -51,7 +51,7 @@ pub(crate) fn is_test_file(path: &Path) -> bool {
 /// A single `test` or `all(test, ...)` predicate is test-only. `any(feature,
 /// ..., test)` is production because a feature can enable it, and `not(...)`
 /// is production because its negation can hold outside tests. Multiple `cfg`
-/// attributes are ANDed, so all of them must be test-only.
+/// attributes combine with logical AND, so all of them must be test-only.
 pub(crate) fn has_cfg_test(attrs: &[Attribute]) -> bool {
     let mut saw_cfg = false;
     for attr in attrs {
