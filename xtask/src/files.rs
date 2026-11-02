@@ -1,7 +1,8 @@
 use anyhow::{Context, Result, anyhow};
 use std::fs;
 use std::path::{Path, PathBuf};
-use syn::{Attribute, Meta};
+use syn::punctuated::Punctuated;
+use syn::{Attribute, Meta, Token};
 
 pub(crate) fn workspace_root() -> Result<PathBuf> {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -45,9 +46,90 @@ pub(crate) fn is_test_file(path: &Path) -> bool {
             })
 }
 
+/// Whether every `cfg` attribute on the item can only hold when `test` is on.
+///
+/// A single `test` or `all(test, ...)` predicate is test-only. `any(feature,
+/// ..., test)` is production because a feature can enable it, and `not(...)`
+/// is production because its negation can hold outside tests. Multiple `cfg`
+/// attributes are ANDed, so all of them must be test-only.
 pub(crate) fn has_cfg_test(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| match &attr.meta {
-        Meta::List(list) if attr.path().is_ident("cfg") => list.tokens.to_string().contains("test"),
+    let mut saw_cfg = false;
+    for attr in attrs {
+        if !attr.path().is_ident("cfg") {
+            continue;
+        }
+        saw_cfg = true;
+        let Meta::List(list) = &attr.meta else {
+            return false;
+        };
+        let Ok(predicate) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+        else {
+            return false;
+        };
+        if predicate.len() != 1 || !meta_is_test_only(&predicate[0]) {
+            return false;
+        }
+    }
+    saw_cfg
+}
+
+fn meta_is_test_only(meta: &Meta) -> bool {
+    match meta {
+        Meta::Path(path) => path.is_ident("test"),
+        Meta::List(list) if list.path.is_ident("all") => {
+            let Ok(args) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            else {
+                return false;
+            };
+            !args.is_empty() && args.iter().any(meta_is_test_only)
+        }
+        Meta::List(list) if list.path.is_ident("any") => {
+            let Ok(args) = list.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            else {
+                return false;
+            };
+            !args.is_empty() && args.iter().all(meta_is_test_only)
+        }
         _ => false,
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::has_cfg_test;
+    use syn::ItemFn;
+
+    fn attrs(source: &str) -> Vec<syn::Attribute> {
+        syn::parse_str::<ItemFn>(source)
+            .expect("test item parses")
+            .attrs
+    }
+
+    #[test]
+    fn cfg_test_is_test_only() {
+        assert!(has_cfg_test(&attrs("#[cfg(test)] fn f() {}")));
+        assert!(has_cfg_test(&attrs(
+            "#[cfg(all(test, feature = \"http3\"))] fn f() {}"
+        )));
+        assert!(has_cfg_test(&attrs("#[cfg(any(test))] fn f() {}")));
+    }
+
+    #[test]
+    fn feature_enabled_and_negated_cfg_are_production() {
+        assert!(!has_cfg_test(&attrs(
+            "#[cfg(any(feature = \"http3\", test))] fn f() {}"
+        )));
+        assert!(!has_cfg_test(&attrs("#[cfg(not(test))] fn f() {}")));
+        assert!(!has_cfg_test(&attrs("fn f() {}")));
+    }
+
+    #[test]
+    fn multiple_cfg_attributes_are_anded() {
+        assert!(!has_cfg_test(&attrs(
+            "#[cfg(test)] #[cfg(feature = \"http3\")] fn f() {}"
+        )));
+        assert!(has_cfg_test(&attrs(
+            "#[cfg(test)] #[cfg(all(test, feature = \"http3\"))] fn f() {}"
+        )));
+    }
 }

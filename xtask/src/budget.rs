@@ -1,8 +1,8 @@
 /// Measured whole-workspace baselines; `check_total_loc_budgets` reports
 /// growth above them.
 pub(crate) const TOTAL_LOC_BUDGETS: TotalLocBudgets = TotalLocBudgets {
-    production_rust: 151_214,
-    test_rust: 81_983,
+    production_rust: 151_249,
+    test_rust: 82_016,
     docs_markdown: 3_658,
 };
 
