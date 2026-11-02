@@ -114,6 +114,7 @@ The acceptance rule is not “old YAML still parses”. The rule is:
 - `qpxf.yaml`: `qpxf` executor with repo-local fixture handlers.
 - `qpx-tcp.yaml`: reverse to `qpxf` over TCP IPC.
 - `qpxf-tcp.yaml`: TCP `qpxf` executor paired with `qpx-tcp.yaml`.
+- `qpxf-fastcgi.yaml`: pooled FastCGI responders with `script_name_prefixes` splitting and concurrency-limited SCGI.
 
 ## 99-test-fixtures
 
