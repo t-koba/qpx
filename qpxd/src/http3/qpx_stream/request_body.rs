@@ -18,14 +18,6 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
     mut sender: Sender,
     options: QpxRequestBodyRelayOptions<'_>,
 ) -> Result<(u64, Option<crate::http::rpc::FramedBodySummary>)> {
-    relay_qpx_request_body_observed_inner(req_stream, &mut sender, options).await
-}
-
-async fn relay_qpx_request_body_observed_inner(
-    req_stream: &mut qpx_h3::RequestRecvStream,
-    sender: &mut Sender,
-    options: QpxRequestBodyRelayOptions<'_>,
-) -> Result<(u64, Option<crate::http::rpc::FramedBodySummary>)> {
     let mut grpc_observer = options.grpc_observer;
     let mut bytes_read = 0usize;
     let mut receiver_open = true;
