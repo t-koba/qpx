@@ -20,7 +20,7 @@ HTTP substrate:
 - QPACK per RFC 9204
 - HTTP Datagrams / Capsules per RFC 9297
 - CONNECT-UDP per RFC 9298
-- WebTransport per `draft-ietf-webtrans-http3-15`
+- WebTransport using the legacy `draft-ietf-webtrans-http3-04`/`05` settings codepoints (current drafts are not yet implemented)
 
 QPX product lanes:
 
