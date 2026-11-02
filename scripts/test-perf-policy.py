@@ -17,8 +17,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
-from perf_policy import (bounded_measure, evaluate, exit_code, load_jsonl,
-                         objectives, summary, write_json, write_jsonl)
+from perf_policy import (bounded_measure, effective_limits, effective_limits_digest,
+                         evaluate, exit_code, load_jsonl, objectives, summary,
+                         write_json, write_jsonl)
 
 ARTIFACTS = ROOT / "target/perf/policy-fixtures"
 ORDER = [["current", "previous"], ["previous", "current"], ["current", "previous"]]
@@ -100,6 +101,19 @@ def pair(lane, throughput=1.0, cpu=1.0, p99=1.0, spread=1.0, invalid_role="curre
 
 
 class PolicyTests(unittest.TestCase):
+    def test_effective_limits_digest_tracks_lane_overrides(self):
+        base = {"defaults": {"min_throughput_ratio": 1.25, "max_p99_latency_ratio": 0.8},
+                "lanes": [{"min_throughput_ratio": 1.15}, {}]}
+        baseline = effective_limits_digest(base)
+        self.assertEqual(effective_limits(base)[0]["min_throughput_ratio"], 1.15)
+        self.assertEqual(effective_limits(base)[0]["max_p99_latency_ratio"], 0.8)
+        weakened = copy.deepcopy(base)
+        weakened["lanes"][0]["min_throughput_ratio"] = 1.0
+        self.assertNotEqual(baseline, effective_limits_digest(weakened))
+        relaxed = copy.deepcopy(base)
+        relaxed["defaults"]["max_p99_latency_ratio"] = 0.95
+        self.assertNotEqual(baseline, effective_limits_digest(relaxed))
+
     def setUp(self):
         self.directory = ARTIFACTS / self._testMethodName
         self.directory.mkdir(parents=True)

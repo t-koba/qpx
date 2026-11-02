@@ -3,6 +3,7 @@
 Exit 1 is a hard error/regression (or a controlled competitive miss).
 INCONCLUSIVE measurements remain visible but are non-blocking. Only RETRYABLE_INVALID permits another measurement.
 """
+import hashlib
 import json
 import math
 import os
@@ -20,6 +21,41 @@ FILES = {
     "origin": ("origin-cache-performance-objectives.json", 2, "multi_axis_origin_cache_dominance"),
     "proxy": ("proxy-performance-objectives.json", 2, "multi_axis_proxy_dominance"),
 }
+
+
+def effective_limits(config):
+    """Return each lane's limits after merging the file defaults with the lane."""
+    if not isinstance(config, dict):
+        fail("objectives: expected a JSON object")
+    defaults = config.get("defaults")
+    lanes = config.get("lanes")
+    if not isinstance(defaults, dict) or not defaults:
+        fail("objectives: defaults are missing")
+    if not isinstance(lanes, list) or not lanes:
+        fail("objectives: lanes are missing")
+    keys = sorted(defaults)
+    effective = []
+    for index, lane in enumerate(lanes):
+        if not isinstance(lane, dict):
+            fail(f"objectives: lane {index} is not an object")
+        merged = {**defaults, **lane}
+        row = {}
+        for key in keys:
+            try:
+                value = float(merged[key])
+            except (KeyError, TypeError, ValueError):
+                fail(f"objectives: lane {index} limit {key} is not numeric")
+            if not math.isfinite(value):
+                fail(f"objectives: lane {index} limit {key} is not finite")
+            row[key] = value
+        effective.append(row)
+    return effective
+
+
+def effective_limits_digest(config):
+    """Stable digest of the effective limits that grading actually uses."""
+    payload = json.dumps(effective_limits(config), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def load_json(path):

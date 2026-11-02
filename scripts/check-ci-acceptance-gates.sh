@@ -670,10 +670,34 @@ for index, lane in enumerate(lanes):
             )
 PY
 }
+require_effective_limits() {
+  local file="$1"
+  local expected="$2"
+  python3 - "$file" "$expected" <<'PY'
+import json
+import sys
+
+sys.path.insert(0, "scripts/lib")
+from perf_policy import effective_limits, effective_limits_digest
+
+file_name, expected = sys.argv[1:3]
+with open(file_name, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+actual = effective_limits_digest(data)
+if actual != expected:
+    raise SystemExit(
+        f"{file_name}: effective limits changed\n"
+        f"  expected digest {expected}\n"
+        f"  actual digest   {actual}\n"
+        f"  effective limits {json.dumps(effective_limits(data), sort_keys=True)}"
+    )
+PY
+}
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_rss_peak_ratio 1.0
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_fd_peak_ratio 1.0
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_scheduler_queue_delay_ratio 1.0
 require_proxy_lane_limits perf/proxy-performance-objectives.json
+require_effective_limits perf/proxy-performance-objectives.json a9fcf23b26d9d63e30a94789f78bd4051c08aebefccfd63ef2c26e060d708a07
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_throughput_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_dominance_score 1.25
@@ -682,6 +706,7 @@ require perf/origin-cache-performance-objectives.json '"bench": "proxy_cache_mis
 require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_rss_peak_ratio 1.0
 require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_fd_peak_ratio 1.0
 require_json_number_at_most perf/origin-cache-performance-objectives.json defaults.max_scheduler_queue_delay_ratio 1.0
+require_effective_limits perf/origin-cache-performance-objectives.json db3e3121bc208a971f70ae651a9697535ac0ac74462cadaffe02ee0e9e7029ce
 require scripts/perf-audit-http2-compare.sh 'MAX_CONCURRENT_STREAMS_VALUES="${QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES:-1 100}"'
 require scripts/perf-audit-http2-compare.sh 'BODY_SIZES="${QPX_HTTP2_COMPARE_BODY_SIZES:-1024 1048576}"'
 require scripts/perf-audit-http2-compare.sh 'CLIENT_THREADS="${QPX_HTTP2_COMPARE_CLIENT_THREADS:-4}"'
@@ -727,6 +752,7 @@ require_json_number_at_least perf/http2-performance-objectives.json defaults.min
 require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_total_rss_peak_ratio 1.0
 require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_total_fd_peak_ratio 1.0
 require_json_number_at_most perf/http2-performance-objectives.json defaults.max_lane_scheduler_queue_delay_ratio 1.0
+require_effective_limits perf/http2-performance-objectives.json 98f0a5fd09095a3a800c70275d711e6dd9224991245f191b60200a0addacf91d
 require scripts/lib/streaming_records.py '"proxy_compare_http1_streaming_reverse"'
 require scripts/perf-audit-streaming-compare.sh 'STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"'
 require scripts/perf-audit-streaming-compare.sh 'FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"'
