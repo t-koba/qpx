@@ -301,30 +301,6 @@ where
     send_http1_request_with_interim_inner(stream, read_buf, write_buf, req, Some(recycler)).await
 }
 
-pub(crate) async fn send_http1_request_with_interim_reusable_raw_response<S>(
-    stream: S,
-    read_buf: BytesMut,
-    write_buf: BytesMut,
-    req: Request<Body>,
-    request_version: http::Version,
-    proxy_name: &str,
-    recycler: Http1ConnectionRecycler<S>,
-) -> Result<Http1ResponseWithInterim>
-where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    send_http1_request_with_interim_raw_response_inner(
-        stream,
-        read_buf,
-        write_buf,
-        req,
-        request_version,
-        proxy_name,
-        Some(recycler),
-    )
-    .await
-}
-
 pub(crate) async fn send_prepared_http1_head_with_interim_reusable_raw_response_under_external_deadline<
     S,
 >(
@@ -432,14 +408,14 @@ where
     })
 }
 
-async fn send_http1_request_with_interim_raw_response_inner<S>(
+pub(crate) async fn send_http1_request_with_interim_reusable_raw_response<S>(
     mut stream: S,
     read_buf: BytesMut,
     mut write_buf: BytesMut,
     req: Request<Body>,
     request_version: http::Version,
     proxy_name: &str,
-    recycler: Option<Http1ConnectionRecycler<S>>,
+    recycler: Http1ConnectionRecycler<S>,
 ) -> Result<Http1ResponseWithInterim>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -457,7 +433,7 @@ where
         )
         .await?;
     let response =
-        response::build_raw_response(stream, final_head, buffered_body, write_buf, recycler);
+        response::build_raw_response(stream, final_head, buffered_body, write_buf, Some(recycler));
     Ok(Http1ResponseWithInterim {
         interim,
         response,
