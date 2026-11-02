@@ -1,4 +1,4 @@
-use crate::budget::{LocBudget, TotalLocBudgets};
+use crate::budget::TotalLocBudgets;
 use crate::files::{has_cfg_test, is_test_file, rust_files_under};
 use crate::visitors::{FinalizeVisitor, PanicVisitor, UnwrapVisitor};
 use anyhow::{Context, Result, anyhow, bail};
@@ -6,7 +6,6 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 use syn::parse::Parser;
 use syn::visit::Visit;
 use syn::{GenericArgument, PathArguments, ReturnType, Type, Visibility};
@@ -53,66 +52,6 @@ fn finalize_rules() -> impl Iterator<Item = FinalizeRule> {
                     .collect(),
             })
         })
-}
-
-pub(crate) fn check_loc_budgets(root: &Path, budgets: &[LocBudget]) -> Result<()> {
-    let mut cmd = Command::new("./scripts/measure-structure.sh");
-    cmd.current_dir(root);
-    for budget in budgets {
-        cmd.arg(budget.path);
-    }
-    let output = cmd.output().context("failed to run measure-structure.sh")?;
-    if !output.status.success() {
-        bail!(
-            "measure-structure.sh failed:\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    let stdout = String::from_utf8(output.stdout).context("measure output was not utf-8")?;
-    let mut values = BTreeMap::new();
-    for line in stdout.lines().skip(1) {
-        let mut parts = line.split_whitespace().collect::<Vec<_>>();
-        if parts.len() < 2 {
-            continue;
-        }
-        let Some(value) = parts.pop() else {
-            continue;
-        };
-        let path = parts.join(" ");
-        if value == "missing" {
-            continue;
-        }
-        let parsed = value
-            .parse::<usize>()
-            .with_context(|| format!("invalid code_loc for {path}: {value}"))?;
-        values.insert(path, parsed);
-    }
-
-    let mut notices = Vec::new();
-    for budget in budgets {
-        match values.get(budget.path) {
-            Some(actual) if *actual > budget.max => {
-                let reason = if budget.reason.trim() == "r" {
-                    "tracked advisory baseline"
-                } else {
-                    budget.reason
-                };
-                notices.push(format!(
-                    "{}: {} > {} ({})",
-                    budget.path, actual, budget.max, reason
-                ));
-            }
-            Some(_) => {}
-            None => notices.push(format!("{}: missing from measure output", budget.path)),
-        }
-    }
-    if !notices.is_empty() {
-        eprintln!(
-            "advisory structure LOC budget notices:\n{}",
-            notices.join("\n")
-        );
-    }
-    Ok(())
 }
 
 pub(crate) fn check_total_loc_budgets(root: &Path, budgets: TotalLocBudgets) -> Result<()> {

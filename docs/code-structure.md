@@ -1,9 +1,8 @@
 # Code Structure
 
 Source-level guide to the qpx workspace. Directory granularity is intentional:
-per-file inventories go stale quickly, and `cargo xtask structure` /
-`xtask/loc-budgets.tsv` are the machine-checked source of truth for file-level
-budgets and structural gates.
+`cargo xtask structure` is the machine-checked source of truth for structural
+gates, and `cargo xtask budget` reports the whole-workspace size baselines.
 
 Production `unwrap()`/`expect()` debt is ratcheted by
 `xtask/production-unwraps-baseline.tsv`: the file records the existing
@@ -182,9 +181,10 @@ internal compatibility re-exports.
 `cargo xtask structure` is the enforcement gate; the rules below are the
 intent behind it.
 
-- File-level Code LOC budgets live in `xtask/loc-budgets.tsv` and are reported as
-  advisory trend signals (production files only, each maximum at its exact measured LOC).
-  New large modules must be visible in review, but code is not split solely to satisfy a line count.
+- Whole-workspace size is tracked by `TOTAL_LOC_BUDGETS` in `xtask/src/budget.rs`
+  (production Rust, test Rust, Markdown docs) and reported by `cargo xtask budget`
+  as advisory trend signals. New large modules must be visible in review, but code
+  is not split solely to satisfy a line count.
 - Production proxy code must not use `panic!`, `todo!`, `unimplemented!`, or
   unchecked `unwrap()`/`expect()` on request paths; `unsafe` blocks require
   `// SAFETY:` comments (denied via workspace lints).
@@ -204,5 +204,4 @@ intent behind it.
 - Operational dispatch failures use typed errors (`DispatchError`) at mode
   boundaries instead of stringly-typed routing.
 
-Run `scripts/measure-structure.sh` (no arguments measures every `xtask/loc-budgets.tsv` row;
-explicit arguments measure just those paths) and `cargo xtask budget` for workspace baselines.
+Run `cargo xtask budget` for workspace size baselines.
