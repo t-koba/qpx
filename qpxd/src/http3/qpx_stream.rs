@@ -15,15 +15,6 @@ pub(crate) use self::request_body::{
     QpxRequestBodyRelayOptions, relay_qpx_request_body_observed_from_recv,
 };
 
-pub(crate) async fn send_qpx_interim_response_to_send(
-    req_stream: &mut qpx_h3::RequestSendStream,
-    interim: crate::upstream::raw_http1::InterimResponseHead,
-    send_timeout: Duration,
-) -> Result<()> {
-    send_qpx_interim_response_inner(QpxResponseWriter::Send(req_stream), interim, send_timeout)
-        .await
-}
-
 enum QpxResponseWriter<'a> {
     Full(&'a mut qpx_h3::RequestStream),
     Send(&'a mut qpx_h3::RequestSendStream),
@@ -72,11 +63,12 @@ impl QpxResponseWriter<'_> {
     }
 }
 
-async fn send_qpx_interim_response_inner(
-    mut req_stream: QpxResponseWriter<'_>,
+pub(crate) async fn send_qpx_interim_response_to_send(
+    req_stream: &mut qpx_h3::RequestSendStream,
     interim: crate::upstream::raw_http1::InterimResponseHead,
     send_timeout: Duration,
 ) -> Result<()> {
+    let mut req_stream = QpxResponseWriter::Send(req_stream);
     let interim = sanitize_interim_response_for_h3(interim)?;
     if let Err(err) = timeout(send_timeout, req_stream.send_response_head(&interim))
         .await
