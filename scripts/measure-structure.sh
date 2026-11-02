@@ -6,7 +6,10 @@ ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 if [ "$#" -gt 0 ]; then
   FILES=("$@")
 else
-  mapfile -t FILES < <(cut -f1 "${ROOT_DIR}/xtask/loc-budgets.tsv" | grep -v '^$')
+  FILES=()
+  while IFS= read -r file; do
+    FILES+=("$file")
+  done < <(cut -f1 "${ROOT_DIR}/xtask/loc-budgets.tsv" | grep -v '^$')
 fi
 
 strip_inline_tests() {
