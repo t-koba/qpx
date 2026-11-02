@@ -42,10 +42,10 @@ request-rate sample from carrying unrelated latency or CPU values into a result.
 `scripts/compare-proxy-baseline.sh` reports throughput, CPU efficiency, p99,
 multi-axis dominance, and historical absolute/normalized qpx comparisons.
 
-Competitive targets are defined in `perf/proxy-performance-objectives.json`:
-the lanes require at least 25% more throughput and CPU efficiency than the
-strongest external result per axis, a p99 ratio of at most 0.8, and dominance
-of at least 1.25. Spread caps are 1.10 for throughput/CPU and 1.25 for p99.
+Competitive targets remain in `perf/proxy-performance-objectives.json`: the
+lanes aim for at least 15% more throughput and CPU efficiency than the strongest
+external result per axis, at least 5% lower p99, and dominance of at least 1.1.
+Existing spread caps are unchanged: 1.10 for throughput/CPU and 1.25 for p99.
 Over-cap spread by qpx makes the lane `INCONCLUSIVE` without remeasurement;
 candidate variance can itself signal a regression. When the candidate spread is
 within cap, over-cap spread by the direct backend **or any external reference**
