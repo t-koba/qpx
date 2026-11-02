@@ -562,6 +562,12 @@ class StreamingGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("no paired rounds", result.stderr)
 
+    def test_paired_queue_rounds_must_be_an_integer(self):
+        """A JSON bool is not a round count, even though True == 1."""
+        result = self.run_gate(reference=reference_report(fast_rounds=True))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no paired rounds", result.stderr)
+
     def test_noisy_tail_measurement_is_reported_as_noise(self):
         """A tail miss inside its own measurement spread is not a regression."""
         result = self.run_gate(

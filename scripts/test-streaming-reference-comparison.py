@@ -82,7 +82,10 @@ class PairedComparisonTest(unittest.TestCase):
         report = streaming_reference.compare(records)
         self.assertEqual(report["read_modes"]["fast"]["paired_rounds"], 0)
         self.assertNotIn("total_ms", report["read_modes"]["fast"]["metrics"])
-        self.assertFalse(report["gate"])
+        self.assertEqual(
+            report["enforced_metric"], "scheduler_queue_delay_us_per_transfer"
+        )
+        self.assertNotIn("gate", report)
 
     def test_records_without_a_round_number_are_not_paired(self):
         records = [
@@ -141,7 +144,7 @@ class PairedComparisonTest(unittest.TestCase):
         self.assertEqual(len(records), 1)
         self.assertEqual(records[0]["sample_round"], 1)
 
-    def test_the_summary_names_the_reference_and_says_it_is_a_report(self):
+    def test_the_summary_names_the_enforced_paired_verdict(self):
         records = [
             record("qpxd", "fast", 1, total_ms=110.0),
             record("qpxd-previous", "fast", 1, total_ms=100.0),
@@ -150,7 +153,8 @@ class PairedComparisonTest(unittest.TestCase):
             streaming_reference.compare(records)
         )
         self.assertIn("qpxd-previous", summary)
-        self.assertIn("not a gate", summary)
+        self.assertIn("paired scheduler queue-delay verdict enforced", summary)
+        self.assertNotIn("not a gate", summary)
         self.assertIn("1 paired rounds", summary)
 
 

@@ -722,7 +722,7 @@ for paired_mode in ("fast", "slow"):
             "verdict requires that metric"
         )
     paired_rounds = paired_metric.get("paired_rounds")
-    if not isinstance(paired_rounds, int) or paired_rounds <= 0:
+    if type(paired_rounds) is not int or paired_rounds <= 0:
         fail(
             f"streaming reference report has no paired rounds for {paired_mode} "
             "scheduler_queue_delay_us_per_transfer: the paired queue-delay "

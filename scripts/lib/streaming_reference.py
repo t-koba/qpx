@@ -72,7 +72,7 @@ def compare(records, current_proxy=CURRENT_PROXY, reference_proxy=REFERENCE_PROX
     """Builds the paired per-round comparison for both read modes."""
     report = {
         "comparison": "current_build_versus_pinned_previous_release",
-        "gate": False,
+        "enforced_metric": "scheduler_queue_delay_us_per_transfer",
         "current_proxy": current_proxy,
         "reference_proxy": reference_proxy,
         "read_modes": {},
@@ -113,7 +113,8 @@ def compare(records, current_proxy=CURRENT_PROXY, reference_proxy=REFERENCE_PROX
 def format_summary(report):
     """One line that states the comparison, its direction and its status."""
     parts = [
-        f"streaming reference (report, not a gate): current vs {report['reference_proxy']};"
+        "streaming reference (paired scheduler queue-delay verdict enforced; "
+        f"other metrics report-only): current vs {report['reference_proxy']};"
         " a total_ms ratio above 1 means the current build was slower"
     ]
     for read_mode in READ_MODES:
