@@ -12,7 +12,6 @@ use crate::reverse::router::HttpRoute;
 use crate::upstream::origin::{
     PreparedPlainHttp1ConnectionAffinity, prepare_proxy_http1_request,
     proxy_direct_plain_http1_raw_response_with_interim,
-    proxy_direct_plain_http1_raw_response_with_interim_on_connection,
 };
 use anyhow::{Result, anyhow};
 use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
@@ -108,28 +107,16 @@ pub(super) async fn dispatch_plain_reverse_http(
         .is_some_and(|policy| policy.latency_threshold.is_some())
         .then(tokio::time::Instant::now);
     let response = timeout_after_pending(route.policy.timeout, async {
-        if let Some(connection_pool) = connection_pool {
-            proxy_direct_plain_http1_raw_response_with_interim_on_connection(
-                &state.pools,
-                req,
-                connect_authority,
-                host_authority,
-                request_version,
-                proxy_name,
-                connection_pool,
-            )
-            .await
-        } else {
-            proxy_direct_plain_http1_raw_response_with_interim(
-                &state.pools,
-                req,
-                connect_authority,
-                host_authority,
-                request_version,
-                proxy_name,
-            )
-            .await
-        }
+        proxy_direct_plain_http1_raw_response_with_interim(
+            &state.pools,
+            req,
+            connect_authority,
+            host_authority,
+            request_version,
+            proxy_name,
+            connection_pool,
+        )
+        .await
     })
     .await;
     let (interim, response, response_finalized) = match response {

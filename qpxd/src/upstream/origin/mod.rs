@@ -22,10 +22,8 @@ pub(crate) use http_backend::H3OriginPool;
 pub(crate) use http_backend::{
     DirectOriginPools, PreparedPlainHttp1ConnectionAffinity, PreparedPlainHttp1Origin,
     PreparedPlainHttp1Session, prepare_plain_http1_origin, prepare_proxy_http1_request,
-    proxy_direct_plain_http1_raw_response_with_interim,
-    proxy_direct_plain_http1_raw_response_with_interim_on_connection,
-    proxy_direct_plain_http1_with_interim, proxy_http, proxy_http_with_interim_timeout,
-    proxy_http_with_interim_timeout_on_connection,
+    proxy_direct_plain_http1_raw_response_with_interim, proxy_direct_plain_http1_with_interim,
+    proxy_http, proxy_http_with_interim_timeout, proxy_http_with_interim_timeout_on_connection,
     proxy_prepared_plain_http1_head_raw_response_with_interim,
     shared_reverse_https_request_with_trust,
 };
