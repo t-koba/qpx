@@ -627,9 +627,51 @@ require_json_number_at_least perf/proxy-performance-objectives.json defaults.min
 require_json_number_at_least perf/proxy-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
 require_json_number_at_least perf/proxy-performance-objectives.json defaults.min_dominance_score 1.25
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_p99_latency_ratio 0.8
+require_proxy_lane_limits() {
+  local file="$1"
+  python3 - "$file" <<'PY'
+import json
+import math
+import sys
+
+file_name = sys.argv[1]
+with open(file_name, "r", encoding="utf-8") as handle:
+    data = json.load(handle)
+defaults = data.get("defaults")
+lanes = data.get("lanes")
+if not isinstance(defaults, dict) or not isinstance(lanes, list) or not lanes:
+    raise SystemExit(f"{file_name}: defaults or lanes are missing")
+checks = (
+    ("min_throughput_ratio", 1.15, "below"),
+    ("min_cpu_efficiency_ratio", 1.15, "below"),
+    ("max_p99_latency_ratio", 0.95, "above"),
+    ("min_dominance_score", 1.1, "below"),
+)
+for index, lane in enumerate(lanes):
+    if not isinstance(lane, dict):
+        raise SystemExit(f"{file_name}: lane {index} is not an object")
+    limits = {**defaults, **lane}
+    for key, bound, direction in checks:
+        try:
+            value = float(limits[key])
+        except (KeyError, TypeError, ValueError):
+            raise SystemExit(f"{file_name}: lane {index} has no numeric {key}")
+        if not math.isfinite(value):
+            raise SystemExit(f"{file_name}: lane {index} {key} is not finite")
+        if direction == "below" and value < bound:
+            raise SystemExit(
+                f"{file_name}: lane {index} effective {key}={value} is below required {bound}"
+            )
+        if direction == "above" and value > bound:
+            raise SystemExit(
+                f"{file_name}: lane {index} effective {key}={value} exceeds allowed {bound}"
+            )
+PY
+}
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_rss_peak_ratio 1.0
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_fd_peak_ratio 1.0
 require_json_number_at_most perf/proxy-performance-objectives.json defaults.max_scheduler_queue_delay_ratio 1.0
+require_proxy_lane_limits perf/proxy-performance-objectives.json
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_throughput_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_cpu_efficiency_ratio 1.25
 require_json_number_at_least perf/origin-cache-performance-objectives.json defaults.min_dominance_score 1.25
