@@ -18,8 +18,9 @@ The job uploads four files as the `qpx-ci-runner-minutes` artifact:
 
 The report covers one workflow: the one that produced the run. The day view
 therefore totals that workflow's runs, not every workflow of the repository.
-The other workflows of a push (the codeql, security-qa and structure checks)
-cost a few minutes each and are not in this number.
+The other push workflows are not counted; on publication `69c705b8…`
+the `security-qa` lane was about 25 minutes (fuzz smoke 1149 s, address
+sanitizer 356 s) and `structure` 27 s. Durations vary per push.
 
 ## What the numbers mean
 
