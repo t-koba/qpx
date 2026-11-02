@@ -339,8 +339,10 @@ fast_checks = (
     ("dominance score", dominance_score, ratio_limit(fast_objectives, "min_dominance_score"), "min"),
     ("total RSS peak ratio", total_rss_peak_ratio, ratio_limit(fast_objectives, "max_total_rss_peak_ratio"), "max"),
     ("total FD peak ratio", total_fd_peak_ratio, ratio_limit(fast_objectives, "max_total_fd_peak_ratio"), "max"),
-    ("scheduler queue-delay ratio", scheduler_queue_delay_ratio, ratio_limit(fast_objectives, "max_scheduler_queue_delay_ratio"), "max"),
 )
+# Scheduler queue delay is diagnostic-only in both assessment modes
+# (docs/performance.md): it stays in the printed summary and measured records
+# but never enters the failure or judgeability decisions.
 
 failures = []
 marginals = []
@@ -409,12 +411,6 @@ fast_objective_noise = {
     "p99 gap ratio": tail_band(
         fast_effective,
         nested_number(qpx_fast, "sample_spread", "p99_chunk_gap_ms_ratio"),
-    ),
-    "scheduler queue-delay ratio": tail_band(
-        fast_effective,
-        nested_number(
-            qpx_fast, "sample_spread", "scheduler_queue_delay_us_per_transfer_ratio"
-        ),
     ),
 }
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
@@ -516,12 +512,6 @@ slow_objective_noise = {
         slow_effective,
         nested_number(qpx_slow, "sample_spread", "p99_chunk_gap_ms_ratio"),
     ),
-    "max_scheduler_queue_delay_ratio": tail_band(
-        slow_effective,
-        nested_number(
-            qpx_slow, "sample_spread", "scheduler_queue_delay_us_per_transfer_ratio"
-        ),
-    ),
 }
 metric_spread_cap = ratio_limit(
     stability_objectives, "max_qpx_metric_sample_spread_ratio"
@@ -558,16 +548,6 @@ tail_objectives = (
         False,
     ),
     (
-        "fast",
-        "scheduler queue-delay ratio",
-        "scheduler_queue_delay_us_per_transfer",
-        qpx_fast,
-        leader,
-        ratio_limit(fast_objectives, "max_scheduler_queue_delay_ratio"),
-        fast_objective_noise["scheduler queue-delay ratio"],
-        True,
-    ),
-    (
         "slow",
         "max_p99_gap_ratio",
         "p99_chunk_gap_ms",
@@ -576,16 +556,6 @@ tail_objectives = (
         ratio_limit(slow_objectives, "max_p99_gap_ratio"),
         slow_objective_noise["max_p99_gap_ratio"],
         False,
-    ),
-    (
-        "slow",
-        "max_scheduler_queue_delay_ratio",
-        "scheduler_queue_delay_us_per_transfer",
-        qpx_slow,
-        slow_resource_leader,
-        ratio_limit(slow_objectives, "max_scheduler_queue_delay_ratio"),
-        slow_objective_noise["max_scheduler_queue_delay_ratio"],
-        True,
     ),
 )
 for lane, _name, metric, subject, reference, cap, band, lower_is_better in tail_objectives:
@@ -672,6 +642,10 @@ if slow_cpu_rate_spread > metric_spread_cap + 1e-12:
     )
 
 for field, current in slow_ratios.items():
+    # Scheduler queue delay is diagnostic-only in both modes; it stays in
+    # slow_ratios for the printed summary but never fails the run.
+    if field == "max_scheduler_queue_delay_ratio":
+        continue
     objective = ratio_limit(slow_objectives, field)
     # The time and CPU-rate objectives use the bounded lane band; the tail
     # objectives use the band of their own metric.

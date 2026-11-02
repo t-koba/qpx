@@ -426,6 +426,31 @@ class StreamingGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertNotIn("marginal", result.stdout)
 
+    def test_scheduler_queue_delay_is_visible_but_not_failing(self):
+        """Queue delay is diagnostic-only in both modes, never a gate."""
+        result = self.run_gate(
+            lane(
+                FAST_LANE,
+                qpxd={"scheduler_queue_delay_us_per_transfer": 38311.0},
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("queue=", result.stdout)
+        self.assertNotIn("scheduler queue-delay ratio", result.stdout)
+        self.assertNotIn("scheduler queue-delay ratio", result.stderr)
+
+    def test_slow_scheduler_queue_delay_is_visible_but_not_failing(self):
+        """The slow lane also reports queue delay without gating on it."""
+        result = self.run_gate(
+            slow=lane(
+                SLOW_LANE,
+                qpxd={"scheduler_queue_delay_us_per_transfer": 100000.0},
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("max_scheduler_queue_delay_ratio=", result.stdout)
+        self.assertNotIn("scheduler queue-delay ratio", result.stderr)
+
     def test_noisy_tail_measurement_is_reported_as_noise(self):
         """A tail miss inside its own measurement spread is not a regression."""
         result = self.run_gate(
@@ -444,7 +469,8 @@ class StreamingGateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("fast streaming p99 gap ratio marginal", result.stdout)
-        self.assertIn("fast streaming scheduler queue-delay ratio marginal", result.stdout)
+        self.assertIn("queue=", result.stdout)
+        self.assertNotIn("scheduler queue-delay ratio", result.stdout)
 
     def test_tail_noise_band_is_bounded_by_the_policy_multiplier(self):
         """A wide measured spread must not widen the band past the policy limit.
@@ -457,20 +483,14 @@ class StreamingGateTest(unittest.TestCase):
             lane(
                 FAST_LANE,
                 qpxd={
-                    # Twice the leader's gap and delay, and twice both caps.
+                    # Twice the leader's gap and twice its cap.
                     "p99_chunk_gap_ms": 0.045 * 2.0 * 3.2,
-                    "scheduler_queue_delay_us_per_transfer": 3943.0 * 2.0 * 6.0,
-                    "sample_spread": {
-                        "p99_chunk_gap_ms_ratio": 2.0,
-                        "scheduler_queue_delay_us_per_transfer_ratio": 2.0,
-                    },
+                    "sample_spread": {"p99_chunk_gap_ms_ratio": 2.0},
                 },
             )
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("fast streaming p99 gap ratio", result.stderr)
-        self.assertIn("decisive", result.stderr)
-        self.assertIn("fast streaming scheduler queue-delay ratio", result.stderr)
         self.assertIn("decisive", result.stderr)
         # The band is the policy multiplier, not the measured spread.
         self.assertNotIn("within measurement noise", result.stdout)
@@ -621,16 +641,12 @@ class StreamingGateTest(unittest.TestCase):
         result = self.run_gate(
             lane(
                 FAST_LANE,
-                qpxd={
-                    "p99_chunk_gap_ms": 0.182083,
-                    "scheduler_queue_delay_us_per_transfer": 29216.16,
-                },
+                qpxd={"p99_chunk_gap_ms": 0.182083},
             )
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("fast streaming p99 gap ratio", result.stderr)
         self.assertIn("decisive", result.stderr)
-        self.assertIn("fast streaming scheduler queue-delay ratio", result.stderr)
 
     def test_reference_spread_never_widens_the_band(self):
         result = self.run_gate(
