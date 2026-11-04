@@ -22,6 +22,8 @@ jobs:
         run: python3 ./scripts/test-ci-runner-minutes.py
       - name: streaming pairing fixture checks
         run: python3 ./scripts/test-streaming-pair.py
+      - name: CI artifact path guard tests
+        run: python3 ./scripts/test-ci-artifact-paths.py
       - name: structure checks
         run: cargo xtask structure
       - name: loc budget checks
