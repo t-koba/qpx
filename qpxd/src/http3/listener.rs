@@ -219,6 +219,21 @@ async fn handle_stream<H: H3RequestHandler>(
         return;
     }
 
+    // Request-specific limits may inspect rules/routes, so validate authority
+    // before letting the handler select them. CONNECT has its own validation.
+    if let Err(err) = qpx_http::protocol::semantics::resolve_request_authority(
+        req_head.headers(),
+        req_head.uri().authority(),
+        req_head.uri().scheme_str(),
+    )
+    .and_then(|authority| {
+        authority.ok_or(qpx_http::protocol::semantics::RequestValidationError::MissingHost)
+    }) {
+        warn!(error = ?err, "malformed HTTP/3 request authority");
+        reject_malformed_h3_request(&mut req_stream);
+        return;
+    }
+
     match parse_expect_continue(req_head.headers()) {
         Ok(true) => {
             let continue_head = match ::http::Response::builder()
