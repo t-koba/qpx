@@ -93,8 +93,17 @@ class ComparatorConfirmationTest(unittest.TestCase):
         self.assertTrue(first["complete_modes"]["fast"])
         self.assertTrue(second["complete_modes"]["fast"])
         self.assertFalse((out / "paired-confirmation/slow").exists())
-        self.assertEqual((confirmation / "streaming-compare-raw.jsonl").read_bytes(),
-                         (out / "logs/paired-confirmation/fast/streaming-compare-raw.jsonl").read_bytes())
+        self.assertTrue((out / "streaming-compare-raw.jsonl").is_file())
+        archive = out / "logs/paired-confirmation/fast"
+        for filename in (
+            "measurements.jsonl",
+            "streaming-compare-raw.jsonl",
+            "streaming-compare-reference.json",
+            "run.log",
+        ):
+            with self.subTest(artifact=filename):
+                self.assertEqual((confirmation / filename).read_bytes(),
+                                 (archive / filename).read_bytes())
         self.assertEqual(trace.count("nginx"), 1)
         self.assertEqual(trace.count("apache"), 1)
         self.assertEqual(trace.count("lighttpd"), 1)
