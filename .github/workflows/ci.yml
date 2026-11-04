@@ -513,8 +513,10 @@ jobs:
           sudo apt-get install -y apache2 apache2-utils iproute2 lighttpd nginx nghttp2-client openssl squid valgrind wrk jq
       - name: check performance policy fixtures
         run: python3 scripts/test-perf-policy.py
-      - name: check streaming performance fixtures
-        run: python3 scripts/test-streaming-performance.py
+      - name: check streaming performance and confirmation fixtures
+        run: |
+          python3 scripts/test-streaming-performance.py
+          python3 scripts/test-streaming-confirmation.py
       - name: check streaming reference comparison fixtures
         run: python3 scripts/test-streaming-reference-comparison.py
       - name: checkout pinned previous release
