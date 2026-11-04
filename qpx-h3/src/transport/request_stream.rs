@@ -17,6 +17,7 @@ use super::{
 pub struct RequestStream {
     send: quinn::SendStream,
     recv: quinn::RecvStream,
+    connection: quinn::Connection,
     stream_id: u64,
     qpack: QpackConnection,
     read_timeout: Duration,
@@ -41,14 +42,16 @@ impl RequestStream {
     pub(crate) fn new_client_request(
         send: quinn::SendStream,
         recv: quinn::RecvStream,
-        stream_id: u64,
+        connection: quinn::Connection,
         qpack: QpackConnection,
         config: RequestStreamConfig,
         request_method: http::Method,
     ) -> Self {
+        let stream_id = send.id().into();
         Self {
             send,
             recv,
+            connection,
             stream_id,
             qpack,
             read_timeout: config.read_timeout,
@@ -73,15 +76,17 @@ impl RequestStream {
     pub(crate) fn new_server_response(
         send: quinn::SendStream,
         recv: quinn::RecvStream,
-        stream_id: u64,
+        connection: quinn::Connection,
         qpack: QpackConnection,
         config: RequestStreamConfig,
         request_method: http::Method,
         declared_request_body_bytes: Option<u64>,
     ) -> Self {
+        let stream_id = send.id().into();
         Self {
             send,
             recv,
+            connection,
             stream_id,
             qpack,
             read_timeout: config.read_timeout,
@@ -265,6 +270,7 @@ impl RequestStream {
             },
             RequestRecvStream {
                 recv: self.recv,
+                connection: self.connection,
                 stream_id: self.stream_id,
                 qpack: self.qpack,
                 read_timeout: self.read_timeout,
@@ -287,7 +293,7 @@ impl RequestStream {
 
     async fn read_next_frame_header(&mut self) -> Result<Option<(u64, usize)>> {
         let limits = self.frame_payload_limits();
-        super::read_next_frame_header(&mut self.recv, limits).await
+        super::read_next_frame_header(&mut self.recv, &self.connection, limits).await
     }
 
     fn frame_payload_limits(&self) -> super::FramePayloadLimits {

@@ -218,3 +218,68 @@ fn stale_registration_does_not_remove_replacement() {
     assert!(second_bidi.upgrade().is_none());
     assert!(second_uni.upgrade().is_none());
 }
+
+#[tokio::test]
+async fn wt_stream_on_response_paths_closes_connection_without_a_length() -> anyhow::Result<()> {
+    timeout(TEST_TIMEOUT, async {
+        for (after_headers, split) in [(false, false), (true, false), (true, true)] {
+            let (session, peer) = session_pair().await?;
+            let mut open = Box::pin(session.open_extended_connect_stream(
+                request(), Some(Protocol::WebTransport), TEST_TIMEOUT,
+            ));
+            let (mut send, mut recv) = tokio::select! {
+                result = &mut open => panic!("open completed before peer response: {:?}", result.err()),
+                streams = peer.connection.accept_bi() => streams?,
+            };
+            assert_eq!(read_varint(&mut recv).await?, Some(FRAME_HEADERS));
+            let len = read_varint(&mut recv).await?.unwrap() as usize;
+            recv.read_exact(&mut vec![0; len]).await?;
+            if after_headers {
+                write_frame(&mut send, FRAME_HEADERS, &encode_response_head(
+                    &http::Response::builder().status(200).body(())?,
+                )).await?;
+            }
+            // The response direction is never a legal place for WT_STREAM,
+            // even as the responder's first bytes. Leave the stream open.
+            send.write_all(&crate::protocol::encode_varint(0x41)?).await?;
+            if after_headers {
+                let mut stream = open.await?;
+                if split {
+                    let (_send, mut recv) = stream.request_stream.split();
+                    assert!(recv.recv_data().await.is_err());
+                } else {
+                    assert!(stream.request_stream.recv_data().await.is_err());
+                }
+            } else {
+                assert!(open.await.is_err());
+            }
+            match peer.connection.closed().await {
+                quinn::ConnectionError::ApplicationClosed(close) => {
+                    assert_eq!(u64::from(close.error_code), crate::protocol::H3_FRAME_UNEXPECTED);
+                }
+                other => panic!("expected H3_FRAME_UNEXPECTED connection close, got {other:?}"),
+            }
+        }
+        Ok::<_, anyhow::Error>(())
+    }).await?
+}
+
+#[tokio::test]
+async fn wt_stream_on_server_control_stream_closes_connection() -> anyhow::Result<()> {
+    let (session, mut peer) = session_pair().await?;
+    peer._critical
+        .0
+        .write_all(&crate::protocol::encode_varint(0x41)?)
+        .await?;
+    match timeout(TEST_TIMEOUT, peer.connection.closed()).await? {
+        quinn::ConnectionError::ApplicationClosed(close) => {
+            assert_eq!(
+                u64::from(close.error_code),
+                crate::protocol::H3_FRAME_UNEXPECTED
+            );
+        }
+        other => panic!("expected H3_FRAME_UNEXPECTED connection close, got {other:?}"),
+    }
+    drop(session);
+    Ok(())
+}

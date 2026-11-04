@@ -95,6 +95,16 @@ fn priority_parser_ignores_invalid_urgency_and_tracks_incremental() {
 
 #[test]
 fn message_stream_rejects_control_only_frames() {
+    for endpoint_is_client in [false, true] {
+        let err = validate_control_stream_frame(0x41, endpoint_is_client).unwrap_err();
+        assert_eq!(err.code, H3_FRAME_UNEXPECTED);
+        assert!(validate_control_stream_frame(0x21, endpoint_is_client).is_ok());
+    }
+    assert_eq!(
+        validate_message_stream_frame(0x41).unwrap_err().code,
+        H3_FRAME_UNEXPECTED
+    );
+    assert!(validate_message_stream_frame(0x21).is_ok());
     let err = validate_message_stream_frame(FRAME_CANCEL_PUSH).unwrap_err();
     assert_eq!(err.code, H3_FRAME_UNEXPECTED);
     let err = validate_message_stream_frame(FRAME_PUSH_PROMISE).unwrap_err();
@@ -309,4 +319,29 @@ async fn control_state_caps_buffered_priority_updates() {
         .await
         .unwrap_err();
     assert_eq!(err.code, H3_EXCESSIVE_LOAD);
+}
+
+#[tokio::test]
+async fn wt_stream_control_headers_reject_type_without_reading_a_length() {
+    for after_idle in [false, true] {
+        let (mut reader, mut writer) = tokio::io::duplex(16);
+        writer
+            .write_all(&encode_varint(0x41).unwrap())
+            .await
+            .unwrap();
+        // Keep the writer open: a framed parser must not wait for a length.
+        let close = tokio::time::timeout(Duration::from_secs(1), async {
+            if after_idle {
+                read_frame_header_after_idle(&mut reader, Duration::from_secs(5))
+                    .await
+                    .unwrap_err()
+                    .into_connection_close()
+            } else {
+                super::read_frame_header(&mut reader).await.unwrap_err()
+            }
+        })
+        .await
+        .expect("WT_STREAM rejected as soon as its type is recognized");
+        assert_eq!(close.code, H3_FRAME_UNEXPECTED);
+    }
 }

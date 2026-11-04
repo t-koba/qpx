@@ -87,8 +87,7 @@ pub(super) async fn consume_uni_stream(
                                 H3_CLOSED_CRITICAL_STREAM,
                                 "control stream timed out",
                             )
-                        })?
-                        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+                        })??
                 };
                 let Some((frame_ty, frame_len)) = frame_header else {
                     return Err(ConnectionClose::new(
@@ -258,6 +257,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
     ctx: RequestStreamContext,
 ) -> Result<()> {
     let via_received_by = handler.via_received_by();
+    let mut at_stream_start = true;
     let first_type = loop {
         let frame_type = match timeout(ctx.settings.read_timeout, read_varint(&mut recv)).await {
             Ok(result) => result?,
@@ -278,15 +278,22 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
             return Ok(());
         };
         if frame_type == FRAME_HEADERS
-            || (frame_type == STREAM_WEBTRANSPORT_BIDI && ctx.settings.enable_webtransport)
+            || (at_stream_start
+                && frame_type == STREAM_WEBTRANSPORT_BIDI
+                && ctx.settings.enable_webtransport)
         {
             break frame_type;
         }
+        at_stream_start = false;
         if frame_type == crate::protocol::FRAME_DATA {
             abort_stream_with_code(&mut send, &mut recv, H3_FRAME_UNEXPECTED).await?;
             return Ok(());
         }
         if let Err(close) = crate::protocol::validate_message_stream_frame(frame_type) {
+            if frame_type == STREAM_WEBTRANSPORT_BIDI {
+                crate::protocol::close_quic_connection(&ctx.connection, &close);
+                return Ok(());
+            }
             abort_stream_with_code(&mut send, &mut recv, close.code).await?;
             return Ok(());
         }
@@ -490,7 +497,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
                 RequestStream::new_server_response(
                     send,
                     recv,
-                    stream_id,
+                    ctx.connection.clone(),
                     ctx.qpack.clone(),
                     stream_config,
                     request_method,
@@ -544,7 +551,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
                 RequestStream::new_server_response(
                     send,
                     recv,
-                    stream_id,
+                    ctx.connection.clone(),
                     ctx.qpack.clone(),
                     stream_config,
                     request_method,
@@ -573,7 +580,7 @@ pub(super) async fn handle_request_stream<H: RequestHandler>(
     let stream = RequestStream::new_server_response(
         send,
         recv,
-        stream_id,
+        ctx.connection.clone(),
         ctx.qpack.clone(),
         stream_config,
         request_method,

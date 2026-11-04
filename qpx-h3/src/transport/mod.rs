@@ -152,11 +152,16 @@ pub(super) struct FramePayloadLimits {
 /// payload is larger than its limit is refused before any of it is read.
 pub(super) async fn read_next_frame_header(
     recv: &mut quinn::RecvStream,
+    connection: &quinn::Connection,
     limits: FramePayloadLimits,
 ) -> Result<Option<(u64, usize)>> {
     let Some(ty) = read_varint(recv).await? else {
         return Ok(None);
     };
+    if let Err(close) = crate::protocol::reject_wt_stream(ty) {
+        crate::protocol::close_quic_connection(connection, &close);
+        return Err(anyhow!(close.message).into());
+    }
     let len = read_varint(recv)
         .await?
         .ok_or_else(|| anyhow!("truncated frame length"))?;

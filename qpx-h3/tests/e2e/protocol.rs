@@ -332,3 +332,95 @@ async fn decoded_qpack_fields_reach_owned_handler_without_coalescing() -> Result
     }
     Ok(())
 }
+
+#[derive(Clone)]
+struct WtStreamPlacementHandler {
+    split: bool,
+}
+
+impl RequestHandler for WtStreamPlacementHandler {
+    fn settings(&self) -> Settings {
+        Settings {
+            enable_extended_connect: true,
+            enable_webtransport: true,
+            read_timeout: TEST_TIMEOUT,
+            ..Default::default()
+        }
+    }
+
+    async fn handle_request(
+        &self,
+        _request: Request,
+        _conn: ConnectionInfo,
+        mut stream: RequestStream,
+    ) -> H3Result<()> {
+        if self.split {
+            let (_send, mut recv) = stream.split();
+            recv.recv_data().await?;
+        } else {
+            stream.recv_data().await?;
+        }
+        Err(anyhow!("expected misplaced WT_STREAM to fail").into())
+    }
+}
+
+async fn expect_wt_stream_connection_error(connection: &quinn::Connection) -> Result<()> {
+    let closed = timeout(TEST_TIMEOUT, connection.closed()).await?;
+    match closed {
+        quinn::ConnectionError::ApplicationClosed(close) => {
+            assert_eq!(u64::from(close.error_code), H3_FRAME_UNEXPECTED);
+        }
+        other => {
+            return Err(anyhow!(
+                "expected H3_FRAME_UNEXPECTED connection error, got {other:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn wt_stream_after_unknown_or_request_headers_closes_connection() -> Result<()> {
+    // Cover the leading-frame parser and both combined/split message parsers.
+    for (after_headers, split) in [(false, false), (true, false), (true, true)] {
+        let (addr, config, server_task) = start_server(WtStreamPlacementHandler { split }).await?;
+        let (_endpoint, connection) = connect_client(addr, config).await?;
+        open_client_control_stream_with_webtransport(&connection).await?;
+        open_client_qpack_streams(&connection).await?;
+        let (mut send, _recv) = connection.open_bi().await?;
+        if after_headers {
+            let headers = build_head_request_headers(&format!("localhost:{}", addr.port()));
+            write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
+        } else {
+            write_frame_raw(&mut send, 0x21, b"grease").await?;
+        }
+        let mut signal = Vec::new();
+        push_varint(&mut signal, 0x41);
+        send.write_all(&signal).await?;
+        // No length, session id, or FIN: rejection must happen on type recognition.
+        expect_wt_stream_connection_error(&connection).await?;
+        server_task.abort();
+        let _ = server_task.await;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn wt_stream_on_control_stream_closes_connection() -> Result<()> {
+    for after_settings in [false, true] {
+        let (addr, config, server_task) = start_server(WebTransportEchoHandler).await?;
+        let (_endpoint, connection) = connect_client(addr, config).await?;
+        let mut control = connection.open_uni().await?;
+        let mut bytes = vec![0]; // Control stream type.
+        if after_settings {
+            push_varint(&mut bytes, FRAME_SETTINGS);
+            push_varint(&mut bytes, 0);
+        }
+        push_varint(&mut bytes, 0x41);
+        control.write_all(&bytes).await?;
+        expect_wt_stream_connection_error(&connection).await?;
+        server_task.abort();
+        let _ = server_task.await;
+    }
+    Ok(())
+}

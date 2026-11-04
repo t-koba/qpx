@@ -79,14 +79,14 @@ async fn webtransport_routes_associated_streams_and_datagrams() -> Result<()> {
     let client_bidi = opener.open_webtransport_bidi(session_id).await?;
     let (mut client_bidi_send, mut client_bidi_recv) = client_bidi.split();
     client_bidi_send
-        .send_chunk(Bytes::from_static(b"client-bidi"))
+        .send_chunk(Bytes::from_static(b"\x40\x41client-bidi"))
         .await?;
     client_bidi_send.finish().await?;
     let mut echoed_bidi = Vec::new();
     while let Some(chunk) = client_bidi_recv.recv_chunk().await? {
         echoed_bidi.extend_from_slice(chunk.as_ref());
     }
-    assert_eq!(echoed_bidi, b"client-bidi");
+    assert_eq!(echoed_bidi, b"\x40\x41client-bidi");
 
     let server_uni = timeout(TEST_TIMEOUT, associated_uni.recv())
         .await

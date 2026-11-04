@@ -12,7 +12,7 @@ use super::{
     FRAME_MAX_PUSH_ID, FRAME_PING, FRAME_PRIORITY, FRAME_PRIORITY_UPDATE_PUSH,
     FRAME_PRIORITY_UPDATE_REQUEST, FRAME_PUSH_PROMISE, FRAME_SETTINGS, FRAME_WINDOW_UPDATE,
     H3_EXCESSIVE_LOAD, H3_FRAME_ERROR, H3_FRAME_UNEXPECTED, H3_GENERAL_PROTOCOL_ERROR, H3_ID_ERROR,
-    H3_MESSAGE_ERROR, H3_STREAM_CREATION_ERROR, read_varint_slice,
+    H3_MESSAGE_ERROR, H3_STREAM_CREATION_ERROR, STREAM_WEBTRANSPORT_BIDI, read_varint_slice,
 };
 
 pub(crate) const MAX_BUFFERED_PRIORITY_UPDATES: usize = 1024;
@@ -438,10 +438,23 @@ fn track_started_request_stream(inner: &mut PeerControlInner, stream_id: u64) {
     }
 }
 
+// WT_STREAM is lengthless and only valid at the start of an associated bidi stream.
+// Framed HTTP parsers must reject it before attempting to read a frame length.
+pub(crate) fn reject_wt_stream(frame_ty: u64) -> std::result::Result<(), ConnectionClose> {
+    if frame_ty == STREAM_WEBTRANSPORT_BIDI {
+        return Err(ConnectionClose::new(
+            H3_FRAME_UNEXPECTED,
+            "WT_STREAM is only permitted as the first bytes sent by a bidirectional stream initiator",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_control_stream_frame(
     frame_ty: u64,
     endpoint_is_client: bool,
 ) -> std::result::Result<(), ConnectionClose> {
+    reject_wt_stream(frame_ty)?;
     match frame_ty {
         FRAME_CANCEL_PUSH | FRAME_GOAWAY => Ok(()),
         FRAME_PRIORITY_UPDATE_REQUEST | FRAME_PRIORITY_UPDATE_PUSH if !endpoint_is_client => Ok(()),
@@ -482,6 +495,7 @@ pub(crate) fn control_frame_payload_is_known(frame_ty: u64) -> bool {
 pub(crate) fn validate_message_stream_frame(
     frame_ty: u64,
 ) -> std::result::Result<(), ConnectionClose> {
+    reject_wt_stream(frame_ty)?;
     match frame_ty {
         FRAME_CANCEL_PUSH
         | FRAME_SETTINGS

@@ -9,7 +9,7 @@ mod settings;
 
 pub(crate) use control::{
     ConnectionClose, PeerControlState, close_quic_connection, control_frame_payload_is_known,
-    discard_uni_stream, validate_message_stream_frame,
+    discard_uni_stream, reject_wt_stream, validate_message_stream_frame,
 };
 #[cfg(test)]
 pub(crate) use control::{
@@ -224,20 +224,32 @@ pub(crate) async fn read_frame<R: AsyncRead + Unpin>(
 
 pub(crate) async fn read_frame_header<R: AsyncRead + Unpin>(
     reader: &mut R,
-) -> Result<Option<(u64, u64)>> {
-    let Some(ty) = read_varint(reader).await? else {
+) -> std::result::Result<Option<(u64, u64)>, ConnectionClose> {
+    let Some(ty) = read_varint(reader)
+        .await
+        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+    else {
         return Ok(None);
     };
+    read_frame_header_after_type(reader, ty).await.map(Some)
+}
+
+async fn read_frame_header_after_type<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    ty: u64,
+) -> std::result::Result<(u64, u64), ConnectionClose> {
+    reject_wt_stream(ty)?;
     let len = read_varint(reader)
-        .await?
-        .ok_or_else(|| anyhow!("truncated frame length"))?;
-    Ok(Some((ty, len)))
+        .await
+        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+        .ok_or_else(|| ConnectionClose::new(H3_MESSAGE_ERROR, "truncated frame length"))?;
+    Ok((ty, len))
 }
 
 #[derive(Debug)]
 pub(crate) enum ControlFrameHeaderError {
     Timeout,
-    Protocol(crate::H3Error),
+    Protocol(ConnectionClose),
 }
 
 impl ControlFrameHeaderError {
@@ -247,7 +259,7 @@ impl ControlFrameHeaderError {
                 H3_CLOSED_CRITICAL_STREAM,
                 "control stream partial frame header timed out",
             ),
-            Self::Protocol(error) => ConnectionClose::new(H3_MESSAGE_ERROR, error.to_string()),
+            Self::Protocol(close) => close,
         }
     }
 }
@@ -259,14 +271,18 @@ pub(crate) async fn read_frame_header_after_idle<R: AsyncRead + Unpin>(
     let first = match reader.read_u8().await {
         Ok(value) => value,
         Err(err) if err.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(err) => return Err(ControlFrameHeaderError::Protocol(err.into())),
+        Err(err) => {
+            return Err(ControlFrameHeaderError::Protocol(ConnectionClose::new(
+                H3_MESSAGE_ERROR,
+                err.to_string(),
+            )));
+        }
     };
     tokio::time::timeout(partial_timeout, async {
-        let ty = read_varint_after_first(reader, first).await?;
-        let len = read_varint(reader)
-            .await?
-            .ok_or_else(|| anyhow!("truncated frame length"))?;
-        Ok(Some((ty, len)))
+        let ty = read_varint_after_first(reader, first)
+            .await
+            .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?;
+        read_frame_header_after_type(reader, ty).await.map(Some)
     })
     .await
     .map_err(|_| ControlFrameHeaderError::Timeout)?

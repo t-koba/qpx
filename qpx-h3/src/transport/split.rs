@@ -55,6 +55,7 @@ impl RequestSendStream {
 #[derive(Debug)]
 pub struct RequestRecvStream {
     pub(super) recv: quinn::RecvStream,
+    pub(super) connection: quinn::Connection,
     pub(super) stream_id: u64,
     pub(super) qpack: QpackConnection,
     pub(super) read_timeout: Duration,
@@ -81,7 +82,7 @@ impl RequestRecvStream {
 
     async fn read_next_frame_header(&mut self) -> Result<Option<(u64, usize)>> {
         let limits = self.frame_payload_limits();
-        super::read_next_frame_header(&mut self.recv, limits).await
+        super::read_next_frame_header(&mut self.recv, &self.connection, limits).await
     }
 
     fn frame_payload_limits(&self) -> super::FramePayloadLimits {

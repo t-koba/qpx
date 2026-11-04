@@ -389,7 +389,7 @@ pub async fn open_extended_connect_stream(
     let mut request_stream = RequestStream::new_client_request(
         bidi_send,
         bidi_recv,
-        stream_id,
+        connection.clone(),
         qpack.clone(),
         client_request_stream_config(&settings, timeout_dur),
         request.method().clone(),
@@ -510,7 +510,7 @@ async fn open_extended_connect_on_session(
     let mut request_stream = RequestStream::new_client_request(
         bidi_send,
         bidi_recv,
-        stream_id,
+        inner.connection.clone(),
         inner.qpack.clone(),
         client_request_stream_config(&inner.settings, timeout_dur),
         request.method().clone(),

@@ -264,8 +264,7 @@ async fn route_uni_stream(
                                 H3_CLOSED_CRITICAL_STREAM,
                                 "control stream timed out",
                             )
-                        })?
-                        .map_err(|err| ConnectionClose::new(H3_MESSAGE_ERROR, err.to_string()))?
+                        })??
                 };
                 let Some((frame_ty, frame_len)) = frame_header else {
                     return Err(ConnectionClose::new(
