@@ -10,13 +10,15 @@ if [ -z "$JSONL" ]; then
   exit 2
 fi
 
-python3 - "$JSONL" "$OBJECTIVES" <<'PY'
+python3 - "$JSONL" "$OBJECTIVES" "$ROOT_DIR/scripts/lib" <<'PY'
 import json
 import math
 import os
 import sys
 
-JSONL_PATH, OBJECTIVES_PATH = sys.argv[1:3]
+JSONL_PATH, OBJECTIVES_PATH, LIB_DIR = sys.argv[1:4]
+sys.path.insert(0, LIB_DIR)
+import streaming_confirmation
 BENCH = "proxy_compare_http1_streaming_reverse"
 
 
@@ -677,10 +679,10 @@ for field, current in slow_ratios.items():
 # report is required: it is written next to the final streaming JSONL by
 # scripts/perf-audit-streaming-compare.sh, and the gate judges the paired
 # current-over-reference median of scheduler_queue_delay_us_per_transfer in
-# each read mode against paired.max_scheduler_queue_delay_ratio. A missing
-# report, a mismatched comparison, or paired_rounds == 0 fails the gate
-# instead of passing silently, so a lost reference can never hide a 10x
-# queue-delay regression behind the visible-only external ratio.
+# each read mode against paired.max_scheduler_queue_delay_ratio. Missing or
+# mismatched source identities, incomplete configured rounds, or an unusable
+# confirmation retain failure; a lost reference can never hide a queue-delay
+# regression behind the visible-only external ratio.
 paired_objectives = objectives.get("paired", {})
 paired_queue_cap = ratio_limit(paired_objectives, "max_scheduler_queue_delay_ratio")
 reference_path = os.path.join(
@@ -704,7 +706,21 @@ if not isinstance(reference_report, dict) or (
         "queue-delay verdict requires "
         "comparison == \"current_build_versus_pinned_previous_release\""
     )
+try:
+    for source_mode in ("fast", "slow"):
+        streaming_confirmation.validate_identity(
+            reference_report, records[(source_mode, "qpxd")].get("commit")
+        )
+except (AttributeError, TypeError, ValueError) as exc:
+    fail(f"streaming reference report has an invalid source identity: {exc}")
+reference_attempts = reference_report.get("sample_attempts")
+if type(reference_attempts) is not int or reference_attempts <= 0:
+    fail("streaming reference report has invalid sample_attempts")
+complete_modes = reference_report.get("complete_modes")
+if not isinstance(complete_modes, dict):
+    fail("streaming reference report has no completeness evidence")
 paired_queue_medians = {}
+paired_resolutions = {}
 for paired_mode in ("fast", "slow"):
     mode_report = (reference_report.get("read_modes") or {}).get(paired_mode)
     if not isinstance(mode_report, dict):
@@ -728,6 +744,12 @@ for paired_mode in ("fast", "slow"):
             "scheduler_queue_delay_us_per_transfer: the paired queue-delay "
             "verdict requires paired_rounds > 0"
         )
+    if paired_rounds != reference_attempts or complete_modes.get(paired_mode) is not True:
+        fail(
+            f"streaming reference report has an incomplete {paired_mode} paired "
+            f"sample: {paired_rounds}/{reference_attempts} rounds and "
+            f"complete_modes={complete_modes.get(paired_mode)!r}"
+        )
     paired_median = paired_metric.get("median_current_over_reference")
     if (
         not isinstance(paired_median, (int, float))
@@ -742,12 +764,34 @@ for paired_mode in ("fast", "slow"):
         )
     paired_queue_medians[paired_mode] = (float(paired_median), paired_rounds)
     if float(paired_median) > paired_queue_cap + 1e-12:
+        confirmation_path = os.path.join(
+            os.path.dirname(reference_path), "paired-confirmation", paired_mode,
+            "streaming-compare-reference.json",
+        )
+        try:
+            with open(confirmation_path, encoding="utf-8") as handle:
+                confirmation = json.load(handle)
+        except (OSError, ValueError):
+            confirmation = {}
+        resolution = streaming_confirmation.resolve(
+            reference_report, confirmation, paired_mode, paired_queue_cap,
+            records[(paired_mode, "qpxd")].get("commit"),
+        )
+        paired_resolutions[paired_mode] = resolution
+        print("streaming paired confirmation: " + json.dumps(resolution, sort_keys=True))
+        if resolution["status"] == "PASSED":
+            continue
         failures.append(
             f"{paired_mode} streaming paired scheduler queue-delay ratio "
             f"{float(paired_median):.6f} > objective {paired_queue_cap:.6f} "
             f"(decisive: paired current-vs-pinned median over {paired_rounds} "
             "paired rounds)"
         )
+
+with open(os.path.join(os.path.dirname(reference_path),
+                       "streaming-compare-confirmation.json"), "w", encoding="utf-8") as handle:
+    json.dump(paired_resolutions, handle, sort_keys=True, indent=2)
+    handle.write("\n")
 
 print(
     "streaming performance: "

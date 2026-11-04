@@ -2,6 +2,7 @@
 """Streaming gate fixture demo; no benchmarks, servers, or network."""
 import copy
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -43,6 +44,7 @@ def build(proxy, mode, **overrides):
     transfers = FAST_TRANSFERS if mode == "fast" else SLOW_TRANSFERS
     record = {
         "bench": BENCH,
+        "commit": "a" * 40,
         "proxy": proxy,
         "read_mode": mode,
         "valid": True,
@@ -387,7 +389,12 @@ def reference_report(fast_median=1.0, slow_median=1.0, fast_rounds=3, slow_round
 
     return {
         "comparison": "current_build_versus_pinned_previous_release",
-        "gate": False,
+        "source_sha": "a" * 40,
+        "reference_source_sha": "b" * 40,
+        "sample_attempts": 3,
+        "workload": {"stream_bytes": STREAM_BYTES, "chunk_bytes": CHUNK_BYTES,
+                     "fast_transfers": FAST_TRANSFERS, "slow_read_delay_ms": "1"},
+        "complete_modes": {"fast": True, "slow": True},
         "current_proxy": "qpxd",
         "reference_proxy": "qpxd-previous",
         "read_modes": {
@@ -398,7 +405,7 @@ def reference_report(fast_median=1.0, slow_median=1.0, fast_rounds=3, slow_round
 
 
 class StreamingGateTest(unittest.TestCase):
-    def run_gate(self, fast=None, slow=None, objectives=None, reference="default"):
+    def run_gate(self, fast=None, slow=None, objectives=None, reference="default", confirmations=None):
         fast = FAST_LANE if fast is None else fast
         slow = SLOW_LANE if slow is None else slow
         if reference == "default":
@@ -415,12 +422,107 @@ class StreamingGateTest(unittest.TestCase):
                 ) as handle:
                     json.dump(reference, handle, sort_keys=True)
                     handle.write("\n")
-            return subprocess.run(
+            for mode, confirmation in (confirmations or {}).items():
+                conf_dir = Path(directory) / "paired-confirmation" / mode
+                conf_dir.mkdir(parents=True)
+                (conf_dir / "streaming-compare-reference.json").write_text(
+                    json.dumps(confirmation) if confirmation != "invalid" else "{"
+                )
+            result = subprocess.run(
                 [str(CHECKER), str(path), str(objectives or OBJECTIVES)],
                 capture_output=True,
                 text=True,
                 check=False,
+                env={**{k: v for k, v in os.environ.items()
+                        if k not in ("GITHUB_SHA", "QPX_PREVIOUS_SOURCE_SHA")},
+                     "GITHUB_SHA": "a" * 40,
+                     "QPX_PREVIOUS_SOURCE_SHA": "b" * 40},
             )
+
+            evidence = Path(directory) / "streaming-compare-confirmation.json"
+            result.confirmation = json.loads(evidence.read_text()) if evidence.exists() else None
+            return result
+
+    def test_confirmation_clear_retains_first_miss(self):
+        result = self.run_gate(reference=reference_report(fast_median=2.082473),
+                               confirmations={"fast": reference_report()})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("unconfirmed_misses", result.stdout)
+        self.assertEqual(result.confirmation["fast"]["unconfirmed_misses"][0]
+                         ["median_current_over_reference"], 2.082473)
+
+    def test_confirmation_repeated_same_mode_miss_fails(self):
+        result = self.run_gate(reference=reference_report(slow_median=2),
+                               confirmations={"slow": reference_report(slow_median=1.5)})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.confirmation["slow"]["status"], "REGRESSED")
+
+    def test_confirmation_clear_cannot_clear_the_other_mode(self):
+        result = self.run_gate(reference=reference_report(fast_median=2, slow_median=2),
+                               confirmations={"fast": reference_report()})
+        self.assertEqual(result.returncode, 1)
+        self.assertEqual(result.confirmation["fast"]["status"], "PASSED")
+        self.assertEqual(result.confirmation["slow"]["status"], "REGRESSED")
+
+    def test_unusable_confirmations_never_clear_a_miss(self):
+        invalids = [None, "invalid", [], reference_report(fast_rounds=0),
+                    reference_report(fast_median=float("nan")),
+                    reference_report(fast_rounds=2)]
+        for field, value in (("source_sha", "c" * 40),
+                             ("reference_source_sha", "c" * 40),
+                             ("reference_source_sha", "unknown"),
+                             ("complete_modes", {"fast": False}),
+                             ("current_proxy", "nginx"),
+                             ("workload", {}), ("sample_attempts", 1)):
+            report = reference_report()
+            report[field] = value
+            invalids.append(report)
+        for invalid in invalids:
+            with self.subTest(confirmation=invalid):
+                result = self.run_gate(reference=reference_report(fast_median=2),
+                                       confirmations={"fast": invalid})
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertNotIn("unconfirmed_misses", result.stdout)
+
+    def test_confirmation_cannot_rescue_an_inconclusive_first_pass(self):
+        for first in (None, reference_report(fast_rounds=0),
+                      reference_report(fast_median=2, fast_rounds=2)):
+            result = self.run_gate(reference=first, confirmations={"fast": reference_report()})
+            self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+
+    def test_incomplete_first_pair_fails_even_when_its_median_is_below_objective(self):
+        incomplete = [
+            reference_report(fast_median=1.0, fast_rounds=2),
+            reference_report(slow_median=1.0, slow_rounds=2),
+        ]
+        incomplete[1]["complete_modes"]["slow"] = False
+        for report in incomplete:
+            with self.subTest(report=report):
+                result = self.run_gate(reference=report)
+                self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+                self.assertIn("incomplete", result.stderr)
+
+    def test_first_report_must_match_the_current_and_pinned_sources(self):
+        report = reference_report()
+        report["source_sha"] = "c" * 40
+        result = self.run_gate(reference=report)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("source_sha identity mismatch", result.stderr)
+
+    def test_confirmation_cannot_clear_a_mixed_source_aggregate(self):
+        result = self.run_gate(lane(FAST_LANE, qpxd={"commit": "c" * 40}),
+                               reference=reference_report(fast_median=2),
+                               confirmations={"fast": reference_report()})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("source_sha identity mismatch", result.stderr)
+
+    def test_confirmation_does_not_clear_other_metric_failures(self):
+        result = self.run_gate(lane(FAST_LANE, qpxd={"total_ms": 10000}),
+                               reference=reference_report(fast_median=2),
+                               confirmations={"fast": reference_report()})
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("unconfirmed_misses", result.stdout)
+        self.assertIn("fast streaming throughput ratio", result.stderr)
 
     def run_gate_with_policy(self, stability, fast=None, slow=None, reference="default"):
         """Runs the gate against a copy of the policy with `stability` replaced."""
@@ -456,6 +558,10 @@ class StreamingGateTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+                env={**{k: v for k, v in os.environ.items()
+                        if k not in ("GITHUB_SHA", "QPX_PREVIOUS_SOURCE_SHA")},
+                     "GITHUB_SHA": "a" * 40,
+                     "QPX_PREVIOUS_SOURCE_SHA": "b" * 40},
             )
 
     def run_gate_with_reference(self, reference):
@@ -476,6 +582,10 @@ class StreamingGateTest(unittest.TestCase):
                 capture_output=True,
                 text=True,
                 check=False,
+                env={**{k: v for k, v in os.environ.items()
+                        if k not in ("GITHUB_SHA", "QPX_PREVIOUS_SOURCE_SHA")},
+                     "GITHUB_SHA": "a" * 40,
+                     "QPX_PREVIOUS_SOURCE_SHA": "b" * 40},
             )
 
     def test_the_reference_build_record_is_not_a_gate_input(self):

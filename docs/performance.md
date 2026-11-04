@@ -612,25 +612,28 @@ previous release this way, so the lane now performs the paired measurement
 the matched-source section describes, against the pinned release rather than
 against an arbitrary earlier commit.
 
-The comparison is a report, and the paired queue-delay median in it is the
-enforced tail verdict. `scripts/check-streaming-performance.sh` loads
-`target/perf/streaming-compare-reference.json` next to the streaming JSONL
-and judges the paired current-over-reference median of
-`scheduler_queue_delay_us_per_transfer` in each read mode against
-`paired.max_scheduler_queue_delay_ratio` (1.25). A missing report, a
-mismatched comparison, or `paired_rounds == 0` for that metric fails the
-gate instead of passing silently, so the reference is required for the
-verdict. The comparison is written to
-`target/perf/streaming-compare-reference.json` and printed in the CI log.
-For each read mode it states how many rounds were paired and the median,
-minimum and maximum of the per-round current-over-reference ratio together
-with the median difference, for the total time, the CPU rate, the p99 chunk
-gap and the scheduler queue delay. A `total_ms` ratio above 1 means the
-current build was slower in that round, and a `requests_per_cpu_second`
-ratio below 1 means it was less efficient. The qpx-vs-external queue-delay
-ratio stays in the printed summary for trend review but never in the failure
-or judgeability decisions. The report names the reference build's source
-SHA, so every number can be traced to the build it was measured against.
+The paired queue-delay median is an enforced tail verdict, not an advisory report.
+`scripts/check-streaming-performance.sh` requires every configured paired round in both fast and slow modes.
+It verifies the current and pinned source SHAs and judges each median of `scheduler_queue_delay_us_per_transfer` against the unchanged `paired.max_scheduler_queue_delay_ratio` objective (1.25).
+A missing reference, incomplete sample, malformed comparison or source mismatch fails closed.
+
+On a complete first miss, the comparator takes one fresh confirmation sample for that mode only.
+It restarts the current and pinned builds against the same streaming origin.
+It repeats the configured paired-round count and counterbalanced order.
+It does not rerun external proxy lanes.
+A decisive miss in the same mode remains a failure.
+A complete confirmation with matching source identities and workload clears the first miss only when its median meets the unchanged objective.
+The first miss is retained as `unconfirmed_misses` in `streaming-compare-confirmation.json` and reported in CI.
+This does not clear unrelated streaming objective failures.
+A missing, incomplete, invalid or mismatched confirmation never clears the first miss; an incomplete first sample is not confirmable.
+
+The initial report is written to `target/perf/streaming-compare-reference.json` beside the streaming JSONL.
+Confirmation raw samples and reports live under `target/perf/paired-confirmation/` and are retained in the existing uploaded streaming evidence.
+Both reports carry the current and pinned source SHAs and workload.
+Per-mode reports include round counts and median, minimum and maximum current/reference ratios, plus median differences for total time, CPU rate, p99 chunk gap and queue delay.
+A `total_ms` ratio above 1 means the current build was slower; a `requests_per_cpu_second` ratio below 1 means it was less efficient.
+The qpx-vs-external queue-delay ratio remains trend-only and never affects failure or judgeability.
+
 `scripts/test-streaming-reference-comparison.py` exercises the pairing, the
 missing-reference case and the report against synthetic per-round records.
 The lane's own pairing is exercised as well:

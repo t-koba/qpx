@@ -21,10 +21,17 @@ LIGHTTPD_PORT="${QPX_STREAMING_COMPARE_LIGHTTPD_PORT:-18384}"
 APACHE_BIN="${QPX_STREAMING_COMPARE_APACHE_BIN:-}"
 # The pinned previous release, when the caller exports it, is measured in the
 # same rounds as the current build so that the two can be compared pairwise.
-# The reference is a report: no objective and no gate depends on it.
+# The paired queue-delay objective requires this exact reference.
 QPX_PREVIOUS_BIN="${QPX_PREVIOUS_BIN:-}"
 QPX_PREVIOUS_SOURCE_SHA="${QPX_PREVIOUS_SOURCE_SHA:-}"
 PREVIOUS_PORT="${QPX_STREAMING_COMPARE_PREVIOUS_PORT:-18385}"
+# Internal confirmation mode: no external proxies, only one read mode's pair.
+PAIR_ONLY_MODE="${QPX_STREAMING_COMPARE_PAIR_ONLY_MODE:-}"
+case "$PAIR_ONLY_MODE" in
+  ''|fast|slow) ;;
+  *) echo "invalid pair-only read mode: $PAIR_ONLY_MODE" >&2; exit 1 ;;
+esac
+CURRENT_SOURCE_SHA="${GITHUB_SHA:-$(git -C "$ROOT_DIR" rev-parse HEAD)}"
 
 TMP_DIR="$(make_temp_dir qpx-streaming-compare)"
 LOG_DIR="$TMP_DIR/logs"
@@ -64,6 +71,11 @@ collect_artifacts() {
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
+  # CI already retains this log tree recursively. Keep each confirmation's
+  # raw/report/log evidence there too, without changing upload policy.
+  if [ -n "${confirmation_root:-}" ] && [ -d "$confirmation_root" ]; then
+    cp -R "$confirmation_root" "$LOG_ARTIFACT_DIR"/
+  fi
 }
 
 cleanup() {
@@ -210,8 +222,8 @@ start_previous_qpxd() {
   wait_http "qpxd-previous" "$PREVIOUS_PORT" "$PREVIOUS_QPXD_PID" "$LOG_DIR/qpxd-previous.log"
 }
 
-# The reference build is best effort: a previous release that cannot start
-# leaves the lane without a reference instead of failing the whole audit.
+# Keep collecting the other audit lanes when the reference cannot start; the
+# paired queue-delay checker fails closed when its pinned reference is absent.
 start_previous_reference() {
   if [ -z "$QPX_PREVIOUS_BIN" ]; then
     return 0
@@ -678,14 +690,16 @@ records.sort(key=lambda record: record["total_ms"])
 print(json.dumps(records[len(records) // 2], sort_keys=True, separators=(",", ":")))
 PY
 )"
-  commit="${GITHUB_SHA:-unknown}"
+  commit="$CURRENT_SOURCE_SHA"
   streaming_write_round_record "$OUT_JSON" "$selected_sample" "$STREAM_BYTES" \
     "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit"
 }
 
 require_cmd curl
-require_cmd lighttpd
-require_cmd nginx
+if [ -z "$PAIR_ONLY_MODE" ]; then
+  require_cmd lighttpd
+  require_cmd nginx
+fi
 require_cmd python3
 
 case "$SAMPLE_ATTEMPTS" in
@@ -722,7 +736,7 @@ if [ "$MIN_VALID_SAMPLES" -eq 0 ] || [ "$MIN_VALID_SAMPLES" -gt "$SAMPLE_ATTEMPT
   exit 1
 fi
 
-if [ -z "$APACHE_BIN" ]; then
+if [ -z "$PAIR_ONLY_MODE" ] && [ -z "$APACHE_BIN" ]; then
   if command -v apache2 >/dev/null 2>&1; then
     APACHE_BIN="$(command -v apache2)"
   elif command -v httpd >/dev/null 2>&1; then
@@ -742,9 +756,14 @@ fi
 start_streaming_backend
 start_qpxd
 start_previous_reference
-start_nginx
-start_apache
-start_lighttpd
+if [ -z "$PAIR_ONLY_MODE" ]; then
+  start_nginx
+  start_apache
+  start_lighttpd
+elif [ "$PREVIOUS_REFERENCE_AVAILABLE" != true ] || [ -z "$QPX_PREVIOUS_SOURCE_SHA" ]; then
+  echo "pair-only confirmation requires the pinned reference" >&2
+  exit 1
+fi
 
 FINAL_OUT_JSON="$OUT_JSON"
 RAW_OUT_JSON="$TMP_DIR/interleaved-raw.jsonl"
@@ -768,10 +787,15 @@ run_streaming_proxy_by_index() {
   esac
 }
 
-for read_mode in fast slow; do
+for read_mode in ${PAIR_ONLY_MODE:-fast slow}; do
   round=1
   while [ "$round" -le "$REQUESTED_SAMPLE_ATTEMPTS" ]; do
     streaming_begin_round "$round"
+    if [ -n "$PAIR_ONLY_MODE" ]; then
+      run_qpxd_pair "$read_mode"
+      round=$((round + 1))
+      continue
+    fi
     start_index=$((((round - 1) * 4) % 5))
     offset=0
     while [ "$offset" -lt 5 ]; do
@@ -787,6 +811,11 @@ for read_mode in fast slow; do
   done
 done
 
+# Keep raw rounds separately from the aggregate and from confirmation evidence.
+cp "$RAW_OUT_JSON" "$(dirname "$FINAL_OUT_JSON")/streaming-compare-raw.jsonl"
+if [ -n "$PAIR_ONLY_MODE" ]; then
+  cp "$RAW_OUT_JSON" "$FINAL_OUT_JSON"
+else
 python3 - "$RAW_OUT_JSON" "$FINAL_OUT_JSON" "$REQUESTED_SAMPLE_ATTEMPTS" \
   "$REQUESTED_MIN_VALID_SAMPLES" <<'PY'
 import json
@@ -810,9 +839,8 @@ with open(raw_path, "r", encoding="utf-8") as handle:
         if record.get("valid") is True:
             groups[(record["read_mode"], record["proxy"])].append(record)
 
-# The reference build is reported, never required: a previous release that
-# produced no valid sample leaves the lane without a reference instead of
-# failing the audit.
+# The remaining lane aggregates can still be emitted without a valid pinned
+# sample, but the paired queue-delay checker rejects incomplete mode evidence.
 reference_keys = {
     (read_mode, reference_proxy)
     for read_mode in ("fast", "slow")
@@ -992,21 +1020,39 @@ with open(out_path, "w", encoding="utf-8") as handle:
         handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
 PY
 
+fi
+
 REFERENCE_OUT_JSON="$(dirname "$FINAL_OUT_JSON")/streaming-compare-reference.json"
-python3 - "$ROOT_DIR/scripts/lib" "$RAW_OUT_JSON" "$REFERENCE_OUT_JSON" \
-  "$QPX_PREVIOUS_SOURCE_SHA" <<'PY'
-import importlib
-import json
-import sys
+python3 "$ROOT_DIR/scripts/lib/streaming_confirmation.py" report \
+  "$RAW_OUT_JSON" "$REFERENCE_OUT_JSON" "$CURRENT_SOURCE_SHA" \
+  "$QPX_PREVIOUS_SOURCE_SHA" "$REQUESTED_SAMPLE_ATTEMPTS" \
+  "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" "$SLOW_READ_DELAY_MS"
 
-lib_dir, raw_path, out_path, previous_sha = sys.argv[1:5]
-sys.path.insert(0, lib_dir)
-streaming_reference = importlib.import_module("streaming_reference")
-
-report = streaming_reference.compare(streaming_reference.load_records(raw_path))
-report["reference_source_sha"] = previous_sha or "unknown"
-with open(out_path, "w", encoding="utf-8") as handle:
-    json.dump(report, handle, sort_keys=True, indent=2)
-    handle.write("\n")
-print(streaming_reference.format_summary(report))
-PY
+if [ -z "$PAIR_ONLY_MODE" ]; then
+  # Only first-mode misses get one independent sample. Keep round count,
+  # alternating pair order and workload; never rerun the external comparison.
+  confirmation_root="$(dirname "$FINAL_OUT_JSON")/paired-confirmation"
+  rm -rf "$confirmation_root"
+  missed_modes="$(python3 "$ROOT_DIR/scripts/lib/streaming_confirmation.py" misses \
+    "$REFERENCE_OUT_JSON" "${QPX_STREAMING_PERFORMANCE_OBJECTIVES:-$ROOT_DIR/perf/streaming-performance-objectives.json}")"
+  if [ -n "$missed_modes" ]; then
+    for pid in "$QPXD_PID" "$PREVIOUS_QPXD_PID" "$BACKEND_PID"; do
+      kill "$pid" >/dev/null 2>&1 || true
+      wait "$pid" >/dev/null 2>&1 || true
+    done
+    PIDS=("$NGINX_PID" "$APACHE_PID" "$LIGHTTPD_PID")
+  fi
+  for mode in $missed_modes; do
+    confirmation_dir="$confirmation_root/$mode"
+    mkdir -p "$confirmation_dir"
+    if ! GITHUB_SHA="$CURRENT_SOURCE_SHA" \
+      QPX_STREAMING_COMPARE_PAIR_ONLY_MODE="$mode" \
+      QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS="$REQUESTED_SAMPLE_ATTEMPTS" \
+      QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES="$REQUESTED_MIN_VALID_SAMPLES" \
+      QPX_STREAMING_COMPARE_LOG_DIR="$confirmation_dir/logs" \
+      bash "$ROOT_DIR/scripts/perf-audit-streaming-compare.sh" \
+        "$confirmation_dir/measurements.jsonl" >"$confirmation_dir/run.log" 2>&1; then
+      echo "$mode streaming paired confirmation failed; first miss remains (see $confirmation_dir/run.log)" >&2
+    fi
+  done
+fi
