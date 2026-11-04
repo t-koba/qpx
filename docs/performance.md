@@ -424,7 +424,7 @@ That `bounded_measure` call can itself retry only exit-75 transients up to `max_
 A same-metric miss in both decisive samples remains `REGRESSED`.
 A `PASSED` confirmation, or a `REGRESSED` one with no repeated metric, clears
 the first miss as `unconfirmed_misses`; distinct confirmation misses stay visible.
-A missing, invalid or inconclusive confirmation retains the first valid regression.
+A missing or non-decisive (`INCONCLUSIVE`/`ERROR`) confirmation retains the first valid regression.
 The lane's `paired-confirmation/confirmation.json` records status and reasons.
 Both samples' ratios/per-round data and raw samples/logs are uploaded.
 `accepted-paired.jsonl` uses confirmation records when it clears the first miss.
