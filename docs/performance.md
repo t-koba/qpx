@@ -413,20 +413,21 @@ sample** can request a retry via sampler exit **75**:
   invalid reference data leaves the lane `INCONCLUSIVE`; candidate qpx errors
   remain `ERROR`.
 
-The driver maps competitive sampler exit 75 to `RETRYABLE_INVALID`. Candidate
-qpx sampler failures are `ERROR`; a competitive sampler failure with a valid
-candidate record but missing/invalid reference lanes is `INCONCLUSIVE`. An
-invalid pinned previous-release sample is also `INCONCLUSIVE`, never a retry
-request. No spread caps, paired regression floors or functional error
-tolerances are widened. After `RETRYABLE_INVALID`, the driver re-measures the
-**whole relevant pair or competitive lane group**, with at most **two additional
-attempts** (three total). Candidate-side spread and non-transient pinned-reference
-failures are terminal and do not start another measurement. The driver accepts
-the first valid attempt, even if that attempt regresses, and never retries a
-valid regression or selects the best attempt.
-Other already-valid lanes are not re-measured. All raw samples, logs,
-measurements and results from every attempt remain under
-`target/perf/{proxy,http2}-policy/` and are uploaded with `if: always()`.
+Exit 75 maps eligible reference transients to `RETRYABLE_INVALID`; the driver
+remeasures the whole relevant pair/group up to configured `max_attempts` (currently 3 total).
+Candidate spread/errors and non-transient pinned-reference failures are not retried;
+all samples/logs/results stay under `target/perf/{proxy,http2}-policy/`.
+
+A separate rule gives each valid non-diagnostic paired `REGRESSED` result one
+fresh same-lane confirmation with the same workload, three paired samples and order.
+That `bounded_measure` call can itself retry only exit-75 transients up to `max_attempts`.
+A same-metric miss in both decisive samples remains `REGRESSED`.
+A `PASSED` confirmation, or a `REGRESSED` one with no repeated metric, clears
+the first miss as `unconfirmed_misses`; distinct confirmation misses stay visible.
+A missing, invalid or inconclusive confirmation retains the first valid regression.
+The lane's `paired-confirmation/confirmation.json` records status and reasons.
+Both samples' ratios/per-round data and raw samples/logs are uploaded.
+`accepted-paired.jsonl` uses confirmation records when it clears the first miss.
 
 At exhaustion, or when a paired reference sample is invalid, the lane is
 `INCONCLUSIVE`/unmeasured with explicit required/valid/unmeasured coverage. The
