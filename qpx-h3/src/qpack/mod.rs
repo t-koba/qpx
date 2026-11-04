@@ -1,7 +1,7 @@
 mod codec;
 mod connection;
 #[cfg(test)]
-mod decode;
+mod decode_tests;
 mod dynamic_table;
 mod encode;
 mod encoder;
@@ -18,7 +18,7 @@ pub(crate) use connection::QpackConnection;
 
 pub(crate) use crate::qpack_fields::validate_h3_regular_field;
 #[cfg(test)]
-pub(crate) use decode::decode_request_head_from_fields;
+pub(crate) use decode_tests::decode_request_head_from_fields;
 pub(crate) use encode::{encode_request_head, encode_response_head, encode_trailers};
 pub(crate) use encoder::fuzz_qpack_decoder;
 #[cfg(test)]

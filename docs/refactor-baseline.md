@@ -43,12 +43,12 @@ cargo xtask budget
 bash ./scripts/check-ci-acceptance-gates.sh
 ```
 
-LOC budgets are advisory trend signals. `xtask` reports LOC drift as a notice, not a failure, so reviewers can ask why code grew without forcing arbitrary shortening. The single authority is the whole-workspace totals in `TOTAL_LOC_BUDGETS` (`xtask/src/budget.rs`): production Rust, test Rust, and Markdown docs measured by `cargo xtask budget` (test files are covered by the total test baseline). The next action is deliberately explicit: either reduce the drift by removing accidental duplication or update the advisory baseline in `xtask/src/budget.rs` with a review rationale when the larger shape is intentional and improves correctness, coverage, or ownership. Do not contort code, delete useful behavior, or split modules only to satisfy a line-count target; prefer clear ownership, lower duplication, better tests, and measurable hot-path improvements. Function length is not separately baseline-gated; use the structural gates below when ownership, duplication, or hot-path resource behavior is the actual concern.
+LOC budgets are advisory trend signals: drift is a notice, not a failure. `TOTAL_LOC_BUDGETS` in `xtask/src/budget.rs` is the single whole-workspace authority for production Rust, test Rust, and Markdown docs; `cargo xtask budget` measures these totals, including xtask. Its sole classifier uses parsed Rust `cfg` predicates: `cfg(test)` and `cfg(all(test, ...))` are test-only, while `cfg(any(feature, ..., test))` and `cfg(not(test))` remain production. To keep the pre-existing combined Rust total unchanged, it explicitly omits the same 609 counted marker lines the prior splitter omitted (`#[cfg(test)]` attributes and `mod tests {` openings); all other counted lines are assigned exactly once, and the owner asserts production plus test equals its counted total. The counting-rule correction moved the accepted 233,287 baseline to 228,786 (−4,501); the separately measured rule changes were +358 deref assignments, −3,315 block-comment continuations, and −1,649 blank/comment-only lines, not an additive decomposition. The classifier and tests add a measured net 188 Rust LOC, so the current exact advisory totals are production 145,857, test 83,117 (combined 228,974), and docs 3,669. These budgets explain intentional maintenance cost; do not contort code, remove useful behavior, or split modules to meet a line count. Prefer clear ownership, lower duplication, better tests, and measurable hot-path improvements; function length is not separately gated.
 
-The authoritative whole-workspace totals are the machine-checked
+The authoritative whole-workspace totals remain the machine-checked
 `TOTAL_LOC_BUDGETS` constants in `xtask/src/budget.rs`; `cargo xtask budget`
-prints the measured values against them. Do not copy the numbers into this
-document: a second copy drifts from the gate.
+prints measured values against them. The values above explain this measurement,
+not a second authority; update them with future ratchets to keep the rationale current.
 
 ## Phase Notes
 

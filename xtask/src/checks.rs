@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use syn::parse::Parser;
+use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{GenericArgument, PathArguments, ReturnType, Type, Visibility};
 
@@ -384,6 +385,7 @@ struct TotalLoc {
 fn measure_total_loc(root: &Path) -> Result<TotalLoc> {
     let mut production_rust = 0usize;
     let mut test_rust = 0usize;
+    let mut counted_rust = 0usize;
     for crate_dir in workspace_member_crates(root)? {
         let crate_root = root.join(crate_dir);
         if !crate_root.is_dir() {
@@ -395,11 +397,15 @@ fn measure_total_loc(root: &Path) -> Result<TotalLoc> {
                 let content = fs::read_to_string(&path)
                     .with_context(|| format!("failed to read {}", path.display()))?;
                 if is_test_file(&path) {
-                    test_rust += count_code_lines(&content);
+                    let counted = count_code_lines(&content);
+                    counted_rust += counted;
+                    test_rust += counted;
                 } else {
-                    let (production, tests) = split_inline_test_code_lines(&content);
+                    let (production, tests, counted) = split_inline_test_code_lines(&content)
+                        .with_context(|| format!("failed to classify LOC in {}", path.display()))?;
                     production_rust += production;
                     test_rust += tests;
+                    counted_rust += counted;
                 }
             }
         }
@@ -408,9 +414,16 @@ fn measure_total_loc(root: &Path) -> Result<TotalLoc> {
             for path in rust_files_under(&tests)? {
                 let content = fs::read_to_string(&path)
                     .with_context(|| format!("failed to read {}", path.display()))?;
-                test_rust += count_code_lines(&content);
+                let counted = count_code_lines(&content);
+                counted_rust += counted;
+                test_rust += counted;
             }
         }
+    }
+
+    let classified_rust = production_rust + test_rust;
+    if classified_rust != counted_rust {
+        bail!("LOC classification mismatch (classified {classified_rust}, counted {counted_rust})");
     }
 
     let docs_markdown = count_markdown_loc(&root.join("docs"))?
@@ -424,45 +437,243 @@ fn measure_total_loc(root: &Path) -> Result<TotalLoc> {
     })
 }
 
-fn split_inline_test_code_lines(content: &str) -> (usize, usize) {
+fn split_inline_test_code_lines(content: &str) -> Result<(usize, usize, usize)> {
+    let syntax = syn::parse_file(content).context("failed to parse Rust source")?;
+    let line_count = content.lines().count() + 2;
+    let mut test_lines = vec![false; line_count];
+    let mut marker_lines = vec![false; line_count];
+    if has_cfg_test(&syntax.attrs) {
+        test_lines.fill(true);
+    } else {
+        let mut visitor = TestLineVisitor {
+            source_lines: content.lines().collect(),
+            test_lines: &mut test_lines,
+            marker_lines: &mut marker_lines,
+        };
+        visitor.visit_file(&syntax);
+    }
+    let mut classifier = LineClassifier::default();
     let mut production = 0usize;
     let mut tests = 0usize;
-    let mut in_test = false;
-    let mut test_depth = 0isize;
-    let mut pending_cfg_test = false;
-    let mut classifier = LineClassifier::default();
-    for line in content.lines() {
-        let blanked = blank_string_literals(line);
-        let trimmed = blanked.trim_start();
-        if !in_test && trimmed.starts_with("#[cfg(test)]") {
-            pending_cfg_test = true;
-            continue;
-        }
-        if pending_cfg_test && trimmed.starts_with("mod tests") && trimmed.contains('{') {
-            in_test = true;
-            test_depth = brace_delta(&blanked);
-            pending_cfg_test = false;
-            continue;
-        }
-        if pending_cfg_test {
-            pending_cfg_test = false;
-        }
+    let mut counted = 0usize;
+    let mut skipped_markers = 0usize;
+    for (index, line) in content.lines().enumerate() {
         if classifier.is_counted(line) {
-            if in_test {
+            counted += 1;
+            if marker_lines[index + 1] {
+                skipped_markers += 1;
+            } else if test_lines[index + 1] {
                 tests += 1;
             } else {
                 production += 1;
             }
         }
-        if in_test {
-            test_depth += brace_delta(&blanked);
-            if test_depth <= 0 {
-                in_test = false;
-                test_depth = 0;
-            }
+    }
+    counted -= skipped_markers;
+    if production + tests != counted {
+        bail!("LOC classification does not conserve counted lines");
+    }
+    Ok((production, tests, counted))
+}
+
+struct TestLineVisitor<'a> {
+    source_lines: Vec<&'a str>,
+    test_lines: &'a mut [bool],
+    marker_lines: &'a mut [bool],
+}
+
+impl TestLineVisitor<'_> {
+    fn mark(&mut self, attrs: &[syn::Attribute], span: proc_macro2::Span) {
+        if has_cfg_test(attrs) {
+            mark_attrs_and_span(attrs, span, self.test_lines, self.marker_lines);
         }
     }
-    (production, tests)
+}
+
+impl<'ast> Visit<'ast> for TestLineVisitor<'_> {
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if has_cfg_test(std::slice::from_ref(attr)) {
+            let line = attr.span().start().line.max(1);
+            if let Some(slot) = self.test_lines.get_mut(line) {
+                *slot = true;
+            }
+            if is_exact_cfg_test(attr)
+                && let Some(slot) = self.marker_lines.get_mut(line)
+            {
+                *slot = true;
+            }
+        }
+        syn::visit::visit_attribute(self, attr);
+    }
+
+    fn visit_local(&mut self, local: &'ast syn::Local) {
+        if has_cfg_test(&local.attrs) {
+            self.mark(&local.attrs, local.span());
+        } else {
+            syn::visit::visit_local(self, local);
+        }
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        if has_cfg_test(&arm.attrs) {
+            self.mark(&arm.attrs, arm.span());
+        } else {
+            syn::visit::visit_arm(self, arm);
+        }
+    }
+
+    fn visit_item(&mut self, item: &'ast syn::Item) {
+        let attrs = item_attrs(item);
+        if has_cfg_test(attrs) {
+            self.mark(attrs, item.span());
+            if let syn::Item::Mod(module) = item
+                && module.ident == "tests"
+                && module.content.is_some()
+            {
+                let line = module.mod_token.span().start().line;
+                let exact_test_marker = line >= 2
+                    && self
+                        .source_lines
+                        .get(line - 2)
+                        .is_some_and(|source| source.trim_start().starts_with("#[cfg(test)]"));
+                let old_test_module_header =
+                    self.source_lines.get(line - 1).is_some_and(|source| {
+                        let source = source.trim_start();
+                        source.starts_with("mod tests") && source.contains('{')
+                    });
+                if exact_test_marker && old_test_module_header {
+                    self.marker_lines[line] = true;
+                }
+            }
+        } else {
+            syn::visit::visit_item(self, item);
+        }
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast syn::ImplItem) {
+        let attrs = impl_item_attrs(item);
+        if has_cfg_test(attrs) {
+            self.mark(attrs, item.span());
+        } else {
+            syn::visit::visit_impl_item(self, item);
+        }
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast syn::TraitItem) {
+        let attrs = trait_item_attrs(item);
+        if has_cfg_test(attrs) {
+            self.mark(attrs, item.span());
+        } else {
+            syn::visit::visit_trait_item(self, item);
+        }
+    }
+
+    fn visit_foreign_item(&mut self, item: &'ast syn::ForeignItem) {
+        let attrs = foreign_item_attrs(item);
+        if has_cfg_test(attrs) {
+            self.mark(attrs, item.span());
+        } else {
+            syn::visit::visit_foreign_item(self, item);
+        }
+    }
+
+    fn visit_field(&mut self, field: &'ast syn::Field) {
+        if has_cfg_test(&field.attrs) {
+            self.mark(&field.attrs, field.span());
+        } else {
+            syn::visit::visit_field(self, field);
+        }
+    }
+
+    fn visit_variant(&mut self, variant: &'ast syn::Variant) {
+        if has_cfg_test(&variant.attrs) {
+            self.mark(&variant.attrs, variant.span());
+        } else {
+            syn::visit::visit_variant(self, variant);
+        }
+    }
+}
+
+fn mark_attrs_and_span(
+    attrs: &[syn::Attribute],
+    span: proc_macro2::Span,
+    test_lines: &mut [bool],
+    marker_lines: &mut [bool],
+) {
+    let mut start = span.start().line.max(1);
+    let end = span.end().line.max(start);
+    for attr in attrs {
+        let line = attr.span().start().line.max(1);
+        start = start.min(line);
+        if is_exact_cfg_test(attr)
+            && let Some(marker) = marker_lines.get_mut(line)
+        {
+            *marker = true;
+        }
+    }
+    for line in start..=end {
+        if let Some(slot) = test_lines.get_mut(line) {
+            *slot = true;
+        }
+    }
+}
+
+fn is_exact_cfg_test(attr: &syn::Attribute) -> bool {
+    matches!(
+        &attr.meta,
+        syn::Meta::List(meta) if meta.path.is_ident("cfg") && meta.tokens.to_string() == "test"
+    )
+}
+
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::ExternCrate(item) => &item.attrs,
+        syn::Item::Fn(item) => &item.attrs,
+        syn::Item::ForeignMod(item) => &item.attrs,
+        syn::Item::Impl(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::TraitAlias(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        syn::Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn impl_item_attrs(item: &syn::ImplItem) -> &[syn::Attribute] {
+    match item {
+        syn::ImplItem::Const(item) => &item.attrs,
+        syn::ImplItem::Fn(item) => &item.attrs,
+        syn::ImplItem::Type(item) => &item.attrs,
+        syn::ImplItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn trait_item_attrs(item: &syn::TraitItem) -> &[syn::Attribute] {
+    match item {
+        syn::TraitItem::Const(item) => &item.attrs,
+        syn::TraitItem::Fn(item) => &item.attrs,
+        syn::TraitItem::Type(item) => &item.attrs,
+        syn::TraitItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn foreign_item_attrs(item: &syn::ForeignItem) -> &[syn::Attribute] {
+    match item {
+        syn::ForeignItem::Fn(item) => &item.attrs,
+        syn::ForeignItem::Static(item) => &item.attrs,
+        syn::ForeignItem::Type(item) => &item.attrs,
+        syn::ForeignItem::Macro(item) => &item.attrs,
+        _ => &[],
+    }
 }
 
 fn count_code_lines(content: &str) -> usize {
@@ -11817,6 +12028,7 @@ pub const LENGTH_HEADER: &str = "x-length";
 #[cfg(test)]
 mod loc_tests {
     use super::{count_code_lines, split_inline_test_code_lines};
+    use std::path::Path;
 
     #[test]
     fn deref_assignment_counts_as_code() {
@@ -11843,15 +12055,87 @@ mod loc_tests {
     }
 
     #[test]
-    fn test_module_split_uses_the_same_rule() {
-        let (production, tests) =
-            split_inline_test_code_lines("#[cfg(test)]\nmod tests {\n *x = 1;\n}\nfn f() {}\n");
-        assert_eq!((production, tests), (1, 2));
+    fn test_module_split_counts_markers_and_body() {
+        let source =
+            "#[cfg(test)]\nmod tests {\n    fn g() {\n        *x = 1;\n    }\n}\nfn f() {}\n";
+        let (production, tests, counted) =
+            split_inline_test_code_lines(source).expect("fixture parses");
+        assert_eq!((production, tests, counted), (1, 4, 5));
     }
 
     #[test]
     fn string_braces_do_not_end_the_test_module() {
         let source = "#[cfg(test)]\nmod tests {\n    fn a() {\n        let s = \"}\";\n    }\n    fn b() {}\n}\n";
-        assert_eq!(split_inline_test_code_lines(source), (0, 5));
+        let (production, tests, counted) =
+            split_inline_test_code_lines(source).expect("fixture parses");
+        assert_eq!((production, tests, counted), (0, 5, 5));
+    }
+
+    #[test]
+    fn differently_named_cfg_test_module_is_test_only() {
+        let source = "#[cfg(test)]\nmod helpers {\n    fn helper() {}\n}\nfn production() {}\n";
+        let (production, tests, counted) =
+            split_inline_test_code_lines(source).expect("fixture parses");
+        assert_eq!((production, tests, counted), (1, 3, 4));
+    }
+
+    #[test]
+    fn cfg_all_test_helper_is_test_only() {
+        let source = "#[cfg(all(test, feature = \"http3\"))]\nfn helper() {}\nfn production() {}\n";
+        assert_eq!(
+            split_inline_test_code_lines(source).expect("fixture parses"),
+            (1, 2, 3)
+        );
+        let module = "#[cfg(all(test, feature = \"http3\"))]\nmod tests {\n    fn helper() {}\n}\n";
+        assert_eq!(
+            split_inline_test_code_lines(module).expect("fixture parses"),
+            (0, 4, 4)
+        );
+    }
+
+    #[test]
+    fn cfg_any_feature_and_test_stays_production() {
+        let source = "#[cfg(any(feature = \"http3\", test))]\nfn maybe() {}\n";
+        assert_eq!(
+            split_inline_test_code_lines(source).expect("fixture parses"),
+            (2, 0, 2)
+        );
+    }
+
+    #[test]
+    fn cfg_not_test_stays_production() {
+        let source = "#[cfg(not(test))]\nfn production() {}\n";
+        assert_eq!(
+            split_inline_test_code_lines(source).expect("fixture parses"),
+            (2, 0, 2)
+        );
+    }
+
+    #[test]
+    fn multiple_cfg_attributes_are_anded() {
+        let source = "#[cfg(test)]\n#[cfg(feature = \"http3\")]\nfn maybe() {}\n";
+        assert_eq!(
+            split_inline_test_code_lines(source).expect("fixture parses"),
+            (0, 2, 2)
+        );
+    }
+
+    #[test]
+    fn marker_lines_are_assigned_and_conserved() {
+        let source = "#[cfg(test)]\nmod tests {\n    fn f() {\n        let s = \"}\";\n    }\n}\nfn production() {\n    #[cfg(test)]\n    let helper = ();\n}\n";
+        let (production, tests, counted) =
+            split_inline_test_code_lines(source).expect("fixture parses");
+        assert_eq!((production, tests, counted), (2, 5, 7));
+        assert_eq!(production + tests, count_code_lines(source) - 3);
+    }
+
+    #[test]
+    fn out_of_line_test_module_file_name_is_recognized() {
+        assert!(super::is_test_file(Path::new(
+            "qpx-h3/src/qpack/decode_tests.rs"
+        )));
+        assert!(!super::is_test_file(Path::new(
+            "qpx-h3/src/qpack/decode.rs"
+        )));
     }
 }

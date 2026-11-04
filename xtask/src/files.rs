@@ -51,14 +51,13 @@ pub(crate) fn is_test_file(path: &Path) -> bool {
 /// A single `test` or `all(test, ...)` predicate is test-only. `any(feature,
 /// ..., test)` is production because a feature can enable it, and `not(...)`
 /// is production because its negation can hold outside tests. Multiple `cfg`
-/// attributes combine with logical AND, so all of them must be test-only.
+/// attributes combine with logical AND, so one test-only conjunct makes the
+/// whole item test-only.
 pub(crate) fn has_cfg_test(attrs: &[Attribute]) -> bool {
-    let mut saw_cfg = false;
-    for attr in attrs {
+    attrs.iter().any(|attr| {
         if !attr.path().is_ident("cfg") {
-            continue;
+            return false;
         }
-        saw_cfg = true;
         let Meta::List(list) = &attr.meta else {
             return false;
         };
@@ -66,11 +65,8 @@ pub(crate) fn has_cfg_test(attrs: &[Attribute]) -> bool {
         else {
             return false;
         };
-        if predicate.len() != 1 || !meta_is_test_only(&predicate[0]) {
-            return false;
-        }
-    }
-    saw_cfg
+        predicate.len() == 1 && meta_is_test_only(&predicate[0])
+    })
 }
 
 fn meta_is_test_only(meta: &Meta) -> bool {
@@ -125,9 +121,6 @@ mod tests {
 
     #[test]
     fn multiple_cfg_attributes_are_anded() {
-        assert!(!has_cfg_test(&attrs(
-            "#[cfg(test)] #[cfg(feature = \"http3\")] fn f() {}"
-        )));
         assert!(has_cfg_test(&attrs(
             "#[cfg(test)] #[cfg(all(test, feature = \"http3\"))] fn f() {}"
         )));
