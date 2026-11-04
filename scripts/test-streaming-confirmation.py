@@ -94,6 +94,22 @@ class ComparatorConfirmationTest(unittest.TestCase):
         self.assertTrue(second["complete_modes"]["fast"])
         self.assertFalse((out / "paired-confirmation/slow").exists())
         self.assertTrue((out / "streaming-compare-raw.jsonl").is_file())
+        initial_raw = [
+            json.loads(line)
+            for line in (out / "streaming-compare-raw.jsonl").read_text().splitlines()
+        ]
+        qpxd_fast = [
+            record
+            for record in initial_raw
+            if record["proxy"] == "qpxd" and record["read_mode"] == "fast"
+        ]
+        self.assertEqual(
+            [
+                (record["sample_round"], record["p99_chunk_gap_ms"])
+                for record in qpxd_fast
+            ],
+            [(1, FIXTURES["FAST_LANE"]["qpxd"]["p99_chunk_gap_ms"])],
+        )
         archive = out / "logs/paired-confirmation/fast"
         for filename in (
             "measurements.jsonl",
