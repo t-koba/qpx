@@ -108,10 +108,14 @@ pub(crate) async fn handle_h3_extended_connect(
         action.kind,
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy
     ) {
-        let response = finalize_h3_connect_response(
+        let mut response = blocked(state.messages.blocked.as_str());
+        crate::http::protocol::l7::finalize_response_with_headers_in_place(
+            &http::Method::CONNECT,
+            http::Version::HTTP_3,
             proxy_name.as_str(),
-            blocked(state.messages.blocked.as_str()),
+            &mut response,
             response_headers.as_deref(),
+            false,
         );
         send_policy!(&mut req_stream, response, DispatchOutcome::Block).await?;
         return Ok(());

@@ -288,9 +288,7 @@ async fn execute_mitm_request(
                         req.method(),
                         req.version(),
                         proxy_name,
-                        qpx_core::http_message::Response::from_http(blocked(
-                            state.messages.blocked.as_str(),
-                        )),
+                        blocked(state.messages.blocked.as_str()),
                         false,
                     ))),
                 )

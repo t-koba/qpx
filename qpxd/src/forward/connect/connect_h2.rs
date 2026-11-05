@@ -289,7 +289,7 @@ pub(super) async fn handle_h2_extended_connect(
     };
     macro_rules! connect_response {
         ($base:expr, $outcome:expr) => {{
-            let mut response = OwnerResponse::from_http($base);
+            let mut response = $base;
             finalize_response_with_headers_in_place(
                 &Method::CONNECT,
                 req_version,
@@ -306,7 +306,7 @@ pub(super) async fn handle_h2_extended_connect(
         ($retry_after:expr) => {{
             let retry_after = $retry_after;
             let mut response = connect_response!(
-                too_many_requests(retry_after),
+                OwnerResponse::from_http(too_many_requests(retry_after)),
                 DispatchOutcome::ConcurrencyLimited
             );
             request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
@@ -316,9 +316,11 @@ pub(super) async fn handle_h2_extended_connect(
     macro_rules! proxy_error_connect_response {
         () => {
             connect_response!(
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))?,
+                OwnerResponse::from_http(
+                    Response::builder()
+                        .status(StatusCode::BAD_GATEWAY)
+                        .body(Body::from(state.messages.proxy_error.clone()))?
+                ),
                 DispatchOutcome::Error
             )
         };

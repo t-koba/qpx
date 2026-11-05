@@ -50,7 +50,7 @@ pub(super) fn handle_forward_local_action(
             false,
         );
         annotate_dispatch_response(&mut response, audit, DispatchOutcome::Block, &[]);
-        return Ok(Some(OwnerResponse::from_http(response)));
+        return Ok(Some(response));
     }
     if matches!(action.kind, ActionKind::Respond) {
         let local = action

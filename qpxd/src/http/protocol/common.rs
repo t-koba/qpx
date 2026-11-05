@@ -33,8 +33,8 @@ fn http_ows_bounds(value: &[u8]) -> (usize, usize) {
     (start, end)
 }
 
-pub(crate) fn blocked_response(message: &str) -> Response<Body> {
-    text_response(StatusCode::FORBIDDEN, message.to_owned())
+pub(crate) fn blocked_response(message: &str) -> qpx_core::http_message::Response<Body> {
+    forbidden_response(message)
 }
 
 pub(crate) fn forbidden_response(message: &str) -> qpx_core::http_message::Response<Body> {
@@ -153,6 +153,71 @@ pub(crate) fn resolve_named_upstream(
 #[cfg(test)]
 mod tests {
     use crate::http::protocol::common::*;
+
+    #[tokio::test]
+    async fn blocked_owner_preserves_text_response_and_finalization_output() {
+        use crate::http::protocol::l7::{
+            finalize_response_with_headers, finalize_response_with_headers_in_place,
+        };
+        use http_body_util::BodyExt;
+        use qpx_core::http_message::Response as OwnerResponse;
+
+        let control = qpx_core::rules::CompiledHeaderControl::compile(
+            &serde_yaml::from_str(
+                "response_set:\n  date: 'Tue, 01 Jan 2030 00:00:00 GMT'\n  connection: x-hop\n  x-hop: removed\nresponse_add:\n  set-cookie: 'a=1'\n",
+            )
+            .expect("header config"),
+        )
+        .expect("header control");
+        for message in ["", "blocked: café\r\n"] {
+            let initial: OwnerResponse<Body> = blocked_response(message);
+            assert_eq!(initial.status(), StatusCode::FORBIDDEN);
+            assert_eq!(initial.version(), http::Version::HTTP_11);
+            assert_eq!(initial.headers().declared_content_length(), Ok(None));
+            let initial = initial
+                .into_http_for_codec()
+                .expect("valid initial framing");
+            assert!(initial.headers().is_empty());
+            let body = initial.into_body().collect().await.expect("body");
+            assert_eq!(body.to_bytes(), message.as_bytes());
+            for method in [http::Method::GET, http::Method::HEAD, http::Method::CONNECT] {
+                for version in [
+                    http::Version::HTTP_10,
+                    http::Version::HTTP_11,
+                    http::Version::HTTP_2,
+                    http::Version::HTTP_3,
+                ] {
+                    let mut owner = blocked_response(message);
+                    // This is the former builder and finalization path.
+                    let expected = finalize_response_with_headers(
+                        &method,
+                        version,
+                        "edge",
+                        text_response(StatusCode::FORBIDDEN, message.into()),
+                        Some(&control),
+                        false,
+                    );
+                    finalize_response_with_headers_in_place(
+                        &method,
+                        version,
+                        "edge",
+                        &mut owner,
+                        Some(&control),
+                        false,
+                    );
+                    let actual = owner.into_http_for_codec().expect("valid final framing");
+                    assert_eq!(actual.status(), expected.status());
+                    assert_eq!(actual.version(), expected.version());
+                    assert_eq!(actual.headers(), expected.headers());
+                    assert!(!actual.headers().contains_key("x-hop"));
+                    let actual_body = actual.into_body().collect().await.expect("actual body");
+                    let expected_body =
+                        expected.into_body().collect().await.expect("expected body");
+                    assert_eq!(actual_body.to_bytes(), expected_body.to_bytes());
+                }
+            }
+        }
+    }
 
     #[test]
     fn trim_http_ows_removes_only_ascii_space_and_tab() {

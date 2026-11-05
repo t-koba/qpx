@@ -97,12 +97,18 @@ pub(crate) async fn handle_h3_connect(
         };
     }
     macro_rules! send_blocked {
-        () => {
-            send_finalized!(
-                blocked(state.messages.blocked.as_str()),
-                DispatchOutcome::Block
-            )
-        };
+        () => {{
+            let mut response = blocked(state.messages.blocked.as_str());
+            crate::http::protocol::l7::finalize_response_with_headers_in_place(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
+                proxy_name.as_str(),
+                &mut response,
+                response_headers.as_deref(),
+                false,
+            );
+            send_policy!(response, DispatchOutcome::Block)
+        }};
     }
     match action.kind {
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy | ActionKind::Inspect => {}

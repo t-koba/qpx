@@ -184,16 +184,17 @@ pub(super) async fn tunnel_connect(
                             Ok(response) => Ok::<_, Infallible>(response),
                             Err(err) => {
                                 warn!(error = ?err, "forward CONNECT MITM request failed");
-                                Ok(OwnerResponse::from_http(finalize_response_for_request(
+                                Ok(finalize_response_for_request(
                                     &request_method,
                                     request_version,
                                     proxy_name.as_str(),
                                     Response::builder()
                                         .status(StatusCode::BAD_GATEWAY)
                                         .body(Body::from(proxy_error))
+                                        .map(OwnerResponse::from_http)
                                         .unwrap_or_else(|_| blocked("proxy error")),
                                     false,
-                                )))
+                                ))
                             }
                         }
                     }

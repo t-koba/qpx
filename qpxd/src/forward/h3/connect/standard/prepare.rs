@@ -1,5 +1,4 @@
 use super::super::super::backend_h3::ForwardH3Handler;
-use super::super::finalize_h3_connect_response;
 use super::super::parse::{format_authority, validate_h3_connect_head};
 use super::super::{H3ConnectRuleContextInput, build_h3_connect_rule_context};
 use super::target::{H3ConnectTargetInput, prepare_h3_connect_target};
@@ -356,10 +355,14 @@ pub(crate) async fn prepare_h3_connect_request(
 
     match action.kind {
         ActionKind::Block => {
-            let response = finalize_h3_connect_response(
+            let mut response = blocked(state.messages.blocked.as_str());
+            crate::http::protocol::l7::finalize_response_with_headers_in_place(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
                 proxy_name,
-                blocked(state.messages.blocked.as_str()),
+                &mut response,
                 response_headers.as_deref(),
+                false,
             );
             respond_with_policy!(
                 response,

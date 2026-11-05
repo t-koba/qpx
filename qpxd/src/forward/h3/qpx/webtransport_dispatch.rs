@@ -348,10 +348,14 @@ pub(super) async fn handle_qpx_webtransport_connect(
 
     match action.kind {
         ActionKind::Block | ActionKind::Inspect => {
-            let response = finalize_h3_connect_response(
+            let mut response = blocked(state.messages.blocked.as_str());
+            crate::http::protocol::l7::finalize_response_with_headers_in_place(
+                &http::Method::CONNECT,
+                http::Version::HTTP_3,
                 proxy_name.as_str(),
-                blocked(state.messages.blocked.as_str()),
+                &mut response,
                 response_headers.as_deref(),
+                false,
             );
             return_with_policy!(
                 response,

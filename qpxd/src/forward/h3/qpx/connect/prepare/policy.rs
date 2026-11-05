@@ -327,9 +327,7 @@ async fn send_connect_local_action(input: SendConnectLocalActionInput<'_>) -> Re
     } = input;
     let (response, outcome) = match action.kind {
         ActionKind::Block => {
-            let mut response = qpx_core::http_message::Response::from_http(blocked(
-                state.messages.blocked.as_str(),
-            ));
+            let mut response = blocked(state.messages.blocked.as_str());
             finalize_response_with_headers_in_place(
                 &http::Method::CONNECT,
                 http::Version::HTTP_3,
