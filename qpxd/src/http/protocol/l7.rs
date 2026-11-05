@@ -498,11 +498,12 @@ pub(crate) async fn handle_max_forwards_in_place(
                     }
                 };
                 let mut response = OwnerResponse::new(Body::from(body));
-                response.headers_mut().insert(
-                    OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
-                        .expect("ordinary field"),
-                    http::HeaderValue::from_static("message/http; charset=utf-8"),
-                );
+                if let Ok(name) = OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE) {
+                    response.headers_mut().insert(
+                        name,
+                        http::HeaderValue::from_static("message/http; charset=utf-8"),
+                    );
+                }
                 response
             }
             Method::OPTIONS => {
