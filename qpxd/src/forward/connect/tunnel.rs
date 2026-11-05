@@ -4,8 +4,6 @@ use super::{
 };
 #[cfg(feature = "mitm")]
 use crate::http::mitm::{MitmRouteContext, proxy_mitm_request};
-#[cfg(feature = "mitm")]
-use crate::http::protocol::common::blocked_response as blocked;
 use crate::http::protocol::io_prefix::PrefixedIo;
 #[cfg(feature = "mitm")]
 use crate::http::protocol::l7::finalize_response_for_request;
@@ -24,7 +22,7 @@ use crate::upstream::io_copy::BandwidthThrottle;
 #[cfg(feature = "mitm")]
 use ::http::Request as HyperRequest;
 #[cfg(feature = "mitm")]
-use ::http::{Response, StatusCode};
+use ::http::StatusCode;
 #[cfg(feature = "mitm")]
 use anyhow::Context;
 use anyhow::{Result, anyhow};
@@ -188,11 +186,12 @@ pub(super) async fn tunnel_connect(
                                     &request_method,
                                     request_version,
                                     proxy_name.as_str(),
-                                    Response::builder()
-                                        .status(StatusCode::BAD_GATEWAY)
-                                        .body(Body::from(proxy_error))
-                                        .map(OwnerResponse::from_http)
-                                        .unwrap_or_else(|_| blocked("proxy error")),
+                                    {
+                                        let mut response =
+                                            OwnerResponse::new(Body::from(proxy_error));
+                                        *response.status_mut() = StatusCode::BAD_GATEWAY;
+                                        response
+                                    },
                                     false,
                                 ))
                             }

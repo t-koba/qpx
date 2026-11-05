@@ -1,7 +1,7 @@
 use super::extended::prepare_h2_upstream_connect_request;
 use super::*;
 use crate::tls::TlsClientHelloInfo;
-use http::Uri;
+use http::{Response, Uri};
 use qpx_core::config::{
     AccessLogConfig, ActionConfig, ActionKind, AuditLogConfig, AuthConfig, CertificateMatchConfig,
     Config, IdentityConfig, IngressEdgeConfig, IngressEdgeMode, MatchConfig, MessagesConfig,
@@ -740,36 +740,69 @@ async fn connect_owned_generated_responses_keep_status_and_tunnel_semantics() {
         (ActionKind::Block, StatusCode::FORBIDDEN),
         (ActionKind::Direct, StatusCode::BAD_GATEWAY),
     ] {
-        let mut config = connect_config();
-        let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0] else {
-            unreachable!()
-        };
-        edge.rules.clear();
-        edge.default_action.kind = kind;
-        let runtime = Runtime::new(config).unwrap();
-        // Port zero cannot be an upstream listener; failure is deterministic.
-        let request = http::Request::builder()
-            .method(Method::CONNECT)
-            .uri("127.0.0.1:0")
-            .body(Body::empty())
+        for (version, extended) in [
+            (http::Version::HTTP_11, false),
+            (http::Version::HTTP_2, false),
+            (http::Version::HTTP_2, true),
+        ] {
+            let mut config = connect_config();
+            config.messages.proxy_error = "configured CONNECT failure".to_string();
+            let expected_body = if status == StatusCode::BAD_GATEWAY {
+                config.messages.proxy_error.clone()
+            } else {
+                config.messages.blocked.clone()
+            };
+            let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0] else {
+                unreachable!()
+            };
+            edge.rules.clear();
+            edge.default_action.kind = kind.clone();
+            let runtime = Runtime::new(config).unwrap();
+            // Port zero cannot be an upstream listener; failure is deterministic.
+            let mut request = http::Request::builder()
+                .method(Method::CONNECT)
+                .version(version)
+                .uri(if extended {
+                    "http://127.0.0.1:0/"
+                } else {
+                    "127.0.0.1:0"
+                })
+                .body(Body::empty())
+                .unwrap();
+            if extended {
+                request
+                    .extensions_mut()
+                    .insert(H2Protocol::from_static("test"));
+            }
+            let response: OwnerResponse<Body> = handle_connect(
+                OwnerRequest::from_http(request),
+                runtime,
+                "forward",
+                SocketAddr::from(([127, 0, 0, 1], 12345)),
+            )
+            .await
             .unwrap();
-        let response: OwnerResponse<Body> = handle_connect(
-            OwnerRequest::from_http(request),
-            runtime,
-            "forward",
-            SocketAddr::from(([127, 0, 0, 1], 12345)),
-        )
-        .await
-        .unwrap();
-        assert_eq!(response.status(), status);
-        let response = response.into_http_for_codec().unwrap();
-        assert!(response.headers().contains_key("via"));
-        assert!(
-            !qpx_http::body::to_bytes(response.into_body())
-                .await
-                .unwrap()
-                .is_empty()
-        );
+            assert_eq!(response.status(), status);
+            let response = response.into_http_for_codec().unwrap();
+            assert!(response.headers().contains_key("via"));
+            // Local builders retain their default head version; the request
+            // version selects finalization policy and the Via protocol label.
+            assert_eq!(response.version(), http::Version::HTTP_11);
+            assert_eq!(
+                response.headers()["via"],
+                if version == http::Version::HTTP_2 {
+                    "2 qpx"
+                } else {
+                    "1.1 qpx"
+                }
+            );
+            assert_eq!(
+                qpx_http::body::to_bytes(response.into_body())
+                    .await
+                    .unwrap(),
+                expected_body
+            );
+        }
     }
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let request = http::Request::builder()

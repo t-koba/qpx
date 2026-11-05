@@ -25,7 +25,7 @@ use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use crate::runtime::Runtime;
 use crate::upstream::connect::connect_tunnel_target;
 use crate::upstream::io_copy::BandwidthThrottle;
-use ::http::{Method, Response, StatusCode};
+use ::http::{Method, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
@@ -337,12 +337,12 @@ pub(super) async fn handle_connect(
     macro_rules! proxy_error_connect_response {
         () => {
             connect_response!(
-                OwnerResponse::from_http(
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(state.messages.proxy_error.clone()))
-                        .unwrap_or_else(|_| Response::new(Body::empty()))
-                ),
+                {
+                    let mut response =
+                        OwnerResponse::new(Body::from(state.messages.proxy_error.clone()));
+                    *response.status_mut() = StatusCode::BAD_GATEWAY;
+                    response
+                },
                 DispatchOutcome::Error
             )
         };

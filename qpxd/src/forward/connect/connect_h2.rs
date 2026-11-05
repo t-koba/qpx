@@ -316,11 +316,12 @@ pub(super) async fn handle_h2_extended_connect(
     macro_rules! proxy_error_connect_response {
         () => {
             connect_response!(
-                OwnerResponse::from_http(
-                    Response::builder()
-                        .status(StatusCode::BAD_GATEWAY)
-                        .body(Body::from(state.messages.proxy_error.clone()))?
-                ),
+                {
+                    let mut response =
+                        OwnerResponse::new(Body::from(state.messages.proxy_error.clone()));
+                    *response.status_mut() = StatusCode::BAD_GATEWAY;
+                    response
+                },
                 DispatchOutcome::Error
             )
         };
