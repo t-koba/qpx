@@ -2901,11 +2901,15 @@ fn qpx_h3_static_response_boundary_violations(content: &str) -> Vec<&'static str
         return violations;
     };
     for required in [
-        ".header(http::header::CONTENT_LENGTH, body.len().to_string())",
-        "Body::from(Bytes::copy_from_slice(body))",
+        "-> Result<OwnerResponse<Body>>",
+        "u64::try_from(body.len())?",
+        "OwnerResponse::new(Body::from(Bytes::copy_from_slice(body)))",
+        "set_content_length(content_length)",
     ] {
         if !static_section.contains(required) {
-            violations.push("qpx_static_response must set exact Content-Length and Bytes body");
+            violations.push(
+                "qpx_static_response must return an owner with exact Content-Length and Bytes body",
+            );
             break;
         }
     }
@@ -6153,17 +6157,18 @@ mod tests {
     }
 
     #[test]
-    fn phase3_qpx_h3_static_response_gate_rejects_vec_materialization() {
+    fn phase3_qpx_h3_static_response_gate_requires_owner_and_rejects_vec_materialization() {
         let good = r#"
             pub(super) async fn send_qpx_static_response() -> Result<()> {
                 let response = qpx_static_response(status, body)?;
                 Ok(())
             }
-            fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<Response<Body>> {
-                Ok(Response::builder()
-                    .status(status)
-                    .header(http::header::CONTENT_LENGTH, body.len().to_string())
-                    .body(Body::from(Bytes::copy_from_slice(body)))?)
+            fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<OwnerResponse<Body>> {
+                let content_length = u64::try_from(body.len())?;
+                let mut response = OwnerResponse::new(Body::from(Bytes::copy_from_slice(body)));
+                *response.status_mut() = status;
+                response.headers_mut().set_content_length(content_length);
+                Ok(response)
             }
         "#;
         assert!(qpx_h3_static_response_boundary_violations(good).is_empty());
@@ -6174,16 +6179,17 @@ mod tests {
                     let response = Response::builder().body(Body::from(body.to_vec()))?;
                     Ok(())
                 }
-                fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<Response<Body>> {
-                    Ok(Response::builder()
-                        .status(status)
-                        .body(Body::from(body.to_vec()))?)
+                fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<OwnerResponse<Body>> {
+                    let mut response = OwnerResponse::new(Body::from(body.to_vec()));
+                    *response.status_mut() = status;
+                    response.headers_mut().set_content_length(1);
+                    Ok(response)
                 }
                 "#
             ),
             [
                 "send_qpx_static_response must delegate response construction",
-                "qpx_static_response must set exact Content-Length and Bytes body",
+                "qpx_static_response must return an owner with exact Content-Length and Bytes body",
                 "qpx_static_response must not materialize through Vec",
             ]
         );

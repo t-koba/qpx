@@ -5,6 +5,7 @@ use crate::http3::codec::h1_headers_to_http;
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::{Response, StatusCode};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::time::Duration;
@@ -36,11 +37,12 @@ pub(super) async fn send_qpx_static_response(
     .await
 }
 
-fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<Response<Body>> {
-    Ok(Response::builder()
-        .status(status)
-        .header(http::header::CONTENT_LENGTH, body.len().to_string())
-        .body(Body::from(Bytes::copy_from_slice(body)))?)
+fn qpx_static_response(status: StatusCode, body: &[u8]) -> Result<OwnerResponse<Body>> {
+    let content_length = u64::try_from(body.len())?;
+    let mut response = OwnerResponse::new(Body::from(Bytes::copy_from_slice(body)));
+    *response.status_mut() = status;
+    response.headers_mut().set_content_length(content_length);
+    Ok(response)
 }
 
 pub(super) async fn send_qpx_response_stream<R: crate::http::response_carrier::ResponseCarrier>(
@@ -128,15 +130,29 @@ mod tests {
         assert!(err.to_string().contains("out of range"));
     }
 
-    #[test]
-    fn qpx_static_response_sets_exact_content_length() {
-        let response =
-            qpx_static_response(StatusCode::BAD_REQUEST, b"bad qpx request").expect("response");
+    #[tokio::test]
+    async fn qpx_static_response_preserves_content_length_and_body_at_egress() {
+        for (body, expected_length) in [(&b"bad qpx request"[..], 15_u64), (&[][..], 0_u64)] {
+            let response = qpx_static_response(StatusCode::BAD_REQUEST, body).expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.headers().declared_content_length(),
+                Ok(Some(expected_length))
+            );
 
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        assert_eq!(
-            response.headers().get(http::header::CONTENT_LENGTH),
-            Some(&http::HeaderValue::from_static("15"))
-        );
+            let response = response
+                .into_http_for_codec()
+                .expect("valid static framing");
+            let expected_length = expected_length.to_string();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(
+                response.headers().get(http::header::CONTENT_LENGTH),
+                Some(&http::HeaderValue::from_str(&expected_length).expect("length header"))
+            );
+            let bytes = qpx_http::body::to_bytes(response.into_body())
+                .await
+                .expect("body bytes");
+            assert_eq!(bytes.as_ref(), body);
+        }
     }
 }
