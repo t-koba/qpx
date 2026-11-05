@@ -39,7 +39,7 @@ fn too_many_requests_dispatch_response(
         method,
         version,
         proxy_name,
-        Response::from_http(too_many_requests_response(retry_after)),
+        too_many_requests_response(retry_after),
         false,
     );
     annotate_dispatch_response(&mut response, &audit, outcome, &[]);

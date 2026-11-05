@@ -59,17 +59,25 @@ pub(crate) fn connect_established_response() -> Response<Body> {
     response
 }
 
-pub(crate) fn too_many_requests_response(retry_after: Option<Duration>) -> Response<Body> {
-    let mut builder = Response::builder()
-        .status(StatusCode::TOO_MANY_REQUESTS)
-        .header(http::header::CONTENT_TYPE, "text/plain; charset=utf-8");
+pub(crate) fn too_many_requests_response(retry_after: Option<Duration>) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(Body::from("too many requests"));
+    *response.status_mut() = StatusCode::TOO_MANY_REQUESTS;
+    if let Ok(name) = http::header::CONTENT_TYPE.try_into() {
+        response.headers_mut().insert(
+            name,
+            http::HeaderValue::from_static("text/plain; charset=utf-8"),
+        );
+    }
     if let Some(retry_after) = retry_after {
         let secs = retry_after.as_secs().max(1);
-        builder = builder.header(http::header::RETRY_AFTER, secs.to_string());
+        if let (Ok(name), Ok(value)) = (
+            http::header::RETRY_AFTER.try_into(),
+            http::HeaderValue::from_str(&secs.to_string()),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
     }
-    builder
-        .body(Body::from("too many requests"))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+    response
 }
 
 pub(crate) fn http_version_label(version: http::Version) -> &'static str {

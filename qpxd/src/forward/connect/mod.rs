@@ -241,7 +241,7 @@ pub(super) async fn handle_connect(
             false,
         );
         request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));
-        return Ok(OwnerResponse::from_http(response));
+        return Ok(response);
     }
     let decision_service = enforce_decision_service(
         &state,
@@ -327,7 +327,7 @@ pub(super) async fn handle_connect(
         ($retry_after:expr) => {{
             let retry_after = $retry_after;
             let mut response = connect_response!(
-                OwnerResponse::from_http(too_many_requests(retry_after)),
+                too_many_requests(retry_after),
                 DispatchOutcome::ConcurrencyLimited
             );
             request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);

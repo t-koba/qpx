@@ -42,7 +42,7 @@ pub(in crate::forward) fn apply_connect_decision_service(
                     &Method::CONNECT,
                     req_version,
                     proxy_name,
-                    Response::from_http(too_many_requests_response(Some(retry_after))),
+                    too_many_requests_response(Some(retry_after)),
                     false,
                 );
                 request_limits.apply_rate_limit_fields(response.headers_mut(), Some(retry_after));

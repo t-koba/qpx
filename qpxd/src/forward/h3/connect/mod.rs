@@ -213,11 +213,15 @@ pub(super) fn h3_connect_rate_limited_response(
     response_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     request_limits: &crate::rate_limit::AppliedRateLimits,
     retry_after: Option<std::time::Duration>,
-) -> http::Response<qpx_http::body::Body> {
-    let mut response = finalize_h3_connect_response(
+) -> qpx_core::http_message::Response<qpx_http::body::Body> {
+    let mut response = crate::http::protocol::common::too_many_requests_response(retry_after);
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        &http::Method::CONNECT,
+        http::Version::HTTP_3,
         proxy_name,
-        crate::http::protocol::common::too_many_requests_response(retry_after),
+        &mut response,
         response_headers,
+        false,
     );
     request_limits.apply_rate_limit_fields(response.headers_mut(), retry_after);
     response
@@ -225,40 +229,75 @@ pub(super) fn h3_connect_rate_limited_response(
 
 #[cfg(all(test, feature = "http3"))]
 mod h3_connect_rate_limited_response_tests {
-    #[test]
-    fn rate_limited_response_uses_429_retry_after_and_plain_text() {
-        let request_limits = crate::rate_limit::AppliedRateLimits::default();
-        let response =
-            super::h3_connect_rate_limited_response("test-proxy", None, &request_limits, None);
-        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
-        assert!(response.headers().get(http::header::RETRY_AFTER).is_none());
-        assert_eq!(
-            response
-                .headers()
-                .get(http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/plain; charset=utf-8"),
+    #[tokio::test]
+    async fn rate_limited_response_keeps_body_retry_and_fields_after_header_control() {
+        use crate::rate_limit::{
+            CompiledRateLimitPlan, RateLimitContext, RateLimitSet, TransportScope,
+        };
+
+        let config = serde_yaml::from_str(
+            "enabled: true
+experimental_rate_limit_fields: true
+apply_to: [request]
+key: global
+requests: { quota: { interval_secs: 60, amount: 1 } }",
+        )
+        .unwrap();
+        let plan = CompiledRateLimitPlan::from_sets(
+            RateLimitSet::from_config(Some(&config)),
+            RateLimitSet::default(),
         );
-        let response = super::h3_connect_rate_limited_response(
-            "test-proxy",
-            None,
-            &request_limits,
-            Some(std::time::Duration::ZERO),
-        );
-        assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
-        assert_eq!(
-            response
-                .headers()
-                .get(http::header::RETRY_AFTER)
-                .and_then(|value| value.to_str().ok()),
-            Some("1"),
-        );
-        assert_eq!(
-            response
-                .headers()
-                .get(http::header::CONTENT_TYPE)
-                .and_then(|value| value.to_str().ok()),
-            Some("text/plain; charset=utf-8"),
-        );
+        let mut limits = plan.collect(TransportScope::Request);
+        let context = RateLimitContext::default();
+        assert!(limits.try_acquire_request(&context, 1).is_none());
+        assert!(limits.try_acquire_request(&context, 1).is_some());
+        let control = qpx_core::rules::CompiledHeaderControl::compile(
+            &serde_yaml::from_str(
+                "response_set: { connection: x-hop, x-hop: removed, rate-limit-policy: stale, ratelimit: stale }",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for retry in [None, Some(0), Some(3)] {
+            let response = super::h3_connect_rate_limited_response(
+                "test-proxy",
+                Some(&control),
+                &limits,
+                retry.map(std::time::Duration::from_secs),
+            )
+            .into_http_for_codec()
+            .unwrap();
+            assert_eq!(response.status(), http::StatusCode::TOO_MANY_REQUESTS);
+            assert_eq!(
+                response.headers()[http::header::CONTENT_TYPE],
+                "text/plain; charset=utf-8"
+            );
+            assert_eq!(
+                response
+                    .headers()
+                    .get(http::header::RETRY_AFTER)
+                    .map(|v| v.to_str().unwrap()),
+                retry.map(|secs| secs.max(1).to_string()).as_deref(),
+            );
+            assert_eq!(response.headers()["via"], "3 test-proxy");
+            assert!(!response.headers().contains_key("x-hop"));
+            assert_eq!(
+                response.headers()["rate-limit-policy"],
+                "\"requests\";q=1;w=60;qu=\"requests\""
+            );
+            assert_eq!(
+                response.headers()["ratelimit"],
+                retry.map_or_else(
+                    || "\"requests\";r=0".to_owned(),
+                    |secs| format!("\"requests\";r=0;t={}", secs.max(1))
+                ),
+            );
+            assert_eq!(
+                qpx_http::body::to_bytes(response.into_body())
+                    .await
+                    .unwrap(),
+                "too many requests",
+            );
+        }
     }
 }
