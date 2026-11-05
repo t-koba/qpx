@@ -262,6 +262,27 @@ where
     .map_err(Into::into)
 }
 
+fn finalized_h3_static_response(
+    status: ::http::StatusCode,
+    body: &[u8],
+    request_method: &http::Method,
+    proxy_name: &str,
+) -> Result<OwnerResponse<Body>> {
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
+        status,
+        "HTTP/3 static response",
+    )?;
+    let mut response = OwnerResponse::new(Body::from(body.to_vec()));
+    *response.status_mut() = status;
+    Ok(finalize_response_for_request(
+        request_method,
+        http::Version::HTTP_3,
+        proxy_name,
+        response,
+        false,
+    ))
+}
+
 pub(crate) async fn send_h3_static_response<S>(
     req_stream: &mut ::h3::server::RequestStream<S, Bytes>,
     status: ::http::StatusCode,
@@ -273,20 +294,9 @@ pub(crate) async fn send_h3_static_response<S>(
 where
     S: ::h3::quic::SendStream<Bytes>,
 {
-    let response = finalize_response_for_request(
-        request_method,
-        http::Version::HTTP_3,
-        proxy_name,
-        Response::builder()
-            .status(qpx_http::protocol::semantics::validate_http_status_class(
-                status,
-                "HTTP/3 static response",
-            )?)
-            .body(Body::from(body.to_vec()))?,
-        false,
-    );
+    let response = finalized_h3_static_response(status, body, request_method, proxy_name)?;
     send_h3_response(
-        OwnerResponse::from_http(response),
+        response,
         request_method,
         req_stream,
         max_h3_response_body_bytes,

@@ -73,6 +73,45 @@ fn owned_h3_head_matches_standard_preparation() {
 }
 
 #[tokio::test]
+async fn static_h3_local_owner_matches_standard_finalization() {
+    use http_body_util::BodyExt as _;
+
+    for method in [Method::GET, Method::HEAD] {
+        for status in [StatusCode::BAD_REQUEST, StatusCode::PAYLOAD_TOO_LARGE] {
+            let body = b"static rejection";
+            let actual = finalized_h3_static_response(status, body, &method, "edge")
+                .expect("owner-backed static response")
+                .into_http_for_library();
+            let expected = finalize_response_for_request(
+                &method,
+                Version::HTTP_3,
+                "edge",
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(body.to_vec()))
+                    .expect("standard static response"),
+                false,
+            );
+
+            assert_eq!(actual.status(), expected.status());
+            assert_eq!(actual.version(), Version::HTTP_11);
+            assert_eq!(actual.version(), expected.version());
+            assert!(actual.headers().contains_key(header::DATE));
+            assert!(expected.headers().contains_key(header::DATE));
+            let mut actual_headers = actual.headers().clone();
+            let mut expected_headers = expected.headers().clone();
+            actual_headers.remove(header::DATE);
+            expected_headers.remove(header::DATE);
+            assert_eq!(actual_headers, expected_headers);
+            assert_eq!(
+                actual.into_body().collect().await.unwrap().to_bytes(),
+                expected.into_body().collect().await.unwrap().to_bytes(),
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn owned_h3_export_preserves_lazy_body_trailers_and_errors() {
     use futures_util::{StreamExt as _, stream};
     use http_body::Frame;
