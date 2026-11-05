@@ -14,7 +14,9 @@ use crate::reverse::transport::{
 use crate::upstream::origin::PreparedPlainHttp1Session;
 use anyhow::{Result, anyhow};
 use bytes::{Buf, Bytes, BytesMut};
-use http::{Response, StatusCode};
+#[cfg(test)]
+use http::Response;
+use http::StatusCode;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_observability::RequestHandler;
@@ -157,19 +159,13 @@ pub(super) async fn serve_raw_or_fallback(
                     Err(error) => {
                         warn!(error = ?error, "reverse handling failed");
                         let state = reverse.runtime.state();
-                        let mut response =
-                            Response::new(Body::from(state.messages.reverse_error.clone()));
-                        *response.status_mut() = StatusCode::BAD_GATEWAY;
-                        let response = crate::http::protocol::l7::finalize_response_for_request(
-                            request_method,
-                            http::Version::HTTP_11,
-                            state.plan.identity.proxy_name.as_ref(),
-                            response,
-                            false,
-                        );
                         PreparedRawHttp1Response::Generic(
                             Vec::new(),
-                            OwnerResponse::from_http(response),
+                            reverse_http1_dispatch_error_response(
+                                request_method,
+                                state.plan.identity.proxy_name.as_ref(),
+                                Body::from(state.messages.reverse_error.clone()),
+                            ),
                         )
                     }
                 };
@@ -383,6 +379,22 @@ fn prepare_complete_request<'a>(
     FastParse::Prepared { consumed, request }
 }
 
+fn reverse_http1_dispatch_error_response(
+    request_method: &http::Method,
+    proxy_name: &str,
+    body: Body,
+) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(body);
+    *response.status_mut() = StatusCode::BAD_GATEWAY;
+    crate::http::protocol::l7::finalize_response_for_request(
+        request_method,
+        http::Version::HTTP_11,
+        proxy_name,
+        response,
+        false,
+    )
+}
+
 // Keep the Generic fallback's static decision before codec export. In particular,
 // a nonempty interim list or trailers must continue through the streaming sender.
 async fn send_generic_response(
@@ -449,6 +461,35 @@ mod tests {
             .unwrap();
         let (server, _) = listener.accept().await.unwrap();
         (server, client)
+    }
+
+    #[test]
+    fn dispatch_error_owner_matches_standard_finalization() {
+        let method = http::Method::GET;
+        let proxy_name = "reverse-proxy";
+        let body = "configured reverse error";
+
+        let mut standard = Response::new(Body::from(body));
+        *standard.status_mut() = StatusCode::BAD_GATEWAY;
+        let standard = crate::http::protocol::l7::finalize_response_for_request(
+            &method,
+            http::Version::HTTP_11,
+            proxy_name,
+            standard,
+            false,
+        );
+        let owned = reverse_http1_dispatch_error_response(&method, proxy_name, Body::from(body))
+            .into_http_for_library();
+
+        let (standard_parts, mut standard_body) = standard.into_parts();
+        let (owned_parts, mut owned_body) = owned.into_parts();
+        assert_eq!(owned_parts.status, standard_parts.status);
+        assert_eq!(owned_parts.version, standard_parts.version);
+        assert_eq!(owned_parts.headers, standard_parts.headers);
+        assert_eq!(
+            owned_body.take_single_frame_without_trailers(),
+            standard_body.take_single_frame_without_trailers(),
+        );
     }
 
     #[tokio::test]
