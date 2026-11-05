@@ -336,7 +336,8 @@ impl<'a> HttpModuleRequest<'a> {
         self.inner.uri()
     }
 
-    /// Replaces the request URI.
+    /// Replaces the request URI. Path/query rewrites are allowed; changing the
+    /// session's original authority fails the enclosing request hook.
     pub fn set_uri(&mut self, uri: http::Uri) {
         *self.inner.uri_mut() = uri;
     }
@@ -572,7 +573,83 @@ impl HttpModuleSession {
     }
 }
 
+// Routing/policy already selected this authority before module execution. Keep
+// this separate from the mutable frozen-request view used by later hooks.
+struct ModuleRequestAuthority {
+    authority: Option<String>,
+    scheme: String,
+}
+
+impl ModuleRequestAuthority {
+    fn from_request(req: &OwnerRequest<Body>, default_scheme: Option<&str>) -> Self {
+        let authority = req
+            .uri()
+            .authority()
+            .map(|value| value.as_str().to_owned())
+            .or_else(|| {
+                req.headers()
+                    .get(&OrdinaryHeaderName::try_from(HOST).ok()?)
+                    .and_then(|value| value.to_str().ok())
+                    .map(str::to_owned)
+            });
+        Self::new(
+            authority,
+            req.uri().scheme_str().or(default_scheme).unwrap_or("http"),
+        )
+    }
+
+    fn new(authority: Option<String>, scheme: &str) -> Self {
+        Self {
+            authority,
+            scheme: scheme.to_ascii_lowercase(),
+        }
+    }
+
+    fn default_port(scheme: &str) -> Option<u16> {
+        if scheme.eq_ignore_ascii_case("https") || scheme.eq_ignore_ascii_case("wss") {
+            Some(443)
+        } else if scheme.eq_ignore_ascii_case("http") || scheme.eq_ignore_ascii_case("ws") {
+            Some(80)
+        } else if scheme.eq_ignore_ascii_case("ftp") {
+            Some(21)
+        } else {
+            None
+        }
+    }
+
+    fn check(&self, uri: &http::Uri, label: &str, stage: &str) -> Result<()> {
+        // Origin-form carries no replacement authority: forwarding uses the
+        // previously selected target (including absolute-form reconstruction).
+        let Some(authority) = uri.authority() else {
+            return Ok(());
+        };
+        let candidate_scheme = uri.scheme_str().unwrap_or(&self.scheme);
+        let unchanged = self.authority.as_deref().is_some_and(|original| {
+            if self.scheme.eq_ignore_ascii_case(candidate_scheme)
+                && original.eq_ignore_ascii_case(authority.as_str())
+            {
+                return true;
+            }
+            let parse = |value, scheme| {
+                qpx_http::protocol::address::parse_authority_host_port_with_default(
+                    value,
+                    Self::default_port(scheme),
+                )
+            };
+            let before = parse(original, &self.scheme);
+            before.is_some() && before == parse(authority.as_str(), candidate_scheme)
+        });
+        if !unchanged {
+            return Err(anyhow!(
+                "http module {label} {stage} failed: request URI authority changed"
+            ));
+        }
+        Ok(())
+    }
+}
+
 pub struct HttpModuleContext {
+    request_authority: Option<ModuleRequestAuthority>,
     runtime: Arc<RuntimeState>,
     session: HttpModuleSession,
 }
@@ -580,6 +657,7 @@ pub struct HttpModuleContext {
 impl HttpModuleContext {
     pub(super) fn new(runtime: Arc<RuntimeState>, init: HttpModuleSessionInit<'_>) -> Self {
         Self {
+            request_authority: None,
             runtime,
             session: HttpModuleSession::new(init),
         }
@@ -867,6 +945,17 @@ impl HttpModuleExecution {
         }
     }
 
+    // Forward dispatch has a preflight-selected target independent of mutable
+    // Host policy. Pin that target rather than inferring it from prepared headers.
+    pub(crate) fn preserve_request_authority(&mut self, authority: &str, scheme: &str) {
+        if let Some((_, context)) = self.active_mut() {
+            context.request_authority = Some(ModuleRequestAuthority::new(
+                Some(authority.to_owned()),
+                scheme,
+            ));
+        }
+    }
+
     pub(crate) async fn on_request_headers(
         &mut self,
         req: &mut OwnerRequest<Body>,
@@ -874,6 +963,12 @@ impl HttpModuleExecution {
         let Some((chain, context)) = self.active_mut() else {
             return Ok(RequestHeadersOutcome::Continue);
         };
+        context.request_authority.get_or_insert_with(|| {
+            ModuleRequestAuthority::from_request(
+                req,
+                context.session.cache_default_scheme.as_deref(),
+            )
+        });
         for module in chain.request_headers.iter() {
             let applies = {
                 let request_view = HttpModuleRequestView::from_request(&*req);
@@ -893,6 +988,9 @@ impl HttpModuleExecution {
                 .await
                 .with_context(|| format!("http module {label} request_headers failed"))?
                 .request_headers_result(label)?;
+            if let Some(authority) = &context.request_authority {
+                authority.check(req.uri(), label, "request_headers")?;
+            }
             match outcome {
                 RequestHeadersOutcome::Continue => {}
                 RequestHeadersOutcome::Respond(response) => {
@@ -938,6 +1036,12 @@ impl HttpModuleExecution {
         let Some((chain, context)) = self.active_mut() else {
             return Ok(());
         };
+        context.request_authority.get_or_insert_with(|| {
+            ModuleRequestAuthority::from_request(
+                req,
+                context.session.cache_default_scheme.as_deref(),
+            )
+        });
         for module in chain.upstream_request.iter() {
             let label = module.label();
             module
@@ -950,6 +1054,9 @@ impl HttpModuleExecution {
                 .await
                 .with_context(|| format!("http module {label} upstream_request failed"))?
                 .into_complete(label, HttpModuleStage::UpstreamRequest)?;
+            if let Some(authority) = &context.request_authority {
+                authority.check(req.uri(), label, "upstream_request")?;
+            }
         }
         crate::http::protocol::l7::prepare_module_request_body_in_place(req);
         if chain.aggregate.needs_frozen_request {
@@ -1097,4 +1204,115 @@ impl HttpModuleExecution {
             }
         }
     }
+}
+
+#[cfg(test)]
+#[test]
+fn module_uri_authority_equivalence() {
+    for (original, host, default_scheme, equivalent, different) in [
+        (
+            "http://Example.test/old",
+            "Example.test",
+            None,
+            "http://example.TEST:80/new?q=1",
+            "http://example.test:81/new",
+        ),
+        (
+            "https://Example.test:443/old",
+            "Example.test",
+            None,
+            "https://example.test/new",
+            "https://example.test:80/new",
+        ),
+        (
+            "/old",
+            "Example.test:443",
+            Some("https"),
+            "https://example.TEST/new",
+            "https://example.test:80/new",
+        ),
+        (
+            "http://[::1]/old",
+            "[::1]",
+            None,
+            "http://[::1]:80/new",
+            "http://[::1]:81/new",
+        ),
+    ] {
+        let request = OwnerRequest::from_http(
+            http::Request::builder()
+                .uri(original)
+                .header(HOST, host)
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let authority = ModuleRequestAuthority::from_request(&request, default_scheme);
+        for accepted in [original, equivalent, "/new?query=1"] {
+            authority
+                .check(&accepted.parse().unwrap(), "test", "request_headers")
+                .unwrap();
+        }
+        for rejected in [
+            different,
+            "http://other.test/new",
+            "http://user@example.test/new",
+            "http://example.test:99999/new",
+        ] {
+            assert!(
+                authority
+                    .check(&rejected.parse().unwrap(), "test", "upstream_request")
+                    .is_err(),
+                "{original} -> {rejected}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn module_uri_authority_uses_candidate_scheme_default_port() {
+    let request = OwnerRequest::from_http(
+        http::Request::builder()
+            .uri("http://example.test/old")
+            .header(HOST, "example.test")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let authority = ModuleRequestAuthority::from_request(&request, None);
+    assert!(
+        authority
+            .check(
+                &"https://example.test/new".parse().unwrap(),
+                "test",
+                "request_headers"
+            )
+            .is_err()
+    );
+    assert!(
+        authority
+            .check(
+                &"https://example.test:80/new".parse().unwrap(),
+                "test",
+                "request_headers"
+            )
+            .is_ok()
+    );
+
+    let explicit_request = OwnerRequest::from_http(
+        http::Request::builder()
+            .uri("http://example.test:8080/old")
+            .header(HOST, "example.test:8080")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let explicit_authority = ModuleRequestAuthority::from_request(&explicit_request, None);
+    assert!(
+        explicit_authority
+            .check(
+                &"https://example.test:8080/new".parse().unwrap(),
+                "test",
+                "request_headers"
+            )
+            .is_ok()
+    );
 }

@@ -72,6 +72,7 @@ pub(super) async fn prepare_forward_dispatch(
             cache_default_scheme: Some(req.uri().scheme_str().unwrap_or("http")),
         }
     });
+    http_modules.preserve_request_authority(&http_authority, &forwarded_scheme);
     if let crate::http::modules::RequestHeadersOutcome::Respond(response) =
         http_modules.on_request_headers(&mut req).await?
     {

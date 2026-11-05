@@ -392,3 +392,227 @@ settings:
         Some("active")
     );
 }
+
+#[derive(Clone)]
+struct UriRewriteModule {
+    stage: crate::module_api::HttpModuleStage,
+    uri: http::Uri,
+}
+
+impl crate::module_api::HttpModuleFactory for UriRewriteModule {
+    fn build(
+        &self,
+        _: &HttpModuleConfig,
+    ) -> anyhow::Result<std::sync::Arc<dyn crate::module_api::HttpModule>> {
+        Ok(std::sync::Arc::new(self.clone()))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::module_api::HttpModule for UriRewriteModule {
+    fn capabilities(&self) -> crate::module_api::HttpModuleCapabilities {
+        use crate::module_api::{HttpModuleCapabilities, HttpModuleStage, ModuleStages};
+        HttpModuleCapabilities::headers_only(match self.stage {
+            HttpModuleStage::RequestHeaders => ModuleStages::REQUEST_HEADERS,
+            HttpModuleStage::UpstreamRequest => ModuleStages::UPSTREAM_REQUEST,
+            _ => unreachable!(),
+        })
+    }
+
+    async fn call<'a>(
+        &self,
+        stage: crate::module_api::HttpModuleStage,
+        _: &mut crate::module_api::HttpModuleContext,
+        event: crate::module_api::HttpModuleEvent<'a>,
+    ) -> anyhow::Result<crate::module_api::HttpModuleEvent<'a>> {
+        use crate::module_api::HttpModuleEvent;
+        assert_eq!(stage, self.stage);
+        let (HttpModuleEvent::RequestHeaders(mut request)
+        | HttpModuleEvent::UpstreamRequest(mut request)) = event
+        else {
+            unreachable!()
+        };
+        if self.uri.authority().map(|value| value.as_str()) == Some("different.invalid")
+            && request.authority().is_none()
+        {
+            assert_eq!(
+                request.host(),
+                Some("different.invalid"),
+                "Host policy must have run before this hook"
+            );
+        }
+        request.set_uri(self.uri.clone());
+        Ok(HttpModuleEvent::Complete)
+    }
+}
+
+#[tokio::test]
+async fn forward_module_uri_authority_policy() {
+    use crate::module_api::HttpModuleStage;
+    use futures_util::FutureExt as _;
+    use std::time::Duration;
+    // Exercise the real preflight, cache-key preparation, hooks and wire send.
+    // Rejected cases must not reach either an origin or a configured proxy.
+    for stage in [
+        HttpModuleStage::RequestHeaders,
+        HttpModuleStage::UpstreamRequest,
+    ] {
+        for via_proxy in [false, true] {
+            for origin_form in [false, true] {
+                for rewrite in [
+                    "origin",
+                    "absolute",
+                    "host",
+                    "port",
+                    "prepared_host",
+                    "scheme_port",
+                ] {
+                    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                    let addr = listener.local_addr().unwrap();
+                    let authority = if via_proxy {
+                        "example.test:8080".to_owned()
+                    } else {
+                        addr.to_string()
+                    };
+                    let original = if origin_form {
+                        "/old?before=1".to_owned()
+                    } else {
+                        format!("http://{authority}/old?before=1")
+                    };
+                    let uri = match rewrite {
+                        "origin" => "/new?after=2".to_owned(),
+                        "absolute" => format!("http://{authority}/new?after=2"),
+                        "prepared_host" => "http://different.invalid/new?after=2".to_owned(),
+                        "host" => format!("http://different.invalid:{}/new?after=2", addr.port()),
+                        "port" => format!(
+                            "http://{}:{}/new?after=2",
+                            if via_proxy {
+                                "example.test"
+                            } else {
+                                "127.0.0.1"
+                            },
+                            if addr.port() == 80 { 81 } else { 80 }
+                        ),
+                        "scheme_port" => format!(
+                            "https://{}/new?after=2",
+                            if via_proxy {
+                                "example.test"
+                            } else {
+                                "127.0.0.1"
+                            }
+                        ),
+                        _ => unreachable!(),
+                    };
+                    let accepted = matches!(rewrite, "origin" | "absolute");
+                    let mut config: Config = serde_yaml::from_str("edges:\n  - kind: forward\n    name: forward\n    listen: 127.0.0.1:0\n    default_action: { type: direct }\n    http_modules: [{ type: rewrite_uri }]\n").unwrap();
+                    if via_proxy {
+                        config.upstreams =
+                            serde_yaml::from_str(&format!("- name: next\n  url: http://{addr}\n"))
+                                .unwrap();
+                        let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0]
+                        else {
+                            unreachable!()
+                        };
+                        edge.upstream_proxy = Some("next".to_owned());
+                        edge.default_action.kind = ActionKind::Proxy;
+                    }
+                    if rewrite == "prepared_host" {
+                        // A configured Host mutation must not become permission
+                        // for a URI rewrite away from the preflight-selected target.
+                        let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0]
+                        else {
+                            unreachable!()
+                        };
+                        let action = if via_proxy { "proxy" } else { "direct" };
+                        edge.rules = serde_yaml::from_str(&format!("- name: prepared-host\n  match: {{ host: ['*'] }}\n  action: {{ type: {action} }}\n  headers: {{ request_set: {{ Host: different.invalid }} }}\n")).unwrap();
+                    }
+                    let runtime = crate::Daemon::builder()
+                        .register_http_module(
+                            "rewrite_uri",
+                            UriRewriteModule {
+                                stage,
+                                uri: uri.parse().unwrap(),
+                            },
+                        )
+                        .unwrap()
+                        .build()
+                        .build_runtime(config)
+                        .unwrap();
+                    let request = http::Request::builder()
+                        .uri(original)
+                        .header("host", &authority)
+                        .body(Body::empty())
+                        .unwrap();
+                    let mut listener = Some(listener);
+                    let server = if accepted {
+                        let listener = listener.take().unwrap();
+                        Some(tokio::spawn(async move {
+                            let (mut socket, _) = listener.accept().await.unwrap();
+                            let mut head = Vec::new();
+                            while !head.ends_with(b"\r\n\r\n") {
+                                let mut byte = [0];
+                                assert_eq!(socket.read(&mut byte).await.unwrap(), 1);
+                                head.push(byte[0]);
+                            }
+                            socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok").await.unwrap();
+                            String::from_utf8(head).unwrap()
+                        }))
+                    } else {
+                        None
+                    };
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(3),
+                        handle_request_inner(
+                            OwnerRequest::from_http(request),
+                            runtime,
+                            "forward",
+                            "127.0.0.1:12345".parse().unwrap(),
+                        ),
+                    )
+                    .await
+                    .expect("bounded dispatch");
+                    if let Some(server) = server {
+                        let response = result.unwrap();
+                        assert_eq!(response.status(), StatusCode::OK);
+                        assert_eq!(
+                            to_bytes(response.into_head_and_body().1).await.unwrap(),
+                            "ok"
+                        );
+                        let head = tokio::time::timeout(Duration::from_secs(3), server)
+                            .await
+                            .unwrap()
+                            .unwrap();
+                        let target = if via_proxy {
+                            format!("http://{authority}/new?after=2")
+                        } else {
+                            "/new?after=2".to_owned()
+                        };
+                        assert!(
+                            head.starts_with(&format!("GET {target} HTTP/1.1\r\n")),
+                            "{stage:?} {head}"
+                        );
+                        assert!(
+                            head.to_ascii_lowercase()
+                                .contains(&format!("\r\nhost: {authority}\r\n")),
+                            "{head}"
+                        );
+                    } else {
+                        assert!(listener.as_ref().unwrap().accept().now_or_never().is_none());
+                        let error = result.unwrap_err().to_string();
+                        let stage_name = if stage == HttpModuleStage::RequestHeaders {
+                            "request_headers"
+                        } else {
+                            "upstream_request"
+                        };
+                        assert_eq!(
+                            error,
+                            format!(
+                                "http module rewrite_uri {stage_name} failed: request URI authority changed"
+                            )
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

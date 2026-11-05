@@ -1,7 +1,6 @@
 # HTTP Modules
 
-HTTP request/response modules are configured on canonical edges and reverse
-routes:
+Configure HTTP modules on canonical edges and reverse routes:
 
 - `edges[].http_modules` applies to forward, transparent HTTP, and MITM HTTP
   paths.
@@ -71,6 +70,12 @@ iterators, callbacks, `Deref`, parts and transport conversions are not
 exposed. Short-circuits build responses via
 `HttpModuleResponse::new(status, Body)`.
 
+`HttpModuleRequest::set_uri` may rewrite path/query, including origin-form
+requests. RequestHeaders and UpstreamRequest reject different URI authorities
+through the normal module-error path before further processing. Host case and
+explicit default-port equivalents are accepted; origin-form retains the selected
+forwarding authority. This is a trusted-module consistency rule, not client validation.
+
 ### Module bodies and the transport boundary
 
 `module_api::{Body, BodyError, BodyFrame, Sender, Trailers}` are qpxd-owned
@@ -119,14 +124,10 @@ required to validate them. Untouched requests keep their existing
 protocol-specific preparation policy. Internal trusted bodies
 left untouched by modules retain their trust marker.
 
-This boundary is intentionally limited to qpxd's module body API. qpx-http's
-public transport `Body`/`Sender` and standard `http_body::Body`/`Frame` trailer
-interoperability are unchanged. `RpcStreamObserver`/`RpcStreamSummary` use the
-same facade: `RpcStreamSummary::trailers()` returns an opaque `&Trailers` with
-the shared filtered application-metadata view and parsed RPC status, message,
-and binary status-detail results; no raw `HeaderMap` or all-field getter
-escapes. This is
-not a workspace-wide header-ownership claim.
+This boundary covers qpxd's module body API, not qpx-http's transport APIs.
+`RpcStreamObserver`/`RpcStreamSummary` use the same opaque trailer facade,
+including parsed RPC status, message and binary status-detail accessors; they
+expose no raw map or all-field getter. This is not workspace-wide header ownership.
 
 Modules declare capabilities so `qpxd` compiles stage-indexed chains and only
 calls modules for the stages they need. Built-in compression runs only on
