@@ -13,10 +13,10 @@ inventory; the recorded debt only goes down. Workspace-wide gates read the
 crate list from the root `Cargo.toml`, so a new or split-out member is covered
 without editing a second list. Members must be literal directories at the
 workspace root; a pattern member or a member without a directory fails the
-gates closed instead of being skipped. Private `Headers` storage enforces Content-Length
-ownership. A syntax backstop rejects production `.get`/`.get_all`/index reads by
-`CONTENT_LENGTH` or a case-insensitive `"content-length"` literal outside the owner.
-It excludes test-only cfg items; it does not expand macros or infer aliases/dataflow.
+gates closed instead of being skipped. `Headers` enforces ownership only on adopted paths; raw-map
+paths remain under the structural migration tracked by `wi_94c89a30c270235af15a6921a9ff2a35`. The syntax backstop catches only explicit production
+`.get`/`.get_all`/index reads keyed by `CONTENT_LENGTH`, case-insensitive literals, or literal
+`from_static`/`from_bytes` calls outside the owner; it excludes test-only cfg, expands no macros, infers no aliases/dataflow, and is not a workspace-wide proof.
 
 ## Architecture overview
 
