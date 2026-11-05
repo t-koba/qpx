@@ -382,7 +382,7 @@ async fn handle_stream<H: H3RequestHandler>(
                     ) {
                         Ok(response) => {
                             if let Err(err) = send_h3_response(
-                                qpx_core::http_message::Response::from_http(response),
+                                response,
                                 &request_method,
                                 &mut send_stream,
                                 limits.streaming.max_response_body_bytes,

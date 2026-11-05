@@ -73,7 +73,22 @@ response_regex_replace:
                     );
                     let raw = match &local {
                         Some(local) => {
-                            crate::http::local_response::build_local_response(local).unwrap()
+                            let mut raw = http::Response::builder()
+                                .status(local.status)
+                                .body(Body::from(local.body.clone()))
+                                .unwrap();
+                            raw.headers_mut().insert(
+                                http::header::CONTENT_TYPE,
+                                http::HeaderValue::from_str(local.content_type.as_deref().unwrap())
+                                    .unwrap(),
+                            );
+                            for (name, value) in &local.headers {
+                                raw.headers_mut().insert(
+                                    http::HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                                    http::HeaderValue::from_str(value).unwrap(),
+                                );
+                            }
+                            raw
                         }
                         None => http::Response::builder()
                             .status(StatusCode::FORBIDDEN)

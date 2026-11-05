@@ -1,10 +1,12 @@
 // Extracted from rpc/mod.rs; keep public re-exports in mod.rs.
+use crate::http::local_response::apply_local_response_headers;
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 use crate::http::media_type::media_type_without_parameters;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use http::{HeaderMap, Response, StatusCode};
+use http::{HeaderMap, StatusCode};
 use qpx_core::config::RpcLocalResponseConfig;
+use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use serde_json::json;
 
@@ -26,11 +28,13 @@ fn build_grpc_local_response(
 ) -> Result<Response<Body>> {
     let http_status = StatusCode::from_u16(config.http_status.unwrap_or(200))
         .map_err(|_| anyhow!("invalid grpc local response HTTP status"))?;
-    let mut response = Response::builder()
-        .status(http_status)
-        .header(http::header::CONTENT_TYPE, "application/grpc")
-        .body(build_grpc_body(config, payload)?)?;
-    apply_rpc_headers(response.headers_mut(), &config.headers)?;
+    let mut response = Response::new(build_grpc_body(config, payload)?);
+    *response.status_mut() = http_status;
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE.try_into()?,
+        http::HeaderValue::from_static("application/grpc"),
+    );
+    apply_local_response_headers(response.headers_mut(), &config.headers)?;
     Ok(response)
 }
 
@@ -40,11 +44,13 @@ fn build_grpc_web_local_response(
 ) -> Result<Response<Body>> {
     let http_status = StatusCode::from_u16(config.http_status.unwrap_or(200))
         .map_err(|_| anyhow!("invalid grpc_web local response HTTP status"))?;
-    let mut response = Response::builder()
-        .status(http_status)
-        .header(http::header::CONTENT_TYPE, "application/grpc-web+proto")
-        .body(build_grpc_web_body(config, payload)?)?;
-    apply_rpc_headers(response.headers_mut(), &config.headers)?;
+    let mut response = Response::new(build_grpc_web_body(config, payload)?);
+    *response.status_mut() = http_status;
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE.try_into()?,
+        http::HeaderValue::from_static("application/grpc-web+proto"),
+    );
+    apply_local_response_headers(response.headers_mut(), &config.headers)?;
     Ok(response)
 }
 
@@ -81,10 +87,12 @@ pub(crate) fn build_connect_streaming_deadline_response(codec: &str) -> Result<R
     framed.push(0x02);
     framed.extend_from_slice(&(payload.len() as u32).to_be_bytes());
     framed.extend_from_slice(&payload);
-    let response = Response::builder()
-        .status(StatusCode::OK)
-        .header(http::header::CONTENT_TYPE, codec)
-        .body(Body::from(framed))?;
+    let mut response = Response::new(Body::from(framed));
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE.try_into()?,
+        http::HeaderValue::from_str(codec)?,
+    );
     Ok(response)
 }
 
@@ -100,11 +108,13 @@ fn build_connect_local_response(config: &RpcLocalResponseConfig) -> Result<Respo
             "connect rpc local responses do not support trailers"
         ));
     }
-    let mut response = Response::builder()
-        .status(http_status)
-        .header(http::header::CONTENT_TYPE, "application/json")
-        .body(Body::from(std::mem::take(&mut body)))?;
-    apply_rpc_headers(response.headers_mut(), &config.headers)?;
+    let mut response = Response::new(Body::from(std::mem::take(&mut body)));
+    *response.status_mut() = http_status;
+    response.headers_mut().insert(
+        http::header::CONTENT_TYPE.try_into()?,
+        http::HeaderValue::from_static("application/json"),
+    );
+    apply_local_response_headers(response.headers_mut(), &config.headers)?;
     Ok(response)
 }
 
@@ -166,18 +176,6 @@ fn build_grpc_web_body(config: &RpcLocalResponseConfig, payload: &[u8]) -> Resul
     }
     out.extend_from_slice(&frame_grpc_web_trailers(&trailers));
     Ok(Body::from(out))
-}
-
-fn apply_rpc_headers(
-    headers: &mut HeaderMap,
-    custom: &std::collections::HashMap<String, String>,
-) -> Result<()> {
-    for (name, value) in custom {
-        let header = http::header::HeaderName::from_bytes(name.as_bytes())?;
-        let value = http::HeaderValue::from_str(value)?;
-        headers.insert(header, value);
-    }
-    Ok(())
 }
 
 pub(super) fn frame_grpc_message(bytes: Bytes) -> Vec<u8> {

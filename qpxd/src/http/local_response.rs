@@ -2,8 +2,9 @@ use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::http::rpc::build_rpc_local_response;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use hyper::{Response, StatusCode};
+use hyper::{StatusCode, Version};
 use qpx_core::config::LocalResponseConfig;
+use qpx_core::http_message::{Headers, Response};
 use qpx_http::body::Body;
 
 #[derive(Debug, Clone)]
@@ -15,7 +16,8 @@ pub(crate) enum CompiledLocalResponse {
 #[derive(Debug, Clone)]
 pub(crate) struct StaticLocalResponse {
     status: StatusCode,
-    headers: http::HeaderMap,
+    version: Version,
+    headers: Headers,
     body: Bytes,
 }
 
@@ -23,10 +25,10 @@ impl CompiledLocalResponse {
     pub(crate) fn compile(config: LocalResponseConfig) -> Result<Self> {
         if config.rpc.is_none() {
             let response = build_local_response(&config)?;
-            let (parts, _) = response.into_parts();
             return Ok(Self::Static(StaticLocalResponse {
-                status: parts.status,
-                headers: parts.headers,
+                status: response.status(),
+                version: response.version(),
+                headers: response.headers().clone(),
                 body: Bytes::from(config.body),
             }));
         }
@@ -39,6 +41,7 @@ impl CompiledLocalResponse {
                 let mut response =
                     Response::new(Body::from(compiled.body.clone()).mark_trailers_sanitized());
                 *response.status_mut() = compiled.status;
+                *response.version_mut() = compiled.version;
                 *response.headers_mut() = compiled.headers.clone();
                 Ok(response)
             }
@@ -53,30 +56,43 @@ pub(crate) fn build_local_response(config: &LocalResponseConfig) -> Result<Respo
     } else {
         let status = StatusCode::from_u16(config.status)
             .map_err(|_| anyhow!("invalid local response status: {}", config.status))?;
-        Response::builder()
-            .status(status)
-            .body(Body::from(config.body.clone()))?
+        let mut response = Response::new(Body::from(config.body.clone()));
+        *response.status_mut() = status;
+        response
     };
 
     if let Some(content_type) = config.content_type.as_ref() {
         response.headers_mut().insert(
-            http::header::CONTENT_TYPE,
+            http::header::CONTENT_TYPE.try_into()?,
             http::HeaderValue::from_str(content_type)?,
         );
     } else if config.rpc.is_none() && !config.body.is_empty() {
         response.headers_mut().insert(
-            http::header::CONTENT_TYPE,
+            http::header::CONTENT_TYPE.try_into()?,
             http::HeaderValue::from_static("text/plain; charset=utf-8"),
         );
     }
 
-    for (name, value) in &config.headers {
-        let name = http::header::HeaderName::from_bytes(name.as_bytes())?;
-        let value = http::HeaderValue::from_str(value)?;
-        response.headers_mut().insert(name, value);
-    }
+    apply_local_response_headers(response.headers_mut(), &config.headers)?;
 
     Ok(response)
+}
+
+// Config maps replace all occurrences of each parsed name, including Content-Length.
+pub(super) fn apply_local_response_headers(
+    headers: &mut Headers,
+    custom: &std::collections::HashMap<String, String>,
+) -> Result<()> {
+    for (name, value) in custom {
+        let name = http::header::HeaderName::from_bytes(name.as_bytes())?;
+        let value = http::HeaderValue::from_str(value)?;
+        if name == http::header::CONTENT_LENGTH {
+            headers.set_content_length_value(value);
+        } else {
+            headers.insert(name.try_into()?, value);
+        }
+    }
+    Ok(())
 }
 
 pub(crate) fn finalized_local_response(
@@ -85,8 +101,8 @@ pub(crate) fn finalized_local_response(
     proxy_name: &str,
     local: &LocalResponseConfig,
     headers: Option<&qpx_core::rules::CompiledHeaderControl>,
-) -> Result<qpx_core::http_message::Response<Body>> {
-    let mut response = qpx_core::http_message::Response::from_http(build_local_response(local)?);
+) -> Result<Response<Body>> {
+    let mut response = build_local_response(local)?;
     finalize_response_with_headers_in_place(
         request_method,
         request_version,
@@ -104,8 +120,8 @@ pub(crate) fn finalized_compiled_local_response(
     proxy_name: &str,
     local: &CompiledLocalResponse,
     headers: Option<&qpx_core::rules::CompiledHeaderControl>,
-) -> Result<qpx_core::http_message::Response<Body>> {
-    let mut response = qpx_core::http_message::Response::from_http(local.build()?);
+) -> Result<Response<Body>> {
+    let mut response = local.build()?;
     crate::http::protocol::l7::finalize_response_with_headers_in_place(
         request_method,
         request_version,
@@ -175,20 +191,50 @@ response_remove: [x-remove]
                                 .headers
                                 .insert("content-length".to_string(), length.to_string());
                         }
-                        for control in [None, Some(&control)] {
+                        let compiled_response =
+                            CompiledLocalResponse::compile(local.clone()).unwrap();
+                        for (control, compiled) in [
+                            (None, false),
+                            (Some(&control), false),
+                            (None, true),
+                            (Some(&control), true),
+                        ] {
                             // The previous standard-response path is the behavior oracle.
                             let expected =
                                 OwnerResponse::from_http(finalize_response_with_headers(
                                     &method,
                                     version,
                                     "qpx",
-                                    build_local_response(&local).unwrap(),
+                                    {
+                                        let mut raw = http::Response::builder()
+                                            .status(local.status)
+                                            .header("content-type", "text/plain; charset=utf-8")
+                                            .body(Body::from(local.body.clone()))
+                                            .unwrap();
+                                        for (name, value) in &local.headers {
+                                            raw.headers_mut().insert(
+                                                http::HeaderName::from_bytes(name.as_bytes())
+                                                    .unwrap(),
+                                                http::HeaderValue::from_str(value).unwrap(),
+                                            );
+                                        }
+                                        raw
+                                    },
                                     control,
                                     false,
                                 ));
-                            let actual: OwnerResponse<Body> =
+                            let actual: OwnerResponse<Body> = if compiled {
+                                finalized_compiled_local_response(
+                                    &method,
+                                    version,
+                                    "qpx",
+                                    &compiled_response,
+                                    control,
+                                )
+                            } else {
                                 finalized_local_response(&method, version, "qpx", &local, control)
-                                    .unwrap();
+                            }
+                            .unwrap();
                             assert_eq!(actual.status(), expected.status());
                             assert_eq!(actual.version(), expected.version());
                             let fields = |response: &OwnerResponse<Body>| {
@@ -204,6 +250,14 @@ response_remove: [x-remove]
                                 fields
                             };
                             assert_eq!(fields(&actual), fields(&expected));
+                            assert_eq!(
+                                actual.headers().selected_fields_for_serialization(&[
+                                    http::header::CONTENT_LENGTH
+                                ]),
+                                expected.headers().selected_fields_for_serialization(&[
+                                    http::header::CONTENT_LENGTH
+                                ])
+                            );
                             assert_eq!(
                                 actual.headers().declared_content_length(),
                                 expected.headers().declared_content_length()
@@ -241,20 +295,31 @@ response_remove: [x-remove]
                     trailers: HashMap::from([("x-trailer".to_string(), "preserved".to_string())]),
                 }),
             };
-            let response =
+            let compiled = CompiledLocalResponse::compile(local.clone()).unwrap();
+            for response in [
                 finalized_local_response(&http::Method::CONNECT, version, "qpx", &local, None)
-                    .unwrap();
-            assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
-            let mut body = response.into_head_and_body().1;
-            assert_eq!(
-                body.data().await.unwrap().unwrap().as_ref(),
-                b"\x00\x00\x00\x00\x03abc"
-            );
-            assert!(body.data().await.is_none());
-            let trailers = body.trailers().await.unwrap().expect("RPC trailers");
-            assert_eq!(trailers.get("grpc-status").unwrap(), "14");
-            assert_eq!(trailers.get("grpc-message").unwrap(), "unavailable");
-            assert_eq!(trailers.get("x-trailer").unwrap(), "preserved");
+                    .unwrap(),
+                finalized_compiled_local_response(
+                    &http::Method::CONNECT,
+                    version,
+                    "qpx",
+                    &compiled,
+                    None,
+                )
+                .unwrap(),
+            ] {
+                assert_eq!(response.status(), StatusCode::IM_A_TEAPOT);
+                let mut body = response.into_head_and_body().1;
+                assert_eq!(
+                    body.data().await.unwrap().unwrap().as_ref(),
+                    b"\x00\x00\x00\x00\x03abc"
+                );
+                assert!(body.data().await.is_none());
+                let trailers = body.trailers().await.unwrap().expect("RPC trailers");
+                assert_eq!(trailers.get("grpc-status").unwrap(), "14");
+                assert_eq!(trailers.get("grpc-message").unwrap(), "unavailable");
+                assert_eq!(trailers.get("x-trailer").unwrap(), "preserved");
+            }
         }
     }
 
@@ -294,28 +359,107 @@ response_remove: [x-remove]
     }
 
     #[tokio::test]
-    async fn compiled_static_response_replays_body_and_headers_independently() {
-        let compiled = CompiledLocalResponse::compile(LocalResponseConfig {
-            status: 201,
-            body: "payload".to_string(),
-            content_type: Some("application/octet-stream".to_string()),
-            headers: HashMap::from([("x-test".to_string(), "value".to_string())]),
-            rpc: None,
-        })
-        .expect("compile local response");
-
-        let first = compiled.build().expect("first response");
-        let second = compiled.build().expect("second response");
-        assert_eq!(first.status(), StatusCode::CREATED);
-        assert_eq!(second.headers().get("x-test").unwrap(), "value");
-        assert_eq!(
-            qpx_http::body::to_bytes(first.into_body()).await.unwrap(),
-            "payload"
-        );
-        assert_eq!(
-            qpx_http::body::to_bytes(second.into_body()).await.unwrap(),
-            "payload"
-        );
+    async fn compiled_local_responses_preserve_declarations_and_replay_independently() {
+        use qpx_core::config::RpcLocalResponseConfig;
+        use qpx_core::http_message::OrdinaryHeaderName;
+        let field = OrdinaryHeaderName::try_from("x-test").unwrap();
+        for protocol in [None, Some("grpc"), Some("grpc_web"), Some("connect")] {
+            for length in [
+                None,
+                Some(""),
+                Some("0"),
+                Some("0007"),
+                Some("07, 7"),
+                Some("7, 8"),
+                Some("invalid"),
+            ] {
+                let mut local = LocalResponseConfig {
+                    status: 201,
+                    body: "payload".into(),
+                    content_type: Some("text/custom".into()),
+                    headers: HashMap::from([("x-test".into(), "value".into())]),
+                    rpc: protocol.map(|protocol| RpcLocalResponseConfig {
+                        protocol: protocol.into(),
+                        status: None,
+                        message: None,
+                        http_status: Some(201),
+                        headers: HashMap::from([("x-test".into(), "rpc-original".into())]),
+                        trailers: HashMap::new(),
+                    }),
+                };
+                if let Some(length) = length {
+                    // The outer config must replace the RPC declaration, not append it.
+                    if let Some(rpc) = local.rpc.as_mut() {
+                        rpc.headers.insert("content-length".into(), "9".into());
+                    }
+                    local.headers.insert("Content-Length".into(), length.into());
+                }
+                let compiled = CompiledLocalResponse::compile(local.clone()).unwrap();
+                for index in 0..3 {
+                    let mut response = match index {
+                        0 => build_local_response(&local),
+                        1 => compiled.build(),
+                        _ => compiled.clone().build(),
+                    }
+                    .unwrap();
+                    assert_eq!(response.status(), StatusCode::CREATED);
+                    assert_eq!(response.version(), Version::HTTP_11);
+                    assert_eq!(response.headers().get(&field).unwrap(), "value");
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get(&OrdinaryHeaderName::try_from("content-type").unwrap())
+                            .unwrap(),
+                        "text/custom"
+                    );
+                    let literal = response
+                        .headers()
+                        .selected_fields_for_serialization(&[http::header::CONTENT_LENGTH]);
+                    assert_eq!(
+                        literal
+                            .get("content-length")
+                            .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>()),
+                        length.map(|value| vec![value])
+                    );
+                    let declaration = response.headers().declared_content_length();
+                    let valid = declaration.is_ok();
+                    match length {
+                        None => assert_eq!(declaration.unwrap(), None),
+                        Some("0") => assert_eq!(declaration.unwrap(), Some(0)),
+                        Some("0007" | "07, 7") => assert_eq!(declaration.unwrap(), Some(7)),
+                        _ => assert!(declaration.is_err()),
+                    }
+                    // Mutations of one replay must not reach the next response.
+                    response
+                        .headers_mut()
+                        .insert(field.clone(), http::HeaderValue::from_static("changed"));
+                    if protocol.is_none() {
+                        assert_eq!(response.body().trailers_are_sanitized(), index != 0);
+                    }
+                    let exported = response.into_http_for_codec();
+                    if !valid {
+                        assert!(exported.is_err());
+                        continue;
+                    }
+                    let response = exported.unwrap();
+                    assert_eq!(
+                        response
+                            .headers()
+                            .get(http::header::CONTENT_LENGTH)
+                            .map(|value| value.to_str().unwrap()),
+                        length.map(|value| if value == "0" { "0" } else { "7" })
+                    );
+                    if protocol.is_none() {
+                        assert_eq!(
+                            qpx_http::body::to_bytes(response.into_body())
+                                .await
+                                .unwrap(),
+                            "payload"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -332,7 +476,7 @@ response_remove: [x-remove]
         let response = compiled.build().expect("empty response");
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
         assert!(
-            qpx_http::body::to_bytes(response.into_body())
+            qpx_http::body::to_bytes(response.into_head_and_body().1)
                 .await
                 .unwrap()
                 .is_empty()

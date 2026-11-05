@@ -213,7 +213,6 @@ impl ForwardQpxHandler {
                                 protocol,
                                 grpc_request_content_type.as_deref(),
                             )
-                            .map(qpx_core::http_message::Response::from_http)
                         } else {
                             Err(anyhow!(
                                 "qpx-h3 gRPC stream duration exceeded configured limit"

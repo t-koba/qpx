@@ -32,19 +32,25 @@ async fn local_response_policy_output_is_owned_and_preserves_finalization_and_st
         })
         .unwrap();
         response.extensions_mut().insert(42_usize);
-        response
-            .headers_mut()
-            .append("x-duplicate", HeaderValue::from_static("first"));
+        response.headers_mut().append(
+            OrdinaryHeaderName::try_from("x-duplicate").unwrap(),
+            HeaderValue::from_static("first"),
+        );
         let mut sensitive = HeaderValue::from_bytes(b"\x80last").unwrap();
         sensitive.set_sensitive(true);
-        response.headers_mut().append("x-duplicate", sensitive);
+        response.headers_mut().append(
+            OrdinaryHeaderName::try_from("x-duplicate").unwrap(),
+            sensitive,
+        );
         // Finalization must still remove Connection-nominated fields.
-        response
-            .headers_mut()
-            .insert("connection", HeaderValue::from_static("x-hop"));
-        response
-            .headers_mut()
-            .insert("x-hop", HeaderValue::from_static("remove"));
+        response.headers_mut().insert(
+            OrdinaryHeaderName::try_from("connection").unwrap(),
+            HeaderValue::from_static("x-hop"),
+        );
+        response.headers_mut().insert(
+            OrdinaryHeaderName::try_from("x-hop").unwrap(),
+            HeaderValue::from_static("remove"),
+        );
         *response.body_mut() = if abort {
             let (mut sender, body) = Body::channel();
             sender.abort();

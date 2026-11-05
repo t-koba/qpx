@@ -697,7 +697,7 @@ async fn grpc_local_response_emits_trailers() {
     )
     .expect("response");
     assert_eq!(response.status(), StatusCode::OK);
-    let mut body = response.into_body();
+    let mut body = response.into_head_and_body().1;
     assert!(body.data().await.is_none());
     let trailers = body.trailers().await.expect("trailers").expect("present");
     assert_eq!(
@@ -722,7 +722,7 @@ async fn grpc_web_local_response_emits_trailer_frame() {
         b"",
     )
     .expect("response");
-    let bytes = qpx_http::body::to_bytes(response.into_body())
+    let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     let mut observer = GrpcFrameObserver::grpc_web(false, None, None);
@@ -746,11 +746,11 @@ async fn grpc_web_deadline_response_uses_body_trailer_frame() {
     assert_eq!(
         response
             .headers()
-            .get(http::header::CONTENT_TYPE)
+            .get(&qpx_core::http_message::OrdinaryHeaderName::try_from("content-type").unwrap())
             .and_then(|value| value.to_str().ok()),
         Some("application/grpc-web+proto")
     );
-    let bytes = qpx_http::body::to_bytes(response.into_body())
+    let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     let mut observer = GrpcFrameObserver::grpc_web(false, None, None);
@@ -775,11 +775,11 @@ async fn connect_deadline_response_uses_json_error_body() {
     assert_eq!(
         response
             .headers()
-            .get(http::header::CONTENT_TYPE)
+            .get(&qpx_core::http_message::OrdinaryHeaderName::try_from("content-type").unwrap())
             .and_then(|value| value.to_str().ok()),
         Some("application/json")
     );
-    let bytes = qpx_http::body::to_bytes(response.into_body())
+    let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .expect("body");
     let text = std::str::from_utf8(&bytes).expect("utf8");
@@ -792,15 +792,17 @@ async fn connect_streaming_deadline_response_uses_end_stream_envelope() {
     for codec in ["application/connect+proto", "application/connect+json"] {
         let response = build_grpc_deadline_exceeded_response("connect", Some(codec))
             .expect("deadline response");
+        #[cfg(feature = "http3-backend-qpx")]
+        assert!(response.extensions().get::<RpcDeadlineReply>().is_some());
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(
             response
                 .headers()
-                .get(http::header::CONTENT_TYPE)
+                .get(&qpx_core::http_message::OrdinaryHeaderName::try_from("content-type").unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some(codec)
         );
-        let bytes = qpx_http::body::to_bytes(response.into_body())
+        let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
             .await
             .expect("body");
         assert!(
@@ -844,7 +846,7 @@ async fn connect_unary_codecs_keep_json_deadline_body() {
         assert_eq!(
             response
                 .headers()
-                .get(http::header::CONTENT_TYPE)
+                .get(&qpx_core::http_message::OrdinaryHeaderName::try_from("content-type").unwrap())
                 .and_then(|value| value.to_str().ok()),
             Some("application/json")
         );

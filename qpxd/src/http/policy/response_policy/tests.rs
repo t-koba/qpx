@@ -1,4 +1,5 @@
 use crate::http::policy::response_policy::*;
+use http::Response;
 use qpx_core::config::{
     HeaderControl, HttpResponseCacheEffectsConfig, HttpResponseEffectsConfig,
     HttpResponseRetryEffectsConfig, MatchConfig, RpcMatchConfig,

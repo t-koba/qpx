@@ -86,7 +86,7 @@ impl ResponseTransform for ListenerResponsePolicyDecision {
             } => {
                 let mut response = ctx
                     .http_modules
-                    .prepare_downstream_response(OwnerResponse::from_http(response))
+                    .prepare_downstream_response(response)
                     .await?;
                 finalize_response_with_headers_in_place(
                     ctx.request_method,

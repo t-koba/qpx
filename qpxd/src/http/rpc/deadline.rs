@@ -4,9 +4,8 @@ use super::local_response::{
     connect_streaming_response_codec,
 };
 use anyhow::Result;
-use http::Response;
 use qpx_core::config::RpcLocalResponseConfig;
-use qpx_core::http_message::{Headers, OrdinaryHeaderName};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Response};
 use qpx_http::body::Body;
 use std::time::Duration;
 use tokio::time::Instant;

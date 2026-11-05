@@ -4,7 +4,6 @@ use crate::http::local_response::build_local_response;
 use crate::http::rpc::RpcMatchContext;
 use crate::policy_context::merge_header_controls;
 use anyhow::Result;
-use hyper::Response;
 use qpx_core::config::HttpResponseRuleConfig;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::prefilter::{MatchPrefilterContext, MatchPrefilterIndex, StringInterner};
@@ -32,7 +31,7 @@ pub(crate) enum ListenerResponsePolicyDecision {
         policy_tags: Vec<String>,
     },
     LocalResponse {
-        response: Response<Body>,
+        response: OwnerResponse<Body>,
         headers: Option<Arc<CompiledHeaderControl>>,
         policy_tags: Vec<String>,
     },

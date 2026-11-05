@@ -87,8 +87,7 @@ pub(crate) fn annotated_local_response(
     audit: &DispatchAuditContext,
     outcome: DispatchOutcome,
 ) -> Result<OwnerResponse<Body>> {
-    let mut response =
-        OwnerResponse::from_http(crate::http::local_response::build_local_response(local)?);
+    let mut response = crate::http::local_response::build_local_response(local)?;
     finalize_response_with_headers_in_place(
         request_method,
         request_version,
