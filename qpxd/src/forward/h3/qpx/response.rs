@@ -136,6 +136,7 @@ mod tests {
         finalize_h3_connect_head_response, finalize_h3_connect_response,
     };
     use crate::forward::h3::qpx::response::*;
+    use crate::http3::codec::http_headers_to_h1;
     use qpx_core::config::HeaderControl;
 
     #[test]
@@ -220,6 +221,34 @@ mod tests {
                 .map(http::HeaderValue::as_bytes)
                 .collect();
             assert_eq!(imported_lengths, lengths);
+
+            let mut upstream_head = http::Response::builder()
+                .status(StatusCode::OK)
+                .body(())
+                .expect("upstream response head");
+            *upstream_head.headers_mut() = decoded;
+            let actual_head = finalize_h3_connect_head_response(
+                upstream_head,
+                "qpx-test",
+                Some(&control),
+                "QPX HTTP/3 extended CONNECT response",
+            )
+            .expect("owner-finalized response head");
+            let mut standard_head = http::Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .expect("standard response head");
+            *standard_head.headers_mut() = headers.clone();
+            let standard_head =
+                finalize_h3_connect_response("qpx-test", standard_head, Some(&control));
+            let mut expected_head = http::Response::builder()
+                .status(standard_head.status())
+                .body(())
+                .expect("standard H3 response head");
+            *expected_head.headers_mut() =
+                http_headers_to_h1(standard_head.headers()).expect("convert standard H3 headers");
+            assert_eq!(actual_head.status(), expected_head.status());
+            assert_headers_eq(actual_head.headers(), expected_head.headers());
 
             let owner = owner_qpx_connect_error_response(status, &headers, Body::from(&body[..]))
                 .expect("owner import");

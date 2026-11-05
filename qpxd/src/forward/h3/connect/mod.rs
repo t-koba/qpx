@@ -48,8 +48,8 @@ pub(super) fn build_h3_connect_rule_context<'a>(
     })
 }
 
-/// Finalizes a local response for an HTTP/3 CONNECT request.
-#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+/// Standard-response behavior oracle retained for parity tests.
+#[cfg(test)]
 pub(super) fn finalize_h3_connect_response(
     proxy_name: &str,
     response: http::Response<qpx_http::body::Body>,
@@ -99,8 +99,17 @@ pub(super) fn finalize_h3_connect_head_response(
         .status(status)
         .body(Body::empty())?;
     *downstream.headers_mut() = crate::http3::codec::h1_headers_to_http(&parts.headers)?;
-    let downstream = finalize_h3_connect_response(proxy_name, downstream, header_control);
+    let mut downstream = qpx_core::http_message::Response::from_http(downstream);
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        &http::Method::CONNECT,
+        http::Version::HTTP_3,
+        proxy_name,
+        &mut downstream,
+        header_control,
+        false,
+    );
     let status = validate_http_status_class(downstream.status(), status_context)?;
+    let downstream = downstream.map_body(|_| ()).into_http_for_library();
     let mut out = http::Response::builder().status(status).body(())?;
     *out.headers_mut() = crate::http3::codec::http_headers_to_h1(downstream.headers())?;
     Ok(out)

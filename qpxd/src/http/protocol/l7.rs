@@ -1,7 +1,7 @@
 use crate::http::protocol::common::trim_http_ows;
 use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
 use crate::http::protocol::trailer_body;
-#[cfg(any(feature = "http3", test))]
+#[cfg(test)]
 use hyper::Response;
 use hyper::{Method, StatusCode};
 use qpx_core::http_message::{
@@ -206,7 +206,7 @@ thread_local! {
     };
 }
 
-#[cfg(any(feature = "http3", test))]
+#[cfg(test)]
 pub(crate) fn finalize_response_with_headers(
     request_method: &Method,
     request_version: http::Version,
