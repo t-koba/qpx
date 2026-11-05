@@ -6,9 +6,9 @@ use crate::http::body::size::set_observed_request_size;
 use crate::http3::response_options::H3ResponseSendOptions;
 use crate::runtime::{ResolvedStreamingLimits, Runtime};
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
+use hyper::StatusCode;
 use qpx_core::config::{ConnectIpConfig, ConnectUdpConfig};
-use qpx_core::http_message::{OrdinaryHeaderName, Request};
+use qpx_core::http_message::{OrdinaryHeaderName, Request, Response as OwnerResponse};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::request_capsule_protocol_enabled;
 use std::sync::Arc;
@@ -481,14 +481,11 @@ impl ForwardQpxHandler {
         status: StatusCode,
         body: String,
     ) -> Result<()> {
-        let response = crate::http::protocol::l7::finalize_response_for_request(
+        let response = finalized_qpx_static_response(
             &method,
-            http::Version::HTTP_3,
+            status,
+            body,
             self.runtime.state().plan.identity.proxy_name.as_ref(),
-            Response::builder()
-                .status(status)
-                .body(qpx_http::body::Body::from(body))?,
-            false,
         );
         send_qpx_response_stream(
             req_stream,
@@ -514,6 +511,23 @@ impl ForwardQpxHandler {
             .map(|edge| edge.default_plan.streaming)
             .unwrap_or_else(|| ResolvedStreamingLimits::from(limits))
     }
+}
+
+fn finalized_qpx_static_response(
+    method: &http::Method,
+    status: StatusCode,
+    body: String,
+    proxy_name: &str,
+) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(Body::from(body));
+    *response.status_mut() = status;
+    crate::http::protocol::l7::finalize_response_for_request(
+        method,
+        http::Version::HTTP_3,
+        proxy_name,
+        response,
+        false,
+    )
 }
 
 pub(crate) fn h3_body_read_timeout(runtime: &Runtime) -> Duration {
@@ -552,6 +566,30 @@ mod tests {
                 "uri_template: 'https://proxy.test/ip/{target}/{ipproto}/'",
             )
             .expect("CONNECT-IP config"),
+        }
+    }
+
+    #[tokio::test]
+    async fn finalized_qpx_static_response_preserves_absent_length_and_body() {
+        for body in ["local refusal", ""] {
+            let response = finalized_qpx_static_response(
+                &http::Method::CONNECT,
+                StatusCode::NOT_IMPLEMENTED,
+                body.to_owned(),
+                "qpx-test",
+            );
+            assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(response.headers().declared_content_length(), Ok(None));
+
+            let response = response
+                .into_http_for_codec()
+                .expect("valid static response framing");
+            assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+            assert_eq!(response.headers().get(http::header::CONTENT_LENGTH), None);
+            let bytes = qpx_http::body::to_bytes(response.into_body())
+                .await
+                .expect("body bytes");
+            assert_eq!(bytes.as_ref(), body.as_bytes());
         }
     }
 
