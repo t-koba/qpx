@@ -1,7 +1,9 @@
 use crate::http::protocol::common::trim_http_ows;
 use crate::http::protocol::header_control::{apply_request_headers, apply_response_headers};
 use crate::http::protocol::trailer_body;
-use hyper::{Method, Response, StatusCode};
+#[cfg(any(feature = "http3", test))]
+use hyper::Response;
+use hyper::{Method, StatusCode};
 use qpx_core::http_message::{
     OrdinaryHeaderMut, OrdinaryHeaderName, Request, Response as OwnerResponse,
 };
