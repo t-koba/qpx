@@ -1,5 +1,3 @@
-#[cfg(feature = "auth-basic")]
-use hyper::Response;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use thiserror::Error;
@@ -13,14 +11,14 @@ pub(crate) enum DispatchError {
     #[error("policy denied: {reason}")]
     PolicyDenied {
         reason: String,
-        response: Box<Response<Body>>,
+        response: Box<OwnerResponse<Body>>,
     },
 
     #[cfg(feature = "auth-basic")]
     #[error("authentication required: {method}")]
     AuthRequired {
         method: String,
-        response: Box<Response<Body>>,
+        response: Box<OwnerResponse<Body>>,
     },
 
     #[error("decision service denied")]
@@ -38,9 +36,9 @@ impl DispatchError {
         match self {
             Self::RateLimited { response } => Ok(*response),
             #[cfg(feature = "auth-basic")]
-            Self::PolicyDenied { response, .. } => Ok(OwnerResponse::from_http(*response)),
+            Self::PolicyDenied { response, .. } => Ok(*response),
             #[cfg(feature = "auth-basic")]
-            Self::AuthRequired { response, .. } => Ok(OwnerResponse::from_http(*response)),
+            Self::AuthRequired { response, .. } => Ok(*response),
             Self::DecisionServiceDenied { response } => Ok(*response),
             Self::UpstreamUnavailable(message) => Err(anyhow::anyhow!(message)),
             Self::Internal(err) => Err(err),

@@ -30,7 +30,6 @@ use crate::http::protocol::websocket::is_websocket_upgrade;
 use crate::policy_context::{DecisionServiceInput, DecisionServiceMode, enforce_decision_service};
 use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
-use hyper::Response;
 use hyper::client::conn::http1::SendRequest;
 use qpx_core::config::{ActionKind, LocalResponseConfig};
 use qpx_core::http_message::Request as OwnerRequest;
@@ -43,7 +42,7 @@ use tokio::sync::Mutex;
 mod tests;
 
 enum MitmEarlyResponse {
-    Response(Response<Body>),
+    Response(qpx_core::http_message::Response<Body>),
     Local(LocalResponseConfig),
 }
 
@@ -289,7 +288,9 @@ async fn execute_mitm_request(
                         req.method(),
                         req.version(),
                         proxy_name,
-                        blocked(state.messages.blocked.as_str()),
+                        qpx_core::http_message::Response::from_http(blocked(
+                            state.messages.blocked.as_str(),
+                        )),
                         false,
                     ))),
                 )
@@ -401,13 +402,6 @@ async fn execute_mitm_request(
         destination: &destination,
         decision_service: decision_service.as_ref(),
     });
-    let annotate_with_tags =
-        |response: &mut Response<Body>, outcome: DispatchOutcome, extra_policy_tags: &[String]| {
-            annotate_dispatch_response(response, &audit, outcome, extra_policy_tags);
-        };
-    let annotate = |response: &mut Response<Body>, outcome: DispatchOutcome| {
-        annotate_with_tags(response, outcome, &[]);
-    };
     let mut timeout_override = None;
     if let Some(decision_service) = decision_service {
         match apply_decision_service_http_access(DecisionServiceHttpAccessInput {
@@ -459,8 +453,13 @@ async fn execute_mitm_request(
     if let Some(early_response) = early_response {
         let response = match early_response {
             MitmEarlyResponse::Response(mut response) => {
-                annotate(&mut response, DispatchOutcome::EarlyResponse);
-                qpx_core::http_message::Response::from_http(response)
+                annotate_dispatch_response(
+                    &mut response,
+                    &audit,
+                    DispatchOutcome::EarlyResponse,
+                    &[],
+                );
+                response
             }
             MitmEarlyResponse::Local(local) => annotated_local_response(
                 req.method(),

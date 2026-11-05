@@ -24,7 +24,7 @@ use crate::http::protocol::l7::finalize_response_for_request;
 use crate::policy_context::{AuditRecord, attach_log_context, emit_audit_log};
 use hyper::Method;
 #[cfg(feature = "auth-basic")]
-use hyper::Response;
+use qpx_core::http_message::Response;
 #[cfg(feature = "auth-basic")]
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -169,3 +169,6 @@ pub(super) fn build_forward_rate_limit_audit_context(
         decision_service: None,
     })
 }
+
+#[cfg(all(test, feature = "auth-basic"))]
+mod tests;

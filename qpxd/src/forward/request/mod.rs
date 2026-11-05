@@ -7,7 +7,9 @@ use crate::runtime::Runtime;
 use anyhow::{Result, anyhow};
 use hyper::Method;
 #[cfg(feature = "auth-basic")]
-use hyper::{Response, StatusCode};
+use hyper::StatusCode;
+#[cfg(feature = "auth-basic")]
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName};
 use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -76,14 +78,17 @@ pub(crate) async fn handle_request_inner(
 pub(crate) fn proxy_auth_required(
     chal: crate::runtime::auth::AuthChallenge,
     message: &str,
-) -> Response<Body> {
-    let mut builder = Response::builder().status(StatusCode::PROXY_AUTHENTICATION_REQUIRED);
+) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(Body::from(message.to_owned()));
+    *response.status_mut() = StatusCode::PROXY_AUTHENTICATION_REQUIRED;
+    let name = OrdinaryHeaderName::try_from("proxy-authenticate").expect("ordinary");
     for header in chal.header_values {
-        builder = builder.header("Proxy-Authenticate", header);
+        let Ok(value) = http::HeaderValue::try_from(header) else {
+            return OwnerResponse::new(Body::empty());
+        };
+        response.headers_mut().ordinary_append(name.clone(), value);
     }
-    builder
-        .body(Body::from(message.to_owned()))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+    response
 }
 
 pub(crate) fn resolve_upstream(

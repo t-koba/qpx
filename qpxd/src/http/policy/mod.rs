@@ -5,7 +5,7 @@ pub mod rule_context;
 use crate::http::local_response::finalized_local_response;
 use crate::http::protocol::l7::finalize_response_for_request;
 use anyhow::{Result, anyhow};
-use hyper::{Method, Response, Version};
+use hyper::{Method, Version};
 use qpx_core::config::{ActionConfig, ActionKind};
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::{CompiledHeaderControl, RuleEngine, RuleMatchContext};
@@ -30,7 +30,7 @@ pub(crate) fn evaluate_listener_policy(
     method: &Method,
     version: Version,
     proxy_name: &str,
-    deny_builder: fn(&str) -> Response<Body>,
+    deny_builder: fn(&str) -> OwnerResponse<Body>,
     deny_message: &str,
 ) -> Result<ListenerPolicyDecision> {
     let outcome = engine.evaluate_ref(ctx);
@@ -43,7 +43,7 @@ pub(crate) fn evaluate_listener_policy(
                 method,
                 version,
                 proxy_name,
-                OwnerResponse::from_http(deny_builder(deny_message)),
+                deny_builder(deny_message),
                 false,
             )),
             matched_rule,

@@ -321,9 +321,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
                     deny.headers.as_deref(),
                 )?
             } else {
-                let mut response = qpx_core::http_message::Response::from_http(forbidden(
-                    state.messages.forbidden.as_str(),
-                ));
+                let mut response = forbidden(state.messages.forbidden.as_str());
                 crate::http::protocol::l7::finalize_response_with_headers_in_place(
                     &http::Method::CONNECT,
                     http::Version::HTTP_3,

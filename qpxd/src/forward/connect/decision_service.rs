@@ -66,7 +66,7 @@ pub(in crate::forward) fn apply_connect_decision_service(
                     deny.headers.as_deref(),
                 )?
             } else {
-                let mut response = Response::from_http(forbidden_response(forbidden_message));
+                let mut response = forbidden_response(forbidden_message);
                 finalize_response_with_headers_in_place(
                     &Method::CONNECT,
                     req_version,

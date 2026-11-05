@@ -95,7 +95,7 @@ pub(super) fn finalize_h3_connect_head_response(
 ))]
 pub(super) fn finalize_h3_connect_auth_response(
     proxy_name: &str,
-    response: http::Response<qpx_http::body::Body>,
+    response: qpx_core::http_message::Response<qpx_http::body::Body>,
 ) -> http::Response<qpx_http::body::Body> {
     crate::http::protocol::l7::finalize_response_for_request(
         &http::Method::CONNECT,
@@ -104,6 +104,7 @@ pub(super) fn finalize_h3_connect_auth_response(
         response,
         false,
     )
+    .into_http_for_library()
 }
 
 /// Backend-neutral metadata shared by the HTTP/3 CONNECT policy-response senders.

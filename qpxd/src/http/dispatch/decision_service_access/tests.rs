@@ -75,7 +75,10 @@ response_regex_replace:
                         Some(local) => {
                             crate::http::local_response::build_local_response(local).unwrap()
                         }
-                        None => crate::http::protocol::common::forbidden_response("payload"),
+                        None => http::Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Body::from("payload"))
+                            .unwrap(),
                     };
                     // Reference is the pre-migration standard-response finalization.
                     let mut expected = finalize_response_with_headers(

@@ -101,9 +101,7 @@ fn decision_service_deny_response(
             DispatchOutcome::DecisionServiceLocalResponse,
         );
     }
-    let mut response = OwnerResponse::from_http(crate::http::protocol::common::forbidden_response(
-        default_deny_body,
-    ));
+    let mut response = crate::http::protocol::common::forbidden_response(default_deny_body);
     finalize_response_with_headers_in_place(
         request_method,
         request_version,

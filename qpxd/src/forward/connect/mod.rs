@@ -204,20 +204,20 @@ pub(super) async fn handle_connect(
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Challenge(chal) => {
             let log_context = identity.to_log_context(None, None, None);
-            return Ok(OwnerResponse::from_http(pre_access_response!(
+            return Ok(pre_access_response!(
                 proxy_auth_required(chal, state.messages.proxy_auth_required.as_str()),
                 &log_context,
                 DispatchOutcome::Challenge
-            )));
+            ));
         }
         #[cfg(feature = "auth-basic")]
         ForwardPolicyDecision::Forbidden => {
             let log_context = identity.to_log_context(None, None, None);
-            return Ok(OwnerResponse::from_http(pre_access_response!(
+            return Ok(pre_access_response!(
                 forbidden(state.messages.forbidden.as_str()),
                 &log_context,
                 DispatchOutcome::Forbidden
-            )));
+            ));
         }
     };
     let selected_plan = state

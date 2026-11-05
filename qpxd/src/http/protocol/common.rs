@@ -37,8 +37,10 @@ pub(crate) fn blocked_response(message: &str) -> Response<Body> {
     text_response(StatusCode::FORBIDDEN, message.to_owned())
 }
 
-pub(crate) fn forbidden_response(message: &str) -> Response<Body> {
-    text_response(StatusCode::FORBIDDEN, message.to_owned())
+pub(crate) fn forbidden_response(message: &str) -> qpx_core::http_message::Response<Body> {
+    let mut response = qpx_core::http_message::Response::new(Body::from(message.to_owned()));
+    *response.status_mut() = StatusCode::FORBIDDEN;
+    response
 }
 
 pub(crate) fn bad_request_response(message: impl Into<String>) -> Response<Body> {
