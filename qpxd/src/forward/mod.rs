@@ -18,7 +18,7 @@ use crate::xdp::remote::resolve_remote_addr_with_xdp;
 use anyhow::Result;
 #[cfg(feature = "http3")]
 use anyhow::anyhow;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, StatusCode};
 use qpx_core::config::IngressEdgeConfig;
 use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::http_message::Response as OwnerResponse;
@@ -266,16 +266,15 @@ async fn handle_request(
         Err(err) => {
             http_metrics::forward_request(&state.observability.metric_names, "error");
             error!(error = ?err, "request handling failed");
-            Ok(OwnerResponse::from_http(finalize_response_for_request(
+            let mut response = OwnerResponse::new(Body::from(state.messages.proxy_error.clone()));
+            *response.status_mut() = StatusCode::BAD_GATEWAY;
+            Ok(finalize_response_for_request(
                 &request_method,
                 request_version,
                 state.plan.identity.proxy_name.as_ref(),
-                Response::builder()
-                    .status(StatusCode::BAD_GATEWAY)
-                    .body(Body::from(state.messages.proxy_error.clone()))
-                    .unwrap_or_else(|_| Response::new(Body::empty())),
+                response,
                 false,
-            )))
+            ))
         }
     }
 }
