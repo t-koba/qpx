@@ -145,12 +145,17 @@ impl ForwardQpxHandler {
             Ok(limits) => limits,
             Err(error) => {
                 let body = error.to_string();
+                let state = self.runtime.state();
                 return send_qpx_static_response(
                     &mut req_stream,
                     error.http_status(),
                     body.as_bytes(),
                     request.method(),
-                    self.runtime.state().plan.identity.proxy_name.as_ref(),
+                    state.plan.identity.proxy_name.as_ref(),
+                    crate::forward::h3::h3_response_send_timeout(
+                        state.plan.limits.timeouts.h3_read_timeout_ms,
+                        None,
+                    ),
                 )
                 .await;
             }
@@ -167,12 +172,17 @@ impl ForwardQpxHandler {
         if let Some(content_length) = declared_content_length
             && content_length > listener_streaming.max_request_body_bytes as u64
         {
+            let state = self.runtime.state();
             return send_qpx_static_response(
                 &mut req_stream,
                 StatusCode::PAYLOAD_TOO_LARGE,
                 b"request payload too large",
                 request.method(),
-                self.runtime.state().plan.identity.proxy_name.as_ref(),
+                state.plan.identity.proxy_name.as_ref(),
+                crate::forward::h3::h3_response_send_timeout(
+                    state.plan.limits.timeouts.h3_read_timeout_ms,
+                    Some(listener_streaming.body_send_timeout_ms),
+                ),
             )
             .await;
         }

@@ -139,7 +139,10 @@ pub(crate) async fn prepare_h3_connect_request(
                     req_head.method(),
                     req_stream,
                     max_h3_response_body_bytes,
-                    std::time::Duration::from_secs(1),
+                    crate::forward::h3::h3_response_send_timeout(
+                        state.plan.limits.timeouts.h3_read_timeout_ms,
+                        None,
+                    ),
                 )
                 .await?;
                 return Ok(None);

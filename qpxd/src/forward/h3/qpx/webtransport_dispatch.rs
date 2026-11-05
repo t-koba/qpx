@@ -54,6 +54,10 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 rejection.body,
                 &http::Method::CONNECT,
                 proxy_name.as_str(),
+                crate::forward::h3::h3_response_send_timeout(
+                    state.plan.limits.timeouts.h3_read_timeout_ms,
+                    None,
+                ),
             )
             .await?;
             return Ok(());
@@ -112,7 +116,10 @@ pub(super) async fn handle_qpx_webtransport_connect(
                     response?.into_http_for_library(),
                     req_head.method(),
                     max_h3_response_body_bytes,
-                    Duration::from_secs(1),
+                    crate::forward::h3::h3_response_send_timeout(
+                        state.plan.limits.timeouts.h3_read_timeout_ms,
+                        None,
+                    ),
                 )
                 .await?;
                 return Ok(());
@@ -217,6 +224,10 @@ pub(super) async fn handle_qpx_webtransport_connect(
                 state.messages.proxy_error.as_bytes(),
                 &http::Method::CONNECT,
                 proxy_name.as_str(),
+                crate::forward::h3::h3_response_send_timeout(
+                    state.plan.limits.timeouts.h3_read_timeout_ms,
+                    None,
+                ),
             )
             .await?;
             return Ok(());

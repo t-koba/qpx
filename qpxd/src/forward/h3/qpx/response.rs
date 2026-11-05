@@ -16,9 +16,8 @@ pub(super) async fn send_qpx_static_response(
     body: &[u8],
     request_method: &http::Method,
     proxy_name: &str,
+    send_timeout: Duration,
 ) -> Result<()> {
-    const STATIC_RESPONSE_SEND_TIMEOUT: Duration = Duration::from_secs(30);
-
     let response = qpx_static_response(status, body)?;
     let response = finalize_response_for_request(
         request_method,
@@ -32,7 +31,7 @@ pub(super) async fn send_qpx_static_response(
         response,
         request_method,
         body.len(),
-        STATIC_RESPONSE_SEND_TIMEOUT,
+        send_timeout,
     )
     .await
 }

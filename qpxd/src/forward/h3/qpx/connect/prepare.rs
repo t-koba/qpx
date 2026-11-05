@@ -107,19 +107,16 @@ pub(super) async fn prepare_qpx_connect_request(
                     .as_ref(),
                 &error,
             ) {
+                let state = input.handler.runtime.state();
                 send_qpx_response_stream(
                     input.req_stream,
                     response?.into_http_for_library(),
                     input.req_head.method(),
-                    input
-                        .handler
-                        .runtime
-                        .state()
-                        .plan
-                        .limits
-                        .body
-                        .max_h3_response_body_bytes,
-                    Duration::from_secs(1),
+                    state.plan.limits.body.max_h3_response_body_bytes,
+                    crate::forward::h3::h3_response_send_timeout(
+                        state.plan.limits.timeouts.h3_read_timeout_ms,
+                        None,
+                    ),
                 )
                 .await?;
                 return Ok(None);
@@ -147,6 +144,10 @@ async fn validate_connect_request(
     let connect_ip_cfg = input.connect_ip_cfg;
     let state = handler.runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
+    let response_send_timeout = crate::forward::h3::h3_response_send_timeout(
+        state.plan.limits.timeouts.h3_read_timeout_ms,
+        None,
+    );
     let is_connect_udp = protocol == Some(&qpx_h3::Protocol::ConnectUdp);
     let is_connect_ip = protocol == Some(&qpx_h3::Protocol::ConnectIp);
     let is_extended_connect = protocol.is_some();
@@ -157,6 +158,7 @@ async fn validate_connect_request(
             StatusCode::NOT_IMPLEMENTED,
             state.messages.connect_udp_disabled.as_bytes(),
             proxy_name,
+            response_send_timeout,
         )
         .await;
     }
@@ -166,6 +168,7 @@ async fn validate_connect_request(
             StatusCode::NOT_IMPLEMENTED,
             b"CONNECT-IP is disabled",
             proxy_name,
+            response_send_timeout,
         )
         .await;
     }
@@ -174,6 +177,7 @@ async fn validate_connect_request(
             req_stream,
             b"CONNECT-IP requires Capsule-Protocol: ?1",
             proxy_name,
+            response_send_timeout,
         )
         .await;
     }
@@ -186,7 +190,8 @@ async fn validate_connect_request(
             } else {
                 b"missing CONNECT authority".as_slice()
             };
-            return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
+            return reject_bad_qpx_connect(req_stream, message, proxy_name, response_send_timeout)
+                .await;
         }
     };
 
@@ -200,6 +205,7 @@ async fn validate_connect_request(
         is_connect_ip,
         is_extended_connect,
         proxy_name,
+        response_send_timeout,
     })
     .await?
     else {
@@ -221,7 +227,8 @@ async fn validate_connect_request(
             b"bad CONNECT request".as_slice()
         };
         warn!(error = ?err, "invalid forward HTTP/3 qpx-h3 CONNECT request");
-        return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
+        return reject_bad_qpx_connect(req_stream, message, proxy_name, response_send_timeout)
+            .await;
     }
     Ok(Some(ValidatedQpxConnect {
         req_authority,
@@ -237,6 +244,7 @@ async fn reject_qpx_connect<T>(
     status: StatusCode,
     message: &[u8],
     proxy_name: &str,
+    response_send_timeout: Duration,
 ) -> Result<Option<T>> {
     send_qpx_static_response(
         req_stream,
@@ -244,6 +252,7 @@ async fn reject_qpx_connect<T>(
         message,
         &http::Method::CONNECT,
         proxy_name,
+        response_send_timeout,
     )
     .await?;
     Ok(None)
@@ -253,8 +262,16 @@ async fn reject_bad_qpx_connect<T>(
     req_stream: &mut qpx_h3::RequestStream,
     message: &[u8],
     proxy_name: &str,
+    response_send_timeout: Duration,
 ) -> Result<Option<T>> {
-    reject_qpx_connect(req_stream, StatusCode::BAD_REQUEST, message, proxy_name).await
+    reject_qpx_connect(
+        req_stream,
+        StatusCode::BAD_REQUEST,
+        message,
+        proxy_name,
+        response_send_timeout,
+    )
+    .await
 }
 
 struct ResolveQpxConnectTargetInput<'a> {
@@ -267,6 +284,7 @@ struct ResolveQpxConnectTargetInput<'a> {
     is_connect_ip: bool,
     is_extended_connect: bool,
     proxy_name: &'a str,
+    response_send_timeout: Duration,
 }
 
 async fn resolve_qpx_connect_target(
@@ -282,6 +300,7 @@ async fn resolve_qpx_connect_target(
         is_connect_ip,
         is_extended_connect,
         proxy_name,
+        response_send_timeout,
     } = input;
     if is_connect_udp {
         return resolve_qpx_connect_udp_target(
@@ -290,6 +309,7 @@ async fn resolve_qpx_connect_target(
             connect_udp_cfg,
             req_authority,
             proxy_name,
+            response_send_timeout,
         )
         .await;
     }
@@ -300,6 +320,7 @@ async fn resolve_qpx_connect_target(
             connect_ip_cfg,
             req_authority,
             proxy_name,
+            response_send_timeout,
         )
         .await;
     }
@@ -309,8 +330,13 @@ async fn resolve_qpx_connect_target(
     let (host, port) = match parse_connect_authority_with_default(req_authority, default_port) {
         Ok(parsed) => parsed,
         Err(_) => {
-            return reject_bad_qpx_connect(req_stream, b"invalid CONNECT authority", proxy_name)
-                .await;
+            return reject_bad_qpx_connect(
+                req_stream,
+                b"invalid CONNECT authority",
+                proxy_name,
+                response_send_timeout,
+            )
+            .await;
         }
     };
     let auth_uri = if is_extended_connect {
@@ -339,17 +365,28 @@ async fn resolve_qpx_connect_ip_target(
     connect_ip_cfg: Option<&ConnectIpConfig>,
     req_authority: &str,
     proxy_name: &str,
+    response_send_timeout: Duration,
 ) -> Result<Option<ValidatedQpxConnectTarget>> {
     let Some(config) = connect_ip_cfg else {
-        return reject_bad_qpx_connect(req_stream, b"CONNECT-IP has no configuration", proxy_name)
-            .await;
+        return reject_bad_qpx_connect(
+            req_stream,
+            b"CONNECT-IP has no configuration",
+            proxy_name,
+            response_send_timeout,
+        )
+        .await;
     };
     let template = qpx_core::uri_template::UriTemplate::parse(&config.uri_template)?;
     let variables = match template.match_scalars(&req_head.uri().to_string()) {
         Ok(variables) => variables,
         Err(_) => {
-            return reject_bad_qpx_connect(req_stream, b"invalid CONNECT-IP target", proxy_name)
-                .await;
+            return reject_bad_qpx_connect(
+                req_stream,
+                b"invalid CONNECT-IP target",
+                proxy_name,
+                response_send_timeout,
+            )
+            .await;
         }
     };
     let target = variables
@@ -371,13 +408,19 @@ async fn resolve_qpx_connect_ip_target(
                     req_stream,
                     b"invalid CONNECT-IP authority",
                     proxy_name,
+                    response_send_timeout,
                 )
                 .await;
             }
         };
     if req_head.uri().scheme_str() != Some("https") {
-        return reject_bad_qpx_connect(req_stream, b"CONNECT-IP :scheme must be https", proxy_name)
-            .await;
+        return reject_bad_qpx_connect(
+            req_stream,
+            b"CONNECT-IP :scheme must be https",
+            proxy_name,
+            response_send_timeout,
+        )
+        .await;
     }
     Ok(Some(ValidatedQpxConnectTarget {
         host: target_ip.to_string(),
@@ -394,13 +437,19 @@ async fn resolve_qpx_connect_udp_target(
     connect_udp_cfg: Option<&ConnectUdpConfig>,
     req_authority: &str,
     proxy_name: &str,
+    response_send_timeout: Duration,
 ) -> Result<Option<ValidatedQpxConnectTarget>> {
     let uri_template = connect_udp_cfg.and_then(|cfg| cfg.uri_template.as_deref());
     let (host, port) = match parse_connect_udp_target(req_head.uri(), uri_template) {
         Ok(parsed) => parsed,
         Err(_) => {
-            return reject_bad_qpx_connect(req_stream, b"invalid CONNECT-UDP target", proxy_name)
-                .await;
+            return reject_bad_qpx_connect(
+                req_stream,
+                b"invalid CONNECT-UDP target",
+                proxy_name,
+                response_send_timeout,
+            )
+            .await;
         }
     };
     let scheme = match validate_connect_udp_scheme(req_head.uri(), uri_template) {
@@ -411,12 +460,18 @@ async fn resolve_qpx_connect_udp_target(
             } else {
                 b"missing CONNECT-UDP :scheme".as_slice()
             };
-            return reject_bad_qpx_connect(req_stream, message, proxy_name).await;
+            return reject_bad_qpx_connect(req_stream, message, proxy_name, response_send_timeout)
+                .await;
         }
     };
     if !scheme.eq_ignore_ascii_case("https") {
-        return reject_bad_qpx_connect(req_stream, b"invalid CONNECT-UDP :scheme", proxy_name)
-            .await;
+        return reject_bad_qpx_connect(
+            req_stream,
+            b"invalid CONNECT-UDP :scheme",
+            proxy_name,
+            response_send_timeout,
+        )
+        .await;
     }
     let (authority_host, authority_port) =
         match parse_connect_authority_with_default(req_authority, Some(443)) {
@@ -426,12 +481,19 @@ async fn resolve_qpx_connect_udp_target(
                     req_stream,
                     b"invalid CONNECT-UDP authority",
                     proxy_name,
+                    response_send_timeout,
                 )
                 .await;
             }
         };
     let Some(path) = req_head.uri().path_and_query().map(|pq| pq.as_str()) else {
-        return reject_bad_qpx_connect(req_stream, b"missing CONNECT-UDP :path", proxy_name).await;
+        return reject_bad_qpx_connect(
+            req_stream,
+            b"missing CONNECT-UDP :path",
+            proxy_name,
+            response_send_timeout,
+        )
+        .await;
     };
     Ok(Some(ValidatedQpxConnectTarget {
         host,

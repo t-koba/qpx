@@ -121,6 +121,10 @@ pub(super) async fn evaluate_connect_policy(
                 state.messages.proxy_error.as_bytes(),
                 &http::Method::CONNECT,
                 state.plan.identity.proxy_name.as_ref(),
+                crate::forward::h3::h3_response_send_timeout(
+                    state.plan.limits.timeouts.h3_read_timeout_ms,
+                    None,
+                ),
             )
             .await?;
             return Ok(None);

@@ -86,12 +86,17 @@ pub(super) async fn handle_qpx_connect_stream(
             .await
         }
         qpx_h3::Protocol::WebTransport => {
+            let state = handler.runtime.state();
             send_qpx_static_response(
                 &mut req_stream,
                 StatusCode::NOT_IMPLEMENTED,
                 b"WEBTRANSPORT is handled by the dedicated relay path",
                 &http::Method::CONNECT,
-                handler.runtime.state().plan.identity.proxy_name.as_ref(),
+                state.plan.identity.proxy_name.as_ref(),
+                crate::forward::h3::h3_response_send_timeout(
+                    state.plan.limits.timeouts.h3_read_timeout_ms,
+                    None,
+                ),
             )
             .await
         }

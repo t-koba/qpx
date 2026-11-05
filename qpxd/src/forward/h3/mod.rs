@@ -24,6 +24,20 @@ mod qpx;
 mod server_tls;
 mod streaming;
 
+/// Select the send deadline for a locally generated HTTP/3 response. Use the
+/// resolved request body-send budget when one exists; otherwise reuse the
+/// configured H3 read timeout, with a nonzero floor for the send timer.
+#[cfg(feature = "http3")]
+pub(crate) fn h3_response_send_timeout(
+    h3_read_timeout_ms: u64,
+    body_send_timeout_ms: Option<u64>,
+) -> std::time::Duration {
+    match body_send_timeout_ms {
+        Some(timeout_ms) => std::time::Duration::from_millis(timeout_ms),
+        None => std::time::Duration::from_millis(h3_read_timeout_ms.max(1)),
+    }
+}
+
 #[cfg(all(
     feature = "http3",
     feature = "http3-backend-h3",
@@ -64,6 +78,27 @@ pub(crate) fn prepare_http3_listener_socket(
         inherited_broker,
         std::sync::Arc::new(crate::http3::quinn_socket::NoopQuinnUdpIngressFilter),
     )
+}
+
+#[cfg(all(test, feature = "http3"))]
+mod h3_response_send_timeout_tests {
+    use std::time::Duration;
+
+    #[test]
+    fn uses_resolved_body_timeout_or_configured_h3_timeout() {
+        assert_eq!(
+            super::h3_response_send_timeout(4_321, Some(7_654)),
+            Duration::from_millis(7_654)
+        );
+        assert_eq!(
+            super::h3_response_send_timeout(4_321, None),
+            Duration::from_millis(4_321)
+        );
+        assert_eq!(
+            super::h3_response_send_timeout(0, None),
+            Duration::from_millis(1)
+        );
+    }
 }
 
 /// Builds an owner-backed HTTP/3 502 status/body; callers retain finalization.
