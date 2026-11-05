@@ -1,4 +1,4 @@
-use super::super::finalize_h3_connect_response;
+use super::super::finalize_h3_connect_owner_response;
 use super::super::parse::parse_extended_connect_upstream;
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
@@ -9,8 +9,10 @@ use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use hyper::Response;
-use qpx_core::rules::CompiledHeaderControl;
+use qpx_core::{
+    http_message::{OrdinaryHeaderName, Response as OwnerResponse},
+    rules::CompiledHeaderControl,
+};
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::net::lookup_host;
@@ -212,21 +214,43 @@ pub(super) fn upstream_extended_connect_error_response(
     proxy_name: &str,
     header_control: Option<&CompiledHeaderControl>,
     body_read_timeout: Duration,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let (parts, _) = response.into_parts();
     let status = qpx_http::protocol::semantics::validate_http_status_class(
         parts.status,
         "HTTP/3 extended CONNECT response",
     )?;
-    let mut downstream = Response::builder()
-        .status(status)
-        .body(body_from_upstream_h3_stream(upstream, body_read_timeout))?;
-    *downstream.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    Ok(finalize_h3_connect_response(
+    let headers = h1_headers_to_http(&parts.headers)?;
+    let downstream = owner_h3_connect_error_response(
+        status,
+        &headers,
+        body_from_upstream_h3_stream(upstream, body_read_timeout),
+    )?;
+    Ok(finalize_h3_connect_owner_response(
         proxy_name,
         downstream,
         header_control,
     ))
+}
+
+fn owner_h3_connect_error_response(
+    status: ::http::StatusCode,
+    headers: &::http::HeaderMap,
+    body: Body,
+) -> Result<OwnerResponse<Body>> {
+    let mut response = OwnerResponse::new(body);
+    *response.status_mut() = status;
+    for (name, value) in headers {
+        if name == ::http::header::CONTENT_LENGTH {
+            response
+                .headers_mut()
+                .append_content_length_value(value.clone());
+        } else {
+            let name = OrdinaryHeaderName::try_from(name.clone())?;
+            response.headers_mut().append(name, value.clone());
+        }
+    }
+    Ok(response)
 }
 
 define_upstream_error_response_body!(
@@ -301,4 +325,97 @@ pub(super) async fn relay_h3_extended_connect_stream(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{h1_headers_to_http, owner_h3_connect_error_response};
+    use crate::forward::h3::connect::{
+        finalize_h3_connect_owner_response, finalize_h3_connect_response,
+    };
+    use qpx_core::{config::HeaderControl, rules::CompiledHeaderControl};
+    use qpx_http::body::Body;
+
+    #[test]
+    fn owner_h3_connect_error_response_preserves_content_length_states() {
+        let cases: [Vec<&[u8]>; 4] = [vec![], vec![b"0"], vec![b"invalid"], vec![b"4", b"5"]];
+        for expected in cases {
+            let mut headers = ::http::HeaderMap::new();
+            for value in &expected {
+                headers.append(
+                    ::http::header::CONTENT_LENGTH,
+                    ::http::HeaderValue::from_bytes(value).expect("header value"),
+                );
+            }
+            let response = owner_h3_connect_error_response(
+                ::http::StatusCode::BAD_GATEWAY,
+                &headers,
+                Body::empty(),
+            )
+            .expect("import headers into owner")
+            .into_http_for_library();
+            let actual: Vec<_> = response
+                .headers()
+                .get_all(::http::header::CONTENT_LENGTH)
+                .iter()
+                .map(::http::HeaderValue::as_bytes)
+                .collect();
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    fn extended_connect_error_owner_preserves_finalized_h3_output() {
+        let mut decoded = ::http::HeaderMap::new();
+        decoded.append("x-repeat", ::http::HeaderValue::from_static("first"));
+        decoded.append("x-repeat", ::http::HeaderValue::from_static("second"));
+        decoded.append("cookie", ::http::HeaderValue::from_static("a=1"));
+        let mut cookie = ::http::HeaderValue::from_static("b=2");
+        cookie.set_sensitive(true);
+        decoded.append("cookie", cookie);
+        decoded.append("set-cookie", ::http::HeaderValue::from_static("first=1"));
+        decoded.append("set-cookie", ::http::HeaderValue::from_static("second=2"));
+        decoded.append(
+            ::http::header::CONTENT_LENGTH,
+            ::http::HeaderValue::from_static("0"),
+        );
+
+        let headers = h1_headers_to_http(&decoded).expect("convert H3 headers");
+        let control = CompiledHeaderControl::compile(&HeaderControl {
+            response_set: [("x-finalized".into(), "configured".into())].into(),
+            ..Default::default()
+        })
+        .expect("header control");
+        let status = ::http::StatusCode::BAD_GATEWAY;
+        let owner = owner_h3_connect_error_response(status, &headers, Body::empty())
+            .expect("import response headers into owner");
+        let actual = finalize_h3_connect_owner_response("qpx-test", owner, Some(&control))
+            .into_http_for_library();
+
+        let mut standard = ::http::Response::builder()
+            .status(status)
+            .body(Body::empty())
+            .expect("valid response");
+        *standard.headers_mut() = headers;
+        let expected = finalize_h3_connect_response("qpx-test", standard, Some(&control));
+
+        assert_eq!(actual.status(), expected.status());
+        assert_eq!(actual.version(), expected.version());
+        assert_eq!(actual.version(), ::http::Version::HTTP_11);
+        assert_eq!(actual.headers(), expected.headers());
+        let repeated: Vec<_> = actual.headers().get_all("x-repeat").iter().collect();
+        assert_eq!(repeated.len(), 2);
+        assert_eq!(repeated[0].as_bytes(), b"first");
+        assert_eq!(repeated[1].as_bytes(), b"second");
+        assert_eq!(
+            actual.headers().get("cookie").unwrap().as_bytes(),
+            b"a=1; b=2"
+        );
+        assert!(actual.headers().get("cookie").unwrap().is_sensitive());
+        let set_cookie: Vec<_> = actual.headers().get_all("set-cookie").iter().collect();
+        assert_eq!(set_cookie.len(), 2);
+        assert_eq!(set_cookie[0].as_bytes(), b"first=1");
+        assert_eq!(set_cookie[1].as_bytes(), b"second=2");
+        assert_eq!(actual.headers().get("x-finalized").unwrap(), "configured");
+    }
 }
