@@ -109,19 +109,14 @@ where
                 Ok(response) => Ok::<_, Infallible>(response),
                 Err(err) => {
                     warn!(error = ?err, "transparent MITM request failed");
-                    Ok(OwnerResponse::from_http(
-                        crate::http::protocol::l7::finalize_response_for_request(
-                            &request_method,
-                            request_version,
-                            proxy_name.as_str(),
-                            hyper::Response::builder()
-                                .status(hyper::StatusCode::BAD_GATEWAY)
-                                .body(Body::from(proxy_error))
-                                .unwrap_or_else(|_| {
-                                    hyper::Response::new(Body::from("proxy error"))
-                                }),
-                            false,
-                        ),
+                    let mut response = OwnerResponse::new(Body::from(proxy_error));
+                    *response.status_mut() = hyper::StatusCode::BAD_GATEWAY;
+                    Ok(crate::http::protocol::l7::finalize_response_for_request(
+                        &request_method,
+                        request_version,
+                        proxy_name.as_str(),
+                        response,
+                        false,
                     ))
                 }
             }
