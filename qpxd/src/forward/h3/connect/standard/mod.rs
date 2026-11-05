@@ -1,5 +1,5 @@
 use crate::http::protocol::common::connect_established_response as connect_established;
-use crate::http::protocol::l7::finalize_response_with_headers;
+use crate::http::protocol::l7::finalize_response_with_headers_in_place;
 use crate::http3::codec::http_headers_to_h1;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response};
 use crate::rate_limit::RateLimitContext;
@@ -55,15 +55,15 @@ pub(super) fn build_h3_connect_success_response(
     let mut response = connect_established();
     if capsule_protocol {
         response.headers_mut().insert(
-            http::header::HeaderName::from_static("capsule-protocol"),
+            qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol")?,
             http::HeaderValue::from_static("?1"),
         );
     }
-    let response = finalize_response_with_headers(
+    finalize_response_with_headers_in_place(
         request_method,
         http::Version::HTTP_3,
         proxy_name,
-        response,
+        &mut response,
         header_control,
         false,
     );
@@ -71,6 +71,7 @@ pub(super) fn build_h3_connect_success_response(
         response.status(),
         "HTTP/3 CONNECT response",
     )?;
+    let response = response.into_http_for_codec()?;
     let mut out = ::http::Response::builder().status(status).body(())?;
     *out.headers_mut() = http_headers_to_h1(response.headers())?;
     Ok(out)

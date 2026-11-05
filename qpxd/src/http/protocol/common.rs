@@ -50,11 +50,9 @@ pub(crate) fn bad_request_response(message: impl Into<String>) -> OwnerResponse<
     response
 }
 
-pub(crate) fn connect_established_response() -> Response<Body> {
-    let mut response = Response::builder()
-        .status(StatusCode::OK)
-        .body(Body::empty())
-        .unwrap_or_else(|_| Response::new(Body::empty()));
+pub(crate) fn connect_established_response() -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(Body::empty());
+    *response.status_mut() = StatusCode::OK;
     qpx_http::protocol::semantics::strip_message_body_headers(response.headers_mut());
     response
 }
@@ -157,6 +155,84 @@ pub(crate) fn resolve_named_upstream(
 #[cfg(test)]
 mod tests {
     use crate::http::protocol::common::*;
+
+    #[tokio::test]
+    async fn connect_established_owner_preserves_finalized_output() {
+        use crate::http::protocol::l7::{
+            finalize_response_with_headers, finalize_response_with_headers_in_place,
+        };
+        use qpx_core::http_message::OrdinaryHeaderName;
+
+        let control = qpx_core::rules::CompiledHeaderControl::compile(
+            &serde_yaml::from_str(
+                "response_set: {date: 'Tue, 01 Jan 2030 00:00:00 GMT', content-length: '7', transfer-encoding: chunked, trailer: x-end, connection: x-hop, x-hop: removed, capsule-protocol: '?0'}",
+            )
+            .expect("header config"),
+        )
+        .expect("header control");
+        for version in [
+            http::Version::HTTP_10,
+            http::Version::HTTP_11,
+            http::Version::HTTP_2,
+            http::Version::HTTP_3,
+        ] {
+            for capsule in [false, true] {
+                for header_control in [None, Some(&control)] {
+                    let mut owner: OwnerResponse<Body> = connect_established_response();
+                    assert_eq!(owner.status(), StatusCode::OK);
+                    assert_eq!(owner.version(), http::Version::HTTP_11);
+                    assert_eq!(owner.headers().declared_content_length(), Ok(None));
+                    // Former construction path, retained only as the parity oracle.
+                    let mut expected = Response::new(Body::empty());
+                    qpx_http::protocol::semantics::strip_message_body_headers(
+                        expected.headers_mut(),
+                    );
+                    if capsule {
+                        owner.headers_mut().insert(
+                            OrdinaryHeaderName::try_from("capsule-protocol").unwrap(),
+                            http::HeaderValue::from_static("?1"),
+                        );
+                        expected
+                            .headers_mut()
+                            .insert("capsule-protocol", http::HeaderValue::from_static("?1"));
+                    }
+                    let expected = finalize_response_with_headers(
+                        &http::Method::CONNECT,
+                        version,
+                        "edge",
+                        expected,
+                        header_control,
+                        false,
+                    );
+                    finalize_response_with_headers_in_place(
+                        &http::Method::CONNECT,
+                        version,
+                        "edge",
+                        &mut owner,
+                        header_control,
+                        false,
+                    );
+                    let mut actual = owner.into_http_for_codec().expect("valid CONNECT framing");
+                    let mut expected = expected;
+                    assert_eq!(actual.status(), expected.status());
+                    assert_eq!(actual.version(), expected.version());
+                    // With no configured Date, finalization may cross a second boundary.
+                    assert!(actual.headers_mut().remove("date").is_some());
+                    assert!(expected.headers_mut().remove("date").is_some());
+                    assert_eq!(actual.headers(), expected.headers());
+                    for name in ["content-length", "transfer-encoding", "trailer", "x-hop"] {
+                        assert!(!actual.headers().contains_key(name));
+                    }
+                    assert!(
+                        qpx_http::body::to_bytes(actual.into_body())
+                            .await
+                            .unwrap()
+                            .is_empty()
+                    );
+                }
+            }
+        }
+    }
 
     #[tokio::test]
     async fn blocked_owner_preserves_text_response_and_finalization_output() {

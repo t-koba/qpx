@@ -449,7 +449,7 @@ impl ForwardQpxHandler {
 
         let mut response = crate::http::protocol::common::connect_established_response();
         response.headers_mut().insert(
-            http::header::HeaderName::from_static("capsule-protocol"),
+            OrdinaryHeaderName::try_from("capsule-protocol")?,
             http::HeaderValue::from_static("?1"),
         );
         let response = crate::http::protocol::l7::finalize_response_for_request(

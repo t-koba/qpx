@@ -349,10 +349,7 @@ pub(super) async fn handle_connect(
     }
     macro_rules! established_connect_response {
         () => {
-            connect_response!(
-                OwnerResponse::from_http(connect_established()),
-                DispatchOutcome::Allow
-            )
+            connect_response!(connect_established(), DispatchOutcome::Allow)
         };
     }
 

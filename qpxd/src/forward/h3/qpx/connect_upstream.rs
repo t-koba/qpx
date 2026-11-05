@@ -5,9 +5,10 @@ use self::pool::{QpxH3UpstreamSessionKey, open_pooled_qpx_h3_extended_connect_st
 use super::super::connect::parse::{
     H3ConnectProtocol, parse_extended_connect_upstream, validate_h3_connect_pseudo_headers,
 };
-use crate::forward::h3::connect::finalize_h3_connect_response;
 use crate::http::protocol::common::connect_established_response as connect_established;
-use crate::http::protocol::l7::prepare_request_with_headers_in_place;
+use crate::http::protocol::l7::{
+    finalize_response_with_headers_in_place, prepare_request_with_headers_in_place,
+};
 use crate::http3::codec::http_headers_to_h1;
 use anyhow::{Result, anyhow};
 use qpx_core::rules::CompiledHeaderControl;
@@ -57,15 +58,23 @@ pub(super) fn build_qpx_connect_success_head(
     let mut response = connect_established();
     if capsule_protocol {
         response.headers_mut().insert(
-            http::header::HeaderName::from_static("capsule-protocol"),
+            qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol")?,
             http::HeaderValue::from_static("?1"),
         );
     }
-    let response = finalize_h3_connect_response(proxy_name, response, header_control);
+    finalize_response_with_headers_in_place(
+        &http::Method::CONNECT,
+        http::Version::HTTP_3,
+        proxy_name,
+        &mut response,
+        header_control,
+        false,
+    );
     let status = qpx_http::protocol::semantics::validate_http_status_class(
         response.status(),
         "QPX HTTP/3 extended CONNECT response",
     )?;
+    let response = response.into_http_for_codec()?;
     let mut out = http::Response::builder().status(status).body(())?;
     *out.headers_mut() = http_headers_to_h1(response.headers())?;
     Ok(out)
