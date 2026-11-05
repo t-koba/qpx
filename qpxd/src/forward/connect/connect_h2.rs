@@ -10,7 +10,7 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 use crate::forward::request::proxy_auth_required;
 use crate::forward::request::resolve_upstream_url;
 use crate::http::codec::h2::{
-    h1_headers_to_http, h2_response_to_hyper, join_duplicate_cookie_values,
+    h1_headers_to_http, h2_response_to_owner, join_duplicate_cookie_values,
 };
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
@@ -406,7 +406,7 @@ pub(super) async fn handle_h2_extended_connect(
     }
     let (_, downstream_body) = req.into_head_and_body();
     if !response.status().is_success() {
-        let mut response = OwnerResponse::from_http(h2_response_to_hyper(response)?);
+        let mut response = h2_response_to_owner(response)?;
         finalize_response_with_headers_in_place(
             &Method::CONNECT,
             req_version,

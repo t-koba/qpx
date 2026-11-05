@@ -325,8 +325,15 @@ async fn send_h2_response_strips_body_framing_for_no_body_status() {
             .contains_key(::http::header::TRANSFER_ENCODING)
     );
     assert!(!response.headers().contains_key(::http::header::TRAILER));
-    let body = h2_response_to_hyper(response).expect("convert");
-    assert!(to_bytes(body.into_body()).await.expect("body").is_empty());
+    let owner = h2_response_to_owner(response).expect("convert");
+    assert_eq!(owner.status(), StatusCode::RESET_CONTENT);
+    assert_eq!(owner.version(), http::Version::HTTP_2);
+    assert!(
+        to_bytes(owner.into_http_for_library().into_body())
+            .await
+            .expect("body")
+            .is_empty()
+    );
 }
 
 /// Serves one HTTP/2 response with the given headers and returns the
@@ -928,6 +935,70 @@ async fn h2_request_to_hyper_rejects_content_length_mismatch() {
         .expect("data");
 
     server.await.expect("server");
+}
+
+#[test]
+fn h2_response_owner_import_preserves_other_headers_and_message_metadata() {
+    use http::header::{CONTENT_LENGTH, COOKIE, SET_COOKIE};
+    use http::{HeaderValue, Response, StatusCode, Version};
+
+    let mut response = Response::builder()
+        .status(StatusCode::NON_AUTHORITATIVE_INFORMATION)
+        .version(Version::HTTP_11)
+        .body("body")
+        .expect("response");
+    response.extensions_mut().insert(42u32);
+    response
+        .headers_mut()
+        .append(CONTENT_LENGTH, HeaderValue::from_static("0"));
+    response
+        .headers_mut()
+        .append(CONTENT_LENGTH, HeaderValue::from_static("invalid"));
+    response
+        .headers_mut()
+        .append(COOKIE, HeaderValue::from_static("a=1"));
+    let mut second_cookie = HeaderValue::from_static("b=2");
+    second_cookie.set_sensitive(true);
+    response.headers_mut().append(COOKIE, second_cookie);
+    response
+        .headers_mut()
+        .append(SET_COOKIE, HeaderValue::from_static("first=1"));
+    response
+        .headers_mut()
+        .append(SET_COOKIE, HeaderValue::from_static("second=2"));
+    let expected_headers = h1_headers_to_http(response.headers()).expect("expected headers");
+
+    let owner = own_h2_response(response).expect("own response");
+    assert_eq!(owner.status(), StatusCode::NON_AUTHORITATIVE_INFORMATION);
+    assert_eq!(owner.version(), Version::HTTP_2);
+    assert_eq!(owner.extensions().get::<u32>(), Some(&42));
+    assert_eq!(owner.body(), &"body");
+    let exported = owner.into_http_for_library();
+    assert_eq!(exported.headers(), &expected_headers);
+    let content_lengths = exported
+        .headers()
+        .get_all(CONTENT_LENGTH)
+        .iter()
+        .map(|value| value.as_bytes())
+        .collect::<Vec<_>>();
+    assert_eq!(content_lengths, [b"0".as_slice(), b"invalid".as_slice()]);
+    let cookies = exported
+        .headers()
+        .get_all(COOKIE)
+        .iter()
+        .collect::<Vec<_>>();
+    assert_eq!(cookies.len(), 1);
+    assert_eq!(cookies[0].as_bytes(), b"a=1; b=2");
+    assert!(cookies[0].is_sensitive());
+    assert_eq!(
+        exported
+            .headers()
+            .get_all(SET_COOKIE)
+            .iter()
+            .map(|value| value.as_bytes())
+            .collect::<Vec<_>>(),
+        [b"first=1".as_slice(), b"second=2".as_slice()]
+    );
 }
 
 #[test]

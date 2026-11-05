@@ -666,13 +666,6 @@ pub(crate) fn join_duplicate_cookie_values<'a>(
     Ok(Some(merged))
 }
 
-fn h1_headers_into_http(src: ::http::HeaderMap) -> Result<http::HeaderMap> {
-    if src.get_all(COOKIE).iter().count() <= 1 {
-        return Ok(src);
-    }
-    h1_headers_to_http(&src)
-}
-
 pub(crate) use qpx_core::http_content_length::declared_content_length as parse_declared_content_length;
 
 #[derive(Debug, thiserror::Error)]
@@ -713,30 +706,49 @@ pub(crate) fn h2_response_body_with_inflight(
     Body::wrap(H2RecvBody::response(body, inflight))
 }
 
+fn own_h2_response<B>(response: ::http::Response<B>) -> Result<OwnerResponse<B>> {
+    let mut response = OwnerResponse::from_http(response);
+    *response.status_mut() = qpx_http::protocol::semantics::validate_http_status_class(
+        response.status(),
+        "HTTP/2 response",
+    )?;
+    *response.version_mut() = http::Version::HTTP_2;
+
+    // H2 permits Cookie fields to be split; join only duplicates and preserve
+    // the field's combined sensitivity and the bytes of every other field.
+    let cookie = OrdinaryHeaderName::try_from(COOKIE)?;
+    if response.headers().get_all(&cookie).count() > 1 {
+        let merged_cookie = join_duplicate_cookie_values(response.headers().get_all(&cookie))?;
+        response.headers_mut().remove(&cookie);
+        if let Some(value) = merged_cookie {
+            response.headers_mut().insert(cookie, value);
+        }
+    }
+    Ok(response)
+}
+
+/// Import a decoded HTTP/2 response directly into the in-domain owner.
+pub(crate) fn h2_response_to_owner(
+    response: ::http::Response<RecvStream>,
+) -> Result<OwnerResponse<Body>> {
+    Ok(own_h2_response(response)?.map_body(h2_response_body))
+}
+
+/// Export the decoded response to a standard HTTP carrier for codec tests.
+#[cfg(test)]
 pub(crate) fn h2_response_to_hyper(
     response: ::http::Response<RecvStream>,
 ) -> Result<Response<Body>> {
-    let (mut parts, body) = response.into_parts();
-    parts.status =
-        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
-    parts.headers = h1_headers_into_http(parts.headers)?;
-    parts.version = http::Version::HTTP_2;
-    Ok(Response::from_parts(parts, h2_response_body(body)))
+    Ok(h2_response_to_owner(response)?.into_http_for_library())
 }
 
 pub(crate) fn h2_response_to_hyper_with_inflight(
     response: ::http::Response<RecvStream>,
     inflight: InflightCounterGuard,
 ) -> Result<Response<Body>> {
-    let (mut parts, body) = response.into_parts();
-    parts.status =
-        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/2 response")?;
-    parts.headers = h1_headers_into_http(parts.headers)?;
-    parts.version = http::Version::HTTP_2;
-    Ok(Response::from_parts(
-        parts,
-        h2_response_body_with_inflight(body, inflight),
-    ))
+    Ok(own_h2_response(response)?
+        .map_body(|body| h2_response_body_with_inflight(body, inflight))
+        .into_http_for_library())
 }
 
 enum H2RecvBodyKind {
