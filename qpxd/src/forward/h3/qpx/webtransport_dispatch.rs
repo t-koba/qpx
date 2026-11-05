@@ -113,7 +113,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
             ) {
                 send_qpx_response_stream(
                     &mut req_stream,
-                    response?.into_http_for_library(),
+                    response?,
                     req_head.method(),
                     max_h3_response_body_bytes,
                     crate::forward::h3::h3_response_send_timeout(

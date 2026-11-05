@@ -110,7 +110,7 @@ pub(super) async fn prepare_qpx_connect_request(
                 let state = input.handler.runtime.state();
                 send_qpx_response_stream(
                     input.req_stream,
-                    response?.into_http_for_library(),
+                    response?,
                     input.req_head.method(),
                     state.plan.limits.body.max_h3_response_body_bytes,
                     crate::forward::h3::h3_response_send_timeout(

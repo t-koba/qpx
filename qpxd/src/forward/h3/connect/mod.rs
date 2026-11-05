@@ -123,7 +123,7 @@ pub(super) fn finalize_h3_connect_head_response(
 pub(super) fn finalize_h3_connect_auth_response(
     proxy_name: &str,
     response: qpx_core::http_message::Response<qpx_http::body::Body>,
-) -> http::Response<qpx_http::body::Body> {
+) -> qpx_core::http_message::Response<qpx_http::body::Body> {
     crate::http::protocol::l7::finalize_response_for_request(
         &http::Method::CONNECT,
         http::Version::HTTP_3,
@@ -131,7 +131,6 @@ pub(super) fn finalize_h3_connect_auth_response(
         response,
         false,
     )
-    .into_http_for_library()
 }
 
 /// Backend-neutral metadata shared by the HTTP/3 CONNECT policy-response senders.
@@ -326,5 +325,75 @@ requests: { quota: { interval_secs: 60, amount: 1 } }",
                 "too many requests",
             );
         }
+    }
+}
+
+#[cfg(all(
+    test,
+    feature = "auth-basic",
+    any(feature = "http3-backend-h3", feature = "http3-backend-qpx")
+))]
+mod auth_response_tests {
+    use super::finalize_h3_connect_auth_response;
+    use crate::http::protocol::l7::finalize_response_with_headers;
+    use http::header::{CONTENT_LENGTH, PROXY_AUTHENTICATE};
+    use http::{HeaderValue, Response, StatusCode};
+    use qpx_core::http_message::Response as OwnerResponse;
+    use qpx_http::body::{Body, to_bytes};
+
+    fn authentication_response() -> Response<Body> {
+        let mut response = Response::builder()
+            .status(StatusCode::PROXY_AUTHENTICATION_REQUIRED)
+            .version(http::Version::HTTP_3)
+            .body(Body::from("denied"))
+            .expect("authentication response");
+        response.headers_mut().append(
+            PROXY_AUTHENTICATE,
+            HeaderValue::from_static("Basic realm=first"),
+        );
+        response.headers_mut().append(
+            PROXY_AUTHENTICATE,
+            HeaderValue::from_static("Bearer realm=second"),
+        );
+        response
+            .headers_mut()
+            .insert(CONTENT_LENGTH, HeaderValue::from_static("6"));
+        response
+    }
+
+    #[tokio::test]
+    async fn owner_finalized_auth_response_matches_standard_output() {
+        let actual = finalize_h3_connect_auth_response(
+            "qpx-test",
+            OwnerResponse::from_http(authentication_response()),
+        )
+        .into_http_for_library();
+        let expected = finalize_response_with_headers(
+            &http::Method::CONNECT,
+            http::Version::HTTP_3,
+            "qpx-test",
+            authentication_response(),
+            None,
+            false,
+        );
+
+        assert_eq!(actual.status(), expected.status());
+        assert_eq!(actual.version(), expected.version());
+        assert_eq!(actual.headers(), expected.headers());
+        let actual_challenges: Vec<_> = actual
+            .headers()
+            .get_all(PROXY_AUTHENTICATE)
+            .iter()
+            .collect();
+        let expected_challenges: Vec<_> = expected
+            .headers()
+            .get_all(PROXY_AUTHENTICATE)
+            .iter()
+            .collect();
+        assert_eq!(actual_challenges, expected_challenges);
+        assert_eq!(
+            to_bytes(actual.into_body()).await.expect("actual body"),
+            to_bytes(expected.into_body()).await.expect("expected body"),
+        );
     }
 }
