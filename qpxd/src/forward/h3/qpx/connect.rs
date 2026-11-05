@@ -11,11 +11,9 @@ use super::response::{
     send_qpx_policy_response, send_qpx_response_stream, send_qpx_static_response,
     upstream_qpx_extended_connect_error_response,
 };
+use crate::forward::h3::connect::finalize_h3_connect_owner_response;
 use crate::forward::h3::connect::{
     H3ConnectAuditContext, emit_h3_connect_audit, finalize_h3_connect_head_response,
-};
-use crate::forward::h3::connect::{
-    finalize_h3_connect_owner_response, finalize_h3_connect_response,
 };
 use crate::forward::request::resolve_upstream;
 use crate::http::dispatch::DispatchOutcome;
@@ -23,8 +21,9 @@ use crate::http::protocol::common::blocked_response as blocked;
 use crate::rate_limit::TransportScope;
 use crate::upstream::connect::connect_tunnel_target;
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
+use hyper::StatusCode;
 use qpx_core::config::ActionKind;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use tokio::time::{Duration, timeout};
@@ -435,11 +434,12 @@ async fn handle_qpx_extended_connect_stream(
 
     if connect_ip_policies.is_some() && action.kind != ActionKind::Proxy {
         let Some(device_name) = handler.connect_ip.device.as_deref() else {
-            let response = finalize_h3_connect_response(
+            let mut response =
+                OwnerResponse::new(Body::from("CONNECT-IP local termination requires a device"));
+            *response.status_mut() = StatusCode::NOT_IMPLEMENTED;
+            let response = finalize_h3_connect_owner_response(
                 proxy_name.as_str(),
-                Response::builder()
-                    .status(StatusCode::NOT_IMPLEMENTED)
-                    .body(Body::from("CONNECT-IP local termination requires a device"))?,
+                response,
                 response_headers.as_deref(),
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
@@ -689,6 +689,50 @@ async fn finish_qpx_extended_connect_stream(
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn connect_ip_missing_device_owner_reply_matches_standard_finalization() {
+        use crate::forward::h3::connect::{
+            finalize_h3_connect_owner_response, finalize_h3_connect_response,
+        };
+        use qpx_core::{
+            config::HeaderControl, http_message::Response as OwnerResponse,
+            rules::CompiledHeaderControl,
+        };
+        use qpx_http::body::Body;
+
+        let control = CompiledHeaderControl::compile(&HeaderControl {
+            response_set: [("x-configured".into(), "configured".into())].into(),
+            ..Default::default()
+        })
+        .expect("header control");
+        let body = "CONNECT-IP local termination requires a device";
+
+        let mut owner = OwnerResponse::new(Body::from(body));
+        *owner.status_mut() = hyper::StatusCode::NOT_IMPLEMENTED;
+        let actual = finalize_h3_connect_owner_response("qpx-test", owner, Some(&control))
+            .into_http_for_library();
+
+        let standard = http::Response::builder()
+            .status(hyper::StatusCode::NOT_IMPLEMENTED)
+            .body(Body::from(body))
+            .expect("valid standard response");
+        let expected = finalize_h3_connect_response("qpx-test", standard, Some(&control));
+
+        assert_eq!(actual.status(), hyper::StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(actual.status(), expected.status());
+        assert_eq!(actual.version(), expected.version());
+        assert_eq!(actual.headers(), expected.headers());
+        assert_eq!(actual.headers().get("x-configured").unwrap(), "configured");
+        let actual_body = qpx_http::body::to_bytes(actual.into_body())
+            .await
+            .expect("owner response body");
+        let expected_body = qpx_http::body::to_bytes(expected.into_body())
+            .await
+            .expect("standard response body");
+        assert_eq!(actual_body, expected_body);
+        assert_eq!(actual_body.as_ref(), body.as_bytes());
+    }
+
     #[tokio::test]
     async fn cleanup_skips_session_driver_and_aborts_owned_tasks() {
         super::super::abort_owned_h3_driver_tasks(None, None).await;
