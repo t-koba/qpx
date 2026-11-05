@@ -138,6 +138,11 @@ async fn unsupported_method_does_not_wait_for_request_body() {
     .expect("response");
 
     assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert_eq!(response.version(), http::Version::HTTP_11);
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("unsupported-method response body");
+    assert_eq!(body.as_ref(), b"unsupported");
 }
 
 #[test]
@@ -384,7 +389,7 @@ async fn ftp_diagnostics_do_not_include_echoed_credentials() {
     assert!(!diagnostic.contains("synthetic-user"));
     assert!(!diagnostic.contains("synthetic-pass"));
     let response = super::ftp_error(err);
-    let body = qpx_http::body::to_bytes(response.into_body())
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .unwrap();
     assert_eq!(body.as_ref(), b"ftp upstream failure");

@@ -80,16 +80,14 @@ pub(super) async fn handle_forward_ftp(
     headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     audit: &DispatchAuditContext,
 ) -> Result<OwnerResponse<Body>> {
-    let mut response = OwnerResponse::from_http(
-        ftp::handle_ftp(
-            req,
-            credentials,
-            listener_cfg.ftp.clone(),
-            Arc::<str>::from(state.messages.unsupported_ftp_method.as_str()),
-            state.ftp_semaphore.clone(),
-        )
-        .await?,
-    );
+    let mut response = ftp::handle_ftp(
+        req,
+        credentials,
+        listener_cfg.ftp.clone(),
+        Arc::<str>::from(state.messages.unsupported_ftp_method.as_str()),
+        state.ftp_semaphore.clone(),
+    )
+    .await?;
     finalize_response_with_headers_in_place(
         request_method,
         response.version(),

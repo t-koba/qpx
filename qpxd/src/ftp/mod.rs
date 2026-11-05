@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, anyhow};
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::config::FtpConfig;
-use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -134,7 +134,7 @@ pub(crate) async fn handle_ftp(
     limits: FtpConfig,
     unsupported_method_message: Arc<str>,
     semaphore: Arc<Semaphore>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let method = req.method().clone();
     let uri = req.uri().to_string();
     let timeout_dur = StdDuration::from_millis(limits.timeout_ms.max(1));
@@ -153,9 +153,10 @@ pub(crate) async fn handle_ftp(
     let is_dir_listing = url.path().ends_with('/');
     let is_list = method.as_str().eq_ignore_ascii_case("LIST");
     if method != Method::GET && method != Method::PUT && !is_list {
-        return Ok(Response::builder()
-            .status(StatusCode::METHOD_NOT_ALLOWED)
-            .body(Body::from(unsupported_method_message.to_string()))?);
+        return Ok(ftp_response(
+            StatusCode::METHOD_NOT_ALLOWED,
+            Body::from(unsupported_method_message.to_string()),
+        ));
     }
     if let Err(err) = ensure_safe_ftp_path(if path.is_empty() {
         None
@@ -214,7 +215,7 @@ struct AsyncFtpJob {
     permit: OwnedSemaphorePermit,
 }
 
-async fn handle_async(job: AsyncFtpJob) -> Result<Response<Body>> {
+async fn handle_async(job: AsyncFtpJob) -> Result<OwnerResponse<Body>> {
     let AsyncFtpJob {
         method,
         addr,
@@ -246,7 +247,7 @@ async fn handle_async(job: AsyncFtpJob) -> Result<Response<Body>> {
             max_download_bytes,
             permit,
         )?;
-        return Ok(Response::builder().status(StatusCode::OK).body(body)?);
+        return Ok(ftp_response(StatusCode::OK, body));
     }
 
     match method {
@@ -265,7 +266,7 @@ async fn handle_async(job: AsyncFtpJob) -> Result<Response<Body>> {
                 max_download_bytes,
                 permit,
             )?;
-            Ok(Response::builder().status(StatusCode::OK).body(body)?)
+            Ok(ftp_response(StatusCode::OK, body))
         }
         Method::PUT => {
             let _permit = permit;
@@ -279,15 +280,13 @@ async fn handle_async(job: AsyncFtpJob) -> Result<Response<Body>> {
                 deadline,
             )
             .await?;
-            Ok(Response::builder()
-                .status(StatusCode::CREATED)
-                .body(Body::empty())?)
+            Ok(ftp_response(StatusCode::CREATED, Body::empty()))
         }
         _ => unreachable!("unsupported FTP methods are returned before connection setup"),
     }
 }
 
-fn ftp_error(err: anyhow::Error) -> Response<Body> {
+fn ftp_error(err: anyhow::Error) -> OwnerResponse<Body> {
     warn!(error = ?err, "ftp upstream handling failed");
     let status = if err.downcast_ref::<RequestBodyTooLarge>().is_some() {
         StatusCode::PAYLOAD_TOO_LARGE
@@ -309,8 +308,11 @@ fn ftp_error(err: anyhow::Error) -> Response<Body> {
     } else {
         "ftp upstream failure".to_string()
     };
-    Response::builder()
-        .status(status)
-        .body(Body::from(body))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+    ftp_response(status, Body::from(body))
+}
+
+fn ftp_response(status: StatusCode, body: Body) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(body);
+    *response.status_mut() = status;
+    response
 }
