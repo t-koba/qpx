@@ -10,9 +10,9 @@ use crate::reverse::transport::{self, ReverseConnInfo};
 use crate::runtime::ResolvedStreamingLimits;
 use crate::server::control::SidecarControl;
 use anyhow::{Result, anyhow};
-use hyper::{Response, StatusCode};
+use hyper::StatusCode;
 use qpx_core::config::ReverseEdgeConfig;
-use qpx_core::http_message::OrdinaryHeaderName;
+use qpx_core::http_message::{OrdinaryHeaderName, Response as OwnerResponse};
 use qpx_http::body::Body;
 use std::net::SocketAddr;
 use tokio::sync::watch;
@@ -408,6 +408,23 @@ fn reverse_qpx_response_summary(
     })
 }
 
+fn build_reverse_qpx_local_response(
+    method: &http::Method,
+    proxy_name: &str,
+    status: StatusCode,
+    body: Body,
+) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(body);
+    *response.status_mut() = status;
+    crate::http::protocol::l7::finalize_response_for_request(
+        method,
+        http::Version::HTTP_3,
+        proxy_name,
+        response,
+        false,
+    )
+}
+
 async fn send_reverse_qpx_local_response(
     req_stream: &mut qpx_h3::RequestStream,
     method: &http::Method,
@@ -417,13 +434,7 @@ async fn send_reverse_qpx_local_response(
     response_body_limit: usize,
     h3_read_timeout: Duration,
 ) -> Result<()> {
-    let response = crate::http::protocol::l7::finalize_response_for_request(
-        method,
-        http::Version::HTTP_3,
-        proxy_name,
-        Response::builder().status(status).body(body)?,
-        false,
-    );
+    let response = build_reverse_qpx_local_response(method, proxy_name, status, body);
     crate::http3::qpx_stream::send_qpx_response_stream(
         req_stream,
         response,
@@ -449,4 +460,54 @@ async fn send_reverse_qpx_interim_response(
         Duration::from_millis(streaming.body_send_timeout_ms),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn reverse_qpx_local_rejection_owner_matches_standard_finalization() {
+        let method = http::Method::POST;
+        let proxy_name = "reverse-proxy";
+        let status = StatusCode::PAYLOAD_TOO_LARGE;
+        let actual = build_reverse_qpx_local_response(
+            &method,
+            proxy_name,
+            status,
+            Body::from("request payload too large"),
+        )
+        .into_http_for_library();
+        let expected = crate::http::protocol::l7::finalize_response_for_request(
+            &method,
+            http::Version::HTTP_3,
+            proxy_name,
+            http::Response::builder()
+                .status(status)
+                .body(Body::from("request payload too large"))
+                .unwrap(),
+            false,
+        );
+
+        assert_eq!(actual.status(), expected.status());
+        assert_eq!(actual.version(), expected.version());
+        assert_eq!(actual.version(), http::Version::HTTP_11);
+        let mut actual_headers = actual.headers().clone();
+        let mut expected_headers = expected.headers().clone();
+        actual_headers.remove(http::header::DATE);
+        expected_headers.remove(http::header::DATE);
+        assert_eq!(actual_headers, expected_headers);
+
+        let mut actual = actual.into_body();
+        let mut expected = expected.into_body();
+        let mut actual_bytes = Vec::new();
+        let mut expected_bytes = Vec::new();
+        while let Some(chunk) = actual.data().await {
+            actual_bytes.extend_from_slice(&chunk.unwrap());
+        }
+        while let Some(chunk) = expected.data().await {
+            expected_bytes.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(actual_bytes, expected_bytes);
+    }
 }
