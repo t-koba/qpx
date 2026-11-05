@@ -861,7 +861,7 @@ impl CacheFields {
     /// Invalid names or values are skipped, matching historical hydration.
     /// Non-text values never appear here; they were omitted at capture.
     pub fn hydrate(&self) -> Headers {
-        let mut out = Headers::new();
+        let mut inner = HeaderMap::new();
         for (name, value) in &self.inner {
             let Ok(name) = http::header::HeaderName::from_bytes(name.as_bytes()) else {
                 continue;
@@ -869,16 +869,9 @@ impl CacheFields {
             let Ok(value) = http::HeaderValue::from_str(value.as_str()) else {
                 continue;
             };
-            if name == CONTENT_LENGTH {
-                out.append_content_length_value(value);
-            } else {
-                let Ok(ordinary) = OrdinaryHeaderName::try_from(name) else {
-                    continue;
-                };
-                out.append(ordinary, value);
-            }
+            inner.append(name, value);
         }
-        out
+        Headers { inner }
     }
 
     /// Declared length without exposing framing text, matching

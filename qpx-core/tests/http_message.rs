@@ -1131,3 +1131,46 @@ fn owned_response_transfer_patches_keep_first_literal_and_boundary_semantics() {
         "invalid"
     );
 }
+
+#[test]
+fn cache_hydration_filters_only_invalid_fields_and_preserves_literal_duplicate_order() {
+    use qpx_core::http_message::CacheFields;
+    for lengths in [
+        vec![],
+        vec!["0"],
+        vec!["007, 7", " 7 "],
+        vec!["invalid"],
+        vec!["5", "6"],
+    ] {
+        let mut pairs = vec![
+            ("X-Repeat", "first"),
+            ("bad name", "ignored"),
+            ("x-repeat", "second"),
+            ("x-invalid", "line\nbreak"),
+            ("CONTENT-LENGTH", "line\nbreak"),
+        ];
+        let mut raw = http::Response::new(());
+        raw.headers_mut()
+            .append("x-repeat", HeaderValue::from_static("first"));
+        raw.headers_mut()
+            .append("x-repeat", HeaderValue::from_static("second"));
+        for (index, value) in lengths.into_iter().enumerate() {
+            pairs.push((
+                if index % 2 == 0 {
+                    "Content-Length"
+                } else {
+                    "cOnTeNt-LeNgTh"
+                },
+                value,
+            ));
+            raw.headers_mut()
+                .append(CONTENT_LENGTH, HeaderValue::from_str(value).unwrap());
+        }
+        let json = serde_json::to_string(&pairs).unwrap();
+        let cached = CacheFields::from_cache_json(&json).unwrap();
+        // Equality compares literal bytes and per-name duplicate order, including
+        // invalid/conflicting declarations; no codec export may canonicalize them.
+        assert_eq!(&cached.hydrate(), Response::from_http(raw).headers());
+        assert_eq!(cached.to_cache_json().unwrap(), json);
+    }
+}

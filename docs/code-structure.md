@@ -13,10 +13,10 @@ inventory; the recorded debt only goes down. Workspace-wide gates read the
 crate list from the root `Cargo.toml`, so a new or split-out member is covered
 without editing a second list. Members must be literal directories at the
 workspace root; a pattern member or a member without a directory fails the
-gates closed instead of being skipped. The declared Content-Length single-owner
-analyzer is ratcheted the same way by `xtask/content-length-baseline.txt`
-until the accepted structural-owner replacement removes the analyzer and its
-debt.
+gates closed instead of being skipped. Private `Headers` storage enforces Content-Length
+ownership. A syntax backstop rejects production `.get`/`.get_all`/index reads by
+`CONTENT_LENGTH` or a case-insensitive `"content-length"` literal outside the owner.
+It excludes test-only cfg items; it does not expand macros or infer aliases/dataflow.
 
 ## Architecture overview
 
