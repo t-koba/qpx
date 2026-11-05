@@ -549,6 +549,7 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
     }
 
     let module_dispatch = match prepare_reverse_modules(ReverseModuleInput {
+        base: &base,
         req,
         state: &state,
         selected_policy: &selected_policy,

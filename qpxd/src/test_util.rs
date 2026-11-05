@@ -167,3 +167,77 @@ pub(crate) fn wire_headers(headers: &qpx_core::http_message::Headers) -> http::H
     *response.headers_mut() = headers.clone();
     response.into_http_for_library().into_parts().0.headers
 }
+
+/// A trusted RequestHeaders module used to test dispatch authority pinning.
+pub(crate) fn uri_rewrite_registry(
+    uri: &str,
+    expected_host: &str,
+) -> std::sync::Arc<crate::http::modules::HttpModuleRegistry> {
+    use crate::http::modules::*;
+    use std::sync::Arc;
+
+    struct Rewrite {
+        uri: http::Uri,
+        expected_host: String,
+    }
+    impl HttpModuleFactory for Arc<Rewrite> {
+        fn build(
+            &self,
+            _: &qpx_core::config::HttpModuleConfig,
+        ) -> anyhow::Result<Arc<dyn HttpModule>> {
+            Ok(self.clone())
+        }
+    }
+    #[async_trait::async_trait]
+    impl HttpModule for Rewrite {
+        fn capabilities(&self) -> HttpModuleCapabilities {
+            HttpModuleCapabilities {
+                mutates_request_headers: true,
+                may_short_circuit: true,
+                ..HttpModuleCapabilities::headers_only(ModuleStages::REQUEST_HEADERS)
+            }
+        }
+        async fn call<'a>(
+            &self,
+            _: HttpModuleStage,
+            _: &mut HttpModuleContext,
+            event: HttpModuleEvent<'a>,
+        ) -> anyhow::Result<HttpModuleEvent<'a>> {
+            let HttpModuleEvent::RequestHeaders(mut request) = event else {
+                unreachable!()
+            };
+            assert_eq!(request.host(), Some(self.expected_host.as_str()));
+            request.set_uri(self.uri.clone());
+            // The authority check must run even on a local module response.
+            Ok(HttpModuleEvent::RequestHeadersResult(
+                RequestHeadersOutcome::Respond(Box::new(HttpModuleResponse::new(
+                    http::StatusCode::NO_CONTENT,
+                    Body::empty(),
+                ))),
+            ))
+        }
+    }
+    let mut registry = HttpModuleRegistryBuilder::new();
+    registry
+        .register_factory(
+            "rewrite",
+            Arc::new(Rewrite {
+                uri: uri.parse().unwrap(),
+                expected_host: expected_host.to_owned(),
+            }),
+        )
+        .unwrap();
+    Arc::new(registry.build())
+}
+
+pub(crate) fn changed_host_control() -> std::sync::Arc<qpx_core::rules::CompiledHeaderControl> {
+    std::sync::Arc::new(
+        qpx_core::rules::CompiledHeaderControl::compile(
+            &serde_yaml::from_str::<qpx_core::config::HeaderControl>(
+                "request_set: { host: changed.test }",
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+}

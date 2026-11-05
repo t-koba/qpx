@@ -161,6 +161,7 @@ pub(super) struct ReverseModuleDispatch {
 }
 
 pub(super) struct ReverseModuleInput<'a> {
+    pub(super) base: &'a BaseRequestFields,
     pub(super) req: OwnerRequest<Body>,
     pub(super) state: &'a Arc<runtime::RuntimeState>,
     pub(super) selected_policy: &'a EffectivePolicyContext,

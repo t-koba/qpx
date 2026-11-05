@@ -93,6 +93,7 @@ pub(super) async fn dispatch_mitm_upstream(
             return Ok(response);
         }
     };
+    let module_authority = export_server.clone();
     let export_session =
         state.export_session_for_plan(selected_plan, input.route.src_addr, export_server);
     if let Some(response) = annotated_max_forwards_response(
@@ -122,6 +123,7 @@ pub(super) async fn dispatch_mitm_upstream(
     let mut http_modules = selected_plan
         .modules
         .start_for_request(&state, &input.req, || module_init);
+    http_modules.preserve_request_authority(Some(&module_authority), "https");
     match http_modules.on_request_headers(&mut input.req).await? {
         crate::http::modules::RequestHeadersOutcome::Continue => {}
         crate::http::modules::RequestHeadersOutcome::Respond(response) => {
@@ -301,5 +303,110 @@ fn mitm_module_init<'a>(
         identity_user: identity.user.as_deref(),
         cache_policy: None,
         cache_default_scheme: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::protocol::base_fields::{BaseRequestContext, extract_base_request_fields};
+    use crate::test_util::{changed_host_control, uri_rewrite_registry};
+
+    #[tokio::test]
+    async fn mitm_modules_pin_route_before_host_control() {
+        for (original, host) in [
+            ("/old", Some("selected.test")),
+            ("https://selected.test/old", Some("selected.test")),
+            ("/old", None),
+        ] {
+            for (rewrite, allowed) in [
+                ("https://changed.test/new", false),
+                ("/new?q=1", true),
+                ("https://SELECTED.test:443/new?q=1", true),
+                ("https://selected.test:80/new", false),
+                ("https://sni.test/new", false),
+            ] {
+                let registry = uri_rewrite_registry(
+                    rewrite,
+                    if original.starts_with('/') {
+                        "changed.test"
+                    } else {
+                        "selected.test"
+                    },
+                );
+                let runtime = Runtime::with_http_module_registry(serde_yaml::from_str(
+                    "edges:\n  - kind: forward\n    name: test\n    listen: 127.0.0.1:0\n    default_action: { type: direct }\n    http_modules: [{ type: rewrite }]",
+                ).unwrap(), registry).unwrap();
+                let state = runtime.state();
+                let plan = state
+                    .plan
+                    .ingress_edge_execution_plan("test", None)
+                    .unwrap();
+                let mut request = http::Request::builder().uri(original);
+                if let Some(host) = host {
+                    request = request.header(http::header::HOST, host);
+                }
+                let req = OwnerRequest::from_http(request.body(Body::empty()).unwrap());
+                let base = extract_base_request_fields(&req, BaseRequestContext::default());
+                // No real upstream is needed: successful hooks respond locally.
+                let (client, _server) = tokio::io::duplex(1024);
+                let (sender, connection) = hyper::client::conn::http1::handshake::<_, Body>(
+                    hyper_util::rt::TokioIo::new(client),
+                )
+                .await
+                .unwrap();
+                let driver = tokio::spawn(connection);
+                let result = dispatch_mitm_upstream(MitmDispatch {
+                    req,
+                    base: &base,
+                    runtime: runtime.clone(),
+                    sender: Arc::new(Mutex::new(sender)),
+                    route: MitmRouteContext {
+                        listener_name: "test",
+                        src_addr: "127.0.0.1:1234".parse().unwrap(),
+                        host: "selected.test",
+                        dst_port: 443,
+                        sni: "sni.test",
+                        upstream_cert: None,
+                    },
+                    selected_plan: plan,
+                    effective_policy: Default::default(),
+                    request_limits: Default::default(),
+                    identity: Default::default(),
+                    matched_rule: None,
+                    headers: Some(changed_host_control()),
+                    timeout_override: None,
+                    request_rpc: None,
+                    destination: Default::default(),
+                    upstream_cert: None,
+                    audit: DispatchAuditContext::new(
+                        None,
+                        ProxyKind::Mitm,
+                        None,
+                        "127.0.0.1:1234".parse().unwrap(),
+                        http::Method::GET,
+                        None,
+                        Default::default(),
+                    ),
+                    websocket: false,
+                    client_upgrade: None,
+                    req_method: http::Method::GET,
+                    req_version: http::Version::HTTP_11,
+                })
+                .await;
+                driver.abort();
+                if allowed {
+                    assert_eq!(result.unwrap().status(), http::StatusCode::NO_CONTENT);
+                } else {
+                    assert!(
+                        result
+                            .unwrap_err()
+                            .to_string()
+                            .contains("request URI authority changed"),
+                        "{original} -> {rewrite}"
+                    );
+                }
+            }
+        }
     }
 }

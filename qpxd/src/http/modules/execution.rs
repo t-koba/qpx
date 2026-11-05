@@ -945,12 +945,12 @@ impl HttpModuleExecution {
         }
     }
 
-    // Forward dispatch has a preflight-selected target independent of mutable
-    // Host policy. Pin that target rather than inferring it from prepared headers.
-    pub(crate) fn preserve_request_authority(&mut self, authority: &str, scheme: &str) {
+    // Pin the routing selection, including its absence, independently of mutable
+    // Host policy. An absent selection must not fall back to prepared headers.
+    pub(crate) fn preserve_request_authority(&mut self, authority: Option<&str>, scheme: &str) {
         if let Some((_, context)) = self.active_mut() {
             context.request_authority = Some(ModuleRequestAuthority::new(
-                Some(authority.to_owned()),
+                authority.map(str::to_owned),
                 scheme,
             ));
         }
