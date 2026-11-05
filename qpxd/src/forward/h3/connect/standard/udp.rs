@@ -9,7 +9,7 @@ mod upstream;
 
 use self::chained::relay_h3_connect_udp_stream_chained;
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
-use super::super::finalize_h3_connect_response;
+use super::super::finalize_h3_connect_owner_response;
 use super::super::{apply_connect_udp_bandwidth_controls, forward_udp_capsules};
 use crate::http::dispatch::DispatchOutcome;
 use crate::http3::capsule::{
@@ -101,11 +101,11 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     macro_rules! send_proxy_error {
         () => {
             send_policy!(
-                finalize_h3_connect_response(
+                finalize_h3_connect_owner_response(
                     proxy_name.as_str(),
                     super::super::super::h3_bad_gateway_base_response(
                         state.messages.proxy_error.clone(),
-                    )?,
+                    ),
                     response_headers.as_deref(),
                 ),
                 DispatchOutcome::Error
@@ -115,11 +115,11 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
     macro_rules! send_upstream_connect_udp_failed {
         () => {
             send_policy!(
-                finalize_h3_connect_response(
+                finalize_h3_connect_owner_response(
                     proxy_name.as_str(),
                     super::super::super::h3_bad_gateway_base_response(
                         state.messages.upstream_connect_udp_failed.clone(),
-                    )?,
+                    ),
                     response_headers.as_deref(),
                 ),
                 DispatchOutcome::Error

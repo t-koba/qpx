@@ -1,5 +1,5 @@
 use super::super::super::backend_h3::ForwardH3Handler;
-use super::super::finalize_h3_connect_response;
+use super::super::finalize_h3_connect_owner_response;
 use super::established::{EstablishedH3Connect, finish_h3_connect};
 use super::{
     H3ConnectAuditContext, PreparedH3Connect, prepare_h3_connect_request, send_h3_policy_response,
@@ -87,7 +87,7 @@ pub(crate) async fn handle_h3_connect(
     macro_rules! send_finalized {
         ($base:expr, $outcome:expr) => {
             send_policy!(
-                finalize_h3_connect_response(
+                finalize_h3_connect_owner_response(
                     proxy_name.as_str(),
                     $base,
                     response_headers.as_deref(),
@@ -151,7 +151,7 @@ pub(crate) async fn handle_h3_connect(
             send_finalized!(
                 super::super::super::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
-                )?,
+                ),
                 DispatchOutcome::Error
             )
             .await?;
@@ -192,7 +192,7 @@ pub(crate) async fn handle_h3_connect(
             send_finalized!(
                 super::super::super::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
-                )?,
+                ),
                 DispatchOutcome::Error
             )
             .await?;

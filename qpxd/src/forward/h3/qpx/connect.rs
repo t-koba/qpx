@@ -11,9 +11,11 @@ use super::response::{
     send_qpx_policy_response, send_qpx_response_stream, send_qpx_static_response,
     upstream_qpx_extended_connect_error_response,
 };
-use crate::forward::h3::connect::finalize_h3_connect_response;
 use crate::forward::h3::connect::{
     H3ConnectAuditContext, emit_h3_connect_audit, finalize_h3_connect_head_response,
+};
+use crate::forward::h3::connect::{
+    finalize_h3_connect_owner_response, finalize_h3_connect_response,
 };
 use crate::forward::request::resolve_upstream;
 use crate::http::dispatch::DispatchOutcome;
@@ -215,11 +217,11 @@ async fn run_qpx_traditional_connect_tunnel(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 qpx-h3 CONNECT upstream resolution failed");
-            let response = finalize_h3_connect_response(
+            let response = finalize_h3_connect_owner_response(
                 proxy_name.as_str(),
                 crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
-                )?,
+                ),
                 response_headers.as_deref(),
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
@@ -238,11 +240,11 @@ async fn run_qpx_traditional_connect_tunnel(
         Ok(server) => server,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 qpx-h3 CONNECT establish failed");
-            let response = finalize_h3_connect_response(
+            let response = finalize_h3_connect_owner_response(
                 proxy_name.as_str(),
                 crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
-                )?,
+                ),
                 response_headers.as_deref(),
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
@@ -495,11 +497,11 @@ async fn handle_qpx_extended_connect_stream(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, "forward HTTP/3 qpx-h3 extended CONNECT establish failed");
-            let response = finalize_h3_connect_response(
+            let response = finalize_h3_connect_owner_response(
                 proxy_name.as_str(),
                 crate::forward::h3::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
-                )?,
+                ),
                 response_headers.as_deref(),
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;

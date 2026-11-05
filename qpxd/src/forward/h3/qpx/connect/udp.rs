@@ -5,14 +5,14 @@ use super::super::connect_upstream::{
 use super::super::relay::{relay_qpx_connect_udp_stream, relay_qpx_connect_udp_stream_chained};
 use super::super::response::send_qpx_policy_response;
 use super::prepare::PreparedQpxConnect;
-use crate::forward::h3::connect::finalize_h3_connect_response;
+use crate::forward::h3::connect::finalize_h3_connect_owner_response;
 use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
 use crate::forward::request::resolve_upstream_url;
 use crate::http::dispatch::DispatchOutcome;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
 use anyhow::{Result, anyhow};
-use hyper::Response;
 use qpx_core::config::ConnectUdpConfig;
+use qpx_core::http_message::Response;
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::net::SocketAddr;
@@ -98,7 +98,7 @@ pub(super) async fn run_connect_udp_relay(
                 proxy_name.as_str(),
                 $body,
                 response_headers.as_deref(),
-            )?;
+            );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;
             return Ok(());
         }};
@@ -320,10 +320,10 @@ fn connect_udp_bad_gateway_response(
     proxy_name: &str,
     body: String,
     response_headers: Option<&CompiledHeaderControl>,
-) -> Result<Response<Body>> {
-    Ok(finalize_h3_connect_response(
+) -> Response<Body> {
+    finalize_h3_connect_owner_response(
         proxy_name,
-        crate::forward::h3::h3_bad_gateway_base_response(body)?,
+        crate::forward::h3::h3_bad_gateway_base_response(body),
         response_headers,
-    ))
+    )
 }

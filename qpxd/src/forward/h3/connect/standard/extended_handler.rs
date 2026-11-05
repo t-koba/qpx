@@ -1,5 +1,5 @@
 use super::super::super::backend_h3::ForwardH3Handler;
-use super::super::{finalize_h3_connect_head_response, finalize_h3_connect_response};
+use super::super::{finalize_h3_connect_head_response, finalize_h3_connect_owner_response};
 use super::extended::{
     OpenUpstreamExtendedConnectInput, UpstreamExtendedConnectStream,
     open_upstream_extended_connect_stream, relay_h3_extended_connect_stream,
@@ -163,11 +163,11 @@ pub(crate) async fn handle_h3_extended_connect(
         Ok(upstream) => upstream,
         Err(err) => {
             warn!(error = ?err, protocol = ?protocol, "forward HTTP/3 extended CONNECT establish failed");
-            let response = finalize_h3_connect_response(
+            let response = finalize_h3_connect_owner_response(
                 proxy_name.as_str(),
                 super::super::super::h3_bad_gateway_base_response(
                     state.messages.proxy_error.clone(),
-                )?,
+                ),
                 response_headers.as_deref(),
             );
             send_policy!(&mut req_stream, response, DispatchOutcome::Error).await?;

@@ -8,7 +8,6 @@ use crate::runtime::Runtime;
 use crate::server::control::SidecarControl;
 use anyhow::Result;
 use async_trait::async_trait;
-use hyper::Response;
 use qpx_core::config::{ConnectUdpConfig, Http3IngressEdgeConfig, IngressEdgeConfig};
 use qpx_core::http_message::Request;
 use qpx_core::http_message::Response as OwnerResponse;
@@ -131,14 +130,13 @@ impl H3RequestHandler for ForwardH3Handler {
             Ok(resp) => resp,
             Err(err) => {
                 tracing::warn!(error = ?err, "forward HTTP/3 request handling failed");
-                OwnerResponse::from_http(crate::http::protocol::l7::finalize_response_for_request(
+                crate::http::protocol::l7::finalize_response_for_request(
                     &request_method,
                     request_version,
                     state.plan.identity.proxy_name.as_ref(),
-                    super::h3_bad_gateway_base_response(state.messages.proxy_error.clone())
-                        .unwrap_or_else(|_| Response::new(Body::empty())),
+                    super::h3_bad_gateway_base_response(state.messages.proxy_error.clone()),
                     false,
-                ))
+                )
             }
         }
     }
@@ -176,16 +174,15 @@ impl H3RequestHandler for ForwardH3Handler {
             }
             Err(err) => {
                 tracing::warn!(error = ?err, "forward HTTP/3 request handling failed");
-                H3HttpResponse::final_only(OwnerResponse::from_http(
+                H3HttpResponse::final_only(
                     crate::http::protocol::l7::finalize_response_for_request(
                         &request_method,
                         request_version,
                         state.plan.identity.proxy_name.as_ref(),
-                        super::h3_bad_gateway_base_response(state.messages.proxy_error.clone())
-                            .unwrap_or_else(|_| Response::new(Body::empty())),
+                        super::h3_bad_gateway_base_response(state.messages.proxy_error.clone()),
                         false,
                     ),
-                ))
+                )
             }
         }
     }

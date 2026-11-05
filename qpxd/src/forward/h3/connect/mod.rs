@@ -65,6 +65,24 @@ pub(super) fn finalize_h3_connect_response(
     )
 }
 
+/// Finalizes an owner-backed local response without exporting its head.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(super) fn finalize_h3_connect_owner_response(
+    proxy_name: &str,
+    mut response: qpx_core::http_message::Response<qpx_http::body::Body>,
+    header_control: Option<&qpx_core::rules::CompiledHeaderControl>,
+) -> qpx_core::http_message::Response<qpx_http::body::Body> {
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        &http::Method::CONNECT,
+        http::Version::HTTP_3,
+        proxy_name,
+        &mut response,
+        header_control,
+        false,
+    );
+    response
+}
+
 /// Normalizes an upstream extended-CONNECT response head for downstream HTTP/3.
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(super) fn finalize_h3_connect_head_response(
