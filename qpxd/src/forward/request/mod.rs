@@ -81,7 +81,9 @@ pub(crate) fn proxy_auth_required(
 ) -> OwnerResponse<Body> {
     let mut response = OwnerResponse::new(Body::from(message.to_owned()));
     *response.status_mut() = StatusCode::PROXY_AUTHENTICATION_REQUIRED;
-    let name = OrdinaryHeaderName::try_from("proxy-authenticate").expect("ordinary");
+    let Ok(name) = OrdinaryHeaderName::try_from(http::header::PROXY_AUTHENTICATE) else {
+        return OwnerResponse::new(Body::empty());
+    };
     for header in chal.header_values {
         let Ok(value) = http::HeaderValue::try_from(header) else {
             return OwnerResponse::new(Body::empty());
