@@ -29,11 +29,11 @@ use crate::policy_context::{
 };
 use crate::rate_limit::RateLimitContext;
 use crate::runtime::Runtime;
-use ::http::{Method, Response, StatusCode};
+use ::http::{Method, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
-use qpx_core::http_message::{Request, Response as OwnerResponse};
+use qpx_core::http_message::{OrdinaryHeaderName, Request, Response as OwnerResponse};
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
@@ -420,26 +420,19 @@ pub(super) async fn handle_h2_extended_connect(
         return Ok(response);
     }
 
-    let (parts, upstream_body) = response.into_parts();
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "HTTP/2 CONNECT response",
-    )?;
-    let mut response = Response::builder()
-        .status(status)
-        .body(spawn_h2_extended_connect_relay(
+    let response = own_h2_extended_connect_response(response)?.map_body(|upstream_body| {
+        spawn_h2_extended_connect_relay(
             downstream_body,
             declared_request_length,
             send_stream,
             upstream_body,
             tunnel_idle_timeout,
-        ))?;
-    *response.headers_mut() = h1_headers_to_http(&parts.headers)?;
-    *response.version_mut() = http::Version::HTTP_2;
+        )
+    });
     let mut response = finalize_extended_connect_response_with_headers(
         req_version,
         proxy_name,
-        OwnerResponse::from_http(response),
+        response,
         response_headers.as_deref(),
         false,
     );
@@ -448,4 +441,160 @@ pub(super) async fn handle_h2_extended_connect(
     }
     audit.annotate(&mut response, DispatchOutcome::Allow);
     Ok(response)
+}
+
+// Import the successful H2 library response before in-domain relay/finalization.
+fn own_h2_extended_connect_response<B>(response: http::Response<B>) -> Result<OwnerResponse<B>> {
+    let mut response = OwnerResponse::from_http(response);
+    *response.status_mut() = qpx_http::protocol::semantics::validate_http_status_class(
+        response.status(),
+        "HTTP/2 CONNECT response",
+    )?;
+    *response.version_mut() = http::Version::HTTP_2;
+    response.extensions_mut().clear();
+
+    // Match h1_headers_to_http: a single empty Cookie is retained, but joining
+    // duplicates adds separators only after nonempty accumulated bytes.
+    let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE)?;
+    if response.headers().get_all(&cookie).count() > 1 {
+        let mut merged_cookie = Vec::new();
+        let mut sensitive = false;
+        for value in response.headers().get_all(&cookie) {
+            if !merged_cookie.is_empty() {
+                merged_cookie.extend_from_slice(b"; ");
+            }
+            merged_cookie.extend_from_slice(value.as_bytes());
+            sensitive |= value.is_sensitive();
+        }
+        response.headers_mut().remove(&cookie);
+        if !merged_cookie.is_empty() {
+            let mut value = http::HeaderValue::from_bytes(&merged_cookie)?;
+            value.set_sensitive(sensitive);
+            response.headers_mut().insert(cookie, value);
+        }
+    }
+    Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::header::{CONTENT_LENGTH, COOKIE, SET_COOKIE};
+    use http::{HeaderValue, Response, Version};
+
+    #[test]
+    fn h2_extended_connect_owner_cookie_parity() {
+        let cases: &[&[&[u8]]] = &[
+            &[],
+            &[b""],
+            &[b"a=1"],
+            &[b"", b""],
+            &[b"", b"a=1"],
+            &[b"a=1", b""],
+            &[b"a=1", b"", b"b=2"],
+            &[b"", b"a=1", b"b=2", b""],
+            &[b"a=1", b"\xff"],
+        ];
+        for cookies in cases {
+            // Exercise sensitivity on every occurrence, including empty values.
+            for sensitive_index in 0..=cookies.len() {
+                let mut upstream = Response::builder()
+                    .status(StatusCode::CREATED)
+                    .version(Version::HTTP_11)
+                    .header(SET_COOKIE, "first=1")
+                    .header(SET_COOKIE, "second=2")
+                    .body(vec![1, 2, 3])
+                    .unwrap();
+                upstream.extensions_mut().insert(42u32);
+                for (index, bytes) in cookies.iter().enumerate() {
+                    let mut value = HeaderValue::from_bytes(bytes).unwrap();
+                    value.set_sensitive(index == sensitive_index);
+                    upstream.headers_mut().append(COOKIE, value);
+                }
+                let mut opaque = HeaderValue::from_bytes(b"\xff").unwrap();
+                opaque.set_sensitive(true);
+                upstream.headers_mut().append("x-opaque", opaque);
+                upstream
+                    .headers_mut()
+                    .append("x-opaque", HeaderValue::from_static("second"));
+                let expected = h1_headers_to_http(upstream.headers()).unwrap();
+                let owner = own_h2_extended_connect_response(upstream)
+                    .unwrap()
+                    .map_body(|body| body.len());
+                assert_eq!(owner.status(), StatusCode::CREATED);
+                assert_eq!(owner.version(), Version::HTTP_2);
+                assert!(owner.extensions().is_empty());
+                assert_eq!(*owner.body(), 3);
+                let exported = owner.into_http_for_codec().unwrap();
+                assert_eq!(exported.headers(), &expected);
+                for name in expected.keys() {
+                    assert_eq!(
+                        exported
+                            .headers()
+                            .get_all(name)
+                            .iter()
+                            .map(|v| v.is_sensitive())
+                            .collect::<Vec<_>>(),
+                        expected
+                            .get_all(name)
+                            .iter()
+                            .map(|v| v.is_sensitive())
+                            .collect::<Vec<_>>()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn h2_extended_connect_owner_preserves_content_length_distinctions() {
+        let cases: &[&[&str]] = &[
+            &[],
+            &["0"],
+            &["007"],
+            &["7", "7"],
+            &["7, 7"],
+            &[""],
+            &["invalid"],
+            &["7", "8"],
+            &["7, 8"],
+        ];
+        for lengths in cases {
+            let mut upstream = Response::new(());
+            for length in *lengths {
+                upstream
+                    .headers_mut()
+                    .append(CONTENT_LENGTH, length.parse().unwrap());
+            }
+            upstream
+                .headers_mut()
+                .append(COOKIE, HeaderValue::from_static("a=1"));
+            upstream
+                .headers_mut()
+                .append(COOKIE, HeaderValue::from_static("b=2"));
+            let expected = OwnerResponse::from_http({
+                let mut response = Response::new(());
+                *response.headers_mut() = h1_headers_to_http(upstream.headers()).unwrap();
+                response
+            });
+            let owner = own_h2_extended_connect_response(upstream).unwrap();
+            assert_eq!(
+                owner.headers().declared_content_length(),
+                expected.headers().declared_content_length(),
+                "{lengths:?}"
+            );
+            assert_eq!(
+                owner.headers().contains_content_length(),
+                !lengths.is_empty()
+            );
+            assert_eq!(
+                owner
+                    .headers()
+                    .selected_fields_for_serialization(&[CONTENT_LENGTH]),
+                expected
+                    .headers()
+                    .selected_fields_for_serialization(&[CONTENT_LENGTH])
+            );
+        }
+    }
 }
