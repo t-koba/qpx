@@ -624,7 +624,7 @@ async fn complete_forward_request(
     )
     .await
     {
-        return Ok(OwnerResponse::from_http(response));
+        return Ok(response);
     }
     let ready = match prepare_forward_dispatch(ForwardDispatchPrepareInput {
         req,

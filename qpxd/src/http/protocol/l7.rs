@@ -441,7 +441,7 @@ pub(crate) async fn handle_max_forwards_in_place(
     trace_reflect_all_headers: bool,
     max_trace_body_bytes: usize,
     trace_body_read_timeout: Duration,
-) -> Option<Response<Body>> {
+) -> Option<OwnerResponse<Body>> {
     if request.method() != Method::TRACE && request.method() != Method::OPTIONS {
         return None;
     }
@@ -453,39 +453,20 @@ pub(crate) async fn handle_max_forwards_in_place(
     if values.is_empty() {
         return None;
     }
-    if values.len() != 1 {
-        return Some(finalize_response_for_request(
-            request.method(),
-            request.version(),
-            proxy_name,
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("invalid Max-Forwards"))
-                .unwrap_or_else(|_| Response::new(Body::from("invalid Max-Forwards"))),
-            false,
-        ));
-    }
-    let Ok(raw) = values[0].to_str() else {
-        return Some(finalize_response_for_request(
-            request.method(),
-            request.version(),
-            proxy_name,
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("invalid Max-Forwards"))
-                .unwrap_or_else(|_| Response::new(Body::from("invalid Max-Forwards"))),
-            false,
-        ));
+    let parsed = match values.as_slice() {
+        [value] => value.to_str().ok().and_then(parse_max_forwards_value),
+        _ => None,
     };
-    let Some(parsed) = parse_max_forwards_value(raw) else {
+    let Some(parsed) = parsed else {
         return Some(finalize_response_for_request(
             request.method(),
             request.version(),
             proxy_name,
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("invalid Max-Forwards"))
-                .unwrap_or_else(|_| Response::new(Body::from("invalid Max-Forwards"))),
+            {
+                let mut response = OwnerResponse::new(Body::from("invalid Max-Forwards"));
+                *response.status_mut() = StatusCode::BAD_REQUEST;
+                response
+            },
             false,
         ));
     };
@@ -507,28 +488,33 @@ pub(crate) async fn handle_max_forwards_in_place(
                             request.method(),
                             request.version(),
                             proxy_name,
-                            Response::builder()
-                                .status(StatusCode::BAD_REQUEST)
-                                .body(Body::from("trace failed"))
-                                .unwrap_or_else(|_| Response::new(Body::from("trace failed"))),
+                            {
+                                let mut response = OwnerResponse::new(Body::from("trace failed"));
+                                *response.status_mut() = StatusCode::BAD_REQUEST;
+                                response
+                            },
                             false,
                         ));
                     }
                 };
-                Response::builder()
-                    .status(StatusCode::OK)
-                    .header(http::header::CONTENT_TYPE, "message/http; charset=utf-8")
-                    .body(Body::from(body))
-                    .unwrap_or_else(|_| Response::new(Body::from("trace failed")))
+                let mut response = OwnerResponse::new(Body::from(body));
+                response.headers_mut().insert(
+                    OrdinaryHeaderName::try_from(http::header::CONTENT_TYPE)
+                        .expect("ordinary field"),
+                    http::HeaderValue::from_static("message/http; charset=utf-8"),
+                );
+                response
             }
-            Method::OPTIONS => Response::builder()
-                .status(StatusCode::NO_CONTENT)
-                .body(Body::empty())
-                .unwrap_or_else(|_| Response::new(Body::empty())),
-            _ => Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body(Body::from("invalid Max-Forwards"))
-                .unwrap_or_else(|_| Response::new(Body::from("invalid Max-Forwards"))),
+            Method::OPTIONS => {
+                let mut response = OwnerResponse::new(Body::empty());
+                *response.status_mut() = StatusCode::NO_CONTENT;
+                response
+            }
+            _ => {
+                let mut response = OwnerResponse::new(Body::from("invalid Max-Forwards"));
+                *response.status_mut() = StatusCode::BAD_REQUEST;
+                response
+            }
         };
         return Some(finalize_response_for_request(
             request.method(),

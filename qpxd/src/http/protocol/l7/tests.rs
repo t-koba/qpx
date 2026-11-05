@@ -226,7 +226,7 @@ async fn trace_loopback_rejects_body_above_hard_cap() {
 async fn run_max_forwards(
     method: Method,
     values: &[&str],
-) -> (Option<Response<Body>>, Request<Body>) {
+) -> (Option<OwnerResponse<Body>>, Request<Body>) {
     let mut request = Request::from_http(
         http::Request::builder()
             .method(method)
@@ -248,6 +248,54 @@ async fn run_max_forwards(
     (response, request)
 }
 
+// Compare the owner at codec egress with the former standard-response path.
+async fn assert_max_forwards_reply(
+    response: OwnerResponse<Body>,
+    method: &Method,
+    status: StatusCode,
+    body: &str,
+    content_type: Option<&str>,
+) {
+    assert_eq!(response.status(), status);
+    let response = response
+        .into_http_for_codec()
+        .expect("valid response framing");
+    let mut expected = Response::new(Body::from(body.to_owned()));
+    *expected.status_mut() = status;
+    if let Some(content_type) = content_type {
+        expected.headers_mut().insert(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_str(content_type).unwrap(),
+        );
+    }
+    let mut expected =
+        finalize_response_for_request(method, http::Version::HTTP_11, "qpx", expected, false);
+    let date = response.headers()[http::header::DATE].clone();
+    httpdate::parse_http_date(date.to_str().unwrap()).expect("valid Date");
+    expected.headers_mut().insert(http::header::DATE, date);
+    assert_eq!(response.version(), expected.version());
+    assert_eq!(response.headers(), expected.headers());
+    // These builders have no declared length, including the empty 204 reply.
+    assert!(
+        !response
+            .headers()
+            .contains_key(http::header::CONTENT_LENGTH)
+    );
+    assert!(
+        !response
+            .headers()
+            .contains_key(http::header::TRANSFER_ENCODING)
+    );
+    assert_eq!(response.headers()[http::header::VIA], "1.1 qpx");
+    assert_eq!(response.headers()["proxy-status"], "qpx");
+    assert_eq!(
+        qpx_http::body::to_bytes(response.into_body())
+            .await
+            .unwrap(),
+        body
+    );
+}
+
 #[tokio::test]
 async fn max_forwards_accepts_only_ows_wrapped_decimal_and_decrements() {
     for (value, expected) in [("1", "0"), ("001", "0"), (" \t2\t ", "1")] {
@@ -265,38 +313,81 @@ async fn max_forwards_accepts_only_ows_wrapped_decimal_and_decrements() {
         );
     }
 
-    for (method, expected) in [
-        (Method::OPTIONS, StatusCode::NO_CONTENT),
-        (Method::TRACE, StatusCode::OK),
+    for (method, status, body, content_type) in [
+        (Method::OPTIONS, StatusCode::NO_CONTENT, "", None),
+        (
+            Method::TRACE,
+            StatusCode::OK,
+            "TRACE / HTTP/1.1\r\nmax-forwards: 0\r\n\r\n",
+            Some("message/http; charset=utf-8"),
+        ),
     ] {
-        let (response, _) = run_max_forwards(method, &["0"]).await;
-        assert_eq!(
-            response
-                .expect("zero Max-Forwards is handled locally")
-                .status(),
-            expected
-        );
+        let (response, _) = run_max_forwards(method.clone(), &["0"]).await;
+        assert_max_forwards_reply(
+            response.expect("zero Max-Forwards is handled locally"),
+            &method,
+            status,
+            body,
+            content_type,
+        )
+        .await;
     }
 }
 
 #[tokio::test]
 async fn max_forwards_rejects_signed_and_non_decimal_values() {
-    for value in ["+0", "+1", "-1", "", "1, 2"] {
-        let (response, _) = run_max_forwards(Method::OPTIONS, &[value]).await;
-        assert_eq!(
-            response.expect("invalid Max-Forwards is rejected").status(),
+    for values in [&["+0"][..], &["+1"], &["-1"], &[""], &["1, 2"], &["1", "2"]] {
+        let (response, _) = run_max_forwards(Method::OPTIONS, values).await;
+        assert_max_forwards_reply(
+            response.expect("invalid Max-Forwards is rejected"),
+            &Method::OPTIONS,
             StatusCode::BAD_REQUEST,
-            "accepted invalid value {value:?}"
-        );
+            "invalid Max-Forwards",
+            None,
+        )
+        .await;
     }
 
-    let (response, _) = run_max_forwards(Method::OPTIONS, &["1", "2"]).await;
-    assert_eq!(
-        response
-            .expect("duplicate Max-Forwards is rejected")
-            .status(),
-        StatusCode::BAD_REQUEST
+    let mut request = Request::new(Body::empty());
+    *request.method_mut() = Method::TRACE;
+    request.headers_mut().insert(
+        OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS).unwrap(),
+        http::HeaderValue::from_bytes(b"\xff").unwrap(),
     );
+    let response =
+        handle_max_forwards_in_place(&mut request, "qpx", false, 1024, Duration::from_secs(1))
+            .await
+            .expect("non-text Max-Forwards is rejected");
+    assert_max_forwards_reply(
+        response,
+        &Method::TRACE,
+        StatusCode::BAD_REQUEST,
+        "invalid Max-Forwards",
+        None,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn max_forwards_trace_body_failure_reply_preserves_output() {
+    let mut request = Request::new(Body::from("body"));
+    *request.method_mut() = Method::TRACE;
+    request.headers_mut().insert(
+        OrdinaryHeaderName::try_from(http::header::MAX_FORWARDS).unwrap(),
+        http::HeaderValue::from_static("0"),
+    );
+    let response =
+        handle_max_forwards_in_place(&mut request, "qpx", false, 3, Duration::from_secs(1))
+            .await
+            .expect("TRACE over the body cap is rejected locally");
+    assert_max_forwards_reply(
+        response,
+        &Method::TRACE,
+        StatusCode::BAD_REQUEST,
+        "trace failed",
+        None,
+    )
+    .await;
 }
 
 #[tokio::test]

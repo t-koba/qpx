@@ -7,7 +7,7 @@ use crate::http::protocol::l7::{
     handle_max_forwards_in_place,
 };
 use anyhow::Result;
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::config::LocalResponseConfig;
 use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_core::rules::CompiledHeaderControl;
@@ -36,7 +36,7 @@ pub(crate) async fn annotated_max_forwards_response(
     max_observed_request_body_bytes: usize,
     read_timeout: Duration,
     audit: &DispatchAuditContext,
-) -> Option<Response<Body>> {
+) -> Option<OwnerResponse<Body>> {
     let mut response = handle_max_forwards_in_place(
         req,
         proxy_name,

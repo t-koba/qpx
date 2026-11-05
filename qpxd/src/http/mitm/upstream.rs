@@ -106,7 +106,7 @@ pub(super) async fn dispatch_mitm_upstream(
     )
     .await
     {
-        return Ok(qpx_core::http_message::Response::from_http(response));
+        return Ok(response);
     }
     strip_identity(&state, effective_policy, src_ip, input.req.headers_mut())?;
     prepare_request(&mut input.req, proxy_name, route_headers, input.websocket);

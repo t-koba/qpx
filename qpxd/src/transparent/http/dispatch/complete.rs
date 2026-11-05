@@ -190,7 +190,7 @@ pub(super) async fn complete_transparent_request(
     )
     .await
     {
-        return Ok(OwnerResponse::from_http(response));
+        return Ok(response);
     }
     strip_untrusted_identity_headers(&state, &effective_policy, remote_ip, req.headers_mut())?;
     let websocket = is_websocket_upgrade(req.method(), req.headers())?;
