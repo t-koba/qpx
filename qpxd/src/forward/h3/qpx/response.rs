@@ -157,6 +157,9 @@ mod tests {
 
     #[tokio::test]
     async fn qpx_connect_error_owner_preserves_import_and_finalized_output() {
+        #[derive(Clone, Debug, PartialEq, Eq)]
+        struct UpstreamHeadMarker;
+
         fn assert_headers_eq(actual: &http::HeaderMap, expected: &http::HeaderMap) {
             assert_eq!(actual, expected);
             for name in expected.keys() {
@@ -224,9 +227,11 @@ mod tests {
 
             let mut upstream_head = http::Response::builder()
                 .status(StatusCode::OK)
+                .version(http::Version::HTTP_3)
                 .body(())
                 .expect("upstream response head");
             *upstream_head.headers_mut() = decoded;
+            upstream_head.extensions_mut().insert(UpstreamHeadMarker);
             let actual_head = finalize_h3_connect_head_response(
                 upstream_head,
                 "qpx-test",
@@ -248,6 +253,14 @@ mod tests {
             *expected_head.headers_mut() =
                 http_headers_to_h1(standard_head.headers()).expect("convert standard H3 headers");
             assert_eq!(actual_head.status(), expected_head.status());
+            assert_eq!(actual_head.version(), expected_head.version());
+            assert_eq!(actual_head.version(), http::Version::HTTP_11);
+            assert!(
+                actual_head
+                    .extensions()
+                    .get::<UpstreamHeadMarker>()
+                    .is_none()
+            );
             assert_headers_eq(actual_head.headers(), expected_head.headers());
 
             let owner = owner_qpx_connect_error_response(status, &headers, Body::from(&body[..]))

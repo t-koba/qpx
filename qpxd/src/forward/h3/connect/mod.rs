@@ -95,11 +95,19 @@ pub(super) fn finalize_h3_connect_head_response(
 
     let (parts, _) = response.into_parts();
     let status = validate_http_status_class(parts.status, status_context)?;
-    let mut downstream = http::Response::builder()
-        .status(status)
-        .body(Body::empty())?;
-    *downstream.headers_mut() = crate::http3::codec::h1_headers_to_http(&parts.headers)?;
-    let mut downstream = qpx_core::http_message::Response::from_http(downstream);
+    let headers = crate::http3::codec::h1_headers_to_http(&parts.headers)?;
+    let mut downstream = qpx_core::http_message::Response::new(Body::empty());
+    *downstream.status_mut() = status;
+    for (name, value) in &headers {
+        if name == http::header::CONTENT_LENGTH {
+            downstream
+                .headers_mut()
+                .append_content_length_value(value.clone());
+        } else {
+            let name = qpx_core::http_message::OrdinaryHeaderName::try_from(name.clone())?;
+            downstream.headers_mut().append(name, value.clone());
+        }
+    }
     crate::http::protocol::l7::finalize_response_with_headers_in_place(
         &http::Method::CONNECT,
         http::Version::HTTP_3,
