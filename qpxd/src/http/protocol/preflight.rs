@@ -1,5 +1,5 @@
 use crate::http::protocol::l7::finalize_response_for_request;
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
 use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_incoming_request_with_metadata;
@@ -47,10 +47,10 @@ pub(crate) fn preflight_validate<B>(
     req: &Request<B>,
     proxy_name: &str,
     options: PreflightOptions<'_>,
-    rejection: Option<Response<Body>>,
+    rejection: Option<OwnerResponse<Body>>,
 ) -> PreflightOutcome {
     let response = if let Some(response) = rejection {
-        OwnerResponse::from_http(response)
+        response
     } else {
         let (status, body) = match validate_incoming_request_with_metadata(req) {
             Err(err) => (err.http_status(), err.to_string()),
@@ -80,4 +80,43 @@ pub(crate) fn preflight_validate<B>(
         response,
         false,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::protocol::common::bad_request_response;
+    use http_body_util::BodyExt;
+
+    #[tokio::test]
+    async fn owner_rejection_is_finalized_without_framing_import() {
+        let request = Request::from_http(
+            hyper::Request::builder()
+                .method(Method::GET)
+                .uri("/")
+                .body(Body::empty())
+                .expect("request"),
+        );
+        let PreflightOutcome::Reject(response) = preflight_validate(
+            &request,
+            "qpx",
+            PreflightOptions::allow_connect(false, "TRACE disabled"),
+            Some(bad_request_response("invalid FTP request")),
+        ) else {
+            panic!("explicit rejection must reject");
+        };
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(response.version(), http::Version::HTTP_11);
+        assert_eq!(response.headers().declared_content_length(), Ok(None));
+        assert_eq!(
+            response
+                .into_head_and_body()
+                .1
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes(),
+            "invalid FTP request"
+        );
+    }
 }

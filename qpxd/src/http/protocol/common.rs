@@ -4,6 +4,7 @@ use hyper::{Response, StatusCode};
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
 use hyper_util::rt::TokioExecutor;
 use qpx_core::config::ActionConfig;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -43,15 +44,10 @@ pub(crate) fn forbidden_response(message: &str) -> qpx_core::http_message::Respo
     response
 }
 
-pub(crate) fn bad_request_response(message: impl Into<String>) -> Response<Body> {
-    text_response(StatusCode::BAD_REQUEST, message.into())
-}
-
-fn text_response(status: StatusCode, message: String) -> Response<Body> {
-    Response::builder()
-        .status(status)
-        .body(Body::from(message))
-        .unwrap_or_else(|_| Response::new(Body::empty()))
+pub(crate) fn bad_request_response(message: impl Into<String>) -> OwnerResponse<Body> {
+    let mut response = OwnerResponse::new(Body::from(message.into()));
+    *response.status_mut() = StatusCode::BAD_REQUEST;
+    response
 }
 
 pub(crate) fn connect_established_response() -> Response<Body> {
@@ -193,7 +189,10 @@ mod tests {
                         &method,
                         version,
                         "edge",
-                        text_response(StatusCode::FORBIDDEN, message.into()),
+                        http::Response::builder()
+                            .status(StatusCode::FORBIDDEN)
+                            .body(Body::from(message.to_owned()))
+                            .expect("baseline response"),
                         Some(&control),
                         false,
                     );

@@ -3,7 +3,6 @@ use crate::http::codec::h1::serve_http1_with_interim_and_capacity;
 use crate::http::codec::interim::{
     H2_PREFACE, serve_h2_with_interim_and_capacity_and_tuning, sniff_h2_preface,
 };
-use crate::http::protocol::common::bad_request_response as bad_request;
 use crate::http::protocol::l7::finalize_response_for_request;
 use crate::runtime::Runtime;
 use anyhow::{Context, Result};
@@ -61,16 +60,16 @@ where
                 Ok(response) => Ok::<_, Infallible>(response),
                 Err(err) => {
                     error!(error = ?err, "transparent request handling failed");
-                    Ok(OwnerResponse::from_http(finalize_response_for_request(
+                    let mut response =
+                        OwnerResponse::new(Body::from(error_state.messages.proxy_error.clone()));
+                    *response.status_mut() = StatusCode::BAD_GATEWAY;
+                    Ok(finalize_response_for_request(
                         &request_method,
                         request_version,
                         error_state.plan.identity.proxy_name.as_ref(),
-                        hyper::Response::builder()
-                            .status(StatusCode::BAD_GATEWAY)
-                            .body(Body::from(error_state.messages.proxy_error.clone()))
-                            .unwrap_or_else(|_| bad_request("proxy error")),
+                        response,
                         false,
-                    )))
+                    ))
                 }
             }
         }
