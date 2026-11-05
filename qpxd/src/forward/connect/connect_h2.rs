@@ -9,7 +9,9 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::forward::request::resolve_upstream_url;
-use crate::http::codec::h2::{h1_headers_to_http, h2_response_to_hyper};
+use crate::http::codec::h2::{
+    h1_headers_to_http, h2_response_to_hyper, join_duplicate_cookie_values,
+};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
 #[cfg(feature = "auth-basic")]
@@ -453,23 +455,13 @@ fn own_h2_extended_connect_response<B>(response: http::Response<B>) -> Result<Ow
     *response.version_mut() = http::Version::HTTP_2;
     response.extensions_mut().clear();
 
-    // Match h1_headers_to_http: a single empty Cookie is retained, but joining
-    // duplicates adds separators only after nonempty accumulated bytes.
+    // Preserve a single Cookie (including an empty one); only duplicate fields
+    // pass through the shared H2 joining rule.
     let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE)?;
     if response.headers().get_all(&cookie).count() > 1 {
-        let mut merged_cookie = Vec::new();
-        let mut sensitive = false;
-        for value in response.headers().get_all(&cookie) {
-            if !merged_cookie.is_empty() {
-                merged_cookie.extend_from_slice(b"; ");
-            }
-            merged_cookie.extend_from_slice(value.as_bytes());
-            sensitive |= value.is_sensitive();
-        }
+        let merged_cookie = join_duplicate_cookie_values(response.headers().get_all(&cookie))?;
         response.headers_mut().remove(&cookie);
-        if !merged_cookie.is_empty() {
-            let mut value = http::HeaderValue::from_bytes(&merged_cookie)?;
-            value.set_sensitive(sensitive);
+        if let Some(value) = merged_cookie {
             response.headers_mut().insert(cookie, value);
         }
     }
@@ -484,18 +476,19 @@ mod tests {
 
     #[test]
     fn h2_extended_connect_owner_cookie_parity() {
-        let cases: &[&[&[u8]]] = &[
-            &[],
-            &[b""],
-            &[b"a=1"],
-            &[b"", b""],
-            &[b"", b"a=1"],
-            &[b"a=1", b""],
-            &[b"a=1", b"", b"b=2"],
-            &[b"", b"a=1", b"b=2", b""],
-            &[b"a=1", b"\xff"],
+        type CookieCase<'a> = (&'a [&'a [u8]], Option<&'a [u8]>);
+        let cases: &[CookieCase<'_>] = &[
+            (&[], None),
+            (&[b""], Some(b"")),
+            (&[b"a=1"], Some(b"a=1")),
+            (&[b"", b""], None),
+            (&[b"", b"a=1"], Some(b"a=1")),
+            (&[b"a=1", b""], Some(b"a=1; ")),
+            (&[b"a=1", b"", b"b=2"], Some(b"a=1; ; b=2")),
+            (&[b"", b"a=1", b"b=2", b""], Some(b"a=1; b=2; ")),
+            (&[b"a=1", b"\xff"], Some(b"a=1; \xff")),
         ];
-        for cookies in cases {
+        for (cookies, expected_cookie) in cases {
             // Exercise sensitivity on every occurrence, including empty values.
             for sensitive_index in 0..=cookies.len() {
                 let mut upstream = Response::builder()
@@ -527,6 +520,22 @@ mod tests {
                 assert_eq!(*owner.body(), 3);
                 let exported = owner.into_http_for_codec().unwrap();
                 assert_eq!(exported.headers(), &expected);
+                assert_eq!(
+                    exported.headers().get(COOKIE).map(|value| value.as_bytes()),
+                    *expected_cookie,
+                    "Cookie bytes for {cookies:?}"
+                );
+                let expected_sensitive = expected_cookie.is_some()
+                    && (0..cookies.len()).any(|index| index == sensitive_index);
+                assert_eq!(
+                    exported
+                        .headers()
+                        .get(COOKIE)
+                        .map(|value| value.is_sensitive())
+                        .unwrap_or(false),
+                    expected_sensitive,
+                    "Cookie sensitivity for {cookies:?}"
+                );
                 for name in expected.keys() {
                     assert_eq!(
                         exported

@@ -631,26 +631,39 @@ pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::Header
     if src.get_all(COOKIE).iter().count() <= 1 {
         return Ok(src.clone());
     }
+    let merged_cookie = join_duplicate_cookie_values(src.get_all(COOKIE).iter())?;
     let mut headers = http::HeaderMap::with_capacity(src.len());
-    let mut merged_cookie = Vec::new();
-    let mut merged_cookie_sensitive = false;
     for (name, value) in src {
         if name == COOKIE {
-            if !merged_cookie.is_empty() {
-                merged_cookie.extend_from_slice(b"; ");
-            }
-            merged_cookie.extend_from_slice(value.as_bytes());
-            merged_cookie_sensitive |= value.is_sensitive();
             continue;
         }
         headers.append(name.clone(), value.clone());
     }
-    if !merged_cookie.is_empty() {
-        let mut merged = http::HeaderValue::from_bytes(&merged_cookie)?;
-        merged.set_sensitive(merged_cookie_sensitive);
-        headers.insert(COOKIE, merged);
+    if let Some(merged_cookie) = merged_cookie {
+        headers.insert(COOKIE, merged_cookie);
     }
     Ok(headers)
+}
+
+/// Join duplicate H2 Cookie fields; `None` means their combined bytes are empty.
+pub(crate) fn join_duplicate_cookie_values<'a>(
+    values: impl IntoIterator<Item = &'a http::HeaderValue>,
+) -> Result<Option<http::HeaderValue>> {
+    let mut merged_cookie = Vec::new();
+    let mut merged_cookie_sensitive = false;
+    for value in values {
+        if !merged_cookie.is_empty() {
+            merged_cookie.extend_from_slice(b"; ");
+        }
+        merged_cookie.extend_from_slice(value.as_bytes());
+        merged_cookie_sensitive |= value.is_sensitive();
+    }
+    if merged_cookie.is_empty() {
+        return Ok(None);
+    }
+    let mut merged = http::HeaderValue::from_bytes(&merged_cookie)?;
+    merged.set_sensitive(merged_cookie_sensitive);
+    Ok(Some(merged))
 }
 
 fn h1_headers_into_http(src: ::http::HeaderMap) -> Result<http::HeaderMap> {
