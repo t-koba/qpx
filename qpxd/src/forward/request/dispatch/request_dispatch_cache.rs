@@ -156,7 +156,7 @@ fn maybe_spawn_forward_background_revalidation(
         let response_delay_secs = started.elapsed().as_secs();
         let backends = &runtime_state.cache.backends;
         let _ = process_upstream_response_for_cache(
-            OwnerResponse::from_http(resp),
+            resp,
             CacheWritebackContext {
                 request_snapshot: &snapshot,
                 response_delay_secs,

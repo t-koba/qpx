@@ -447,14 +447,16 @@ pub(crate) async fn proxy_http1_request(
     direct_authority: &str,
     timeout_dur: Duration,
     proxy_pool: &crate::upstream::pool::UpstreamProxyPool,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     ensure_absolute_uri(&mut req, "http", direct_authority)?;
     *req.version_mut() = http::Version::HTTP_11;
-    if let Some(upstream) = upstream_proxy {
-        return send_via_upstream_proxy(req, upstream, timeout_dur, proxy_pool).await;
-    }
-    let hyper_req = into_http1_for_codec(req)?;
-    Ok(timeout(timeout_dur, request_with_shared_client(hyper_req)).await??)
+    let response = if let Some(upstream) = upstream_proxy {
+        send_via_upstream_proxy(req, upstream, timeout_dur, proxy_pool).await?
+    } else {
+        let hyper_req = into_http1_for_codec(req)?;
+        timeout(timeout_dur, request_with_shared_client(hyper_req)).await??
+    };
+    Ok(OwnerResponse::from_http(response))
 }
 
 pub(crate) async fn proxy_http1_request_with_interim(
@@ -546,9 +548,15 @@ mod tests {
             1
         );
         let pool = crate::upstream::pool::UpstreamProxyPool::default();
-        proxy_http1_request(req, None, &addr.to_string(), Duration::from_secs(3), &pool)
-            .await
-            .unwrap();
+        let response =
+            proxy_http1_request(req, None, &addr.to_string(), Duration::from_secs(3), &pool)
+                .await
+                .unwrap();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        assert_eq!(
+            response.headers().declared_content_length().unwrap(),
+            Some(0)
+        );
         let wire = tokio::time::timeout(Duration::from_secs(3), server)
             .await
             .unwrap()
