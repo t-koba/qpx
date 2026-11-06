@@ -129,7 +129,7 @@ pub(super) async fn proxy_reverse_http_attempt(
                 .map_err(|err| anyhow!("{err}"))?;
             return Ok((
                 Vec::new(),
-                OwnerResponse::from_http(proxy_ipc(pools, hyper_req, &url, proxy_name).await?),
+                proxy_ipc(pools, hyper_req, &url, proxy_name).await?,
                 None,
             ));
         }

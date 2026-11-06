@@ -1,4 +1,3 @@
-use super::proxy::validate_ipc_response_status;
 use super::shm::{downstream_body_closed, read_shm_response_meta_after_body_writer};
 #[cfg(unix)]
 use super::shm::{remove_ipc_shm_path, write_request_body_to_shm};
@@ -107,12 +106,6 @@ async fn shm_response_meta_returns_before_body_writer_after_fast_response() {
     writer.await.expect("join writer");
 }
 
-#[test]
-fn ipc_response_status_rejects_non_http_status_class() {
-    let err = validate_ipc_response_status(700).expect_err("6xx IPC status must fail");
-    assert!(err.to_string().contains("out of range"));
-}
-
 #[tokio::test]
 async fn downstream_body_closed_reports_dropped_receiver() {
     let (sender, body) = Body::channel_with_capacity(16);
@@ -123,27 +116,109 @@ async fn downstream_body_closed_reports_dropped_receiver() {
     assert!(sender.is_closed());
 }
 
-#[test]
-fn ipc_response_headers_reconstruct_ordered_duplicates() {
-    let meta: IpcResponseMeta = serde_json::from_str(
-        r#"{"status":201,"headers":[["Content-Type","text/plain"],["Set-Cookie","a=1"],["set-cookie","b=2"],["X-Dup","first"],["x-dup","second"]]}"#,
-    ).expect("IPC response wire");
-    let builder = meta.headers.apply_to_response(
-        hyper::Response::builder().status(validate_ipc_response_status(meta.status).unwrap()),
-    );
-    let response = builder.body(Body::empty()).unwrap();
-    assert_eq!(response.status(), 201);
-    assert_eq!(response.headers()["content-type"], "text/plain");
-    for (name, expected) in [
-        ("set-cookie", ["a=1", "b=2"]),
-        ("x-dup", ["first", "second"]),
+async fn proxy_tcp_response(
+    meta: IpcResponseMeta,
+) -> Result<qpx_core::http_message::Response<Body>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let url = url::Url::parse(&format!("ipc://{}", listener.local_addr()?))?;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let _: qpx_core::ipc::meta::IpcRequestMeta =
+            qpx_core::ipc::protocol::read_frame(&mut stream)
+                .await
+                .unwrap();
+        let mut request_body = Vec::new();
+        stream.read_to_end(&mut request_body).await.unwrap();
+        assert_eq!(request_body, b"request");
+        write_frame(&mut stream, &meta).await.unwrap();
+        stream.write_all(b"response").await.unwrap();
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        let result = super::proxy_ipc(
+            &crate::pool::PoolRegistry::new(),
+            hyper::Request::new(Body::from("request")),
+            &url,
+            "test",
+        )
+        .await;
+        server.await.unwrap();
+        result
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn ipc_response_owner_preserves_metadata_and_streaming_body() {
+    use qpx_core::http_content_length::ContentLengthError;
+
+    for (lengths, declared) in [
+        (vec![], Ok(None)),
+        (vec!["0"], Ok(Some(0))),
+        (vec!["invalid"], Err(ContentLengthError::InvalidValue)),
+        (vec!["3", "4"], Err(ContentLengthError::Conflicting)),
+        (vec!["003", "3"], Ok(Some(3))),
     ] {
-        let actual: Vec<_> = response
-            .headers()
-            .get_all(name)
-            .iter()
-            .map(|v| v.to_str().unwrap())
-            .collect();
-        assert_eq!(actual, expected);
+        // Keep the raw declarations, including invalid and conflicting values, at ingress.
+        let mut pairs = vec![
+            ("Content-Type".to_string(), "text/plain".to_string()),
+            ("Set-Cookie".to_string(), "a=1".to_string()),
+            ("set-cookie".to_string(), "b=2".to_string()),
+            ("X-Dup".to_string(), "first".to_string()),
+            ("x-dup".to_string(), "second".to_string()),
+        ];
+        pairs.extend(
+            lengths
+                .iter()
+                .map(|value| ("Content-Length".to_string(), value.to_string())),
+        );
+        let meta = IpcResponseMeta {
+            status: 201,
+            headers: qpx_core::ipc::meta::IpcResponseHeaders::from_pairs(pairs),
+        };
+        let mut response = proxy_tcp_response(meta).await.unwrap();
+        assert_eq!(response.status(), 201);
+        assert_eq!(response.version(), hyper::Version::HTTP_11);
+        assert_eq!(response.headers().declared_content_length(), declared);
+        for (name, expected) in [
+            ("content-type", vec!["text/plain"]),
+            ("set-cookie", vec!["a=1", "b=2"]),
+            ("x-dup", vec!["first", "second"]),
+            ("content-length", lengths),
+        ] {
+            let actual = response
+                .headers()
+                .selected_fields_for_serialization(&[name.parse().unwrap()])
+                .remove(name)
+                .unwrap_or_default();
+            assert_eq!(actual, expected);
+        }
+        let mut body = Vec::new();
+        while let Some(chunk) = response.body_mut().data().await {
+            body.extend_from_slice(&chunk.unwrap());
+        }
+        assert_eq!(body, b"response");
+    }
+}
+
+#[tokio::test]
+async fn ipc_response_owner_retains_status_and_header_validation() {
+    for (status, name, value) in [
+        (99, "x-test", "ok"),
+        (600, "x-test", "ok"),
+        (700, "x-test", "ok"),
+        (200, "bad name", "ok"),
+        (200, "x-test", "bad\r\nvalue"),
+    ] {
+        let result = proxy_tcp_response(IpcResponseMeta {
+            status,
+            headers: qpx_core::ipc::meta::IpcResponseHeaders::from_pairs(vec![(
+                name.to_string(),
+                value.to_string(),
+            )]),
+        })
+        .await;
+        assert!(result.is_err(), "accepted {status} {name}: {value:?}");
     }
 }

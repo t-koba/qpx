@@ -1,6 +1,5 @@
 use anyhow::Result;
 use hyper::Request;
-use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use url::Url;
 
@@ -18,7 +17,7 @@ pub(super) async fn proxy_ipc_with_interim(
     let response = crate::ipc_client::proxy_ipc(pools, req, &url, proxy_name).await?;
     Ok(Http1ResponseWithInterim {
         interim: Vec::new(),
-        response: OwnerResponse::from_http(response),
+        response,
         upstream_cert: None,
         response_finalized: false,
     })

@@ -144,9 +144,7 @@ pub(super) async fn dispatch_reverse_ipc_route<R: ReverseTerminalResponse>(
         .await;
         match response {
             Ok(Ok(resp)) => {
-                let resp = http_modules
-                    .on_upstream_response(qpx_core::http_message::Response::from_http(resp))
-                    .await?;
+                let resp = http_modules.on_upstream_response(resp).await?;
                 match handle_reverse_success::<R>(ReverseSuccessInput {
                     base,
                     state,

@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use hyper::{Request, Response, StatusCode};
 use qpx_core::config::IpcMode;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::ipc::meta::IpcResponseMeta;
 use qpx_core::ipc::protocol::{read_frame, write_frame};
 use qpx_http::body::{Body, Sender};
@@ -27,7 +28,7 @@ pub(crate) async fn proxy_ipc(
     req: Request<Body>,
     url: &Url,
     _proxy_name: &str,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let mode = IpcMode::Tcp;
     let backend = match url.scheme() {
         "ipc" => {
@@ -74,7 +75,7 @@ pub(crate) async fn proxy_ipc_upstream(
     upstream: &IpcUpstream,
     _proxy_name: &str,
     context: IpcUpstreamRequestContext,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let timeout_dur = upstream.effective_timeout(context.route_timeout);
     proxy_ipc_backend(
         pools.ipc.clone(),
@@ -108,7 +109,7 @@ async fn proxy_ipc_backend(
     ipc_pool: Arc<crate::ipc_client::IpcConnectionPool>,
     mut req: Request<Body>,
     backend_request: IpcBackendRequest<'_>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let IpcBackendRequest {
         backend,
         mode,
@@ -276,7 +277,7 @@ async fn proxy_ipc_backend(
         spawn_tcp_response_reader(sender, conn, max_response_bytes, timeout_dur);
     }
 
-    Ok(builder.body(body)?)
+    Ok(OwnerResponse::from_http(builder.body(body)?))
 }
 
 fn spawn_tcp_response_reader(
