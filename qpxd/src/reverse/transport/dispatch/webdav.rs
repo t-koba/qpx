@@ -109,7 +109,7 @@ pub(super) async fn execute_webdav_service(
     })
     .await
     .map_err(|error| anyhow!("WebDAV worker failed: {error}"))??;
-    let (mut head, body) = OwnerResponse::from_http(response).into_head_and_body();
+    let (mut head, body) = response.into_head_and_body();
     let file_region = head
         .extensions_mut()
         .remove::<qpx_webdav::ResourceFileRegion>();

@@ -9,8 +9,8 @@ use crate::{
 use anyhow::{Result, anyhow};
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
-use http::{Method, Response, StatusCode};
-use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request};
+use http::{HeaderName, HeaderValue, Method, StatusCode};
+use qpx_core::http_message::{Headers, OrdinaryHeaderName, Request, Response};
 use quick_xml::XmlVersion;
 use quick_xml::events::{BytesStart, Event};
 use quick_xml::name::ResolveResult;
@@ -179,7 +179,7 @@ impl<S: WebDavStore> WebDavService<S> {
             }
             prepared => self
                 .handle_prepared(request, context, prepared)
-                .map(|response| response.map(Bytes::from)),
+                .map(|response| response.map_body(Bytes::from)),
         }
     }
 
@@ -262,24 +262,32 @@ impl<S: WebDavStore> WebDavService<S> {
     }
 
     fn options(&self) -> Result<Response<Vec<u8>>> {
-        Response::builder()
-            .status(StatusCode::NO_CONTENT)
-            .header(
-                "dav",
+        let mut response = response(StatusCode::NO_CONTENT, Vec::new())?;
+        append_header(
+            &mut response,
+            HeaderName::try_from("dav")?,
+            HeaderValue::from_static(
                 "1, 2, access-control, calendar-access, extended-mkcol, version-control, checkout-in-place, bind",
-            )
-            .header("dasl", "<DAV:basicsearch>")
-            .header(
-                http::header::ALLOW,
+            ),
+        )?;
+        append_header(
+            &mut response,
+            HeaderName::try_from("dasl")?,
+            HeaderValue::from_static("<DAV:basicsearch>"),
+        )?;
+        append_header(
+            &mut response,
+            http::header::ALLOW,
+            HeaderValue::from_static(
                 "OPTIONS, GET, HEAD, PUT, DELETE, MKCOL, MKCALENDAR, PROPFIND, PROPPATCH, LOCK, UNLOCK, COPY, MOVE, SEARCH, ACL, VERSION-CONTROL, CHECKOUT, CHECKIN, UPDATE, MERGE, REPORT, BIND, UNBIND, REBIND",
-            )
-            .body(Vec::new())
-            .map_err(Into::into)
+            ),
+        )?;
+        Ok(response)
     }
 
     fn get(&self, resource: &ResourceId, head: bool) -> Result<Response<Vec<u8>>> {
         self.get_bytes(resource, head, self.store.content_type(resource)?, false)
-            .map(|response| response.map(|body| body.to_vec()))
+            .map(|response| response.map_body(|body| body.to_vec()))
     }
 
     fn get_bytes(
@@ -317,19 +325,24 @@ impl<S: WebDavStore> WebDavService<S> {
         if read.metadata.is_collection {
             return response_bytes(StatusCode::METHOD_NOT_ALLOWED, Bytes::new());
         }
-        let mut builder = Response::builder()
-            .status(StatusCode::OK)
-            .header(http::header::CONTENT_LENGTH, read.metadata.content_length)
-            .header(http::header::ETAG, read.etag);
+        let mut response = Response::new(read.body);
+        *response.status_mut() = StatusCode::OK;
+        response
+            .headers_mut()
+            .set_content_length(read.metadata.content_length);
+        append_header(&mut response, http::header::ETAG, read.etag)?;
         if let Some(content_type) = &read.metadata.content_type {
-            builder = builder.header(http::header::CONTENT_TYPE, content_type);
+            append_header(
+                &mut response,
+                http::header::CONTENT_TYPE,
+                HeaderValue::from_str(content_type)?,
+            )?;
         }
         let file_region = read.file.map(|file| crate::ResourceFileRegion {
             file,
             offset: 0,
             len: read.metadata.content_length,
         });
-        let mut response = builder.body(read.body)?;
         if !head && let Some(file_region) = file_region {
             response.extensions_mut().insert(file_region);
         }
@@ -595,11 +608,12 @@ impl<S: WebDavStore> WebDavService<S> {
             xml.push_str("</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
         }
         xml.push_str("</D:multistatus>");
-        Response::builder()
-            .status(StatusCode::MULTI_STATUS)
-            .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(xml.into_bytes())
-            .map_err(Into::into)
+        response_with_header(
+            StatusCode::MULTI_STATUS,
+            xml.into_bytes(),
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/xml; charset=utf-8"),
+        )
     }
 
     fn search(&self, request_resource: &ResourceId, body: &[u8]) -> Result<Response<Vec<u8>>> {
@@ -749,14 +763,12 @@ impl<S: WebDavStore> WebDavService<S> {
         }
         let version = self.create_version(resource)?;
         self.store.set_checkout_owner(resource, None)?;
-        Response::builder()
-            .status(StatusCode::CREATED)
-            .header(
-                "location",
-                format!("{}/.versions/{version}", resource.as_str()),
-            )
-            .body(Vec::new())
-            .map_err(Into::into)
+        response_with_header(
+            StatusCode::CREATED,
+            Vec::new(),
+            http::header::LOCATION,
+            HeaderValue::from_str(&format!("{}/.versions/{version}", resource.as_str()))?,
+        )
     }
 
     fn create_version(&self, resource: &ResourceId) -> Result<String> {
@@ -832,11 +844,12 @@ impl<S: WebDavStore> WebDavService<S> {
             xml.push_str("</D:version-name></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
         }
         xml.push_str("</D:multistatus>");
-        Response::builder()
-            .status(StatusCode::MULTI_STATUS)
-            .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(xml.into_bytes())
-            .map_err(Into::into)
+        response_with_header(
+            StatusCode::MULTI_STATUS,
+            xml.into_bytes(),
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/xml; charset=utf-8"),
+        )
     }
 
     fn report(&self, resource: &ResourceId, body: &[u8]) -> Result<Response<Vec<u8>>> {
@@ -921,11 +934,12 @@ impl<S: WebDavStore> WebDavService<S> {
             xml.push_str("</C:calendar-data></D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response>");
         }
         xml.push_str("</D:multistatus>");
-        Response::builder()
-            .status(StatusCode::MULTI_STATUS)
-            .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
-            .body(xml.into_bytes())
-            .map_err(Into::into)
+        response_with_header(
+            StatusCode::MULTI_STATUS,
+            xml.into_bytes(),
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("application/xml; charset=utf-8"),
+        )
     }
 
     fn free_busy(
@@ -961,11 +975,12 @@ impl<S: WebDavStore> WebDavService<S> {
             "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VFREEBUSY\r\nFREEBUSY:{}\r\nEND:VFREEBUSY\r\nEND:VCALENDAR\r\n",
             periods.join(",")
         );
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(http::header::CONTENT_TYPE, "text/calendar; charset=utf-8")
-            .body(body.into_bytes())
-            .map_err(Into::into)
+        response_with_header(
+            StatusCode::OK,
+            body.into_bytes(),
+            http::header::CONTENT_TYPE,
+            HeaderValue::from_static("text/calendar; charset=utf-8"),
+        )
     }
 
     fn is_calendar_collection(&self, resource: &ResourceId) -> Result<bool> {
@@ -2161,11 +2176,12 @@ fn multistatus_property_response(
     xml.push_str(
         "</D:prop><D:status>HTTP/1.1 200 OK</D:status></D:propstat></D:response></D:multistatus>",
     );
-    Response::builder()
-        .status(StatusCode::MULTI_STATUS)
-        .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
-        .body(xml.into_bytes())
-        .map_err(Into::into)
+    response_with_header(
+        StatusCode::MULTI_STATUS,
+        xml.into_bytes(),
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/xml; charset=utf-8"),
+    )
 }
 
 fn escape_xml(value: &str) -> String {
@@ -2194,26 +2210,53 @@ fn lock_response(
         r#"<?xml version="1.0" encoding="utf-8"?><D:prop xmlns:D="DAV:"><D:lockdiscovery><D:activelock><D:locktype><D:write/></D:locktype><D:lockscope><D:{scope}/></D:lockscope><D:depth>{depth}</D:depth><D:locktoken><D:href>{}</D:href></D:locktoken><D:timeout>Second-{timeout_seconds}</D:timeout></D:activelock></D:lockdiscovery></D:prop>"#,
         escape_xml(&lock.token)
     );
-    Response::builder()
-        .status(status)
-        .header("lock-token", format!("<{}>", lock.token))
-        .header(http::header::CONTENT_TYPE, "application/xml; charset=utf-8")
-        .body(body.into_bytes())
-        .map_err(Into::into)
+    let mut response = response_with_header(
+        status,
+        body.into_bytes(),
+        HeaderName::try_from("lock-token")?,
+        HeaderValue::from_str(&format!("<{}>", lock.token))?,
+    )?;
+    append_header(
+        &mut response,
+        http::header::CONTENT_TYPE,
+        HeaderValue::from_static("application/xml; charset=utf-8"),
+    )?;
+    Ok(response)
 }
 
 fn response(status: StatusCode, body: Vec<u8>) -> Result<Response<Vec<u8>>> {
-    Response::builder()
-        .status(status)
-        .body(body)
-        .map_err(Into::into)
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    Ok(response)
 }
 
 fn response_bytes(status: StatusCode, body: Bytes) -> Result<Response<Bytes>> {
-    Response::builder()
-        .status(status)
-        .body(body)
-        .map_err(Into::into)
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    Ok(response)
+}
+
+fn response_with_header<B>(
+    status: StatusCode,
+    body: B,
+    name: HeaderName,
+    value: HeaderValue,
+) -> Result<Response<B>> {
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    append_header(&mut response, name, value)?;
+    Ok(response)
+}
+
+fn append_header<B>(
+    response: &mut Response<B>,
+    name: HeaderName,
+    value: HeaderValue,
+) -> Result<()> {
+    response
+        .headers_mut()
+        .append(OrdinaryHeaderName::try_from(name)?, value);
+    Ok(())
 }
 
 fn locked_status() -> StatusCode {
@@ -2283,7 +2326,7 @@ mod tests {
             .unwrap();
         let response = service.handle(propfind, &context).unwrap();
         assert_eq!(response.status(), 207);
-        let body = String::from_utf8(response.into_body()).unwrap();
+        let body = String::from_utf8(response.into_head_and_body().1).unwrap();
         assert!(body.contains("report.txt"));
         assert!(body.contains("current-user-principal"));
         assert!(body.contains("calendar-home-set"));
@@ -2374,7 +2417,10 @@ mod tests {
             .handle_bytes_for_resource(request, &WebDavRequestContext::default(), resource)
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(response.into_body(), Bytes::from_static(b"report"));
+        assert_eq!(
+            response.into_head_and_body().1,
+            Bytes::from_static(b"report")
+        );
     }
 
     #[test]
@@ -2816,7 +2862,7 @@ mod tests {
             .unwrap();
         let response = service.handle(request, &context).unwrap();
         assert_eq!(response.status(), StatusCode::MULTI_STATUS);
-        let body = String::from_utf8(response.into_body()).unwrap();
+        let body = String::from_utf8(response.into_head_and_body().1).unwrap();
         assert!(body.contains("/docs/report.txt"));
         assert!(!body.contains("/docs/public.txt"));
         assert!(!body.contains("/private/secret.txt"));
@@ -3024,7 +3070,8 @@ mod tests {
                     &context,
                 )
                 .unwrap()
-                .into_body(),
+                .into_head_and_body()
+                .1,
             b"version one"
         );
     }
@@ -3076,7 +3123,7 @@ mod tests {
             .unwrap();
         let response = service.handle(query, &context).unwrap();
         assert_eq!(response.status(), StatusCode::MULTI_STATUS);
-        let query_body = String::from_utf8(response.into_body()).unwrap();
+        let query_body = String::from_utf8(response.into_head_and_body().1).unwrap();
         assert!(query_body.contains("meeting.ics"), "{query_body}");
         assert!(query_body.contains("C:calendar-data"), "{query_body}");
         assert!(query_body.contains("BEGIN:VCALENDAR"), "{query_body}");
@@ -3087,7 +3134,7 @@ mod tests {
             .unwrap();
         let response = service.handle(free_busy, &context).unwrap();
         assert_eq!(response.status(), StatusCode::OK);
-        let body = String::from_utf8(response.into_body()).unwrap();
+        let body = String::from_utf8(response.into_head_and_body().1).unwrap();
         assert!(body.contains("FREEBUSY:20260711T010000Z/20260711T020000Z"));
     }
 
@@ -3160,7 +3207,8 @@ mod tests {
                     &context,
                 )
                 .unwrap()
-                .into_body(),
+                .into_head_and_body()
+                .1,
             b"one"
         );
         service
@@ -3186,7 +3234,8 @@ mod tests {
                     &context,
                 )
                 .unwrap()
-                .into_body(),
+                .into_head_and_body()
+                .1,
             b"two"
         );
         assert_eq!(
