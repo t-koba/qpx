@@ -112,8 +112,6 @@ edges:
         headers:
           response_set:
             X-Qpx-Policy: retry-limited
-        retry:
-          suppress: true
         mirror:
           enabled: false
         tags:

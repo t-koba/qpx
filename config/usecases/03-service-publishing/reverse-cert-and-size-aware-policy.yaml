@@ -47,8 +47,6 @@ edges:
           headers:
             response_add:
               X-Transfer-Profile: large-certified
-          retry:
-            suppress: true
           tags:
           - large-upload
     target:

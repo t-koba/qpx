@@ -33,8 +33,6 @@ edges:
               message: maintenance
             headers:
               X-QPX-RPC-Policy: grpc-maintenance
-          retry:
-            suppress: true
           tags:
           - rpc
           - grpc-unavailable

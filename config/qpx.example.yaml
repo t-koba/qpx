@@ -490,8 +490,6 @@ edges:
           ja4:
           - t13dh2_03_05_02
       effects:
-        retry:
-          suppress: true
         tags:
         - ai-saas
   http3:
@@ -721,8 +719,6 @@ edges:
               message: maintenance
             headers:
               X-QPX-RPC-Policy: grpc-maintenance
-          retry:
-            suppress: true
           tags:
           - grpc-unavailable
     health_check:

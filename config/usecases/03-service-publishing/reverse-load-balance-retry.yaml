@@ -36,6 +36,17 @@ edges:
       ejection:
         max_ms: 30000
     timeout_ms: 30000
+    http:
+      response_rules:
+      - name: stop-retry-for-matching-get-failures
+        match:
+          method:
+          - GET
+          response_status:
+          - 500-599
+        effects:
+          retry:
+            suppress: true
     health_check:
       interval_ms: 5000
       timeout_ms: 1000
