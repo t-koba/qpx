@@ -281,3 +281,131 @@ async fn mitm_owned_ingress_retains_upgrade_cancellation_and_trailer_frames() {
         "downstream upgrade canceled"
     );
 }
+
+#[tokio::test]
+async fn mitm_websocket_upstream_upgrade_relays_bytes_and_rejects_bad_accept() {
+    use hyper::body::Incoming;
+    use hyper::service::service_fn;
+    use hyper_util::rt::TokioIo;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::time::{Duration, timeout};
+
+    timeout(Duration::from_secs(5), async {
+        for valid_accept in [true, false] {
+            let (client_io, server_io) = tokio::io::duplex(8192);
+            let server = tokio::spawn(async move {
+                let service = service_fn(move |mut request: Request<Incoming>| async move {
+                    let server_upgrade = hyper::upgrade::on(&mut request);
+                    if valid_accept {
+                        tokio::spawn(async move {
+                            let upgraded = server_upgrade.await.expect("upstream upgrade");
+                            let mut upgraded = TokioIo::new(upgraded);
+                            let mut received = [0; 4];
+                            upgraded
+                                .read_exact(&mut received)
+                                .await
+                                .expect("client bytes");
+                            assert_eq!(&received, b"ping");
+                            upgraded.write_all(b"pong").await.expect("server bytes");
+                        });
+                    }
+                    let accept = if valid_accept {
+                        "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+                    } else {
+                        "invalid"
+                    };
+                    Ok::<_, std::convert::Infallible>(
+                        hyper::Response::builder()
+                            .status(http::StatusCode::SWITCHING_PROTOCOLS)
+                            .header(http::header::CONNECTION, "upgrade")
+                            .header(http::header::UPGRADE, "websocket")
+                            .header("sec-websocket-accept", accept)
+                            .body(Body::empty())
+                            .expect("101 response"),
+                    )
+                });
+                hyper::server::conn::http1::Builder::new()
+                    .serve_connection(TokioIo::new(server_io), service)
+                    .with_upgrades()
+                    .await
+                    .expect("upstream server connection");
+            });
+            let (sender, connection) = qpx_http::protocol::common::handshake_http1(client_io)
+                .await
+                .expect("upstream client handshake");
+            let connection = tokio::spawn(async move {
+                connection
+                    .with_upgrades()
+                    .await
+                    .expect("upstream client connection");
+            });
+            let sender = std::sync::Arc::new(tokio::sync::Mutex::new(sender));
+
+            let mut request = Request::builder()
+                .method(http::Method::GET)
+                .uri("/socket")
+                .version(http::Version::HTTP_11)
+                .header(http::header::HOST, "secure.example")
+                .header(http::header::CONNECTION, "upgrade")
+                .header(http::header::UPGRADE, "websocket")
+                .header("sec-websocket-version", "13")
+                .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+                .body(Body::empty())
+                .expect("websocket request");
+            let commit = crate::http::protocol::upgrade::install(&mut request);
+            let (downstream_io, mut downstream_client) = tokio::io::duplex(64);
+            commit.resolve_with_io(downstream_io);
+
+            let result = proxy_mitm_request(
+                request,
+                mitm_runtime(Vec::new()),
+                sender,
+                crate::http::mitm::MitmRouteContext {
+                    listener_name: "forward",
+                    src_addr: "127.0.0.1:12345".parse().expect("source address"),
+                    dst_port: 443,
+                    host: "secure.example",
+                    sni: "secure.example",
+                    upstream_cert: None,
+                },
+            )
+            .await;
+
+            if valid_accept {
+                let response = result.expect("valid WebSocket response");
+                assert_eq!(response.status(), http::StatusCode::SWITCHING_PROTOCOLS);
+                assert_eq!(
+                    crate::test_util::wire_headers(response.headers())
+                        .get("sec-websocket-accept")
+                        .and_then(|value| value.to_str().ok()),
+                    Some("s3pPLMBiTxaQ9kYGzzhZRbK+xOo=")
+                );
+                downstream_client
+                    .write_all(b"ping")
+                    .await
+                    .expect("downstream bytes");
+                let mut relayed = [0; 4];
+                timeout(
+                    Duration::from_secs(1),
+                    downstream_client.read_exact(&mut relayed),
+                )
+                .await
+                .expect("relay response timeout")
+                .expect("relayed bytes");
+                assert_eq!(&relayed, b"pong");
+            } else {
+                let error = result.expect_err("invalid WebSocket accept must be rejected");
+                assert!(
+                    format!("{error:#}").contains("WebSocket accept does not match request key"),
+                    "unexpected validation error: {error:#}"
+                );
+            }
+
+            drop(downstream_client);
+            server.abort();
+            connection.abort();
+        }
+    })
+    .await
+    .expect("bounded MITM WebSocket upgrade test");
+}
