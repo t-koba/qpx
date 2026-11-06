@@ -78,6 +78,12 @@ pub(super) fn validate_identity_sources(identity_sources: &[IdentitySourceConfig
                     bearer.header.as_deref().unwrap_or("authorization"),
                     &format!("identity_sources {} bearer.header", source.name),
                 )?;
+                if bearer.authority_timeout_ms == 0 {
+                    return Err(anyhow!(
+                        "identity_sources {} bearer.authority_timeout_ms must be positive",
+                        source.name
+                    ));
+                }
                 if let Some(dpop) = bearer.dpop.as_ref() {
                     validate_dpop_config(dpop, &source.name)?;
                 }

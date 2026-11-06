@@ -66,6 +66,9 @@ pub enum IdentitySourceKind {
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct BearerIdentityConfig {
+    /// Total deadline for each remote authority request and response body, in milliseconds.
+    #[serde(default = "default_authority_timeout_ms")]
+    pub authority_timeout_ms: u64,
     #[serde(default)]
     pub header: Option<String>,
     pub source: BearerIdentitySourceConfig,
@@ -74,6 +77,10 @@ pub struct BearerIdentityConfig {
     /// Enables RFC 9449 Demonstrating Proof of Possession validation.
     #[serde(default)]
     pub dpop: Option<DpopConfig>,
+}
+
+fn default_authority_timeout_ms() -> u64 {
+    5000
 }
 
 /// RFC 9449 resource-server validation policy for a bearer identity source.

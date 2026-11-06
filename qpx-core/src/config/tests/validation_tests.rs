@@ -1,6 +1,61 @@
 use super::*;
 
 #[test]
+fn load_config_validates_bearer_authority_timeout_ms() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let path = dir.join("bearer-timeout.yaml");
+    let base = r#"edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct
+security:
+  identity_sources:
+  - name: oauth
+    type: bearer
+    bearer:
+      source:
+        mode: jwt
+        issuer: https://issuer.example
+        audience: https://api.example
+        jwks_url: https://issuer.example/jwks
+      claims:
+        user_from_sub: true
+"#;
+    for (setting, expected) in [("", 5000), ("      authority_timeout_ms: 37\n", 37)] {
+        write_config(&path, &format!("{base}{setting}")).expect("write");
+        let config = load_config(&path).expect("valid timeout");
+        assert_eq!(
+            config.security.identity_sources[0]
+                .bearer
+                .as_ref()
+                .expect("bearer")
+                .authority_timeout_ms,
+            expected
+        );
+    }
+    for value in ["0", "-1", "1.5", "invalid"] {
+        write_config(
+            &path,
+            &format!("{base}      authority_timeout_ms: {value}\n"),
+        )
+        .expect("write");
+        let error = load_config(&path).expect_err("timeout must be a positive integer");
+        if value == "0" {
+            assert!(
+                error
+                    .to_string()
+                    .contains("bearer.authority_timeout_ms must be positive"),
+                "{error}"
+            );
+        }
+    }
+    fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
 fn load_config_rejects_unsupported_dpop_algorithm() {
     let dir = unique_tmp_dir();
     fs::create_dir_all(&dir).expect("mkdir");

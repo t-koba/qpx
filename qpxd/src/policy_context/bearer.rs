@@ -36,7 +36,6 @@ use url::Url;
 use zeroize::Zeroizing;
 
 const MAX_AUTHORITY_RESPONSE_BYTES: usize = 1024 * 1024;
-const AUTHORITY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Debug)]
 pub(super) struct CompiledBearerIdentity {
@@ -394,6 +393,7 @@ struct JwtSource {
 
 #[derive(Debug)]
 struct JwksSource {
+    authority_timeout: Duration,
     url: Url,
     cache: Mutex<Option<CachedJwks>>,
 }
@@ -414,6 +414,7 @@ struct JwkVerificationKey {
 
 #[derive(Debug)]
 struct IntrospectionSource {
+    authority_timeout: Duration,
     endpoint: Url,
     client_id: String,
     client_secret: Zeroizing<String>,
@@ -470,6 +471,7 @@ impl CompiledBearerIdentity {
                     .map(Url::parse)
                     .transpose()?
                     .map(|url| JwksSource {
+                        authority_timeout: Duration::from_millis(config.authority_timeout_ms),
                         url,
                         cache: Mutex::new(None),
                     });
@@ -489,6 +491,7 @@ impl CompiledBearerIdentity {
                 positive_cache_seconds,
                 negative_cache_seconds,
             } => BearerSource::Introspection(IntrospectionSource {
+                authority_timeout: Duration::from_millis(config.authority_timeout_ms),
                 endpoint: Url::parse(endpoint)?,
                 client_id: client_id.clone(),
                 client_secret: Zeroizing::new(std::env::var(client_secret_env).with_context(
@@ -700,10 +703,10 @@ impl JwksSource {
             .as_ref()
             .is_none_or(|cached| Instant::now() >= cached.expires_at)
         {
-            *cache = Some(fetch_jwks(state, &self.url).await?);
+            *cache = Some(fetch_jwks(state, &self.url, self.authority_timeout).await?);
         }
         if select_jwks_key(cache.as_ref(), kid, algorithm)?.is_none() {
-            *cache = Some(fetch_jwks(state, &self.url).await?);
+            *cache = Some(fetch_jwks(state, &self.url, self.authority_timeout).await?);
         }
         select_jwks_key(cache.as_ref(), kid, algorithm)?
             .ok_or_else(|| anyhow!("JWT signing key was not found after JWKS refresh"))
@@ -792,32 +795,39 @@ fn authorization_token<'a>(
         })
 }
 
-async fn fetch_jwks(state: &RuntimeState, url: &Url) -> Result<CachedJwks> {
-    let request = Request::builder()
-        .method(http::Method::GET)
-        .uri(url.as_str())
-        .body(Body::empty())?;
-    let response = authority_request(state, url, request).await?;
-    if !response.status().is_success() {
-        return Err(anyhow!("JWKS endpoint returned {}", response.status()));
-    }
-    let max_age = cache_max_age(response.headers()).min(3600);
-    let body = response
-        .into_head_and_body()
-        .1
-        .limit_bytes(MAX_AUTHORITY_RESPONSE_BYTES)
-        .collect()
-        .await?
-        .to_bytes();
-    let document: JwksDocument = serde_json::from_slice(&body)?;
-    let keys = verification_keys(document)?;
-    if keys.is_empty() {
-        return Err(anyhow!("JWKS contains no supported verification keys"));
-    }
-    Ok(CachedJwks {
-        keys,
-        expires_at: Instant::now() + Duration::from_secs(max_age.max(1)),
+async fn fetch_jwks(
+    state: &RuntimeState,
+    url: &Url,
+    authority_timeout: Duration,
+) -> Result<CachedJwks> {
+    timeout(authority_timeout, async {
+        let request = Request::builder()
+            .method(http::Method::GET)
+            .uri(url.as_str())
+            .body(Body::empty())?;
+        let response = authority_request(state, url, request).await?;
+        if !response.status().is_success() {
+            return Err(anyhow!("JWKS endpoint returned {}", response.status()));
+        }
+        let max_age = cache_max_age(response.headers()).min(3600);
+        let body = response
+            .into_head_and_body()
+            .1
+            .limit_bytes(MAX_AUTHORITY_RESPONSE_BYTES)
+            .collect()
+            .await?
+            .to_bytes();
+        let document: JwksDocument = serde_json::from_slice(&body)?;
+        let keys = verification_keys(document)?;
+        if keys.is_empty() {
+            return Err(anyhow!("JWKS contains no supported verification keys"));
+        }
+        Ok(CachedJwks {
+            keys,
+            expires_at: Instant::now() + Duration::from_secs(max_age.max(1)),
+        })
     })
+    .await?
 }
 
 async fn fetch_introspection(
@@ -825,38 +835,41 @@ async fn fetch_introspection(
     source: &IntrospectionSource,
     token: &str,
 ) -> Result<Option<Value>> {
-    let body = url::form_urlencoded::Serializer::new(String::new())
-        .append_pair("token", token)
-        .finish();
-    let authorization = super::oauth::oauth_client_secret_basic_header(
-        &source.client_id,
-        source.client_secret.as_str(),
-    )?;
-    let request = Request::builder()
-        .method(http::Method::POST)
-        .uri(source.endpoint.as_str())
-        .header(
-            http::header::CONTENT_TYPE,
-            "application/x-www-form-urlencoded",
-        )
-        .header(http::header::AUTHORIZATION, authorization)
-        .body(Body::from(body))?;
-    let response = authority_request(state, &source.endpoint, request).await?;
-    if !response.status().is_success() {
-        return Err(anyhow!(
-            "introspection endpoint returned {}",
-            response.status()
-        ));
-    }
-    let body = response
-        .into_head_and_body()
-        .1
-        .limit_bytes(MAX_AUTHORITY_RESPONSE_BYTES)
-        .collect()
-        .await?
-        .to_bytes();
-    let payload: Value = serde_json::from_slice(&body)?;
-    Ok(is_active(&payload).then_some(payload))
+    timeout(source.authority_timeout, async {
+        let body = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("token", token)
+            .finish();
+        let authorization = super::oauth::oauth_client_secret_basic_header(
+            &source.client_id,
+            source.client_secret.as_str(),
+        )?;
+        let request = Request::builder()
+            .method(http::Method::POST)
+            .uri(source.endpoint.as_str())
+            .header(
+                http::header::CONTENT_TYPE,
+                "application/x-www-form-urlencoded",
+            )
+            .header(http::header::AUTHORIZATION, authorization)
+            .body(Body::from(body))?;
+        let response = authority_request(state, &source.endpoint, request).await?;
+        if !response.status().is_success() {
+            return Err(anyhow!(
+                "introspection endpoint returned {}",
+                response.status()
+            ));
+        }
+        let body = response
+            .into_head_and_body()
+            .1
+            .limit_bytes(MAX_AUTHORITY_RESPONSE_BYTES)
+            .collect()
+            .await?
+            .to_bytes();
+        let payload: Value = serde_json::from_slice(&body)?;
+        Ok(is_active(&payload).then_some(payload))
+    })
+    .await?
 }
 
 async fn authority_request(
@@ -864,24 +877,21 @@ async fn authority_request(
     url: &Url,
     request: Request<Body>,
 ) -> Result<qpx_core::http_message::Response<Body>> {
-    timeout(AUTHORITY_TIMEOUT, async {
-        match url.scheme() {
-            "http" => crate::http::protocol::common::request_with_shared_client(request)
-                .await
-                .map(qpx_core::http_message::Response::from_http)
-                .map_err(Into::into),
-            "https" => {
-                crate::upstream::origin::shared_reverse_https_request_with_trust(
-                    &state.pools,
-                    qpx_core::http_message::Request::from_http(request),
-                    None,
-                )
-                .await
-            }
-            scheme => Err(anyhow!("unsupported authority URL scheme: {scheme}")),
+    match url.scheme() {
+        "http" => crate::http::protocol::common::request_with_shared_client(request)
+            .await
+            .map(qpx_core::http_message::Response::from_http)
+            .map_err(Into::into),
+        "https" => {
+            crate::upstream::origin::shared_reverse_https_request_with_trust(
+                &state.pools,
+                qpx_core::http_message::Request::from_http(request),
+                None,
+            )
+            .await
         }
-    })
-    .await?
+        scheme => Err(anyhow!("unsupported authority URL scheme: {scheme}")),
+    }
 }
 
 fn validate_claims_with_skew(
@@ -1566,6 +1576,7 @@ mod tests {
             std::env::set_var(&env_name, key_pair.public_key_pem());
         }
         let config = BearerIdentityConfig {
+            authority_timeout_ms: 5000,
             header: None,
             source: BearerIdentitySourceConfig::Jwt {
                 issuer: "test-issuer".to_string(),
@@ -1863,6 +1874,102 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn authority_timeout_covers_stalled_jwks_and_introspection_bodies() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let state = bearer_test_runtime();
+        for introspection in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let endpoint = format!("http://{}/authority", listener.local_addr().unwrap());
+            let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 1024];
+                crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
+                    )
+                    .await
+                    .unwrap();
+                headers_tx.send(()).unwrap();
+                // Keep the incomplete body open until the client has timed out.
+                let _ = release_rx.await;
+            });
+            let identity = {
+                let _guard = crate::test_env_lock().lock().unwrap();
+                let env_name = bearer_test_env_name("AUTHORITY_TIMEOUT");
+                // SAFETY: process-unique test variable, removed before releasing the lock.
+                unsafe {
+                    std::env::set_var(&env_name, "test-authority-secret");
+                }
+                let source = if introspection {
+                    serde_json::json!({"mode": "introspection", "endpoint": endpoint,
+                        "client_id": "test-client", "client_secret_env": env_name})
+                } else {
+                    serde_json::json!({"mode": "jwt", "issuer": "test", "audience": "test",
+                        "jwks_url": endpoint})
+                };
+                let config: BearerIdentityConfig = serde_json::from_value(serde_json::json!({
+                    "authority_timeout_ms": 250, "source": source
+                }))
+                .unwrap();
+                let identity = CompiledBearerIdentity::from_config("test", &config);
+                // SAFETY: the variable is still protected by the environment lock.
+                unsafe {
+                    std::env::remove_var(&env_name);
+                }
+                identity.unwrap()
+            };
+            let fetch = async {
+                match &identity.source {
+                    BearerSource::Jwt(source) => source
+                        .jwks
+                        .as_ref()
+                        .unwrap()
+                        .verification_key(&state, None, JwtAlgorithm::Rs256)
+                        .await
+                        .map(|_| ()),
+                    BearerSource::Introspection(source) => {
+                        source.introspect(&state, "test-token").await.map(|_| ())
+                    }
+                }
+            };
+            tokio::pin!(fetch);
+            tokio::select! {
+                result = &mut fetch => panic!("fetch ended before response headers: {result:?}"),
+                result = headers_rx => result.expect("server sent response headers"),
+            }
+            // Advance only after real socket I/O; avoid timing-sensitive wall-clock assertions.
+            tokio::time::pause();
+            tokio::time::advance(Duration::from_millis(250)).await;
+            let error = timeout(Duration::from_millis(1), &mut fetch)
+                .await
+                .expect("configured deadline, not a fresh body deadline or hardcoded five seconds")
+                .expect_err("incomplete authority body must fail closed");
+            assert!(
+                error
+                    .downcast_ref::<tokio::time::error::Elapsed>()
+                    .is_some(),
+                "{error:#}"
+            );
+            match &identity.source {
+                BearerSource::Jwt(source) => {
+                    assert!(source.jwks.as_ref().unwrap().cache.lock().await.is_none())
+                }
+                BearerSource::Introspection(source) => {
+                    assert!(source.cache.lock().await.is_empty())
+                }
+            }
+            tokio::time::resume();
+            release_tx.send(()).unwrap();
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn introspection_request_sends_form_encoded_client_secret_basic() {
         use base64::Engine as _;
         use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -1926,6 +2033,7 @@ mod tests {
 
         let state = bearer_test_runtime();
         let source = IntrospectionSource {
+            authority_timeout: Duration::from_millis(5000),
             endpoint: Url::parse(&format!("http://{addr}/introspect"))
                 .expect("mock introspection url"),
             client_id: client_id.to_string(),
