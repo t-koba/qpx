@@ -133,11 +133,9 @@ pub(super) async fn execute_forward_upstream(
             return Err(err);
         }
     };
-    let mut response = proxied.response;
+    let mut response = OwnerResponse::from_http(proxied.response);
     attach_interim_response_heads(&mut response, proxied.interim);
-    let mut response = http_modules
-        .on_upstream_response(OwnerResponse::from_http(response))
-        .await?;
+    let mut response = http_modules.on_upstream_response(response).await?;
     let response_policy_tags = match apply_forward_response_policy(ForwardResponsePolicyInput {
         response,
         http_modules,
