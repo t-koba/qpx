@@ -6,7 +6,8 @@ use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use http_body::Frame;
-use hyper::{Method, Response, StatusCode};
+use hyper::{Method, StatusCode};
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::{Body, BodyError};
 use qpx_http::protocol::semantics::response_status_has_no_body;
 use std::future::Future;
@@ -38,31 +39,42 @@ pub(super) async fn recv_h3_response_with_interim(
     }
 }
 
-pub(super) fn h3_response_to_hyper(
+pub(super) fn h3_response_to_owner(
     response: ::http::Response<()>,
     request_method: &Method,
     upstream: H3ClientRecvStream,
     inflight_guard: InflightStreamGuard,
     timeout_dur: Duration,
     request_relay: Option<H3RequestRelayJoin>,
-) -> Result<Response<Body>> {
-    let (parts, _) = response.into_parts();
-    let status =
-        qpx_http::protocol::semantics::validate_http_status_class(parts.status, "HTTP/3 response")?;
-    let headers = h1_headers_to_http(&parts.headers)?;
-    let declared_length = declared_h3_response_body_length(request_method, status, &headers)?;
-    let mut out = Response::builder()
-        .status(status)
-        .body(body_from_h3_stream(
+) -> Result<OwnerResponse<Body>> {
+    let (response, declared_length) = own_h3_response_head(response, request_method)?;
+    Ok(response.map_body(|()| {
+        body_from_h3_stream(
             upstream,
             inflight_guard,
             timeout_dur,
             request_relay,
             declared_length,
-        ))?;
-    *out.headers_mut() = headers;
-    *out.version_mut() = http::Version::HTTP_3;
-    Ok(out)
+        )
+    }))
+}
+
+fn own_h3_response_head(
+    mut response: ::http::Response<()>,
+    request_method: &Method,
+) -> Result<(OwnerResponse<()>, Option<u64>)> {
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
+        response.status(),
+        "HTTP/3 response",
+    )?;
+    let headers = h1_headers_to_http(response.headers())?;
+    let declared_length = declared_h3_response_body_length(request_method, status, &headers)?;
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    *response.version_mut() = http::Version::HTTP_3;
+    // The former reconstructed response did not retain library extensions.
+    response.extensions_mut().clear();
+    Ok((OwnerResponse::from_http(response), declared_length))
 }
 
 pub(super) fn declared_h3_response_body_length(
@@ -336,5 +348,112 @@ impl Drop for InflightStreamGuard {
             super::metrics::inflight(pooled.origin_label.as_str(), current);
             pooled.inflight_below_threshold.notify_waiters();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use http::header::{CONTENT_LENGTH, COOKIE};
+    use http::{HeaderValue, Version};
+
+    #[test]
+    fn h3_response_owner_preserves_converted_head() {
+        for cookies in [vec![], vec![""], vec!["", "a=1", "", "b=2"]] {
+            let mut decoded = http::Response::builder()
+                .status(StatusCode::BAD_GATEWAY)
+                .version(Version::HTTP_2)
+                .body(())
+                .unwrap();
+            decoded.extensions_mut().insert(42_u32);
+            let headers = decoded.headers_mut();
+            headers.append("x-repeat", HeaderValue::from_static("first"));
+            let mut opaque = HeaderValue::from_bytes(b"\x80\xff").unwrap();
+            opaque.set_sensitive(true);
+            headers.append("x-repeat", opaque);
+            headers.append("set-cookie", HeaderValue::from_static("a=1"));
+            headers.append("set-cookie", HeaderValue::from_static("b=2"));
+            for cookie in cookies {
+                let mut value = HeaderValue::from_static(cookie);
+                value.set_sensitive(cookie == "b=2");
+                headers.append(COOKIE, value);
+            }
+            headers.append(CONTENT_LENGTH, HeaderValue::from_static("005"));
+            let expected = h1_headers_to_http(headers).unwrap();
+
+            let (owner, declared) = own_h3_response_head(decoded, &Method::GET).unwrap();
+            assert_eq!(owner.status(), StatusCode::BAD_GATEWAY);
+            assert_eq!(owner.version(), Version::HTTP_3);
+            assert_eq!(declared, Some(5));
+            assert!(owner.extensions().is_empty());
+            let actual = owner.into_http_for_library();
+            let fields = |headers: &http::HeaderMap| {
+                headers
+                    .iter()
+                    .map(|(name, value)| {
+                        (
+                            name.clone(),
+                            value.as_bytes().to_vec(),
+                            value.is_sensitive(),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(fields(actual.headers()), fields(&expected));
+        }
+    }
+
+    #[test]
+    fn h3_response_owner_keeps_strict_content_length_and_no_body_rules() {
+        for (method, status, no_body) in [
+            (Method::GET, StatusCode::OK, false),
+            (Method::HEAD, StatusCode::OK, true),
+            (Method::GET, StatusCode::NO_CONTENT, true),
+            (Method::GET, StatusCode::NOT_MODIFIED, true),
+            (Method::GET, StatusCode::RESET_CONTENT, true),
+            (Method::CONNECT, StatusCode::OK, true),
+            (Method::CONNECT, StatusCode::BAD_GATEWAY, false),
+        ] {
+            for (values, expected) in [
+                (vec![], Ok(None)),
+                (vec!["0"], Ok(Some(0))),
+                (vec!["005", "5"], Ok(Some(5))),
+                (vec!["invalid"], Err(())),
+                (vec!["4", "5"], Err(())),
+            ] {
+                let mut decoded = http::Response::builder().status(status).body(()).unwrap();
+                for value in &values {
+                    decoded
+                        .headers_mut()
+                        .append(CONTENT_LENGTH, HeaderValue::from_static(value));
+                }
+                let result = own_h3_response_head(decoded, &method);
+                match expected {
+                    Ok(length) => {
+                        let (owner, declared) = result.unwrap();
+                        assert_eq!(declared, if no_body { Some(0) } else { length });
+                        let exported = owner.into_http_for_library();
+                        let actual: Vec<_> = exported
+                            .headers()
+                            .get_all(CONTENT_LENGTH)
+                            .iter()
+                            .map(|value| value.to_str().unwrap())
+                            .collect();
+                        assert_eq!(actual, values);
+                    }
+                    Err(()) => assert!(result.is_err(), "{method} {status}: {values:?}"),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn h3_response_owner_rejects_out_of_range_status() {
+        let decoded = http::Response::builder().status(600).body(()).unwrap();
+        let error = own_h3_response_head(decoded, &Method::GET).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "HTTP/3 response status is out of range: 600"
+        );
     }
 }

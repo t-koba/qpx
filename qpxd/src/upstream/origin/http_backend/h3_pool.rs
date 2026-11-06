@@ -9,7 +9,6 @@ use crate::http3::quic::{
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::http_message::Request as OwnerRequest;
-use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_request_trailers;
@@ -32,7 +31,7 @@ pub(super) use self::alt_svc::{
     request_can_use_alt_svc_h3,
 };
 use self::response::{
-    InflightStreamGuard, abort_h3_request_relay, h3_response_to_hyper, join_h3_request_relay,
+    InflightStreamGuard, abort_h3_request_relay, h3_response_to_owner, join_h3_request_relay,
     recv_h3_response_with_interim,
 };
 
@@ -269,7 +268,7 @@ pub(super) async fn proxy_h3_origin(
     {
         join_h3_request_relay(relay).await?;
     }
-    let response = h3_response_to_hyper(
+    let response = h3_response_to_owner(
         response,
         &request_method,
         req_recv,
@@ -279,7 +278,7 @@ pub(super) async fn proxy_h3_origin(
     )?;
     Ok(crate::upstream::raw_http1::Http1ResponseWithInterim {
         interim,
-        response: OwnerResponse::from_http(response),
+        response,
         upstream_cert: Some(pooled.upstream_cert.clone()),
         response_finalized: false,
     })
