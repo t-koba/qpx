@@ -79,10 +79,10 @@ impl ReverseConnInfo {
     }
 }
 
-// The raw-H1 dispatcher still owns its standard head until its InMemory
-// decision. Select the carrier after standard-only finalization, before the
-// reverse capture/limit/audit tail and shared route effects. Ordinary services
-// select the opaque owner, with no owner-to-standard bridge.
+// Production reverse listeners select the opaque owner. Raw-H1 retains it
+// through generic dispatch and exports standard parts only at HTTP/1 egress;
+// direct relay uses its raw-head owner, while interim heads remain separate.
+// The standard terminal carrier below is exercised only by parity tests.
 pub(super) trait ReverseTerminalResponse:
     crate::http::response_carrier::ResponseCarrier
 {
