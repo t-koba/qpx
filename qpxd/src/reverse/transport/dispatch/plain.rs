@@ -122,8 +122,7 @@ pub(super) async fn dispatch_plain_reverse_http(
     let (interim, response, response_finalized) = match response {
         Ok(Ok(response)) => (
             response.interim,
-            // Import once from the network adapter; all remaining mutations use the owner.
-            OwnerResponse::from_http(response.response),
+            response.response,
             response.response_finalized,
         ),
         Ok(Err(err)) => {

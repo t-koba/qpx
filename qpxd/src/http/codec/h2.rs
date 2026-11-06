@@ -7,8 +7,10 @@ use h2::Reason;
 use h2::RecvStream;
 use h2::server::SendResponse;
 use http_body::Frame;
+use hyper::Request;
+#[cfg(test)]
+use hyper::Response;
 use hyper::header::COOKIE;
-use hyper::{Request, Response};
 use qpx_core::http_message::{Headers, OrdinaryHeaderName, Response as OwnerResponse};
 use qpx_http::body::{Body, BodyError};
 use qpx_http::protocol::semantics::response_status_has_no_body;
@@ -742,13 +744,11 @@ pub(crate) fn h2_response_to_hyper(
     Ok(h2_response_to_owner(response)?.into_http_for_library())
 }
 
-pub(crate) fn h2_response_to_hyper_with_inflight(
+pub(crate) fn h2_response_to_owner_with_inflight(
     response: ::http::Response<RecvStream>,
     inflight: InflightCounterGuard,
-) -> Result<Response<Body>> {
-    Ok(own_h2_response(response)?
-        .map_body(|body| h2_response_body_with_inflight(body, inflight))
-        .into_http_for_library())
+) -> Result<OwnerResponse<Body>> {
+    Ok(own_h2_response(response)?.map_body(|body| h2_response_body_with_inflight(body, inflight)))
 }
 
 enum H2RecvBodyKind {

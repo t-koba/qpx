@@ -523,7 +523,7 @@ async fn invalid_h2_response_releases_inflight_on_conversion_error() {
     let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
     assert_eq!(inflight.load(Ordering::Relaxed), 4);
 
-    let result = h2_response_to_hyper_with_inflight(response, reservation);
+    let result = h2_response_to_owner_with_inflight(response, reservation);
 
     assert!(result.is_err(), "invalid final status must be rejected");
     assert_eq!(inflight.load(Ordering::Relaxed), 3);
@@ -536,7 +536,7 @@ async fn empty_h2_response_releases_inflight_immediately() {
     let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
 
     let converted =
-        h2_response_to_hyper_with_inflight(response, reservation).expect("convert response");
+        h2_response_to_owner_with_inflight(response, reservation).expect("convert response");
 
     assert!(converted.body().is_end_stream());
     assert_eq!(inflight.load(Ordering::Relaxed), 0);
@@ -549,7 +549,7 @@ async fn nonempty_h2_response_retains_inflight_until_body_drop() {
     let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
 
     let converted =
-        h2_response_to_hyper_with_inflight(response, reservation).expect("convert response");
+        h2_response_to_owner_with_inflight(response, reservation).expect("convert response");
 
     assert!(!converted.body().is_end_stream());
     assert_eq!(inflight.load(Ordering::Relaxed), 1);
@@ -564,10 +564,12 @@ async fn nonempty_h2_response_releases_inflight_after_body_consumption() {
     let reservation = InflightCounterGuard::reserve(Some(inflight.clone()));
 
     let converted =
-        h2_response_to_hyper_with_inflight(response, reservation).expect("convert response");
+        h2_response_to_owner_with_inflight(response, reservation).expect("convert response");
 
     assert_eq!(inflight.load(Ordering::Relaxed), 1);
-    let bytes = to_bytes(converted.into_body()).await.expect("read body");
+    let bytes = to_bytes(converted.into_head_and_body().1)
+        .await
+        .expect("read body");
     assert_eq!(bytes.as_ref(), b"body");
     assert_eq!(inflight.load(Ordering::Relaxed), 0);
 }

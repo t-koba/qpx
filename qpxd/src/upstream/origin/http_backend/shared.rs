@@ -8,9 +8,10 @@ use crate::upstream::raw_http1::{
     Http1ConnectionRecycler, Http1ResponseWithInterim, send_http1_request_with_interim_reusable,
 };
 use anyhow::{Result, anyhow};
-use hyper::Response;
 use hyper::header::{HOST, HeaderValue};
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ pub(crate) async fn shared_reverse_https_request_with_trust(
     pools: &crate::pool::PoolRegistry,
     mut req: OwnerRequest<Body>,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let parsed = url::Url::parse(req.uri().to_string().as_str())?;
     let scheme = parsed.scheme().to_string();
     let host = parsed

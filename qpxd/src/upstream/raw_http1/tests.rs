@@ -111,7 +111,7 @@ async fn send_http1_request_with_interim_parses_early_hints() {
     );
     assert_eq!(response.response.status(), StatusCode::OK);
     assert_eq!(
-        to_bytes(response.response.into_body())
+        to_bytes(response.response.into_head_and_body().1)
             .await
             .expect("body bytes"),
         Bytes::from_static(b"OK")

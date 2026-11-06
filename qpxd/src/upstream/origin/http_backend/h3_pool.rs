@@ -9,6 +9,7 @@ use crate::http3::quic::{
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::http_message::Request as OwnerRequest;
+use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::tls::{CompiledUpstreamTlsTrust, UpstreamCertificateInfo};
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::validate_request_trailers;
@@ -278,7 +279,7 @@ pub(super) async fn proxy_h3_origin(
     )?;
     Ok(crate::upstream::raw_http1::Http1ResponseWithInterim {
         interim,
-        response,
+        response: OwnerResponse::from_http(response),
         upstream_cert: Some(pooled.upstream_cert.clone()),
         response_finalized: false,
     })

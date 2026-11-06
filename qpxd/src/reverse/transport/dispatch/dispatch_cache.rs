@@ -360,7 +360,7 @@ fn maybe_spawn_reverse_revalidation(req: &OwnerRequest<Body>, input: ReverseReva
         };
         let response_delay_secs = started.elapsed().as_secs();
         let _ = process_upstream_response_for_cache(
-            Response::from_http(resp),
+            resp,
             CacheWritebackContext {
                 request_snapshot: &snapshot,
                 response_delay_secs,

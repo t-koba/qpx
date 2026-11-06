@@ -614,10 +614,10 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     session.recycle_response_globally(&mut proxied);
     let proxied = proxied.into_http_response()?;
     let interim = proxied.interim;
-    // This conversion is the parsed upstream HTTP response boundary. Keep the
-    // fallback response owner-backed through capture limits and finalization;
+    // The adapter has imported the parsed upstream response. Keep the fallback
+    // owner-backed through capture limits and finalization;
     // only the specialized in-memory serializer path needs standard parts.
-    let mut response = OwnerResponse::from_http(proxied.response);
+    let mut response = proxied.response;
     crate::http::capture::stream::limit_response_body_for_plan_in_place(&mut response, &route.plan);
     // RFC 9110 §7.6.3: Via received-protocol is the parsed upstream version,
     // not the downstream request version.

@@ -1,6 +1,7 @@
 use anyhow::{Result, anyhow};
 use bytes::BytesMut;
-use hyper::{Request, Response, StatusCode};
+use hyper::{Request, StatusCode};
+use qpx_core::http_message::Response as OwnerResponse;
 // Keep raw HTTP/1 on qpx-core's shared Content-Length parser.
 use qpx_core::http_content_length::declared_content_length as parse_declared_content_length;
 use qpx_core::tls::UpstreamCertificateInfo;
@@ -52,7 +53,7 @@ pub(crate) use interim::InterimResponseHead;
 
 pub(crate) struct Http1ResponseWithInterim {
     pub(crate) interim: Vec<InterimResponseHead>,
-    pub(crate) response: Response<Body>,
+    pub(crate) response: OwnerResponse<Body>,
     pub(crate) upstream_cert: Option<UpstreamCertificateInfo>,
     pub(crate) response_finalized: bool,
 }
@@ -201,7 +202,7 @@ where
         retain_active_permit(response.body_mut(), active_permit);
         Ok(Http1ResponseWithInterim {
             interim,
-            response,
+            response: OwnerResponse::from_http(response),
             upstream_cert: None,
             response_finalized: materialize_headers,
         })
@@ -402,7 +403,7 @@ where
     let response = response::build_response(stream, final_head, buffered_body, write_buf, recycler);
     Ok(Http1ResponseWithInterim {
         interim,
-        response,
+        response: OwnerResponse::from_http(response),
         upstream_cert: None,
         response_finalized: false,
     })
@@ -436,7 +437,7 @@ where
         response::build_raw_response(stream, final_head, buffered_body, write_buf, Some(recycler));
     Ok(Http1ResponseWithInterim {
         interim,
-        response,
+        response: OwnerResponse::from_http(response),
         upstream_cert: None,
         response_finalized: false,
     })

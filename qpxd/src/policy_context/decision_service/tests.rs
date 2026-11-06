@@ -407,8 +407,11 @@ fn decision_service_content_length_is_rejected_before_body_read() {
     let mut headers = HeaderMap::new();
     headers.insert(http::header::CONTENT_LENGTH, "65".parse().expect("header"));
 
-    let err = validate_decision_service_content_length(&headers, 64)
-        .expect_err("content-length above cap should fail");
+    let err = validate_decision_service_content_length(
+        declared_content_length(&headers).ok().flatten(),
+        64,
+    )
+    .expect_err("content-length above cap should fail");
     assert!(err.to_string().contains("exceeds hard cap"));
 }
 
@@ -422,8 +425,11 @@ fn decision_service_reads_the_declared_length_through_the_owner() {
         "65, 65".parse().expect("header"),
     );
 
-    let err = validate_decision_service_content_length(&headers, 64)
-        .expect_err("content-length above cap should fail");
+    let err = validate_decision_service_content_length(
+        declared_content_length(&headers).ok().flatten(),
+        64,
+    )
+    .expect_err("content-length above cap should fail");
     assert!(err.to_string().contains("exceeds hard cap"));
 
     // A declaration the owner refuses names no length, so the body is read
@@ -431,7 +437,7 @@ fn decision_service_reads_the_declared_length_through_the_owner() {
     let mut headers = HeaderMap::new();
     headers.insert(http::header::CONTENT_LENGTH, "+65".parse().expect("header"));
 
-    validate_decision_service_content_length(&headers, 64)
+    validate_decision_service_content_length(declared_content_length(&headers).ok().flatten(), 64)
         .expect("a declaration that names no length is not over the cap");
 }
 

@@ -1,8 +1,10 @@
 use anyhow::Result;
 use arc_swap::ArcSwapOption;
+use hyper::Request;
 use hyper::header::{HOST, HeaderValue};
-use hyper::{Request, Response};
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_http::body::Body;
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -224,7 +226,7 @@ pub(crate) async fn proxy_http(
     origin: &OriginEndpoint,
     proxy_name: &str,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let mut proxied = proxy_http_with_interim(pools, req, origin, proxy_name, trust).await?;
     attach_interim_response_heads(&mut proxied.response, proxied.interim);
     Ok(proxied.response)

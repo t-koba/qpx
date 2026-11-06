@@ -13,7 +13,6 @@ use crate::upstream::origin::{
     proxy_http_with_interim_timeout_on_connection,
 };
 use anyhow::{Result, anyhow};
-use hyper::Response;
 use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
 use tokio::time::{Duration, timeout};
@@ -114,7 +113,7 @@ pub(super) async fn proxy_reverse_http_attempt(
 ) -> std::result::Result<
     Result<(
         InterimList,
-        Response<Body>,
+        OwnerResponse<Body>,
         Option<qpx_core::tls::UpstreamCertificateInfo>,
     )>,
     tokio::time::error::Elapsed,
@@ -130,7 +129,7 @@ pub(super) async fn proxy_reverse_http_attempt(
                 .map_err(|err| anyhow!("{err}"))?;
             return Ok((
                 Vec::new(),
-                proxy_ipc(pools, hyper_req, &url, proxy_name).await?,
+                OwnerResponse::from_http(proxy_ipc(pools, hyper_req, &url, proxy_name).await?),
                 None,
             ));
         }

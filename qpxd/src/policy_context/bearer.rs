@@ -9,14 +9,18 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use http::header::HeaderName;
 use http_body_util::BodyExt as _;
-use hyper::{HeaderMap, Request};
+#[cfg(test)]
+use hyper::HeaderMap;
+use hyper::Request;
 use qpx_core::config::{BearerIdentityConfig, BearerIdentitySourceConfig, DpopConfig};
 use qpx_core::dpop::{
     DpopAlgorithm, DpopError, DpopJwk, DpopPolicy, DpopReplayError, DpopReplayKey, DpopReplayStore,
     DpopSignatureError, DpopSignatureVerifier, DpopValidationContext, access_token_jkt,
     validate_dpop,
 };
-use qpx_core::http_message::{Headers, IdentityAuthorizationError, OrdinaryHeaderName};
+use qpx_core::http_message::{
+    Headers, IdentityAuthorizationError, OrdinaryHeaderMut, OrdinaryHeaderName,
+};
 use qpx_http::body::Body;
 use qpx_http::problem::{PROBLEM_JSON, ProblemDetails};
 use ring::signature;
@@ -799,7 +803,8 @@ async fn fetch_jwks(state: &RuntimeState, url: &Url) -> Result<CachedJwks> {
     }
     let max_age = cache_max_age(response.headers()).min(3600);
     let body = response
-        .into_body()
+        .into_head_and_body()
+        .1
         .limit_bytes(MAX_AUTHORITY_RESPONSE_BYTES)
         .collect()
         .await?
@@ -844,7 +849,8 @@ async fn fetch_introspection(
         ));
     }
     let body = response
-        .into_body()
+        .into_head_and_body()
+        .1
         .limit_bytes(MAX_AUTHORITY_RESPONSE_BYTES)
         .collect()
         .await?
@@ -857,11 +863,12 @@ async fn authority_request(
     state: &RuntimeState,
     url: &Url,
     request: Request<Body>,
-) -> Result<hyper::Response<Body>> {
+) -> Result<qpx_core::http_message::Response<Body>> {
     timeout(AUTHORITY_TIMEOUT, async {
         match url.scheme() {
             "http" => crate::http::protocol::common::request_with_shared_client(request)
                 .await
+                .map(qpx_core::http_message::Response::from_http)
                 .map_err(Into::into),
             "https" => {
                 crate::upstream::origin::shared_reverse_https_request_with_trust(
@@ -919,8 +926,11 @@ fn is_active(payload: &Value) -> bool {
     payload.get("active").and_then(Value::as_bool) == Some(true)
 }
 
-fn cache_max_age(headers: &HeaderMap) -> u64 {
-    qpx_core::http_token::header_value_members(headers, &http::header::CACHE_CONTROL)
+fn cache_max_age(headers: &impl OrdinaryHeaderMut) -> u64 {
+    let Ok(name) = OrdinaryHeaderName::try_from(http::header::CACHE_CONTROL) else {
+        return 300;
+    };
+    qpx_core::http_token::value_members(headers.ordinary_values(&name))
         .find_map(|directive| {
             directive
                 .strip_prefix("max-age=")

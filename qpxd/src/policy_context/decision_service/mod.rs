@@ -5,7 +5,7 @@ use base64::Engine as _;
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use http::header::HeaderName;
 use http_body_util::BodyExt;
-use hyper::{HeaderMap, Request};
+use hyper::Request;
 use jsonschema::Validator;
 use qpx_core::config::{
     ActionConfig, ActionKind, DecisionServiceAuthorityConfig, DecisionServiceConfig,
@@ -438,7 +438,7 @@ async fn decision_service_round_trip(
                     crate::http::protocol::common::request_with_shared_client(request).await?;
                 let status = response.status();
                 validate_decision_service_content_length(
-                    response.headers(),
+                    declared_content_length(response.headers()).ok().flatten(),
                     cfg.max_response_bytes,
                 )?;
                 let (body_len, response) = parse_decision_service_response_body(
@@ -460,11 +460,11 @@ async fn decision_service_round_trip(
                 .await?;
                 let status = response.status();
                 validate_decision_service_content_length(
-                    response.headers(),
+                    response.headers().declared_content_length().ok().flatten(),
                     cfg.max_response_bytes,
                 )?;
                 let (body_len, response) = parse_decision_service_response_body(
-                    response.into_body(),
+                    response.into_head_and_body().1,
                     cfg.max_response_bytes,
                 )
                 .await?;
@@ -553,7 +553,9 @@ async fn fetch_oauth2_client_credentials_token(
     let response = match provider.endpoint.scheme() {
         "http" => {
             timeout(cfg.timeout, async {
-                crate::http::protocol::common::request_with_shared_client(request).await
+                crate::http::protocol::common::request_with_shared_client(request)
+                    .await
+                    .map(qpx_core::http_message::Response::from_http)
             })
             .await??
         }
@@ -577,7 +579,7 @@ async fn fetch_oauth2_client_credentials_token(
         ));
     }
     let (_, value) = parse_decision_service_response_body(
-        response.into_body(),
+        response.into_head_and_body().1,
         cfg.max_response_bytes.min(64 * 1024),
     )
     .await?;
@@ -1445,8 +1447,8 @@ fn unescape_json_pointer_token(token: &str) -> Result<String> {
     Ok(out)
 }
 
-fn validate_decision_service_content_length(headers: &HeaderMap, max_bytes: usize) -> Result<()> {
-    let Some(len) = declared_content_length(headers).ok().flatten() else {
+fn validate_decision_service_content_length(length: Option<u64>, max_bytes: usize) -> Result<()> {
+    let Some(len) = length else {
         return Ok(());
     };
     if len > max_bytes as u64 {

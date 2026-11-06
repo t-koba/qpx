@@ -23,6 +23,72 @@ fn origin_authority_header_values_are_reused() {
     assert_eq!(first.as_bytes().as_ptr(), second.as_bytes().as_ptr());
 }
 
+#[tokio::test]
+async fn proxy_http_keeps_owned_response_and_ordered_early_hints() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut head = Vec::new();
+        let mut buf = [0; 1024];
+        crate::test_util::read_request_head(&mut stream, &mut head, &mut buf).await;
+        stream
+            .write_all(
+                concat!(
+                    "HTTP/1.1 103 Early Hints\r\nLink: </first>\r\n\r\n",
+                    "HTTP/1.1 103 Early Hints\r\nLink: </second>\r\n\r\n",
+                    "HTTP/1.1 203 Non-Authoritative Information\r\n",
+                    "Content-Length: 02\r\nContent-Length: 2\r\n",
+                    "Set-Cookie: first=1\r\nSet-Cookie: second=2\r\n\r\nOK",
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("response");
+    });
+    let pools = crate::pool::PoolRegistry::default();
+    let origin = OriginEndpoint::direct(format!("http://{addr}"));
+    let mut request = OwnerRequest::new(Body::empty());
+    *request.uri_mut() = format!("http://{addr}/hints").parse()?;
+    let response: OwnerResponse<Body> =
+        proxy_http(&pools, request, &origin, "qpx-test", None).await?;
+    assert_eq!(response.status(), StatusCode::NON_AUTHORITATIVE_INFORMATION);
+    assert_eq!(response.version(), http::Version::HTTP_11);
+    let hints = response
+        .extensions()
+        .get::<Vec<crate::upstream::raw_http1::InterimResponseHead>>()
+        .expect("interim extension");
+    assert_eq!(hints.len(), 2);
+    for (hint, link) in hints.iter().zip(["</first>", "</second>"]) {
+        assert_eq!(hint.status.as_u16(), 103);
+        assert_eq!(hint.headers_for_egress()["link"], link);
+    }
+    // Library export is inspection only, not codec canonicalization: ingress
+    // must retain equal, noncanonical length bytes and duplicate field order.
+    let response = response.into_http_for_library();
+    assert_eq!(
+        response
+            .headers()
+            .get_all(http::header::CONTENT_LENGTH)
+            .iter()
+            .map(|v| v.as_bytes())
+            .collect::<Vec<_>>(),
+        [b"02".as_slice(), b"2"]
+    );
+    assert_eq!(
+        response
+            .headers()
+            .get_all(http::header::SET_COOKIE)
+            .iter()
+            .map(|v| v.as_bytes())
+            .collect::<Vec<_>>(),
+        [b"first=1".as_slice(), b"second=2"]
+    );
+    assert_eq!(to_bytes(response.into_body()).await?, "OK");
+    server.await?;
+    Ok(())
+}
+
 async fn spawn_counting_http1_origin(scheme: &str) -> Result<(OriginEndpoint, Arc<AtomicUsize>)> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
@@ -113,7 +179,7 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
         None,
     )
     .await?;
-    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    assert_eq!(to_bytes(first.response.into_head_and_body().1).await?, "OK");
     yield_now().await;
 
     let second = proxy_http_with_interim(
@@ -128,7 +194,10 @@ async fn proxy_plain_http_reuses_direct_origin_connection() -> Result<()> {
         None,
     )
     .await?;
-    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+    assert_eq!(
+        to_bytes(second.response.into_head_and_body().1).await?,
+        "OK"
+    );
 
     assert_eq!(accepts.load(Ordering::SeqCst), 1);
     Ok(())
@@ -170,7 +239,10 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
             Some(connection),
         )
         .await?;
-        assert_eq!(to_bytes(response.response.into_body()).await?, "OK");
+        assert_eq!(
+            to_bytes(response.response.into_head_and_body().1).await?,
+            "OK"
+        );
     }
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
@@ -204,7 +276,7 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
         None,
     )
     .await?;
-    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    assert_eq!(to_bytes(first.response.into_head_and_body().1).await?, "OK");
     while closes.load(Ordering::SeqCst) == 0 {
         let notified = closed.notified();
         if closes.load(Ordering::SeqCst) == 0 {
@@ -224,7 +296,10 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
         None,
     )
     .await?;
-    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+    assert_eq!(
+        to_bytes(second.response.into_head_and_body().1).await?,
+        "OK"
+    );
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
     Ok(())
@@ -259,7 +334,7 @@ async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<
         None,
     )
     .await?;
-    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    assert_eq!(to_bytes(first.response.into_head_and_body().1).await?, "OK");
     while closes.load(Ordering::SeqCst) == 0 {
         let notified = closed.notified();
         if closes.load(Ordering::SeqCst) == 0 {
@@ -300,12 +375,17 @@ async fn bodyless_raw_response_path_retries_a_stale_idle_connection() -> Result<
         second
             .response
             .headers()
-            .get(http::header::VIA)
+            .get(&qpx_core::http_message::OrdinaryHeaderName::try_from(
+                http::header::VIA
+            )?)
             .and_then(|value| value.to_str().ok()),
         Some("1.1 qpx-test"),
         "response Via records the HTTP/1.1 origin protocol, not the HTTP/2 downstream version"
     );
-    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+    assert_eq!(
+        to_bytes(second.response.into_head_and_body().1).await?,
+        "OK"
+    );
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
     Ok(())
@@ -516,7 +596,7 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
             .map(|cert| cert.present)
             .unwrap_or(false)
     );
-    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    assert_eq!(to_bytes(first.response.into_head_and_body().1).await?, "OK");
     yield_now().await;
 
     let second = proxy_https_with_options(
@@ -540,7 +620,10 @@ async fn proxy_https_http1_reuses_direct_origin_connection() -> Result<()> {
             .map(|cert| cert.present)
             .unwrap_or(false)
     );
-    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+    assert_eq!(
+        to_bytes(second.response.into_head_and_body().1).await?,
+        "OK"
+    );
 
     assert_eq!(accepts.load(Ordering::SeqCst), 1);
     Ok(())
@@ -574,7 +657,7 @@ async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
             .map(|cert| cert.present)
             .unwrap_or(false)
     );
-    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    assert_eq!(to_bytes(first.response.into_head_and_body().1).await?, "OK");
 
     let second = proxy_https_with_options(
         &pools,
@@ -597,7 +680,10 @@ async fn proxy_https_h2_reuses_direct_origin_connection() -> Result<()> {
             .map(|cert| cert.present)
             .unwrap_or(false)
     );
-    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+    assert_eq!(
+        to_bytes(second.response.into_head_and_body().1).await?,
+        "OK"
+    );
 
     assert_eq!(accepts.load(Ordering::SeqCst), 1);
     Ok(())
@@ -657,7 +743,10 @@ async fn proxy_https_h2_opens_additional_direct_origin_connections_under_stream_
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
     release_first.notify_waiters();
-    assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
-    assert_eq!(to_bytes(second.response.into_body()).await?, "OK");
+    assert_eq!(to_bytes(first.response.into_head_and_body().1).await?, "OK");
+    assert_eq!(
+        to_bytes(second.response.into_head_and_body().1).await?,
+        "OK"
+    );
     Ok(())
 }

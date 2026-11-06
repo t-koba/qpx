@@ -1,5 +1,5 @@
 use crate::http::codec::h2::{
-    InflightCounterGuard, h2_response_to_hyper_with_inflight, http_uri_to_http1_uri,
+    InflightCounterGuard, h2_response_to_owner_with_inflight, http_uri_to_http1_uri,
     parse_declared_content_length,
 };
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
@@ -69,7 +69,7 @@ pub(super) async fn send_h2_request_with_sender(
     let (mut response, mut send_stream) = sender.send_request(request, false)?;
     stream_request_body_to_h2(&mut body, &mut send_stream, declared_length).await?;
     let (interim, response) = recv_h2_response_with_interim(&mut response).await?;
-    let response = h2_response_to_hyper_with_inflight(response, inflight)?;
+    let response = h2_response_to_owner_with_inflight(response, inflight)?;
     Ok(Http1ResponseWithInterim {
         interim,
         response,

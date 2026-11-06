@@ -15,6 +15,7 @@ use crate::upstream::origin::{OriginEndpoint, proxy_http};
 use anyhow::{Context, Result, anyhow};
 use http::header::HOST;
 use http::{Extensions, HeaderName, HeaderValue, Method, StatusCode, Version};
+#[cfg(test)]
 use hyper::Response;
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_message::{
@@ -519,6 +520,7 @@ impl HttpModuleResponse {
     }
 
     /// Import a response returned by a network/client library.
+    #[cfg(test)]
     pub(super) fn from_inner(inner: Response<Body>) -> Self {
         Self::from_owner(OwnerResponse::from_http(inner))
     }
@@ -800,10 +802,13 @@ impl HttpModuleContext {
         crate::http::protocol::l7::mark_module_request_body_replaced(&mut req);
         self.send_absolute_request_inner(req)
             .await
-            .map(HttpModuleResponse::from_inner)
+            .map(HttpModuleResponse::from_owner)
     }
 
-    async fn send_absolute_request_inner(&self, req: OwnerRequest<Body>) -> Result<Response<Body>> {
+    async fn send_absolute_request_inner(
+        &self,
+        req: OwnerRequest<Body>,
+    ) -> Result<OwnerResponse<Body>> {
         let url = req.uri().to_string();
         let origin = OriginEndpoint::direct(url.as_str());
         let inner = proxy_http(
@@ -831,14 +836,14 @@ impl HttpModuleContext {
         crate::http::protocol::l7::mark_module_request_body_replaced(&mut req);
         self.send_absolute_request_to_addr_inner(req, connect_addr)
             .await
-            .map(HttpModuleResponse::from_inner)
+            .map(HttpModuleResponse::from_owner)
     }
 
     async fn send_absolute_request_to_addr_inner(
         &self,
         req: OwnerRequest<Body>,
         connect_addr: SocketAddr,
-    ) -> Result<Response<Body>> {
+    ) -> Result<OwnerResponse<Body>> {
         let uri = req.uri();
         let scheme = uri
             .scheme_str()

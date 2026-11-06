@@ -239,12 +239,10 @@ impl SubrequestModule {
                 None => ctx.send_absolute_request_inner(req).await,
             }
         };
-        let response = Response::from_http(
-            timeout(timeout_dur, future)
-                .await
-                .with_context(|| format!("subrequest {} timed out", self.name))?
-                .with_context(|| format!("subrequest {} failed", self.name))?,
-        );
+        let response = timeout(timeout_dur, future)
+            .await
+            .with_context(|| format!("subrequest {} timed out", self.name))?
+            .with_context(|| format!("subrequest {} failed", self.name))?;
         if self.deny_redirects && response.status().is_redirection() {
             return Err(anyhow!("subrequest {} received a redirect", self.name));
         }

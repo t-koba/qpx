@@ -364,7 +364,7 @@ pub(super) async fn proxy_transparent_http1(
             return Err(err);
         }
     };
-    let mut response = OwnerResponse::from_http(proxied.response);
+    let mut response = proxied.response;
     attach_interim_response_heads(&mut response, proxied.interim);
     let mut response = http_modules.on_upstream_response(response).await?;
     let response_candidates = input

@@ -1,7 +1,6 @@
 use super::OriginEndpoint;
 use anyhow::Result;
-use http::HeaderMap;
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{OrdinaryHeaderMut, OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use std::collections::HashMap;
 use std::sync::LazyLock;
@@ -83,9 +82,11 @@ pub(in crate::upstream::origin::http_backend) async fn cached_alt_svc_h3_endpoin
 
 pub(in crate::upstream::origin::http_backend) async fn record_h3_alt_svc(
     origin: &OriginEndpoint,
-    headers: &HeaderMap,
+    headers: &impl OrdinaryHeaderMut,
 ) {
-    let alt_svc = http::header::HeaderName::from_static("alt-svc");
+    let Ok(alt_svc) = OrdinaryHeaderName::try_from("alt-svc") else {
+        return;
+    };
     let key = match alt_svc_cache_key(origin) {
         Ok(key) => key,
         Err(_) => return,
@@ -100,7 +101,7 @@ pub(in crate::upstream::origin::http_backend) async fn record_h3_alt_svc(
     // age from Date), consistent with RFC9111 age semantics.
     let response_age = alt_svc_response_age(headers);
     let mut found_valid_advertisement = false;
-    for value in headers.get_all(alt_svc).iter() {
+    for value in headers.ordinary_values(&alt_svc) {
         let Ok(value) = value.to_str() else {
             continue;
         };
@@ -249,18 +250,22 @@ pub(super) fn alt_svc_value_is_valid_advertisement(value: &str) -> bool {
     false
 }
 
-pub(super) fn alt_svc_response_age(headers: &HeaderMap) -> Duration {
+pub(super) fn alt_svc_response_age(headers: &impl OrdinaryHeaderMut) -> Duration {
+    let (Ok(age), Ok(date)) = (
+        OrdinaryHeaderName::try_from(http::header::AGE),
+        OrdinaryHeaderName::try_from(http::header::DATE),
+    ) else {
+        return Duration::ZERO;
+    };
     let age_value = headers
-        .get_all(http::header::AGE)
-        .iter()
+        .ordinary_values(&age)
         .filter_map(|value| value.to_str().ok())
         .filter_map(|value| value.trim().parse::<u64>().ok())
         .map(Duration::from_secs)
         .max()
         .unwrap_or(Duration::ZERO);
     let apparent_age = headers
-        .get_all(http::header::DATE)
-        .iter()
+        .ordinary_values(&date)
         .filter_map(|value| value.to_str().ok())
         .filter_map(|value| httpdate::parse_http_date(value).ok())
         .filter_map(|date| SystemTime::now().duration_since(date).ok())
