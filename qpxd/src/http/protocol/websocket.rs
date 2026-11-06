@@ -174,22 +174,6 @@ pub(crate) fn validate_extended_connect_websocket_response(
     Ok(())
 }
 
-pub(crate) fn validate_websocket_switching_response(
-    response: &http::Response<Body>,
-    expected_accept: &str,
-    offered_protocols: &[String],
-) -> anyhow::Result<()> {
-    validate_websocket_switching_response_fields(
-        response.status(),
-        response.headers().get_all(http::header::UPGRADE).iter(),
-        response.headers().get_all(http::header::CONNECTION).iter(),
-        response.headers().get_all("sec-websocket-accept").iter(),
-        response.headers().get_all("sec-websocket-protocol").iter(),
-        expected_accept,
-        offered_protocols,
-    )
-}
-
 pub(crate) fn normalize_owned_websocket_switching_response(
     response: &mut qpx_core::http_message::Response<Body>,
 ) -> anyhow::Result<()> {

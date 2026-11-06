@@ -1,7 +1,8 @@
 use anyhow::Result;
-use hyper::Response;
 use hyper::header::HeaderValue;
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_http::body::Body;
 use tokio::net::TcpStream;
 use tokio::time::{Duration, timeout};
@@ -9,9 +10,7 @@ use tracing::warn;
 
 use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use crate::http::protocol::websocket::spawn_upgrade_tunnel;
-use crate::upstream::http1::{
-    WebsocketProxyConfig, normalize_websocket_switching_protocols_response, proxy_websocket_http1,
-};
+use crate::upstream::http1::{WebsocketProxyConfig, proxy_websocket_http1_owned};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::tls::builder::connect_client_http1;
 
@@ -26,7 +25,7 @@ pub(crate) async fn proxy_websocket(
     upgrade_wait_timeout: Duration,
     tunnel_idle_timeout: Duration,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let scheme = match origin_scheme(origin)? {
         OriginScheme::Ws | OriginScheme::Http => OriginScheme::Ws,
         OriginScheme::Wss | OriginScheme::Https => OriginScheme::Wss,
@@ -45,7 +44,7 @@ pub(crate) async fn proxy_websocket(
     let req = prepare_websocket_request(req, host_authority.as_str(), proxy_name)?;
 
     if scheme == OriginScheme::Ws {
-        return proxy_websocket_http1(
+        return proxy_websocket_http1_owned(
             req,
             WebsocketProxyConfig {
                 upstream_proxy: None,
@@ -97,7 +96,7 @@ async fn proxy_wss(
     upgrade_wait_timeout: Duration,
     tunnel_idle_timeout: Duration,
     trust: Option<&CompiledUpstreamTlsTrust>,
-) -> Result<Response<Body>> {
+) -> Result<OwnerResponse<Body>> {
     let (expected_accept, offered_protocols) =
         crate::http::protocol::websocket::websocket_response_expectation(req.headers())?;
     let client_upgrade = crate::http::protocol::upgrade::on(req.extensions_mut());
@@ -121,15 +120,16 @@ async fn proxy_wss(
         }
     });
     let hyper_req = crate::upstream::http1::into_http1_for_codec(req)?;
-    let mut response = timeout(timeout_dur, sender.send_request(hyper_req))
+    let response = timeout(timeout_dur, sender.send_request(hyper_req))
         .await??
         .map(Body::from);
-    crate::http::protocol::websocket::validate_websocket_switching_response(
+    let mut response = OwnerResponse::from_http(response);
+    crate::http::protocol::websocket::validate_owned_websocket_switching_response(
         &response,
         &expected_accept,
         &offered_protocols,
     )?;
-    normalize_websocket_switching_protocols_response(&mut response);
+    crate::http::protocol::websocket::normalize_owned_websocket_switching_response(&mut response)?;
     spawn_upgrade_tunnel(
         &mut response,
         client_upgrade,

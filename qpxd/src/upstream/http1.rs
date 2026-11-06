@@ -7,8 +7,8 @@ use crate::upstream::raw_http1::Http1ResponseWithInterim;
 use anyhow::{Result, anyhow};
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
-use hyper::header::{CONNECTION, HOST, HeaderValue, UPGRADE};
-use hyper::{Response, Uri};
+use hyper::Uri;
+use hyper::header::{HOST, HeaderValue};
 use qpx_core::http_message::{
     OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
 };
@@ -357,15 +357,6 @@ pub(crate) async fn open_http1_sender(
     Ok(sender)
 }
 
-pub(crate) async fn proxy_websocket_http1(
-    req: OwnerRequest<Body>,
-    cfg: WebsocketProxyConfig<'_>,
-) -> Result<Response<Body>> {
-    Ok(proxy_websocket_http1_owned(req, cfg)
-        .await?
-        .into_http_for_library())
-}
-
 pub(crate) async fn proxy_websocket_http1_owned(
     mut req: OwnerRequest<Body>,
     cfg: WebsocketProxyConfig<'_>,
@@ -426,19 +417,6 @@ pub(crate) async fn proxy_websocket_http1_owned(
         tunnel_idle_timeout,
     );
     Ok(response)
-}
-
-pub(crate) fn normalize_websocket_switching_protocols_response(response: &mut Response<Body>) {
-    if response.status() != hyper::StatusCode::SWITCHING_PROTOCOLS {
-        return;
-    }
-    response
-        .headers_mut()
-        .insert(CONNECTION, HeaderValue::from_static("upgrade"));
-    response
-        .headers_mut()
-        .entry(UPGRADE)
-        .or_insert(HeaderValue::from_static("websocket"));
 }
 
 pub(crate) async fn proxy_http1_request(

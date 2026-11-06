@@ -18,7 +18,6 @@ use crate::ipc_client::{ClientConnInfo, IpcUpstreamRequestContext, proxy_ipc_ups
 use crate::upstream::origin::{OriginEndpoint, proxy_websocket};
 use anyhow::{Result, anyhow};
 use hyper::StatusCode;
-use qpx_core::http_message::Response as OwnerResponse;
 use tokio::time::{Duration, Instant, timeout};
 
 pub(super) async fn dispatch_reverse_ipc_route<R: ReverseTerminalResponse>(
@@ -334,8 +333,7 @@ pub(super) async fn handle_reverse_websocket_upgrade<R: ReverseTerminalResponse>
         guard.release();
     }
     match response {
-        Ok(Ok(resp)) => {
-            let mut resp = OwnerResponse::from_http(resp);
+        Ok(Ok(mut resp)) => {
             if let Some(upstream) = selected_upstream.as_ref() {
                 record_reverse_upstream_status(
                     upstream,
