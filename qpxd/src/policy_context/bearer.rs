@@ -1873,21 +1873,27 @@ mod tests {
         assert_eq!(cache_max_age(&headers), 300);
     }
 
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn authority_timeout_covers_stalled_jwks_and_introspection_bodies() {
+        use std::{future::Future as _, task::Poll};
         use tokio::io::AsyncWriteExt as _;
 
         let state = bearer_test_runtime();
         for introspection in [false, true] {
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
             let endpoint = format!("http://{}/authority", listener.local_addr().unwrap());
-            let (headers_tx, headers_rx) = tokio::sync::oneshot::channel();
+            let (request_tx, mut request_rx) = tokio::sync::oneshot::channel();
+            let (send_headers_tx, send_headers_rx) = tokio::sync::oneshot::channel();
+            let mut send_headers_tx = Some(send_headers_tx);
+            let (headers_tx, mut headers_rx) = tokio::sync::oneshot::channel();
             let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
             let server = tokio::spawn(async move {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut raw = Vec::new();
                 let mut buf = [0u8; 1024];
                 crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
+                request_tx.send(()).unwrap();
+                send_headers_rx.await.unwrap();
                 stream
                     .write_all(
                         b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{",
@@ -1938,17 +1944,39 @@ mod tests {
                 }
             };
             tokio::pin!(fetch);
-            tokio::select! {
-                result = &mut fetch => panic!("fetch ended before response headers: {result:?}"),
-                result = headers_rx => result.expect("server sent response headers"),
+            let started = Instant::now();
+            // Keep the runtime runnable while waiting for real socket I/O so Tokio
+            // cannot auto-advance the paused clock to the authority deadline.
+            for received in [&mut request_rx, &mut headers_rx] {
+                std::future::poll_fn(|cx| {
+                    if let Poll::Ready(result) = fetch.as_mut().poll(cx) {
+                        panic!("fetch ended before the original deadline: {result:?}");
+                    }
+                    if let Poll::Ready(result) = std::pin::Pin::new(&mut *received).poll(cx) {
+                        result.expect("server reached the requested phase");
+                        return Poll::Ready(());
+                    }
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                })
+                .await;
+                if let Some(send_headers) = send_headers_tx.take() {
+                    // Spend part of the total budget before allowing any response.
+                    tokio::time::advance(Duration::from_millis(100)).await;
+                    send_headers.send(()).unwrap();
+                }
             }
-            // Advance only after real socket I/O; avoid timing-sensitive wall-clock assertions.
-            tokio::time::pause();
-            tokio::time::advance(Duration::from_millis(250)).await;
+            tokio::time::advance(Duration::from_millis(149)).await;
+            assert_eq!(Instant::now() - started, Duration::from_millis(249));
+            assert!(
+                std::future::poll_fn(|cx| Poll::Ready(fetch.as_mut().poll(cx).is_pending())).await
+            );
+            tokio::time::advance(Duration::from_millis(1)).await;
             let error = timeout(Duration::from_millis(1), &mut fetch)
                 .await
                 .expect("configured deadline, not a fresh body deadline or hardcoded five seconds")
                 .expect_err("incomplete authority body must fail closed");
+            assert_eq!(Instant::now() - started, Duration::from_millis(250));
             assert!(
                 error
                     .downcast_ref::<tokio::time::error::Elapsed>()
@@ -1963,7 +1991,6 @@ mod tests {
                     assert!(source.cache.lock().await.is_empty())
                 }
             }
-            tokio::time::resume();
             release_tx.send(()).unwrap();
             server.await.unwrap();
         }
