@@ -177,16 +177,15 @@ pub(super) async fn dispatch_mitm_upstream(
             return Err(err);
         }
     };
+    let response = qpx_core::http_message::Response::from_http(response);
     if let Some((expected_accept, offered_protocols)) = websocket_expectation.as_ref() {
-        crate::http::protocol::websocket::validate_websocket_switching_response(
+        crate::http::protocol::websocket::validate_owned_websocket_switching_response(
             &response,
             expected_accept,
             offered_protocols,
         )?;
     }
-    let mut response = http_modules
-        .on_upstream_response(qpx_core::http_message::Response::from_http(response))
-        .await?;
+    let mut response = http_modules.on_upstream_response(response).await?;
     let response_engine = selected_plan.response_rules.as_deref();
     let response_candidates = response_engine
         .map(|engine| {

@@ -1,7 +1,7 @@
 use crate::http::protocol::common::trim_http_ows;
 use hyper_util::rt::TokioIo;
 use qpx_core::http_message::{Headers, OrdinaryHeaderName};
-use qpx_core::http_token::{header_values_contain_token, is_http_token, value_members};
+use qpx_core::http_token::{is_http_token, value_members};
 use qpx_http::body::Body;
 use std::collections::HashSet;
 use std::future::Future;
@@ -179,17 +179,64 @@ pub(crate) fn validate_websocket_switching_response(
     expected_accept: &str,
     offered_protocols: &[String],
 ) -> anyhow::Result<()> {
-    if response.status() != http::StatusCode::SWITCHING_PROTOCOLS {
+    validate_websocket_switching_response_fields(
+        response.status(),
+        response.headers().get_all(http::header::UPGRADE).iter(),
+        response.headers().get_all(http::header::CONNECTION).iter(),
+        response.headers().get_all("sec-websocket-accept").iter(),
+        response.headers().get_all("sec-websocket-protocol").iter(),
+        expected_accept,
+        offered_protocols,
+    )
+}
+
+pub(crate) fn validate_owned_websocket_switching_response(
+    response: &qpx_core::http_message::Response<Body>,
+    expected_accept: &str,
+    offered_protocols: &[String],
+) -> anyhow::Result<()> {
+    let upgrade = websocket_response_header_name(http::header::UPGRADE)?;
+    let connection = websocket_response_header_name(http::header::CONNECTION)?;
+    let accept =
+        websocket_response_header_name(http::HeaderName::from_static("sec-websocket-accept"))?;
+    let protocol =
+        websocket_response_header_name(http::HeaderName::from_static("sec-websocket-protocol"))?;
+    validate_websocket_switching_response_fields(
+        response.status(),
+        response.headers().get_all(&upgrade),
+        response.headers().get_all(&connection),
+        response.headers().get_all(&accept),
+        response.headers().get_all(&protocol),
+        expected_accept,
+        offered_protocols,
+    )
+}
+
+fn websocket_response_header_name(name: http::HeaderName) -> anyhow::Result<OrdinaryHeaderName> {
+    OrdinaryHeaderName::try_from(name)
+        .map_err(|_| anyhow::anyhow!("WebSocket response field name is not ordinary"))
+}
+
+fn validate_websocket_switching_response_fields<'a>(
+    status: http::StatusCode,
+    upgrade_values: impl Iterator<Item = &'a http::HeaderValue>,
+    connection_values: impl Iterator<Item = &'a http::HeaderValue>,
+    accept_values: impl Iterator<Item = &'a http::HeaderValue>,
+    protocol_values: impl Iterator<Item = &'a http::HeaderValue>,
+    expected_accept: &str,
+    offered_protocols: &[String],
+) -> anyhow::Result<()> {
+    if status != http::StatusCode::SWITCHING_PROTOCOLS {
         return Ok(());
     }
-    if !header_values_contain_token(response.headers(), &http::header::UPGRADE, "websocket")
-        || !header_values_contain_token(response.headers(), &http::header::CONNECTION, "upgrade")
+    if !value_members(upgrade_values).any(|member| member.eq_ignore_ascii_case("websocket"))
+        || !value_members(connection_values).any(|member| member.eq_ignore_ascii_case("upgrade"))
     {
         return Err(anyhow::anyhow!(
             "WebSocket switching response is missing Upgrade fields"
         ));
     }
-    let mut accepts = response.headers().get_all("sec-websocket-accept").iter();
+    let mut accepts = accept_values;
     let accept = accepts
         .next()
         .and_then(|value| value.to_str().ok())
@@ -199,7 +246,7 @@ pub(crate) fn validate_websocket_switching_response(
             "WebSocket accept does not match request key"
         ));
     }
-    let mut selected = response.headers().get_all("sec-websocket-protocol").iter();
+    let mut selected = protocol_values;
     if let Some(protocol) = selected.next() {
         let protocol = protocol
             .to_str()
