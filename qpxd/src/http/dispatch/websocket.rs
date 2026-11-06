@@ -1,4 +1,4 @@
-use crate::upstream::http1::{WebsocketProxyConfig, proxy_websocket_http1};
+use crate::upstream::http1::{WebsocketProxyConfig, proxy_websocket_http1_owned};
 use anyhow::Result;
 use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_http::body::Body;
@@ -38,7 +38,7 @@ pub(crate) async fn proxy_dispatch_websocket_http1(
         let preview = crate::exporter::serialize_request_preview_async(&req).await;
         session.emit_plaintext(true, &preview);
     }
-    proxy_websocket_http1(
+    proxy_websocket_http1_owned(
         req,
         WebsocketProxyConfig {
             upstream_proxy,
@@ -53,7 +53,6 @@ pub(crate) async fn proxy_dispatch_websocket_http1(
         },
     )
     .await
-    .map(OwnerResponse::from_http)
 }
 
 pub(crate) fn emit_dispatch_websocket_response_preview<

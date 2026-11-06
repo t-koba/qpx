@@ -190,6 +190,25 @@ pub(crate) fn validate_websocket_switching_response(
     )
 }
 
+pub(crate) fn normalize_owned_websocket_switching_response(
+    response: &mut qpx_core::http_message::Response<Body>,
+) -> anyhow::Result<()> {
+    if response.status() != http::StatusCode::SWITCHING_PROTOCOLS {
+        return Ok(());
+    }
+    let connection = websocket_response_header_name(http::header::CONNECTION)?;
+    let upgrade = websocket_response_header_name(http::header::UPGRADE)?;
+    response
+        .headers_mut()
+        .insert(connection, http::HeaderValue::from_static("upgrade"));
+    if !response.headers().contains_key(&upgrade) {
+        response
+            .headers_mut()
+            .insert(upgrade, http::HeaderValue::from_static("websocket"));
+    }
+    Ok(())
+}
+
 pub(crate) fn validate_owned_websocket_switching_response(
     response: &qpx_core::http_message::Response<Body>,
     expected_accept: &str,

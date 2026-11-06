@@ -72,6 +72,7 @@ Sec-WebSocket-Version: 13\r\n\
         return Err(anyhow!("expected 101 switching protocols, got {status}"));
     }
     assert_header_present_contains(&headers, "upgrade", "websocket");
+    assert_header_present_contains(&headers, "connection", "upgrade");
 
     // Upgraded tunnel should carry arbitrary bytes.
     const MSG: &[u8] = b"client-bytes";

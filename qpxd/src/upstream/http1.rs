@@ -9,7 +9,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use hyper::header::{CONNECTION, HOST, HeaderValue, UPGRADE};
 use hyper::{Response, Uri};
-use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
+use qpx_core::http_message::{
+    OrdinaryHeaderName, Request as OwnerRequest, Response as OwnerResponse,
+};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use qpx_http::tls::builder::connect_client_http1;
@@ -356,9 +358,18 @@ pub(crate) async fn open_http1_sender(
 }
 
 pub(crate) async fn proxy_websocket_http1(
-    mut req: OwnerRequest<Body>,
+    req: OwnerRequest<Body>,
     cfg: WebsocketProxyConfig<'_>,
 ) -> Result<Response<Body>> {
+    Ok(proxy_websocket_http1_owned(req, cfg)
+        .await?
+        .into_http_for_library())
+}
+
+pub(crate) async fn proxy_websocket_http1_owned(
+    mut req: OwnerRequest<Body>,
+    cfg: WebsocketProxyConfig<'_>,
+) -> Result<OwnerResponse<Body>> {
     let WebsocketProxyConfig {
         upstream_proxy,
         direct_connect_authority,
@@ -397,15 +408,16 @@ pub(crate) async fn proxy_websocket_http1(
     };
 
     let hyper_req = into_http1_for_codec(req)?;
-    let mut response = timeout(timeout_dur, sender.send_request(hyper_req))
+    let response = timeout(timeout_dur, sender.send_request(hyper_req))
         .await??
         .map(Body::from);
-    crate::http::protocol::websocket::validate_websocket_switching_response(
+    let mut response = OwnerResponse::from_http(response);
+    crate::http::protocol::websocket::validate_owned_websocket_switching_response(
         &response,
         &expected_accept,
         &offered_protocols,
     )?;
-    normalize_websocket_switching_protocols_response(&mut response);
+    crate::http::protocol::websocket::normalize_owned_websocket_switching_response(&mut response)?;
     spawn_upgrade_tunnel(
         &mut response,
         client_upgrade,
