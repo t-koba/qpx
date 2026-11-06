@@ -178,7 +178,9 @@ mod tests {
             use qpx_core::shm_ring::ShmRingBuffer;
             use qpxd_cache::{CacheRequestKey, CacheStoreContext, CacheStoreTiming, LookupOutcome};
 
-            for case in ["http", "ipc", "retry", "stop", "stale", "local", "cache"] {
+            for case in [
+                "http", "ipc", "retry", "stop", "stale", "local", "cache", "continue",
+            ] {
                 let dir = tempfile::tempdir()?;
                 let cache_path = dir.path().canonicalize()?.join("cache");
                 let mut config = qpx_core::config::load_config_value(
@@ -210,6 +212,10 @@ edges:
                 if case == "local" {
                     edge.routes[0].http = Some(serde_yaml::from_str(
                         "response_rules:\n- name: local\n  effects:\n    local_response: {status: 418, body: policy}",
+                    )?);
+                } else if case == "continue" {
+                    edge.routes[0].http = Some(serde_yaml::from_str(
+                        "response_rules:\n- name: continue\n  match:\n    response_status: ['200']\n  effects:\n    headers:\n      response_set:\n        x-policy-response: continued",
                     )?);
                 }
                 let registry = crate::http::modules::default_http_module_registry();
@@ -319,7 +325,7 @@ edges:
                         headers,
                     ));
                 }
-                let is_error = !matches!(case, "http" | "ipc");
+                let is_error = !matches!(case, "http" | "ipc" | "continue");
                 let outcome = if case == "cache" {
                     // Exercise the actual cache-hit return in transport dispatch,
                     // not an owner conversion constructed only by this test.
@@ -408,8 +414,12 @@ edges:
                     ReverseAttemptOutcome::Response(response) => {
                         assert!(!matches!(case, "retry" | "stop"));
                         let (interim, mut response) = *response;
-                        assert_eq!(interim.len(), usize::from(case == "http"), "{case}");
-                        if case == "http" {
+                        assert_eq!(
+                            interim.len(),
+                            usize::from(matches!(case, "http" | "continue")),
+                            "{case}"
+                        );
+                        if matches!(case, "http" | "continue") {
                             assert_eq!(interim[0].status, StatusCode::EARLY_HINTS);
                             assert_eq!(
                                 interim[0].headers_for_egress()["link"],
@@ -424,6 +434,14 @@ edges:
                         response.preview_fields(&mut fields, |_| true);
                         assert!(fields.contains("via:"), "{case}");
                         assert!(!fields.contains("connection:"), "{case}");
+                        if case == "continue" {
+                            assert!(
+                                fields
+                                    .to_ascii_lowercase()
+                                    .contains("x-policy-response: continued"),
+                                "continued response-rule header: {fields}"
+                            );
+                        }
                         assert!(
                             response
                                 .extensions()
@@ -443,7 +461,7 @@ edges:
                 }
                 assert_eq!(
                     selected.is_healthy(crate::runtime::now_millis()),
-                    matches!(case, "http" | "local" | "cache"),
+                    matches!(case, "http" | "local" | "cache" | "continue"),
                     "{case}"
                 );
                 // FIFO sentinel makes absence/uniqueness assertions deterministic:
@@ -477,7 +495,7 @@ edges:
                 }
                 assert_eq!(
                     revalidation.is_some(),
-                    !matches!(case, "http" | "ipc" | "cache"),
+                    !matches!(case, "http" | "ipc" | "cache" | "continue"),
                     "only normal finalization consumes cache state: {case}"
                 );
                 ring.unlink_doorbells()?;
