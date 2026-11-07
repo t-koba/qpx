@@ -95,6 +95,8 @@ struct DiskCacheIndexEntry {
 }
 
 struct HotCacheEntry {
+    // Co-located metadata and body share a path, but never logical identity.
+    key: std::sync::Arc<str>,
     value: Bytes,
     expires_at_ms: u64,
     body_offset: u64,
@@ -442,6 +444,7 @@ impl DiskCacheBackend {
         let value = state
             .hot_entries
             .get(&path)
+            .filter(|entry| entry.key.as_ref() == key)
             .map(|entry| (entry.value.clone(), entry.expires_at_ms, entry.body_offset));
         drop(state);
         if let Some((value, expires_at_ms, body_offset)) = value {
@@ -550,6 +553,7 @@ impl DiskCacheBackend {
         state.hot_entries.put(
             path,
             HotCacheEntry {
+                key: std::sync::Arc::from(key),
                 value,
                 expires_at_ms,
                 body_offset,
@@ -977,7 +981,7 @@ impl CacheBackend for DiskCacheBackend {
         &self,
         namespace: &str,
         index_key: &str,
-        default_variant_key: &str,
+        _default_variant_key: &str,
         now: u64,
     ) -> Result<Option<CachedResponseCandidate>> {
         let slot_index = hot_slot(namespace, index_key);
@@ -1005,24 +1009,18 @@ impl CacheBackend for DiskCacheBackend {
         }
 
         let recent = self.hot_recent.load();
-        // Vary-less responses publish no variant index; when the index is
-        // missing or holds no single variant, the canonical default variant
-        // is probed directly.
-        let resolved = match recent_hot_entry(&recent, namespace, index_key, now) {
-            Some(index_entry) => {
-                let variants =
-                    self.decode_variant_index(namespace, index_key, index_entry.value.clone())?;
-                match variants.variants.first() {
-                    Some(only) if variants.variants.len() == 1 => {
-                        Some((only.clone(), index_entry.expires_at_ms))
-                    }
-                    _ => None,
-                }
-            }
-            None => None,
+        // New responses always publish a generation through the index. If it
+        // is cold or not a single variant, use full lookup/negotiation instead
+        // of probing an older canonical object that replacement left behind.
+        let Some(index_entry) = recent_hot_entry(&recent, namespace, index_key, now) else {
+            return Ok(None);
         };
-        let (variant_key, index_expires_at_ms) =
-            resolved.unwrap_or((default_variant_key.to_string(), u64::MAX));
+        let variants =
+            self.decode_variant_index(namespace, index_key, index_entry.value.clone())?;
+        let [variant_key] = variants.variants.as_slice() else {
+            return Ok(None);
+        };
+        let index_expires_at_ms = index_entry.expires_at_ms;
         let Some(metadata_entry) = recent_hot_entry(&recent, namespace, variant_key.as_str(), now)
         else {
             return Ok(None);
@@ -1871,6 +1869,40 @@ mod tests {
             .expect("value");
         assert_eq!(value.as_ref(), b"value");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn co_located_metadata_never_aliases_body_after_recent_slot_eviction() {
+        let dir = temp_dir("generation-lru-identity");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).unwrap();
+        let key = super::super::vary::representation_storage_key("obj:primary:default");
+        backend
+            .put_response(
+                "ns",
+                &key,
+                Body::from("body"),
+                BodyStreamWriteOptions {
+                    max_body_bytes: 1024,
+                    body_read_timeout: Duration::from_secs(1),
+                    ttl_secs: 60,
+                },
+                // Equal sizes deliberately defeat length-only identity checking.
+                Box::new(|_| Ok(b"meta".to_vec())),
+            )
+            .await
+            .unwrap();
+        // A slot collision/eviction must fall back to the correct logical LRU
+        // object, even though metadata and body share the same physical file.
+        backend
+            .hot_recent
+            .store(std::sync::Arc::new(RecentHotCache::default()));
+        let stream = backend
+            .get_object_stream("ns", &cache_body_storage_key(&key), 4, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(qpx_http::body::to_bytes(stream.body).await.unwrap(), "body");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

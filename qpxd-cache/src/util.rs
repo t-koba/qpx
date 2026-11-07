@@ -18,9 +18,12 @@ pub fn cacheable_content_length(headers: &OwnedHeaders) -> Option<u64> {
 }
 
 pub fn upsert_variant_with_cap(index: &mut VariantIndex, variant_key: &str) -> Vec<String> {
-    if let Some(pos) = index.variants.iter().position(|v| v == variant_key) {
-        index.variants.remove(pos);
-    }
+    // Superseded generations are no longer discoverable. Do not delete their
+    // objects here: an already-open remote body producer may still need them.
+    // They retain the TTL assigned by their writer.
+    index
+        .variants
+        .retain(|v| super::vary::variant_identity(v) != super::vary::variant_identity(variant_key));
     index.variants.push(variant_key.to_string());
     let mut evicted = Vec::new();
     while index.variants.len() > MAX_VARIANTS_PER_PRIMARY {

@@ -77,6 +77,19 @@ pub fn matches_vary(
     })
 }
 
+// A published response owns its keys for its entire lifetime. Finalizers can
+// therefore address the observed representation without CAS support from the
+// storage server (in particular, the HTTP backend only promises PUT/DELETE).
+// The index, not the representation, is replaced by subsequent writebacks.
+pub(crate) fn representation_storage_key(variant_key: &str) -> String {
+    format!("{variant_key}:generation:{}", uuid::Uuid::new_v4().simple())
+}
+
+pub(crate) fn variant_identity(key: &str) -> &str {
+    key.split_once(":generation:")
+        .map_or(key, |(variant, _)| variant)
+}
+
 pub fn variant_storage_key(primary: &str, vary_values: &[(String, VarySelector)]) -> String {
     if vary_values.is_empty() {
         return format!("obj:{}:default", primary);

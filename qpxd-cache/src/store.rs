@@ -4,7 +4,6 @@ use super::entry::{
     response_from_envelope_for_request_with_body,
 };
 use super::freshness::{active_range, freshness_lifetime_secs, initial_age_secs};
-use super::invalidate::invalidate_primary;
 use super::types::{
     BodyStreamWriteOptions, CACHE_HEADER, CacheBackend, CacheRequestKey, CacheWritebackAdmission,
     CacheWritebackPermit, CachedBody, CachedHeaders, CachedResponseEnvelope, INDEX_TTL_SECS,
@@ -151,7 +150,10 @@ pub async fn maybe_store(
             .insert(ord(CACHE_HEADER), cache_status_header("MISS", None)?);
         return Ok(response);
     };
-    let variant_key = variant_storage_key(storage_primary.as_ref(), &vary_values);
+    let variant_key = super::vary::representation_storage_key(&variant_storage_key(
+        storage_primary.as_ref(),
+        &vary_values,
+    ));
     let namespace = cache_namespace(policy, "default");
     let ttl = object_retention_ttl_secs(freshness_lifetime_secs, &resp_directives);
     let writeback = CacheWriteback {
@@ -223,7 +225,6 @@ struct CacheWriteback {
 
 impl CacheWriteback {
     async fn store(self, body: Body) -> Result<()> {
-        let vary_less = self.vary_values.is_empty();
         let CacheWriteback {
             status,
             headers,
@@ -263,49 +264,25 @@ impl CacheWriteback {
                 encode_cached_response_metadata(&envelope)
             }),
         );
-        let index_load = async {
-            // Vary-less responses use the deterministic `obj:{primary}:default`
-            // variant key and publish no variant index, removing one read and
-            // one write per store for the common case.
-            if vary_less {
-                return Ok(None);
-            }
-            load_variant_index(
-                self.backend.as_ref(),
+        let index_load = load_variant_index(
+            self.backend.as_ref(),
+            self.namespace.as_str(),
+            self.storage_primary.as_ref(),
+        );
+        // Publishing the index is the only operation that makes a new
+        // generation discoverable. Both split-object (HTTP/Redis) and co-located
+        // (disk) backends must finish the response write before this point.
+        let (_body_len, mut index) = tokio::try_join!(response_put, index_load)?;
+        let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key);
+        delete_obsolete_variants(self.backend.clone(), self.namespace.clone(), obsolete).await;
+        self.backend
+            .put(
                 self.namespace.as_str(),
-                self.storage_primary.as_ref(),
+                index_storage_key(self.storage_primary.as_ref()).as_str(),
+                &serde_json::to_vec(&index)?,
+                self.ttl.max(INDEX_TTL_SECS),
             )
-            .await
-            .map(Some)
-        };
-        let (_body_len, loaded_index) = tokio::try_join!(response_put, index_load)?;
-        // The removal of superseded variants is independent of the index
-        // update and runs concurrently to shorten the writeback tail.
-        let index_payload = match loaded_index {
-            Some(mut index) => {
-                let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key);
-                let (_, payload) = tokio::join!(
-                    delete_obsolete_variants(
-                        self.backend.clone(),
-                        self.namespace.clone(),
-                        obsolete,
-                    ),
-                    async { serde_json::to_vec(&index) },
-                );
-                Some(payload?)
-            }
-            None => None,
-        };
-        if let Some(index_payload) = index_payload {
-            self.backend
-                .put(
-                    self.namespace.as_str(),
-                    index_storage_key(self.storage_primary.as_ref()).as_str(),
-                    &index_payload,
-                    self.ttl.max(INDEX_TTL_SECS),
-                )
-                .await?;
-        }
+            .await?;
         Ok(())
     }
 }
@@ -378,7 +355,8 @@ pub async fn revalidate_not_modified<B>(
             vary_headers == &state.envelope.vary_headers
                 && vary_values == &state.envelope.vary_values
                 && primary_from_variant_key(state.variant_key.as_str()).is_some_and(|primary| {
-                    variant_storage_key(primary, vary_values).as_str() == state.variant_key
+                    variant_storage_key(primary, vary_values).as_str()
+                        == super::vary::variant_identity(&state.variant_key)
                 })
         }
         _ => false,
@@ -510,11 +488,13 @@ pub async fn revalidate_not_modified<B>(
 }
 
 async fn invalidate_revalidated(backend: &dyn CacheBackend, namespace: &str, variant_key: &str) {
-    if let Some(primary) = primary_from_variant_key(variant_key) {
-        let _ = invalidate_primary(backend, namespace, primary).await;
-    } else {
-        let _ = backend.delete(namespace, variant_key).await;
-    }
+    // Never invalidate the primary/index here: it may already point at a new
+    // representation, including another Vary selector. Only this generation is
+    // owned by the revalidation that just completed.
+    let _ = backend.delete(namespace, variant_key).await;
+    let _ = backend
+        .delete(namespace, &cache_body_storage_key(variant_key))
+        .await;
 }
 
 fn object_retention_ttl_secs(freshness_lifetime_secs: u64, directives: &ResponseDirectives) -> u64 {

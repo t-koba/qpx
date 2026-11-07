@@ -33,6 +33,7 @@ sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
+uuid.workspace = true
 
 # The SHA extensions assembly backend does not build on windows-msvc, so it
 # stays target-gated to unix x86_64/aarch64 hosts.

@@ -34,7 +34,11 @@ async fn stale_revalidation_lookup_defers_body_fetch_until_stale_fallback() {
         .await
         .expect("lookup");
     assert!(matches!(outcome, LookupOutcome::Revalidate(_)));
-    let variant_key = variant_storage_key(key.primary_hash().as_str(), &[]);
+    let variant_key = load_variant_index(backend.as_ref(), "ns", &key.primary_hash())
+        .await
+        .unwrap()
+        .variants
+        .remove(0);
     let body_key = cache_body_storage_key(variant_key.as_str());
     let gets = backend.get_log();
     assert!(
@@ -248,7 +252,7 @@ async fn maybe_store_does_not_block_downstream_on_idle_cacheable_body() {
 }
 
 #[tokio::test]
-async fn vary_less_store_publishes_no_variant_index() {
+async fn vary_less_store_publishes_a_generation_in_the_variant_index() {
     let req = make_get_request("/vary-less");
     let key = CacheRequestKey::for_lookup(&req, "http")
         .expect("key")
@@ -273,13 +277,14 @@ async fn vary_less_store_publishes_no_variant_index() {
     .expect("store");
 
     let primary = key.primary_hash();
-    assert!(
-        backend
-            .get("ns", index_storage_key(primary.as_str()).as_str())
-            .await
-            .expect("get index")
-            .is_none(),
-        "Vary-less stores must not publish a variant index"
+    let index = load_variant_index(backend.as_ref(), "ns", &primary)
+        .await
+        .unwrap();
+    assert_eq!(index.variants.len(), 1);
+    assert_ne!(index.variants[0], variant_storage_key(&primary, &[]));
+    assert_eq!(
+        super::super::vary::variant_identity(&index.variants[0]),
+        variant_storage_key(&primary, &[])
     );
 
     let outcome = lookup(&req, &key, &policy(), &backends, &test_revalidations())
@@ -287,7 +292,7 @@ async fn vary_less_store_publishes_no_variant_index() {
         .expect("lookup");
     assert!(
         matches!(outcome, LookupOutcome::Hit(_)),
-        "lookup must hit the canonical default variant without an index"
+        "lookup must follow the published generation"
     );
 }
 

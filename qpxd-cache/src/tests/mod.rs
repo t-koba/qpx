@@ -317,6 +317,7 @@ mod lookup_head_post_tests;
 mod lookup_policy_tests;
 mod lookup_range_tests;
 mod revalidation_delivery_tests;
+mod revalidation_generation_tests;
 mod store_flow_tests;
 
 pub(crate) fn owned_headers(headers: &http::HeaderMap) -> qpx_core::http_message::Headers {

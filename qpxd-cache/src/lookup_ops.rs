@@ -317,8 +317,8 @@ async fn load_candidate_variant_keys(
         }
     }
     if variants.variants.is_empty() {
-        // Vary-less stores publish no variant index; probe the canonical
-        // default variant, falling back to the GET method group for HEAD.
+        // Historical Vary-less stores published no index. Keep their canonical
+        // default probe, falling back to the GET method group for HEAD.
         let mut probed = vec![super::vary::variant_storage_key(primary.as_ref(), &[])];
         if let Some(get_primary) = get_primary.as_ref() {
             probed.push(super::vary::variant_storage_key(get_primary, &[]));
