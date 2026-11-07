@@ -588,6 +588,46 @@ async fn short_content_length_response_uses_bounded_read_capacity() {
 }
 
 #[tokio::test]
+async fn truncated_parsed_content_length_response_errors_without_recycling() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("2"));
+    let body_kind = determine_response_body_kind(&Method::GET, StatusCode::OK, &headers)
+        .expect("declared response framing");
+    assert!(matches!(body_kind, ResponseBodyKind::ContentLength(2)));
+
+    let (proxy, origin) = tokio::io::duplex(64);
+    drop(origin);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_response(
+        proxy,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers,
+            body_kind,
+        },
+        BytesMut::from(&b"O"[..]),
+        BytesMut::new(),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
+    );
+
+    let error = to_bytes(response.into_body())
+        .await
+        .expect_err("truncated content-length body must fail");
+    assert!(
+        error
+            .to_string()
+            .contains("closed before content-length completed")
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn pull_content_length_response_does_not_recycle_with_leftover_bytes() {
     let (proxy, mut origin) = tokio::io::duplex(64);
     let recycled = Arc::new(AtomicUsize::new(0));
