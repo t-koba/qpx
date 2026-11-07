@@ -181,11 +181,25 @@ pub(super) fn determine_response_body_kind(
     status: StatusCode,
     headers: &HeaderMap,
 ) -> Result<ResponseBodyKind> {
-    if *request_method == Method::HEAD || response_status_has_no_body(status, false) {
+    let status_has_no_body = response_status_has_no_body(status, false);
+    if *request_method == Method::HEAD
+        || (status_has_no_body && status != StatusCode::RESET_CONTENT)
+    {
         return Ok(ResponseBodyKind::Empty);
     }
 
-    if has_only_chunked_transfer_encoding(headers)? {
+    let chunked = has_only_chunked_transfer_encoding(headers)?;
+    if status_has_no_body {
+        // 205 forbids content but is not self-delimiting in HTTP/1. Validate
+        // its declared framing before discarding it; build_response will only
+        // reuse an upstream connection when an explicit zero length proves
+        // that no body can be misattributed to the next response.
+        if !chunked {
+            let _ = parse_declared_content_length(headers)?;
+        }
+        return Ok(ResponseBodyKind::Empty);
+    }
+    if chunked {
         return Ok(ResponseBodyKind::Chunked);
     }
     if let Some(length) = parse_declared_content_length(headers)? {

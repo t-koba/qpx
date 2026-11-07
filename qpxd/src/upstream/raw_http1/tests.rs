@@ -1,4 +1,4 @@
-use super::io::{determine_response_body_kind, response_body_allows_reuse};
+use super::io::determine_response_body_kind;
 use super::response::{
     ParsedResponseHead, RawResponseHeadDeadline, ResponseBodyKind, build_raw_response,
     build_response, forward_chunked_body, forward_close_delimited_body,
@@ -427,12 +427,85 @@ fn parse_declared_content_length_refuses_a_signed_member() {
 }
 
 #[test]
-fn reset_content_response_has_no_body_and_allows_reuse() {
-    let headers = HeaderMap::new();
-    let kind = determine_response_body_kind(&Method::GET, StatusCode::RESET_CONTENT, &headers)
+fn reset_content_response_validates_declared_content_length() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("+1"));
+    let error = determine_response_body_kind(&Method::GET, StatusCode::RESET_CONTENT, &headers)
+        .expect_err("invalid 205 framing must be rejected");
+    assert_eq!(error.to_string(), "invalid content-length value");
+}
+
+#[tokio::test]
+async fn zero_length_reset_content_response_can_recycle_upstream() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("0"));
+    let body_kind = determine_response_body_kind(&Method::GET, StatusCode::RESET_CONTENT, &headers)
         .expect("body kind");
-    assert!(matches!(kind, ResponseBodyKind::Empty));
-    assert!(response_body_allows_reuse(kind));
+    assert!(matches!(body_kind, ResponseBodyKind::Empty));
+
+    let (stream, _peer) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_response(
+        stream,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::RESET_CONTENT,
+            headers,
+            body_kind,
+        },
+        BytesMut::new(),
+        BytesMut::new(),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
+    );
+
+    assert!(
+        to_bytes(response.into_body())
+            .await
+            .expect("empty reset-content body")
+            .is_empty()
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
+async fn unframed_reset_content_response_does_not_recycle_upstream() {
+    let headers = HeaderMap::new();
+    let body_kind = determine_response_body_kind(&Method::GET, StatusCode::RESET_CONTENT, &headers)
+        .expect("body kind");
+    assert!(matches!(body_kind, ResponseBodyKind::Empty));
+
+    let (stream, _peer) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_response(
+        stream,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::RESET_CONTENT,
+            headers,
+            body_kind,
+        },
+        BytesMut::new(),
+        BytesMut::new(),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
+    );
+
+    assert!(
+        to_bytes(response.into_body())
+            .await
+            .expect("empty reset-content body")
+            .is_empty()
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

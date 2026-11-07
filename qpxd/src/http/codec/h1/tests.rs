@@ -845,6 +845,77 @@ async fn finalized_head_204_owner_response_omits_content_length_at_http1_egress(
 }
 
 #[tokio::test]
+async fn finalized_get_205_is_zero_framed_without_content() {
+    let response = finalized_response(&Method::GET, StatusCode::RESET_CONTENT);
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let mut head_buf = BytesMut::new();
+
+    let keep_alive = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("send response");
+    assert!(keep_alive);
+    drop(write_half);
+    drop(read_half);
+
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    assert!(raw.starts_with(b"HTTP/1.1 205"));
+    assert_eq!(content_length_lines(&raw), ["content-length: 0"]);
+    assert!(raw.ends_with(b"\r\n\r\n"));
+}
+
+#[tokio::test]
+async fn static_205_sanitizes_length_and_zero_frames_persistent_response() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("invalid"));
+    headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+    headers.insert(TRAILER, HeaderValue::from_static("x-end"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("listener address");
+    let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+    let mut client = client.expect("connect");
+    let (mut server, _) = accepted.expect("accept");
+    let mut head_buf = BytesMut::new();
+
+    let keep_alive = send_static_http1_response(
+        &mut server,
+        &Method::GET,
+        StatusCode::RESET_CONTENT,
+        headers,
+        Bytes::from_static(b"must not be sent"),
+        true,
+        &mut head_buf,
+    )
+    .await
+    .expect("send reset-content response");
+    assert!(keep_alive);
+
+    let mut raw = vec![0; head_buf.len()];
+    client
+        .read_exact(&mut raw)
+        .await
+        .expect("read response head");
+    assert!(raw.starts_with(b"HTTP/1.1 205"));
+    assert_eq!(content_length_lines(&raw), ["content-length: 0"]);
+    assert!(
+        !raw.windows(b"Transfer-Encoding:".len())
+            .any(|w| w == b"Transfer-Encoding:")
+    );
+    assert!(!raw.windows(b"Trailer:".len()).any(|w| w == b"Trailer:"));
+    assert!(raw.ends_with(b"\r\n\r\n"));
+}
+
+#[tokio::test]
 async fn static_finalized_head_omits_204_length_and_preserves_304_length() {
     for (status, expected_length) in [
         (StatusCode::NO_CONTENT, None),

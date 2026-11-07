@@ -94,9 +94,24 @@ pub(crate) async fn send_static_http1_response(
         || (request_method == Method::CONNECT && response_status.is_success());
     let no_body = request_method == Method::HEAD || status_has_no_body;
     let body_len = body.len() as u64;
-    let declared_length = parse_declared_content_length(&headers)?;
+    let declared_length = match parse_declared_content_length(&headers) {
+        Ok(length) => length,
+        Err(_) if no_body => {
+            headers.remove(CONTENT_LENGTH);
+            None
+        }
+        Err(error) => return Err(error.into()),
+    };
     if status_has_no_body {
-        if response_status_forbids_content_length(response_status)
+        if response_status == StatusCode::RESET_CONTENT {
+            // 205 responses cannot contain content, but unlike 1xx/204/304
+            // they are not self-delimiting in HTTP/1. Keep persistent
+            // connections usable by explicitly framing their empty content.
+            headers.insert(
+                CONTENT_LENGTH,
+                qpx_core::http_content_length::canonical_content_length_value(0),
+            );
+        } else if response_status_forbids_content_length(response_status)
             || (request_method != Method::HEAD && response_status != StatusCode::NOT_MODIFIED)
         {
             headers.remove(CONTENT_LENGTH);
@@ -257,7 +272,12 @@ where
         let declared_length = parse_declared_content_length(&headers)?;
         let has_chunked = has_only_chunked_transfer_encoding(&headers)?;
         if no_body {
-            if response_status_forbids_content_length(parts.status)
+            if parts.status == StatusCode::RESET_CONTENT {
+                headers.insert(
+                    CONTENT_LENGTH,
+                    qpx_core::http_content_length::canonical_content_length_value(0),
+                );
+            } else if response_status_forbids_content_length(parts.status)
                 || (request_method != Method::HEAD && parts.status != StatusCode::NOT_MODIFIED)
             {
                 headers.remove(CONTENT_LENGTH);

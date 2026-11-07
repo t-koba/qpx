@@ -7,6 +7,7 @@ use super::io::{
 use super::{
     Http1ConnectionRecycler, INITIAL_READ_BUF_SIZE, InterimResponseHead, MAX_HEADER_BYTES,
     RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1BodyFraming, RawHttp1ResponseHead,
+    parse_declared_content_length,
 };
 #[cfg(test)]
 use super::{MAX_CHUNKED_BODY_BYTES, READ_BUF_SIZE};
@@ -347,7 +348,11 @@ where
     if matches!(head.body_kind, ResponseBodyKind::Chunked) {
         head.headers.remove(CONTENT_LENGTH);
     }
+    let reset_content_framed = head.status != StatusCode::RESET_CONTENT
+        || (!head.headers.contains_key(hyper::header::TRANSFER_ENCODING)
+            && parse_declared_content_length(&head.headers).ok().flatten() == Some(0));
     let upstream_reusable = head.status != StatusCode::SWITCHING_PROTOCOLS
+        && reset_content_framed
         && http1_keep_alive(head.version, &head.headers);
     let body = match head.body_kind {
         ResponseBodyKind::Empty => {
