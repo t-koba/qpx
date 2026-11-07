@@ -384,6 +384,9 @@ where
     let keep_alive = request_keep_alive
         && request_version == Version::HTTP_11
         && !matches!(body_kind, ResponseBodyKind::CloseDelimited)
+        && !raw_head
+            .as_ref()
+            .is_some_and(|raw| raw.requires_close_delimited_egress())
         && parts.status != StatusCode::SWITCHING_PROTOCOLS
         // RFC 9931 requires an HTTP/1.1 proxy server to close the connection
         // after every rejected CONNECT request. Successful CONNECT also takes
@@ -530,6 +533,7 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
     };
     let keep_alive = request_keep_alive
         && request_version == Version::HTTP_11
+        && !response.raw.requires_close_delimited_egress()
         && response.status() != StatusCode::SWITCHING_PROTOCOLS
         && request_method != Method::CONNECT;
     let connection_mode = if keep_alive {
