@@ -12,7 +12,8 @@ use super::types::{
 };
 use super::util::{cache_namespace, load_variant_index, now_millis, upsert_variant_with_cap};
 use super::vary::{
-    index_storage_key, parse_vary, variant_storage_key, vary_values_from_request_headers,
+    index_storage_key, legacy_variant_retirement_storage_key, parse_vary, variant_storage_key,
+    vary_values_from_request_headers,
 };
 use anyhow::Result;
 use http::header::{CONTENT_LOCATION, EXPIRES, SET_COOKIE};
@@ -273,6 +274,36 @@ impl CacheWriteback {
         // generation discoverable. Both split-object (HTTP/Redis) and co-located
         // (disk) backends must finish the response write before this point.
         let (_body_len, mut index) = tokio::try_join!(response_put, index_load)?;
+        let legacy_key = variant_storage_key(self.storage_primary.as_ref(), &[]);
+        let legacy_metadata = self
+            .backend
+            .get_decoded_response_metadata_many(
+                self.namespace.as_str(),
+                std::slice::from_ref(&legacy_key),
+            )
+            .await?;
+        if let Some(envelope) = legacy_metadata.into_iter().next().flatten() {
+            // The marker must live at least as long as the superseded canonical
+            // object. Index retention is independent and can be shorter, or the
+            // index can be evicted while that old object is still present.
+            let retention_secs = object_retention_ttl_secs(
+                envelope.freshness_lifetime_secs,
+                envelope.response_directives(),
+            );
+            let expires_at_ms = envelope
+                .stored_at_ms
+                .saturating_add(retention_secs.saturating_mul(1000));
+            let remaining_ms = expires_at_ms.saturating_sub(now_millis());
+            let retirement_ttl = (remaining_ms / 1000 + u64::from(remaining_ms % 1000 != 0)).max(1);
+            self.backend
+                .put(
+                    self.namespace.as_str(),
+                    legacy_variant_retirement_storage_key(self.storage_primary.as_ref()).as_str(),
+                    b"retired",
+                    retirement_ttl,
+                )
+                .await?;
+        }
         let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key);
         delete_obsolete_variants(self.backend.clone(), self.namespace.clone(), obsolete).await;
         self.backend

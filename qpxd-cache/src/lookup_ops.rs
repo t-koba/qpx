@@ -12,7 +12,7 @@ use super::types::{
     cache_body_storage_key, cache_status_header,
 };
 use super::util::{cache_namespace, now_millis};
-use super::vary::matches_vary;
+use super::vary::{legacy_variant_retirement_storage_key, matches_vary};
 use anyhow::Result;
 use hyper::{Method, StatusCode};
 use qpx_core::config::CachePolicyConfig;
@@ -318,10 +318,29 @@ async fn load_candidate_variant_keys(
     }
     if variants.variants.is_empty() {
         // Historical Vary-less stores published no index. Keep their canonical
-        // default probe, falling back to the GET method group for HEAD.
-        let mut probed = vec![super::vary::variant_storage_key(primary.as_ref(), &[])];
+        // default probe unless a newer generation retired that legacy fallback.
+        let primary_retired = backend
+            .get(
+                namespace,
+                legacy_variant_retirement_storage_key(primary.as_ref()).as_str(),
+            )
+            .await?
+            .is_some();
+        let mut probed = Vec::with_capacity(2);
+        if !primary_retired {
+            probed.push(super::vary::variant_storage_key(primary.as_ref(), &[]));
+        }
         if let Some(get_primary) = get_primary.as_ref() {
-            probed.push(super::vary::variant_storage_key(get_primary, &[]));
+            let get_retired = backend
+                .get(
+                    namespace,
+                    legacy_variant_retirement_storage_key(get_primary).as_str(),
+                )
+                .await?
+                .is_some();
+            if !get_retired {
+                probed.push(super::vary::variant_storage_key(get_primary, &[]));
+            }
         }
         variants = Arc::new(VariantIndex { variants: probed });
     }

@@ -69,6 +69,56 @@ impl CacheBackend for ObservedBackend {
     }
 }
 
+async fn seed_legacy_canonical(
+    backend: &dyn CacheBackend,
+    namespace: &str,
+    key: &CacheRequestKey,
+) -> (String, Bytes) {
+    const LEGACY_TTL_SECS: u64 = 2 * 24 * 60 * 60;
+    let legacy_key = variant_storage_key(key.primary_hash().as_str(), &[]);
+    let body = Bytes::from(vec![b'l'; 2 * 1024 * 1024]);
+    let headers = crate::types::CachedHeaders::from_pairs(vec![
+        (
+            "cache-control".to_owned(),
+            format!("public, max-age={LEGACY_TTL_SECS}"),
+        ),
+        ("content-length".to_owned(), body.len().to_string()),
+    ]);
+    let envelope = CachedResponseEnvelope {
+        status: StatusCode::OK.as_u16(),
+        headers,
+        body: CachedBody::default(),
+        body_len: 0,
+        stored_at_ms: super::util::now_millis(),
+        initial_age_secs: 0,
+        response_delay_secs: 0,
+        freshness_lifetime_secs: LEGACY_TTL_SECS,
+        vary_headers: Vec::new(),
+        vary_values: Vec::new(),
+        response_directives: Default::default(),
+        response_header_values: Default::default(),
+    };
+    backend
+        .put_response(
+            namespace,
+            legacy_key.as_str(),
+            Body::from(body.clone()),
+            BodyStreamWriteOptions {
+                max_body_bytes: 4 * 1024 * 1024,
+                body_read_timeout: Duration::from_secs(5),
+                ttl_secs: LEGACY_TTL_SECS,
+            },
+            Box::new(move |body_len| {
+                let mut envelope = envelope;
+                envelope.body_len = body_len;
+                crate::types::encode_cached_response_metadata(&envelope)
+            }),
+        )
+        .await
+        .expect("seed legacy canonical response");
+    (legacy_key, body)
+}
+
 async fn publish(
     request: &OwnerRequest<()>,
     key: &CacheRequestKey,
@@ -116,6 +166,138 @@ async fn publish(
     };
     let (settled, ()) = tokio::join!(waiter.wait(Duration::from_secs(1)), store);
     assert!(settled, "writeback did not settle");
+}
+
+#[tokio::test]
+async fn retired_legacy_canonical_does_not_resurface_after_short_generation_index_eviction() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        for disk in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "qpx-cache-legacy-retirement-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let inner: Arc<dyn CacheBackend> = if disk {
+                Arc::new(
+                    crate::backend_disk::DiskCacheBackend::new(
+                        qpx_core::config::CacheBackendConfig {
+                            name: "b".into(),
+                            kind: "disk".into(),
+                            endpoint: String::new(),
+                            path: Some(root.display().to_string()),
+                            max_bytes: Some(8 * 1024 * 1024),
+                            sweep_interval_secs: 60,
+                            timeout_ms: 1000,
+                            max_object_bytes: 4 * 1024 * 1024,
+                            auth_header_env: None,
+                        },
+                    )
+                    .expect("disk backend"),
+                )
+            } else {
+                Arc::new(MockBackend::new())
+            };
+            let (mutations, mut completed) = mpsc::unbounded_channel();
+            let backend = Arc::new(ObservedBackend {
+                inner: inner.clone(),
+                mutations,
+            });
+            let backends =
+                HashMap::from([("b".to_owned(), backend.clone() as Arc<dyn CacheBackend>)]);
+            let request = make_get_request("/legacy-retirement");
+            let key = CacheRequestKey::for_lookup(&request, "http")
+                .expect("key")
+                .expect("cache key");
+            let cache_policy = policy();
+            let namespace = super::util::cache_namespace(&cache_policy, "default");
+            let (legacy_key, legacy_body) =
+                seed_legacy_canonical(inner.as_ref(), namespace, &key).await;
+
+            // Untouched historical entries still use the canonical fallback.
+            let held_legacy =
+                match lookup(&request, &key, &policy(), &backends, &test_revalidations())
+                    .await
+                    .expect("legacy lookup")
+                {
+                    LookupOutcome::Hit(response) => response,
+                    _ => panic!("untouched legacy entry should hit"),
+                };
+
+            // The replacement is fresh briefly, while the canonical entry's
+            // retained lifetime exceeds the index's 24-hour minimum.
+            publish(
+                &request,
+                &key,
+                &backends,
+                "public, max-age=1",
+                "replacement",
+                "new",
+            )
+            .await;
+            let primary = key.primary_hash();
+            let retirement_key =
+                crate::vary::legacy_variant_retirement_storage_key(primary.as_str());
+            assert!(
+                backend
+                    .get(namespace, retirement_key.as_str())
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            let mutations = std::iter::from_fn(|| completed.try_recv().ok()).collect::<Vec<_>>();
+            let retirement_write = mutations
+                .iter()
+                .position(|written| written == &retirement_key)
+                .expect("retirement marker write");
+            let index_key = index_storage_key(primary.as_str());
+            let index_write = mutations
+                .iter()
+                .position(|written| written == &index_key)
+                .expect("generation index write");
+            assert!(
+                retirement_write < index_write,
+                "index published before legacy retirement"
+            );
+
+            // Removing the index models expiry/eviction before the legacy object
+            // expires. The old object remains available to an already-held body,
+            // but a fresh lookup cannot rediscover it through the fallback.
+            backend
+                .delete(namespace, index_storage_key(primary.as_str()).as_str())
+                .await
+                .expect("evict replacement index");
+            assert!(
+                backend
+                    .get_decoded_response_metadata_many(
+                        namespace,
+                        std::slice::from_ref(&legacy_key)
+                    )
+                    .await
+                    .expect("legacy metadata")
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .is_some()
+            );
+            assert!(matches!(
+                lookup(&request, &key, &policy(), &backends, &test_revalidations(),)
+                    .await
+                    .expect("lookup after index eviction"),
+                LookupOutcome::Miss
+            ));
+
+            let body = qpx_http::body::to_bytes(held_legacy.into_head_and_body().1)
+                .await
+                .expect("held legacy body stream");
+            assert_eq!(body.as_ref(), legacy_body.as_ref());
+            if disk {
+                tokio::fs::remove_dir_all(root)
+                    .await
+                    .expect("remove disk cache");
+            }
+        }
+    })
+    .await
+    .expect("bounded legacy retirement regression");
 }
 
 #[tokio::test]
