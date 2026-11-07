@@ -35,6 +35,10 @@ enum ResponseBodyKind {
     CloseDelimited,
 }
 
+fn response_status_forbids_content_length(status: StatusCode) -> bool {
+    status.is_informational() || status == StatusCode::NO_CONTENT
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ConnectionHeaderMode {
     Omit,
@@ -94,7 +98,8 @@ pub(crate) async fn send_static_http1_response(
     let body_len = body.len() as u64;
     let declared_length = parse_declared_content_length(&headers)?;
     if status_has_no_body {
-        if request_method != Method::HEAD {
+        if request_method != Method::HEAD || response_status_forbids_content_length(response_status)
+        {
             headers.remove(CONTENT_LENGTH);
         } else if let Some(length) = declared_length {
             // RFC 9110 section 8.6: the value a sender writes is one
@@ -242,7 +247,9 @@ where
         let declared_length = parse_declared_content_length(&headers)?;
         let has_chunked = has_only_chunked_transfer_encoding(&headers)?;
         if no_body {
-            if request_method != Method::HEAD {
+            if request_method != Method::HEAD
+                || response_status_forbids_content_length(parts.status)
+            {
                 headers.remove(CONTENT_LENGTH);
             } else if let Some(length) = declared_length {
                 // RFC 9110 section 8.6: the value a sender writes is one
