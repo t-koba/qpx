@@ -427,6 +427,39 @@ fn parse_declared_content_length_refuses_a_signed_member() {
 }
 
 #[test]
+fn bodyless_responses_validate_content_length_without_using_it_for_framing() {
+    for (method, status, valid_length) in [
+        (Method::HEAD, StatusCode::OK, Some("42")),
+        (Method::GET, StatusCode::NO_CONTENT, None),
+        (Method::GET, StatusCode::NOT_MODIFIED, Some("42")),
+    ] {
+        let mut headers = HeaderMap::new();
+        if let Some(value) = valid_length {
+            headers.insert(CONTENT_LENGTH, HeaderValue::from_static(value));
+        }
+        assert!(matches!(
+            determine_response_body_kind(&method, status, &headers).expect("valid declaration"),
+            ResponseBodyKind::Empty
+        ));
+
+        let mut invalid = HeaderMap::new();
+        invalid.insert(CONTENT_LENGTH, HeaderValue::from_static("+42"));
+        assert!(
+            determine_response_body_kind(&method, status, &invalid).is_err(),
+            "{method} {status} must reject invalid Content-Length syntax"
+        );
+
+        let mut conflicting = HeaderMap::new();
+        conflicting.append(CONTENT_LENGTH, HeaderValue::from_static("42"));
+        conflicting.append(CONTENT_LENGTH, HeaderValue::from_static("43"));
+        assert!(
+            determine_response_body_kind(&method, status, &conflicting).is_err(),
+            "{method} {status} must reject conflicting Content-Length values"
+        );
+    }
+}
+
+#[test]
 fn reset_content_response_validates_declared_content_length() {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_LENGTH, HeaderValue::from_static("+1"));

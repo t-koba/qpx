@@ -185,6 +185,10 @@ pub(super) fn determine_response_body_kind(
     if *request_method == Method::HEAD
         || (status_has_no_body && status != StatusCode::RESET_CONTENT)
     {
+        // Validate the field without using its value to frame a response that
+        // is bodyless by method or status. HEAD and 304 can carry representation
+        // length metadata; 204 is stripped by response normalization.
+        let _ = parse_declared_content_length(headers)?;
         return Ok(ResponseBodyKind::Empty);
     }
 
