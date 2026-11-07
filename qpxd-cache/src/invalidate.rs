@@ -76,9 +76,13 @@ pub async fn invalidate_primary(
         let _commit = crate::store::commit::lock(backend, namespace, primary).await;
         let index = load_variant_index(backend, namespace, primary).await?;
         let default_variant = variant_storage_key(primary, &[]);
-        let _ = backend
+        // Do not claim invalidation if the canonical fallback could not be
+        // retired. Returning here keeps the index untouched and releases the
+        // lock only with an explicit error, so an in-flight 304 cannot race a
+        // falsely successful invalidation.
+        backend
             .retire_response_metadata(namespace, default_variant.as_str())
-            .await;
+            .await?;
         let _ = backend
             .delete(namespace, index_storage_key(primary).as_str())
             .await;

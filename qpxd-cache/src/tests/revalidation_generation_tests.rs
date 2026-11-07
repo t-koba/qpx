@@ -1205,6 +1205,174 @@ async fn stalled_legacy_body_timeout_releases_producer_without_publishing() {
 }
 
 #[tokio::test]
+async fn invalidation_reports_failed_canonical_retirement_before_304_commit() {
+    tokio::time::timeout(Duration::from_secs(20), async {
+        for disk in [false, true] {
+            let root = std::env::temp_dir().join(format!(
+                "qpx-legacy-retire-failure-invalidate-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let inner = legacy_test_backend(disk, &root);
+            let (mutations, mut completed) = mpsc::unbounded_channel();
+            let backend = Arc::new(ObservedBackend {
+                inner: inner.clone(),
+                mutations,
+                fail_retirement: std::sync::atomic::AtomicBool::new(false),
+                staged_gate: Mutex::new(None),
+                index_gate: Mutex::new(None),
+            });
+            let backends = HashMap::from([("b".into(), backend.clone() as Arc<dyn CacheBackend>)]);
+            let request = make_get_request("/legacy-retire-failure-invalidate");
+            let key = CacheRequestKey::for_lookup(&request, "http")
+                .unwrap()
+                .unwrap();
+            let cache_policy = CachePolicyConfig {
+                max_object_bytes: 4 * 1024 * 1024,
+                ..policy()
+            };
+            let namespace = super::util::cache_namespace(&cache_policy, "default");
+            let (legacy_key, legacy_body) =
+                seed_legacy_canonical(inner.as_ref(), namespace, &key).await;
+            let mut refresh_request = make_get_request("/legacy-retire-failure-invalidate");
+            refresh_request.headers_mut().insert(
+                OrdinaryHeaderName::try_from(CACHE_CONTROL).unwrap(),
+                "no-cache".parse().unwrap(),
+            );
+            let LookupOutcome::Revalidate(state) = lookup(
+                &refresh_request,
+                &key,
+                &cache_policy,
+                &backends,
+                &test_revalidations(),
+            )
+            .await
+            .unwrap() else {
+                panic!("legacy response must be revalidated");
+            };
+
+            // Pause after the 304 body has been staged but before migration
+            // takes the commit lock. Invalidation can then hit the injected
+            // metadata-retirement error at the exact contested primary.
+            let (staged_tx, mut staged_rx) = mpsc::unbounded_channel();
+            let staged_release = Arc::new(tokio::sync::Notify::new());
+            *backend.staged_gate.lock().unwrap() = Some((staged_tx, staged_release.clone()));
+            let migration_backends = backends.clone();
+            let migration_policy = cache_policy.clone();
+            let migration_request = refresh_request;
+            let migration = tokio::spawn(async move {
+                let response = revalidate_not_modified(
+                    &migration_request,
+                    &migration_policy,
+                    qpx_core::http_message::Response::from_http(
+                        Response::builder()
+                            .status(304)
+                            .header(CACHE_CONTROL, "public, max-age=300")
+                            .body(Body::empty())
+                            .unwrap(),
+                    ),
+                    state,
+                    0,
+                    Duration::from_secs(5),
+                    &migration_backends,
+                )
+                .await
+                .expect("304 still serves the legacy response");
+                qpx_http::body::to_bytes(response.into_head_and_body().1)
+                    .await
+                    .expect("legacy body remains readable")
+            });
+            tokio::time::timeout(Duration::from_secs(5), staged_rx.recv())
+                .await
+                .expect("staged body")
+                .expect("staged generation key");
+            let primary = key.primary_hash();
+            // Preserve a pre-existing legacy index so the failure assertion
+            // proves invalidation did not delete or rewrite it before returning.
+            let prior_index_key = index_storage_key(primary.as_str());
+            let prior_index = serde_json::to_vec(&VariantIndex {
+                variants: vec![legacy_key.clone()],
+            })
+            .unwrap();
+            backend
+                .put(namespace, &prior_index_key, &prior_index, 24 * 60 * 60)
+                .await
+                .unwrap();
+
+            backend
+                .fail_retirement
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            let invalidation = crate::invalidate::invalidate_primary(
+                backend.as_ref(),
+                namespace,
+                primary.as_str(),
+            )
+            .await;
+            assert!(
+                invalidation.is_err(),
+                "failed retirement must not be reported as a successful invalidation"
+            );
+            assert!(
+                backend
+                    .get_decoded_response_metadata_many(
+                        namespace,
+                        std::slice::from_ref(&legacy_key)
+                    )
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .next()
+                    .flatten()
+                    .is_some(),
+                "failed invalidation must not remove canonical metadata"
+            );
+            assert_eq!(
+                backend.get(namespace, &prior_index_key).await.unwrap(),
+                Some(Bytes::from(prior_index.clone())),
+                "failed retirement must leave the existing index untouched"
+            );
+            while completed.try_recv().is_ok() {}
+
+            // Since invalidation explicitly failed, the 304 can safely finish
+            // as an ordinary refresh; the caller was never told it was purged.
+            backend
+                .fail_retirement
+                .store(false, std::sync::atomic::Ordering::Relaxed);
+            staged_release.notify_one();
+            let client_body = tokio::time::timeout(Duration::from_secs(5), migration)
+                .await
+                .expect("migration completes after releasing stage")
+                .expect("join");
+            assert_eq!(client_body, legacy_body);
+            let published_index = prior_index_key;
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if completed.recv().await.as_deref() == Some(published_index.as_str()) {
+                        break;
+                    }
+                }
+            })
+            .await
+            .expect("post-error 304 index publication");
+            assert!(
+                backend
+                    .get(namespace, &published_index)
+                    .await
+                    .unwrap()
+                    .is_some(),
+                "the subsequent 304 refresh is published only after invalidation returned error"
+            );
+            drop(backends);
+            drop(backend);
+            if disk {
+                tokio::fs::remove_dir_all(root).await.unwrap();
+            }
+        }
+    })
+    .await
+    .expect("bounded failed-retirement invalidation regression");
+}
+
+#[tokio::test]
 async fn legacy_migration_invalidation_race_cannot_republish_after_final_check() {
     tokio::time::timeout(Duration::from_secs(20), async {
         for disk in [false, true] {
