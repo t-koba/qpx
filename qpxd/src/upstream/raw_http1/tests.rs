@@ -509,6 +509,54 @@ async fn unframed_reset_content_response_does_not_recycle_upstream() {
 }
 
 #[tokio::test]
+async fn raw_reset_content_recycles_only_after_explicit_zero_length_framing() {
+    for (declared_length, expected_recycles) in [
+        (None, false),
+        (Some(b"0".as_slice()), true),
+        (Some(b"1".as_slice()), false),
+    ] {
+        let headers: Vec<httparse::Header<'_>> = declared_length
+            .map(|value| {
+                vec![httparse::Header {
+                    name: "Content-Length",
+                    value,
+                }]
+            })
+            .unwrap_or_default();
+        let mut raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::RESET_CONTENT,
+            Version::HTTP_11,
+        )
+        .expect("raw 205 head");
+        raw.finalize("qpx");
+
+        let (stream, _peer) = tokio::io::duplex(64);
+        let recycled = Arc::new(AtomicUsize::new(0));
+        let recycled_in_closure = recycled.clone();
+        let response = build_raw_response(
+            stream,
+            Arc::new(raw),
+            BytesMut::new(),
+            BytesMut::new(),
+            Some(Http1ConnectionRecycler::new(
+                move |_stream, _read_buf, _write_buf| {
+                    recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+                },
+            )),
+        );
+        assert!(
+            to_bytes(response.into_body())
+                .await
+                .expect("empty raw 205 body")
+                .is_empty()
+        );
+        assert_eq!(recycled.load(Ordering::SeqCst) == 1, expected_recycles);
+    }
+}
+
+#[tokio::test]
 async fn chunked_response_build_removes_conflicting_content_length() {
     let mut headers = HeaderMap::new();
     headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));

@@ -103,6 +103,19 @@ impl RawHttp1ResponseHead {
         }
         let content_length = parse_content_length(headers)?;
         let no_body = request_method == Method::HEAD || response_status_has_no_body(status, false);
+        let successful_connect = request_method == Method::CONNECT && status.is_success();
+        let reset_content_framing = status == StatusCode::RESET_CONTENT
+            && request_method != Method::HEAD
+            && !successful_connect;
+        // HEAD is self-delimiting by request method; other 205 responses can
+        // only return to the pool after an explicit zero-length declaration.
+        let reset_content_upstream_reusable = status != StatusCode::RESET_CONTENT
+            || request_method == Method::HEAD
+            || (!successful_connect
+                && content_length == Some(0)
+                && !headers
+                    .iter()
+                    .any(|header| header.name.eq_ignore_ascii_case("transfer-encoding")));
         let chunked = if no_body {
             false
         } else {
@@ -129,7 +142,7 @@ impl RawHttp1ResponseHead {
         let upstream_keep_alive = match version {
             Version::HTTP_10 => raw_has_connection_token(headers, b"keep-alive"),
             _ => !raw_has_connection_token(headers, b"close"),
-        };
+        } && reset_content_upstream_reusable;
         let strip_content_length = response_status_forbids_content_length(status)
             || (no_body && request_method != Method::HEAD && status != StatusCode::NOT_MODIFIED)
             || chunked;
@@ -162,6 +175,13 @@ impl RawHttp1ResponseHead {
                 continue;
             }
             if name.eq_ignore_ascii_case(b"content-length") {
+                if reset_content_framing {
+                    if !content_length_written {
+                        content_length_written = true;
+                        append_header_line(&mut header_lines, b"Content-Length", b"0");
+                    }
+                    continue;
+                }
                 if strip_content_length {
                     continue;
                 }
@@ -186,6 +206,9 @@ impl RawHttp1ResponseHead {
                 has_date = true;
             }
             append_header_line(&mut header_lines, name, header.value);
+        }
+        if reset_content_framing && !content_length_written {
+            append_header_line(&mut header_lines, b"Content-Length", b"0");
         }
 
         Ok(Self {
@@ -513,6 +536,17 @@ mod tests {
         let encoded = std::str::from_utf8(head_response.header_lines()).expect("ASCII head");
         assert_eq!(content_length_lines(encoded), vec!["Content-Length: 42"]);
 
+        let mut reset_content_head = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::HEAD,
+            StatusCode::RESET_CONTENT,
+            Version::HTTP_11,
+        )
+        .expect("HEAD 205 response");
+        reset_content_head.finalize("qpx");
+        let encoded = std::str::from_utf8(reset_content_head.header_lines()).expect("ASCII head");
+        assert_eq!(content_length_lines(encoded), vec!["Content-Length: 42"]);
+
         let mut no_content = RawHttp1ResponseHead::from_parsed(
             &headers,
             &Method::HEAD,
@@ -523,6 +557,99 @@ mod tests {
         assert_eq!(no_content.framing(), RawHttp1BodyFraming::Empty);
         no_content.finalize("qpx");
         let encoded = std::str::from_utf8(no_content.header_lines()).expect("ASCII head");
+        assert!(content_length_lines(encoded).is_empty());
+    }
+
+    #[test]
+    fn raw_head_frames_205_as_empty_and_reuses_only_verified_zero_length_upstream() {
+        let cases = [
+            (
+                None,
+                false,
+                "X-Before: first\r\nX-After: last\r\nContent-Length: 0\r\n",
+            ),
+            (
+                Some(b"0".as_slice()),
+                true,
+                "X-Before: first\r\nContent-Length: 0\r\nX-After: last\r\n",
+            ),
+            (
+                Some(b"8".as_slice()),
+                false,
+                "X-Before: first\r\nContent-Length: 0\r\nX-After: last\r\n",
+            ),
+        ];
+
+        for (length, reusable, expected_order) in cases {
+            let mut headers = vec![httparse::Header {
+                name: "X-Before",
+                value: b"first",
+            }];
+            if let Some(value) = length {
+                headers.push(httparse::Header {
+                    name: "Content-Length",
+                    value,
+                });
+            }
+            headers.push(httparse::Header {
+                name: "X-After",
+                value: b"last",
+            });
+
+            let mut raw = RawHttp1ResponseHead::from_parsed(
+                &headers,
+                &Method::GET,
+                StatusCode::RESET_CONTENT,
+                Version::HTTP_11,
+            )
+            .expect("raw 205 head");
+            assert_eq!(raw.framing(), RawHttp1BodyFraming::Empty);
+            assert_eq!(raw.upstream_keep_alive(), reusable);
+            raw.finalize("qpx");
+            let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+            assert_eq!(content_length_lines(encoded), ["Content-Length: 0"]);
+            assert!(
+                encoded.contains(expected_order),
+                "unexpected order: {encoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_head_does_not_reuse_205_with_transfer_encoding_or_add_zero_for_connect() {
+        let transfer_encoded = [
+            httparse::Header {
+                name: "Transfer-Encoding",
+                value: b"chunked",
+            },
+            httparse::Header {
+                name: "Content-Length",
+                value: b"0",
+            },
+        ];
+        let raw = RawHttp1ResponseHead::from_parsed(
+            &transfer_encoded,
+            &Method::GET,
+            StatusCode::RESET_CONTENT,
+            Version::HTTP_11,
+        )
+        .expect("raw 205 head");
+        assert!(!raw.upstream_keep_alive());
+
+        let connect_headers = [httparse::Header {
+            name: "Content-Length",
+            value: b"0",
+        }];
+        let mut connect = RawHttp1ResponseHead::from_parsed(
+            &connect_headers,
+            &Method::CONNECT,
+            StatusCode::RESET_CONTENT,
+            Version::HTTP_11,
+        )
+        .expect("successful CONNECT head");
+        assert!(!connect.upstream_keep_alive());
+        connect.finalize("qpx");
+        let encoded = std::str::from_utf8(connect.header_lines()).expect("ASCII head");
         assert!(content_length_lines(encoded).is_empty());
     }
 
