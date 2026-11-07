@@ -13,7 +13,9 @@ use hyper::Response;
 use hyper::header::COOKIE;
 use qpx_core::http_message::{Headers, OrdinaryHeaderName, Response as OwnerResponse};
 use qpx_http::body::{Body, BodyError};
-use qpx_http::protocol::semantics::response_status_has_no_body;
+use qpx_http::protocol::semantics::{
+    response_status_forbids_content_length, response_status_has_no_body,
+};
 use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -202,7 +204,7 @@ pub(crate) async fn send_h2_response_with_interim(
         head = OwnerResponse::from_http(raw_response);
     }
     let declared_length =
-        prepare_h2_response_content_length(head.headers_mut(), no_body, request_method)?;
+        prepare_h2_response_content_length(head.headers_mut(), no_body, request_method, status)?;
     let headers = head.into_http_for_codec()?.into_parts().0.headers;
     let flow_control_body =
         declared_length.is_none_or(|length| length > H2_DIRECT_SEND_BODY_MAX_BYTES);
@@ -452,19 +454,23 @@ fn prepare_h2_response_content_length(
     headers: &mut Headers,
     no_body: bool,
     request_method: &hyper::Method,
+    response_status: http::StatusCode,
 ) -> Result<Option<u64>> {
     if no_body {
         for name in [http::header::TRANSFER_ENCODING, http::header::TRAILER] {
             headers.remove(&OrdinaryHeaderName::try_from(name)?);
         }
-        if request_method == hyper::Method::HEAD {
+        if response_status_forbids_content_length(response_status)
+            || (request_method != hyper::Method::HEAD
+                && response_status != http::StatusCode::NOT_MODIFIED)
+        {
+            headers.remove_content_length();
+        } else {
             match headers.declared_content_length() {
                 Ok(Some(length)) => headers.set_content_length(length),
                 Ok(None) => {}
                 Err(_) => headers.remove_content_length(),
             }
-        } else {
-            headers.remove_content_length();
         }
         return Ok(None);
     }

@@ -1260,12 +1260,20 @@ fn invalid_content_length_diagnostic_does_not_echo_userinfo() {
 }
 
 #[test]
-fn h2_owned_framing_matches_map_rules() {
-    for (method, no_body) in [
-        (hyper::Method::HEAD, true),
-        (hyper::Method::GET, true),
-        (hyper::Method::GET, false),
+fn h2_owned_framing_matches_http1_no_body_rules() {
+    for (method, status) in [
+        (&hyper::Method::HEAD, StatusCode::OK),
+        (&hyper::Method::GET, StatusCode::NO_CONTENT),
+        (&hyper::Method::HEAD, StatusCode::NO_CONTENT),
+        (&hyper::Method::GET, StatusCode::RESET_CONTENT),
+        (&hyper::Method::GET, StatusCode::NOT_MODIFIED),
+        (&hyper::Method::HEAD, StatusCode::NOT_MODIFIED),
+        (&hyper::Method::GET, StatusCode::OK),
+        (&hyper::Method::CONNECT, StatusCode::OK),
     ] {
+        let no_body = method == hyper::Method::HEAD
+            || response_status_has_no_body(status, false)
+            || (method == hyper::Method::CONNECT && status.is_success());
         for values in [
             vec![],
             vec!["0"],
@@ -1283,10 +1291,13 @@ fn h2_owned_framing_matches_map_rules() {
             original.append("x-test", "two".parse().unwrap());
             let mut expected = original.clone();
             let expected_length = if no_body {
-                if method == hyper::Method::HEAD {
-                    qpx_http::protocol::semantics::strip_message_body_framing_headers(
-                        &mut expected,
-                    );
+                expected.remove(http::header::TRANSFER_ENCODING);
+                expected.remove(http::header::TRAILER);
+                if response_status_forbids_content_length(status)
+                    || (method != hyper::Method::HEAD && status != StatusCode::NOT_MODIFIED)
+                {
+                    expected.remove(http::header::CONTENT_LENGTH);
+                } else {
                     match parse_declared_content_length(&expected) {
                         Ok(Some(length)) => {
                             expected.insert(
@@ -1301,8 +1312,6 @@ fn h2_owned_framing_matches_map_rules() {
                             expected.remove(http::header::CONTENT_LENGTH);
                         }
                     }
-                } else {
-                    qpx_http::protocol::semantics::strip_message_body_headers(&mut expected);
                 }
                 Ok(None)
             } else {
@@ -1317,9 +1326,10 @@ fn h2_owned_framing_matches_map_rules() {
             };
             let mut standard = Response::new(());
             *standard.headers_mut() = original;
+            *standard.status_mut() = status;
             let mut owned = OwnerResponse::from_http(standard);
             let actual_length =
-                prepare_h2_response_content_length(owned.headers_mut(), no_body, &method);
+                prepare_h2_response_content_length(owned.headers_mut(), no_body, method, status);
             assert_eq!(actual_length.as_ref().ok(), expected_length.as_ref().ok());
             if let (Err(actual), Err(expected)) = (&actual_length, &expected_length) {
                 assert_eq!(actual.to_string(), expected.to_string());
@@ -1332,8 +1342,14 @@ fn h2_owned_framing_matches_map_rules() {
 }
 
 #[tokio::test]
-async fn h2_invalid_head_length_and_raw_placeholder_keep_interim_order() {
-    for (raw_head, is_head) in [(false, true), (true, true), (true, false)] {
+async fn h2_no_body_content_length_and_raw_placeholder_keep_interim_order() {
+    for (raw_head, is_head, status, initial_length, expected_length) in [
+        (false, true, StatusCode::OK, "invalid", None),
+        (true, true, StatusCode::OK, "invalid", Some("7")),
+        (true, false, StatusCode::OK, "invalid", Some("0")),
+        (false, false, StatusCode::NOT_MODIFIED, "007", Some("7")),
+        (false, true, StatusCode::NO_CONTENT, "7", None),
+    ] {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let (result_tx, result_rx) = tokio::sync::oneshot::channel();
@@ -1344,9 +1360,11 @@ async fn h2_invalid_head_length_and_raw_placeholder_keep_interim_order() {
                 let (_, respond) = result.unwrap();
                 tokio::spawn(async move {
                     let mut response = Response::new(Body::empty());
-                    response
-                        .headers_mut()
-                        .insert(http::header::CONTENT_LENGTH, "invalid".parse().unwrap());
+                    response.headers_mut().insert(
+                        http::header::CONTENT_LENGTH,
+                        initial_length.parse().unwrap(),
+                    );
+                    *response.status_mut() = status;
                     if raw_head {
                         let fields = [
                             httparse::Header {
@@ -1365,7 +1383,7 @@ async fn h2_invalid_head_length_and_raw_placeholder_keep_interim_order() {
                             } else {
                                 &hyper::Method::GET
                             },
-                            StatusCode::OK,
+                            status,
                             http::Version::HTTP_11,
                         )
                         .unwrap();
@@ -1416,21 +1434,16 @@ async fn h2_invalid_head_length_and_raw_placeholder_keep_interim_order() {
             StatusCode::EARLY_HINTS
         );
         let response = future.await.unwrap();
+        assert_eq!(response.status(), status);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::CONTENT_LENGTH)
+                .map(http::HeaderValue::as_bytes),
+            expected_length.map(str::as_bytes)
+        );
         if raw_head {
-            assert_eq!(
-                response
-                    .headers()
-                    .get(http::header::CONTENT_LENGTH)
-                    .unwrap(),
-                if is_head { "7" } else { "0" }
-            );
             assert_eq!(response.headers().get("x-raw").unwrap(), "present");
-        } else {
-            assert!(
-                !response
-                    .headers()
-                    .contains_key(http::header::CONTENT_LENGTH)
-            );
         }
         result_rx.await.unwrap().unwrap();
     }

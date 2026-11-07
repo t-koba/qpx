@@ -5,7 +5,9 @@ use anyhow::{Result, anyhow};
 use http::header::COOKIE;
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 use qpx_core::http_message::Request;
-use qpx_http::protocol::semantics::response_status_has_no_body;
+use qpx_http::protocol::semantics::{
+    response_status_forbids_content_length, response_status_has_no_body,
+};
 
 pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
     let mut headers = http::HeaderMap::new();
@@ -110,7 +112,11 @@ pub(crate) fn prepare_h3_response_head(
     // decimal: the field leaves as one field whose value is that decimal,
     // never as two fields and never as a value the grammar does not have.
     let content_length = if no_body {
-        if *request_method == http::Method::HEAD {
+        if response_status_forbids_content_length(status)
+            || (*request_method != http::Method::HEAD && status != http::StatusCode::NOT_MODIFIED)
+        {
+            qpx_http::protocol::semantics::strip_message_body_headers(&mut headers);
+        } else {
             qpx_http::protocol::semantics::strip_message_body_framing_headers(&mut headers);
             match crate::http::codec::h2::parse_declared_content_length(&headers) {
                 Ok(Some(length)) => {
@@ -124,8 +130,6 @@ pub(crate) fn prepare_h3_response_head(
                     headers.remove(http::header::CONTENT_LENGTH);
                 }
             }
-        } else {
-            qpx_http::protocol::semantics::strip_message_body_headers(&mut headers);
         }
         crate::http::codec::h2::parse_declared_content_length(&headers)
             .ok()
@@ -412,6 +416,60 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("42")
         );
+    }
+
+    #[test]
+    fn h3_no_body_content_length_matches_http1_rules() {
+        for (method, status, value, expected) in [
+            (
+                ::http::Method::GET,
+                ::http::StatusCode::NOT_MODIFIED,
+                "007",
+                Some("7"),
+            ),
+            (
+                ::http::Method::HEAD,
+                ::http::StatusCode::NO_CONTENT,
+                "7",
+                None,
+            ),
+            (
+                ::http::Method::GET,
+                ::http::StatusCode::NO_CONTENT,
+                "7",
+                None,
+            ),
+            (
+                ::http::Method::HEAD,
+                ::http::StatusCode::OK,
+                "invalid",
+                None,
+            ),
+            (
+                ::http::Method::HEAD,
+                ::http::StatusCode::NOT_MODIFIED,
+                "42",
+                Some("42"),
+            ),
+        ] {
+            let response = ::http::Response::builder()
+                .status(status)
+                .header(::http::header::CONTENT_LENGTH, value)
+                .body(())
+                .expect("response");
+            let (parts, _) = response.into_parts();
+            let prepared = prepare_h3_response_head(&parts, &method).expect("prepare head");
+
+            assert!(!prepared.body_allowed);
+            assert_eq!(
+                prepared.content_length,
+                expected.map(|value| value.parse().unwrap())
+            );
+            assert_eq!(
+                content_length_fields(prepared.head.headers()),
+                expected.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            );
+        }
     }
 
     #[test]
