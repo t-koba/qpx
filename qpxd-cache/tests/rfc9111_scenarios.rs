@@ -509,6 +509,29 @@ async fn conditional_requests_return_not_modified_or_attach_revalidation_headers
     Ok(())
 }
 
+// Delivery schedules metadata work rather than awaiting it on the response
+// path. Observe that mutation before asserting subsequent lookup behavior.
+async fn wait_for_revalidated_outcome(
+    req: &OwnerRequest<()>,
+    key: &CacheRequestKey,
+    policy: &CachePolicyConfig,
+    backends: &HashMap<String, Arc<dyn CacheBackend>>,
+    expect_hit: bool,
+) -> Result<LookupOutcome> {
+    tokio::time::timeout(Duration::from_secs(2), async {
+        loop {
+            let outcome = lookup(req, key, policy, backends, &revalidations()).await?;
+            if matches!(&outcome, LookupOutcome::Hit(_)) && expect_hit
+                || matches!(&outcome, LookupOutcome::Miss) && !expect_hit
+            {
+                return Ok::<_, anyhow::Error>(outcome);
+            }
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+    })
+    .await?
+}
+
 #[tokio::test]
 async fn foreground_304_replays_persisted_body() -> Result<()> {
     for case in backend_cases("foreground-304") {
@@ -609,7 +632,15 @@ async fn foreground_304_replays_persisted_body() -> Result<()> {
             );
             // Metadata refresh must leave the complete representation available.
             let get = request(&path);
-            match lookup(&get, &key, &case.policy, &case.backends, &revalidations()).await? {
+            match wait_for_revalidated_outcome(
+                &get,
+                &key,
+                &case.policy,
+                &case.backends,
+                control != "no-store",
+            )
+            .await?
+            {
                 LookupOutcome::Hit(mut hit) if control != "no-store" => {
                     assert_eq!(hit.headers().declared_content_length()?, Some(11));
                     assert_eq!(collect_body(hit.body_mut()).await?.as_ref(), b"cached body");
@@ -691,12 +722,12 @@ async fn foreground_304_vary_changes_evict_incoherent_selectors() -> Result<()> 
                 .headers_mut()
                 .insert(ord("x-region"), HeaderValue::from_static("ca"));
             let old_key = CacheRequestKey::for_lookup(&old_selector, "http")?.expect("cache key");
-            let old_outcome = lookup(
+            let old_outcome = wait_for_revalidated_outcome(
                 &old_selector,
                 &old_key,
                 &case.policy,
                 &case.backends,
-                &revalidations(),
+                expect_hit,
             )
             .await?;
             if expect_hit {
@@ -774,7 +805,6 @@ async fn foreground_304_rejects_missing_or_invalid_body() -> Result<()> {
         let backend = state.backend.clone();
         let namespace = state.namespace.clone();
         let variant_key = state.variant_key.clone();
-        let metadata = backend.get(&namespace, &variant_key).await?;
         let body_key = format!("{variant_key}:body");
         if corrupt {
             backend.put(&namespace, &body_key, b"short", 60).await?;
@@ -797,7 +827,7 @@ async fn foreground_304_rejects_missing_or_invalid_body() -> Result<()> {
             .await
             .is_err()
         );
-        assert_eq!(backend.get(&namespace, &variant_key).await?, metadata);
+        assert!(backend.get(&namespace, &variant_key).await?.is_none());
     }
     Ok(())
 }

@@ -1131,6 +1131,7 @@ impl CacheBackend for DiskCacheBackend {
             .body_offset
             .saturating_add(range.map(|(start, _)| start).unwrap_or(0));
         let (mut sender, body) = Body::channel_with_capacity(16);
+        let (done, producer_done) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = async {
                 let mut file = TokioFile::open(&read.path).await?;
@@ -1156,9 +1157,12 @@ impl CacheBackend for DiskCacheBackend {
             if result.is_err() {
                 sender.abort();
             }
+            let _ = done.send(());
         });
-        Ok(Some(CachedBodyStream::from_body_for_backend(
-            body_len, body,
+        Ok(Some(CachedBodyStream::from_producer_for_backend(
+            body_len,
+            body,
+            producer_done,
         )))
     }
 

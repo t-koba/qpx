@@ -189,6 +189,8 @@ pub trait CacheBackend: Send + Sync {
     async fn get_object(&self, namespace: &str, key: &str) -> Result<Option<CachedBody>> {
         Ok(self.get(namespace, key).await?.map(CachedBody::from_bytes))
     }
+    /// On None/error, no producer may still use the object. On success the
+    /// returned completion signal must cover that producer's resource lifetime.
     async fn get_object_stream(
         &self,
         _namespace: &str,

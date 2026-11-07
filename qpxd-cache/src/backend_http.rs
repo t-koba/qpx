@@ -508,6 +508,7 @@ impl CacheBackend for HttpCacheBackend {
         let (mut tx, body) = Body::channel_with_capacity(16);
         let timeout_dur = self.timeout;
         let idle = self.idle.clone();
+        let (done, producer_done) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let mut body = resp.map(Body::from).into_body();
             let mut seen = 0u64;
@@ -534,12 +535,17 @@ impl CacheBackend for HttpCacheBackend {
                 Ok(sender) => recycle_sender(idle, sender).await,
                 Err(_) => tx.abort(),
             }
+            drop(body);
             drop(_permit);
+            let _ = done.send(());
         });
-        Ok(Some(super::types::CachedBodyStream {
-            len: expected_body_len,
-            body,
-        }))
+        Ok(Some(
+            super::types::CachedBodyStream::from_producer_for_backend(
+                expected_body_len,
+                body,
+                producer_done,
+            ),
+        ))
     }
 
     async fn put(&self, namespace: &str, key: &str, value: &[u8], ttl_secs: u64) -> Result<()> {

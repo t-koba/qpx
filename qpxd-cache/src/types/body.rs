@@ -16,12 +16,36 @@ const CACHE_BODY_FILE_CHUNK_BYTES: usize = 64 * 1024;
 pub struct CachedBodyStream {
     pub(crate) len: u64,
     pub(crate) body: Body,
+    pub(crate) producer_done: oneshot::Receiver<()>,
 }
 
 impl CachedBodyStream {
+    /// A materialized body with no producer using backend resources.
     #[doc(hidden)]
     pub fn from_body_for_backend(len: u64, body: Body) -> Self {
-        Self { len, body }
+        let (done, producer_done) = oneshot::channel();
+        let _ = done.send(());
+        Self {
+            len,
+            body,
+            producer_done,
+        }
+    }
+
+    /// The producer must signal only after it stops using the stored object and
+    /// releases backend resources (including operation permits). Dropping the
+    /// body must stop a backpressured producer. A closed signal means failure.
+    #[doc(hidden)]
+    pub fn from_producer_for_backend(
+        len: u64,
+        body: Body,
+        producer_done: oneshot::Receiver<()>,
+    ) -> Self {
+        Self {
+            len,
+            body,
+            producer_done,
+        }
     }
 }
 

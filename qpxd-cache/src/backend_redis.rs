@@ -256,18 +256,21 @@ impl CacheBackend for RedisCacheBackend {
         let (tx, body) = Body::channel_with_capacity(16);
         let idle = self.idle.clone();
         let timeout_dur = self.timeout;
+        let (done, producer_done) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = stream_redis_bulk_to_body(stream, timeout_dur, len, tx).await;
             if let Ok(stream) = result {
                 recycle_stream(idle, stream).await;
             }
             drop(permit);
+            let _ = done.send(());
         });
 
-        Ok(Some(CachedBodyStream {
-            len: expected_stream_len,
+        Ok(Some(CachedBodyStream::from_producer_for_backend(
+            expected_stream_len,
             body,
-        }))
+            producer_done,
+        )))
     }
 
     async fn put(&self, namespace: &str, key: &str, value: &[u8], ttl_secs: u64) -> Result<()> {

@@ -427,54 +427,94 @@ pub async fn revalidate_not_modified<B>(
     let req = parse_request_directives(request_headers);
     let range = active_range(&req, &updated);
     let stream_range = range.and_then(|range| resolve_range(range, updated.body_len));
-    // Persisted metadata carries only the body length, not the representation.
-    // Open the existing object before updating metadata or purging a no-store entry.
+    // Encode/build before opening a producer, so preparation failures cannot
+    // strand a body or mutate metadata while a backend permit is held.
+    let refresh = if storable {
+        Some((
+            encode_cached_response_metadata(&updated)?,
+            object_retention_ttl_secs(updated.freshness_lifetime_secs, &directives),
+        ))
+    } else {
+        None
+    };
     let response = if *request_method == Method::HEAD || (range.is_some() && stream_range.is_none())
     {
         response_from_envelope_for_request(request_method, &req, &updated, now, "REVALIDATED")?
     } else {
-        let body = backend
+        let expected_len = stream_range
+            .map(|(start, end)| end - start + 1)
+            .unwrap_or(updated.body_len);
+        let mut response = response_from_envelope_for_request_with_body(
+            request_method,
+            &req,
+            &updated,
+            now,
+            "REVALIDATED",
+            Body::empty(),
+            expected_len,
+        )?;
+        let stream = match backend
             .get_object_stream(
                 state.namespace.as_str(),
                 cache_body_storage_key(state.variant_key.as_str()).as_str(),
                 updated.body_len,
                 stream_range,
             )
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("missing or invalid cached body during revalidation"))?;
-        response_from_envelope_for_request_with_body(
-            request_method,
-            &req,
-            &updated,
-            now,
-            "REVALIDATED",
-            body.body,
-            body.len,
-        )?
+            .await
+        {
+            Ok(Some(stream)) => stream,
+            result => {
+                invalidate_revalidated(backend.as_ref(), &state.namespace, &state.variant_key)
+                    .await;
+                return Err(result.err().unwrap_or_else(|| {
+                    anyhow::anyhow!("missing or invalid cached body during revalidation")
+                }));
+            }
+        };
+        if stream.len != expected_len {
+            drop(stream.body);
+            let _ = stream.producer_done.await;
+            invalidate_revalidated(backend.as_ref(), &state.namespace, &state.variant_key).await;
+            return Err(anyhow::anyhow!(
+                "invalid cached body length during revalidation"
+            ));
+        }
+        let backend = backend.clone();
+        let namespace = state.namespace;
+        let variant_key = state.variant_key;
+        *response.body_mut() = body::after_delivery(
+            body::validate_body_length(stream.body, Some(expected_len)),
+            stream.producer_done,
+            move |delivery| async move {
+                match (delivery, refresh) {
+                    (body::Delivery::Complete, Some((payload, ttl))) => {
+                        let _ = backend.put(&namespace, &variant_key, &payload, ttl).await;
+                    }
+                    (body::Delivery::Abandoned, Some(_)) => {}
+                    _ => invalidate_revalidated(backend.as_ref(), &namespace, &variant_key).await,
+                }
+            },
+        );
+        return Ok(response);
     };
 
-    if storable {
-        let ttl = object_retention_ttl_secs(updated.freshness_lifetime_secs, &directives);
-        let payload = encode_cached_response_metadata(&updated)?;
+    // HEAD and unsatisfiable ranges have no stored-body producer to wait for.
+    if let Some((payload, ttl)) = refresh {
         let _ = backend
-            .put(
-                state.namespace.as_str(),
-                state.variant_key.as_str(),
-                &payload,
-                ttl,
-            )
+            .put(&state.namespace, &state.variant_key, &payload, ttl)
             .await;
     } else {
-        // The representation is no longer storable (e.g. new no-store/private). Purge it.
-        if let Some(primary) = primary_from_variant_key(state.variant_key.as_str()) {
-            let _ = invalidate_primary(backend.as_ref(), state.namespace.as_str(), primary).await;
-        } else {
-            let _ = backend
-                .delete(state.namespace.as_str(), state.variant_key.as_str())
-                .await;
-        }
+        invalidate_revalidated(backend.as_ref(), &state.namespace, &state.variant_key).await;
     }
     Ok(response)
+}
+
+async fn invalidate_revalidated(backend: &dyn CacheBackend, namespace: &str, variant_key: &str) {
+    if let Some(primary) = primary_from_variant_key(variant_key) {
+        let _ = invalidate_primary(backend, namespace, primary).await;
+    } else {
+        let _ = backend.delete(namespace, variant_key).await;
+    }
 }
 
 fn object_retention_ttl_secs(freshness_lifetime_secs: u64, directives: &ResponseDirectives) -> u64 {

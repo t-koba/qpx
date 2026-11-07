@@ -173,7 +173,7 @@ impl CacheBackend for MockBackend {
             }
             None => (bytes.len() as u64, Body::from(bytes)),
         };
-        Ok(Some(CachedBodyStream { len, body }))
+        Ok(Some(CachedBodyStream::from_body_for_backend(len, body)))
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
@@ -316,6 +316,7 @@ mod index_metadata_tests;
 mod lookup_head_post_tests;
 mod lookup_policy_tests;
 mod lookup_range_tests;
+mod revalidation_delivery_tests;
 mod store_flow_tests;
 
 pub(crate) fn owned_headers(headers: &http::HeaderMap) -> qpx_core::http_message::Headers {
