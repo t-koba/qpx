@@ -1,0 +1,107 @@
+name: streaming scheduler trace
+
+# Diagnostic only; no ordinary CI trigger, objectives, or release-gate dependency.
+# Sampling adds overhead and misses tasks that live entirely between polls or
+# exit tails. Raw task counts/read errors expose partial coverage, not causality.
+on:
+  workflow_dispatch:
+    inputs:
+      interval_seconds:
+        description: Per-thread sampling interval (positive seconds; observer overhead applies)
+        type: choice
+        options: ["0.02", "0.05", "0.1"]
+        default: "0.02"
+      timeout_minutes:
+        description: Whole job bound including both release builds
+        type: choice
+        options: ["30", "60"]
+        default: "60"
+      workload_timeout_minutes:
+        description: Fast-stream workload bound excluding builds
+        type: choice
+        options: ["5", "10"]
+        default: "10"
+      retention_days:
+        description: Diagnostic artifact lifetime
+        type: choice
+        options: ["1", "7"]
+        default: "7"
+
+permissions:
+  contents: read
+
+jobs:
+  trace:
+    runs-on: ubuntu-latest
+    timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
+    env:
+      RUSTUP_TOOLCHAIN: "1.99.1"
+      CURRENT_SHA: 66a3124fff808ddb6a8cb88d850aad1a425129f0
+      REFERENCE_SHA: d67a148e7ccbbd272750415213601005af0f38c5
+      CARGO_INCREMENTAL: "0"
+      # Required for Linux to accumulate schedstat field 2; restore after tracing.
+      SCHED_SCHEDSTATS: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/checkout@v5
+        with:
+          ref: 66a3124fff808ddb6a8cb88d850aad1a425129f0
+          path: .trace-current
+      - uses: actions/checkout@v5
+        with:
+          ref: d67a148e7ccbbd272750415213601005af0f38c5
+          path: .trace-reference
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.1"
+      - name: capture identity and build both exact sources
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p target/scheduler-trace
+          exec > >(tee target/scheduler-trace/build.log) 2>&1
+          test "$(git -C .trace-current rev-parse HEAD)" = "$CURRENT_SHA"
+          test "$(git -C .trace-reference rev-parse HEAD)" = "$REFERENCE_SHA"
+          {
+            printf 'harness=%s\ncurrent=%s\nreference=%s\n' "$GITHUB_SHA" "$CURRENT_SHA" "$REFERENCE_SHA"
+            printf 'run=%s attempt=%s runner=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME"
+            rustc +1.99.1 -Vv
+            cargo +1.99.1 -V
+            uname -a
+            cat /proc/sys/kernel/random/boot_id
+          } > target/scheduler-trace/identity.txt
+          (cd .trace-current && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-current" RUSTFLAGS="-D warnings" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
+          (cd .trace-reference && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-reference" RUSTFLAGS="" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
+          sha256sum "$RUNNER_TEMP/trace-current/release/qpxd" "$RUNNER_TEMP/trace-reference/release/qpxd" >> target/scheduler-trace/identity.txt
+      - name: trace existing fast-stream paired workload
+        timeout-minutes: ${{ fromJSON(inputs.workload_timeout_minutes) }}
+        env:
+          QPX_STREAMING_SCHEDSTAT_INTERVAL: ${{ inputs.interval_seconds }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          sysctl -n kernel.sched_schedstats > target/scheduler-trace/schedstats-before.txt
+          sudo sysctl -w kernel.sched_schedstats="$SCHED_SCHEDSTATS" | tee target/scheduler-trace/schedstats-enabled.txt
+          export QPXD_BIN="$RUNNER_TEMP/trace-current/release/qpxd"
+          export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-reference/release/qpxd"
+          export QPX_PREVIOUS_SOURCE_SHA="$REFERENCE_SHA"
+          export GITHUB_SHA="$CURRENT_SHA"
+          export QPX_STREAMING_COMPARE_PAIR_ONLY_MODE=fast
+          export QPX_STREAMING_SCHEDSTAT_DIR="$GITHUB_WORKSPACE/target/scheduler-trace/tasks"
+          export QPX_STREAMING_COMPARE_LOG_DIR="$GITHUB_WORKSPACE/target/scheduler-trace/logs"
+          bash scripts/perf-audit-streaming-compare.sh target/scheduler-trace/measurements.jsonl 2>&1 | tee target/scheduler-trace/workload.log
+      - name: restore runner scheduler statistics setting
+        if: always()
+        shell: bash
+        run: |
+          if [ -f target/scheduler-trace/schedstats-before.txt ]; then
+            sudo sysctl -w kernel.sched_schedstats="$(cat target/scheduler-trace/schedstats-before.txt)" > target/scheduler-trace/schedstats-restored.txt
+          fi
+      - name: upload raw scheduler diagnostic even on failure
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: streaming-scheduler-trace-${{ github.run_id }}-${{ github.run_attempt }}
+          path: target/scheduler-trace/
+          retention-days: ${{ fromJSON(inputs.retention_days) }}
+          if-no-files-found: error

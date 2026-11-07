@@ -93,6 +93,41 @@ trap cleanup EXIT
 
 source "$ROOT_DIR/scripts/lib/perf-process-metrics.sh"
 
+# Manual diagnostic only: retain per-thread observations alongside raw rounds.
+start_schedstat_trace() {
+  trace_pid=""
+  if [ -z "${QPX_STREAMING_SCHEDSTAT_DIR:-}" ]; then return; fi
+  mkdir -p "$QPX_STREAMING_SCHEDSTAT_DIR"
+  trace_base="$QPX_STREAMING_SCHEDSTAT_DIR/${artifact}.attempt-${attempt}"
+  local sha="$CURRENT_SOURCE_SHA"
+  if [ "$proxy" = qpxd-previous ]; then sha="$QPX_PREVIOUS_SOURCE_SHA"; fi
+  python3 "$ROOT_DIR/scripts/trace-streaming-schedstat.py" \
+    --root "qpxd=$resource_pid" --root "backend=$BACKEND_PID" \
+    --source-sha "$sha" --sample "${artifact}.attempt-${attempt}" \
+    --interval "${QPX_STREAMING_SCHEDSTAT_INTERVAL:?set a diagnostic sampling interval}" \
+    --output "$trace_base.jsonl" --ready "$trace_base.ready" --stop "$trace_base.stop" &
+  trace_pid=$!
+  register_pid "$trace_pid"
+  until [ -f "$trace_base.ready" ]; do
+    kill -0 "$trace_pid" 2>/dev/null || { wait "$trace_pid"; return 1; }
+    sleep "$QPX_STREAMING_SCHEDSTAT_INTERVAL"
+  done
+}
+
+stop_schedstat_trace() {
+  if [ -z "$trace_pid" ]; then return; fi
+  touch "$trace_base.stop"
+  kill -TERM "$trace_pid" 2>/dev/null || true
+  local result=0
+  wait "$trace_pid" || result=$?
+  local i
+  for i in "${!PIDS[@]}"; do
+    if [ "${PIDS[$i]}" = "$trace_pid" ]; then unset 'PIDS[i]'; fi
+  done
+  rm -f "$trace_base.ready" "$trace_base.stop"
+  return "$result"
+}
+
 start_streaming_backend() {
   cat >"$TMP_DIR/streaming_backend.py" <<'PY'
 import socketserver
@@ -505,6 +540,8 @@ run_one() {
         backend_fd_baseline="$fd_baseline"
       fi
     fi
+    local trace_pid trace_base
+    start_schedstat_trace
     cpu_before_ms="$(process_tree_cpu_ms "$resource_pid")"
     if [ "$resource_pid" = "$BACKEND_PID" ]; then
       backend_cpu_before_ms="$cpu_before_ms"
@@ -528,10 +565,12 @@ run_one() {
         kill "$backend_rss_peak_monitor_pid" >/dev/null 2>&1 || true
         wait "$backend_rss_peak_monitor_pid" 2>/dev/null || true
       fi
+      stop_schedstat_trace
       echo "${proxy} streaming client failed on attempt ${attempt}/${SAMPLE_ATTEMPTS}" >&2
       attempt=$((attempt + 1))
       continue
     fi
+    stop_schedstat_trace
     if [ -n "$fd_peak_monitor_pid" ]; then
       kill "$fd_peak_monitor_pid" >/dev/null 2>&1 || true
       wait "$fd_peak_monitor_pid" 2>/dev/null || true
@@ -694,6 +733,11 @@ PY
   streaming_write_round_record "$OUT_JSON" "$selected_sample" "$STREAM_BYTES" \
     "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit"
 }
+
+if [ -n "${QPX_STREAMING_SCHEDSTAT_DIR:-}" ] && [ "$PAIR_ONLY_MODE" != fast ]; then
+  echo "scheduler trace requires the manual fast pair-only workload" >&2
+  exit 1
+fi
 
 require_cmd curl
 if [ -z "$PAIR_ONLY_MODE" ]; then
