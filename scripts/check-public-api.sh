@@ -56,7 +56,9 @@ check_crate() {
 # lossless, separate from the validating codec export. The closed opaque cache-field carrier is
 # the fixed-format cache persistence boundary; no generic serde or arbitrary field-pair
 # projection is public. Revalidation merging stays within the owner.
-check_crate qpx-core 3daf6df9c4dde97e6dd75c53e4a4bf3506802f56c2e2a557d3b4798e00c22e0b
+# CacheBackendConfig exposes `writer_mode` (default `single_instance`; `shared` is
+# limited to Unix disk) and `commit_lock_stripes` (default 64) for shared disk-cache writers.
+check_crate qpx-core 48fdfa262434f2044ca77e587691531b3fdf82be217b09f4b737bef734c443e0
 check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
 check_crate qpx-h3 24b3e088e981e7d045d04b3a6fa8461fda1f78d10443de0796ac7ac3adc23b8b
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
