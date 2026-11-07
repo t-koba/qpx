@@ -1,6 +1,7 @@
 name: streaming scheduler trace
 
-# Diagnostic only; no ordinary CI trigger, objectives, or release-gate dependency.
+# Diagnostic only; the path-scoped push is registration-only and skips the job.
+# Manual dispatch runs the trace; no objectives or release-gate dependency.
 # Sampling adds overhead and misses tasks that live entirely between polls or
 # exit tails. Raw task counts/read errors expose partial coverage, not causality.
 on:
@@ -26,12 +27,18 @@ on:
         type: choice
         options: ["1", "7"]
         default: "7"
+  # Register from a non-default development branch on workflow-file changes.
+  # The job is skipped for push; tracing remains manual-only.
+  push:
+    paths:
+      - .github/workflows/streaming-scheduler-trace.yml
 
 permissions:
   contents: read
 
 jobs:
   trace:
+    if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     env:
@@ -43,6 +50,8 @@ jobs:
       SCHED_SCHEDSTATS: "1"
     steps:
       - uses: actions/checkout@v5
+      - name: test scheduler trace tooling and registration contract
+        run: python3 scripts/test-streaming-schedstat.py
       - uses: actions/checkout@v5
         with:
           ref: 66a3124fff808ddb6a8cb88d850aad1a425129f0

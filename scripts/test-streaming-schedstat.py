@@ -30,6 +30,19 @@ def task(proc, pid, tid, start, delay, children=""):
         (directory / name).write_text(text)
 
 
+class WorkflowRegistrationTest(unittest.TestCase):
+    def test_push_registers_workflow_without_running_trace(self):
+        workflow = (ROOT / ".github/workflows/streaming-scheduler-trace.yml").read_text()
+        self.assertIn("on:\n  workflow_dispatch:\n", workflow)
+        self.assertIn(
+            "  push:\n    paths:\n      - .github/workflows/streaming-scheduler-trace.yml\n",
+            workflow,
+        )
+        self.assertIn(
+            "  trace:\n    if: github.event_name == 'workflow_dispatch'\n", workflow
+        )
+
+
 class CollectorTest(unittest.TestCase):
     def test_tree_counts_deltas_churn_and_missing_reads(self):
         with tempfile.TemporaryDirectory() as tmp:
