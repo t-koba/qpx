@@ -179,7 +179,15 @@ mod tests {
             use qpxd_cache::{CacheRequestKey, CacheStoreContext, CacheStoreTiming, LookupOutcome};
 
             for case in [
-                "http", "ipc", "retry", "stop", "stale", "local", "cache", "continue",
+                "http",
+                "ipc",
+                "retry",
+                "stop",
+                "stale",
+                "local",
+                "cache",
+                "continue",
+                "continue-suppressed",
             ] {
                 let dir = tempfile::tempdir()?;
                 let cache_path = dir.path().canonicalize()?.join("cache");
@@ -213,10 +221,15 @@ edges:
                     edge.routes[0].http = Some(serde_yaml::from_str(
                         "response_rules:\n- name: local\n  effects:\n    local_response: {status: 418, body: policy}",
                     )?);
-                } else if case == "continue" {
-                    edge.routes[0].http = Some(serde_yaml::from_str(
-                        "response_rules:\n- name: continue\n  match:\n    response_status: ['200']\n  effects:\n    headers:\n      response_set:\n        x-policy-response: continued",
-                    )?);
+                } else if matches!(case, "continue" | "continue-suppressed") {
+                    let (response_status, retry_effect) = if case == "continue" {
+                        ("200", "")
+                    } else {
+                        ("503", "    retry:\n      suppress: true\n")
+                    };
+                    edge.routes[0].http = Some(serde_yaml::from_str(&format!(
+                        "response_rules:\n- name: continue\n  match:\n    response_status: ['{response_status}']\n  effects:\n    headers:\n      response_set:\n        x-policy-response: continued\n{retry_effect}"
+                    ))?);
                 }
                 let registry = crate::http::modules::default_http_module_registry();
                 let router = ReverseRouter::new(edge, &config.upstreams, registry.as_ref())?;
@@ -261,7 +274,7 @@ edges:
                         Response::builder()
                             .header(
                                 "cache-control",
-                                if case == "cache" {
+                                if matches!(case, "cache" | "continue-suppressed") {
                                     "max-age=60"
                                 } else {
                                     "max-age=0, stale-if-error=60"
@@ -292,7 +305,9 @@ edges:
                 .await?;
                 let mut revalidation = match lookup {
                     LookupOutcome::Revalidate(stale) => Some(stale),
-                    LookupOutcome::Hit(_) if case == "cache" => None,
+                    LookupOutcome::Hit(_) if matches!(case, "cache" | "continue-suppressed") => {
+                        None
+                    }
                     _ => panic!("unexpected cache entry: {case}"),
                 };
                 let mut collapse = None;
@@ -384,7 +399,10 @@ edges:
                         template: None,
                         replay_recorder: None,
                         mirror_upstreams: &mut Vec::new(),
-                        attempts: if matches!(case, "retry" | "stop" | "local") {
+                        attempts: if matches!(
+                            case,
+                            "retry" | "stop" | "local" | "continue-suppressed"
+                        ) {
                             2
                         } else {
                             1
@@ -416,10 +434,13 @@ edges:
                         let (interim, mut response) = *response;
                         assert_eq!(
                             interim.len(),
-                            usize::from(matches!(case, "http" | "continue")),
+                            usize::from(matches!(
+                                case,
+                                "http" | "continue" | "continue-suppressed"
+                            )),
                             "{case}"
                         );
-                        if matches!(case, "http" | "continue") {
+                        if matches!(case, "http" | "continue" | "continue-suppressed") {
                             assert_eq!(interim[0].status, StatusCode::EARLY_HINTS);
                             assert_eq!(
                                 interim[0].headers_for_egress()["link"],
@@ -428,13 +449,17 @@ edges:
                         }
                         assert_eq!(
                             response.status().as_u16(),
-                            if case == "local" { 418 } else { 200 }
+                            match case {
+                                "local" => 418,
+                                "continue-suppressed" => 503,
+                                _ => 200,
+                            }
                         );
                         let mut fields = String::new();
                         response.preview_fields(&mut fields, |_| true);
                         assert!(fields.contains("via:"), "{case}");
                         assert!(!fields.contains("connection:"), "{case}");
-                        if case == "continue" {
+                        if matches!(case, "continue" | "continue-suppressed") {
                             assert!(
                                 fields
                                     .to_ascii_lowercase()
@@ -495,7 +520,10 @@ edges:
                 }
                 assert_eq!(
                     revalidation.is_some(),
-                    !matches!(case, "http" | "ipc" | "cache" | "continue"),
+                    !matches!(
+                        case,
+                        "http" | "ipc" | "cache" | "continue" | "continue-suppressed"
+                    ),
                     "only normal finalization consumes cache state: {case}"
                 );
                 ring.unlink_doorbells()?;
