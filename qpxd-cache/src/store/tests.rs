@@ -231,20 +231,17 @@ fn refreshed_selectors_preserve_query_digest_and_fail_closed_on_obs_text() {
     headers.set_content_length_value(http::HeaderValue::from_static("05"));
     let previous = cache_vary_values(headers.view(), &fields, Some("digest-a")).unwrap();
     headers.set_content_length_value(http::HeaderValue::from_static("5"));
-    let refreshed = refreshed_vary_values(headers.view(), &fields, &previous);
+    let refreshed = refreshed_vary_values(headers.view(), &fields, &previous).unwrap();
     assert_eq!(
         refreshed,
         cache_vary_values(headers.view(), &fields, Some("digest-a")).unwrap()
     );
     assert_ne!(refreshed, previous);
     headers.append_content_length_value(http::HeaderValue::from_bytes(&[0x80]).unwrap());
-    assert_eq!(
-        refreshed_vary_values(headers.view(), &fields, &previous),
-        previous
-    );
+    assert!(refreshed_vary_values(headers.view(), &fields, &previous).is_none());
     headers = OwnedHeaders::new();
     assert_eq!(
         refreshed_vary_values(headers.view(), &[], &previous),
-        vec![previous[1].clone()]
+        Some(vec![previous[1].clone()])
     );
 }

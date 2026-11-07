@@ -46,6 +46,10 @@ impl CachedHeaders {
         crate::directives::parse_response_directives(self.map())
     }
 
+    pub(crate) fn vary_spec(&self) -> VarySpec {
+        crate::vary::parse_vary(self.map())
+    }
+
     pub(crate) fn freshness_lifetime_secs(
         &self,
         policy: &CachePolicyConfig,

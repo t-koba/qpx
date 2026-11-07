@@ -362,7 +362,29 @@ pub async fn revalidate_not_modified<B>(
     let freshness = merged_headers
         .freshness_lifetime_secs(policy, now, &directives)
         .unwrap_or_else(|| policy.default_ttl_secs.unwrap_or(1));
-    let vary_headers = state.envelope.vary_headers.clone();
+    let parsed_vary_headers = match merged_headers.vary_spec() {
+        VarySpec::Fields(fields) => Some(fields),
+        VarySpec::Any => None,
+    };
+    let refreshed_values = parsed_vary_headers.as_deref().and_then(|vary_headers| {
+        refreshed_vary_values(
+            request_headers.view(),
+            vary_headers,
+            &state.envelope.vary_values,
+        )
+    });
+    let selectors_unchanged = match (&parsed_vary_headers, &refreshed_values) {
+        (Some(vary_headers), Some(vary_values)) => {
+            vary_headers == &state.envelope.vary_headers
+                && vary_values == &state.envelope.vary_values
+                && primary_from_variant_key(state.variant_key.as_str()).is_some_and(|primary| {
+                    variant_storage_key(primary, vary_values).as_str() == state.variant_key
+                })
+        }
+        _ => false,
+    };
+    let vary_headers = parsed_vary_headers.unwrap_or_else(|| state.envelope.vary_headers.clone());
+    let vary_values = refreshed_values.unwrap_or_else(|| state.envelope.vary_values.clone());
     let initial_age_secs = merged_headers.initial_age_secs(now, response_delay_secs);
     let status = qpx_http::protocol::semantics::validate_http_status_class(
         StatusCode::from_u16(state.envelope.status)
@@ -370,7 +392,7 @@ pub async fn revalidate_not_modified<B>(
         "cached response revalidation",
     )?;
 
-    let storable = merged_headers.is_revalidation_storable(
+    let policy_storable = merged_headers.is_revalidation_storable(
         status,
         request_headers,
         request_method,
@@ -378,7 +400,11 @@ pub async fn revalidate_not_modified<B>(
         freshness,
         &directives,
     );
-    let sanitized = if storable {
+    // A changed (or unrepresentable) Vary selector cannot be written under the
+    // old variant key. Serve this successful revalidation to its request, but
+    // evict the stale variant instead of leaving its metadata inconsistent.
+    let storable = policy_storable && selectors_unchanged;
+    let sanitized = if policy_storable {
         merged_headers.sanitized(&directives)
     } else {
         merged_headers
@@ -392,12 +418,8 @@ pub async fn revalidate_not_modified<B>(
         initial_age_secs,
         response_delay_secs,
         freshness_lifetime_secs: freshness,
-        vary_headers: vary_headers.clone(),
-        vary_values: refreshed_vary_values(
-            request_headers.view(),
-            &vary_headers,
-            &state.envelope.vary_values,
-        ),
+        vary_headers,
+        vary_values,
         response_directives: std::sync::OnceLock::new(),
         response_header_values: std::sync::OnceLock::new(),
     };
@@ -576,16 +598,12 @@ fn refreshed_vary_values(
     request_headers: OwnedHeaderView<'_>,
     vary_headers: &[String],
     previous: &[(String, VarySelector)],
-) -> Vec<(String, VarySelector)> {
-    // Keep the previous variant on unrepresentable selectors rather than
-    // poisoning the entry with a collapsed value.
-    let Some(mut values) = vary_values_from_request_headers(request_headers, vary_headers) else {
-        return previous.to_vec();
-    };
+) -> Option<Vec<(String, VarySelector)>> {
+    let mut values = vary_values_from_request_headers(request_headers, vary_headers)?;
     if let Some(query_content) = previous.iter().find(|(name, _)| name == "@query-content") {
         values.push(query_content.clone());
     }
-    values
+    Some(values)
 }
 
 fn content_location_matches_target(response_headers: &OwnedHeaders, key: &CacheRequestKey) -> bool {

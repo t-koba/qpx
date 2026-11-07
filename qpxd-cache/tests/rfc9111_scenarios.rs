@@ -623,6 +623,125 @@ async fn foreground_304_replays_persisted_body() -> Result<()> {
 }
 
 #[tokio::test]
+async fn foreground_304_vary_changes_evict_incoherent_selectors() -> Result<()> {
+    for case in backend_cases("foreground-304-vary") {
+        for (index, (updated_vary, expect_hit)) in
+            [("accept-language", true), ("x-region", false), ("*", false)]
+                .into_iter()
+                .enumerate()
+        {
+            let path = format!("/foreground-304-vary/{index}");
+            let mut req = request(&path);
+            req.headers_mut()
+                .insert(ord("accept-language"), HeaderValue::from_static("en"));
+            req.headers_mut()
+                .insert(ord("x-region"), HeaderValue::from_static("us"));
+            let key = CacheRequestKey::for_lookup(&req, "http")?.expect("cache key");
+            store_and_drain(
+                &req,
+                &key,
+                response(
+                    "cached vary body",
+                    &[
+                        (CACHE_CONTROL.as_str(), "public, no-cache, max-age=60"),
+                        (VARY.as_str(), "accept-language"),
+                        (ETAG.as_str(), "\"vary-v1\""),
+                    ],
+                ),
+                &case.policy,
+                &case.backends,
+            )
+            .await?;
+            let LookupOutcome::Revalidate(state) =
+                wait_for_cached_outcome(&req, &key, &case.policy, &case.backends).await?
+            else {
+                panic!("expected revalidation for {}", case.name)
+            };
+            let not_modified = Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(CACHE_CONTROL, "public, max-age=300")
+                .header(VARY, updated_vary)
+                .body(Body::empty())?;
+            let mut refreshed = revalidate_not_modified(
+                &req,
+                &case.policy,
+                qpx_core::http_message::Response::from_http(not_modified),
+                state,
+                0,
+                &case.backends,
+            )
+            .await?;
+            assert_eq!(
+                collect_body(refreshed.body_mut()).await?.as_ref(),
+                b"cached vary body"
+            );
+            assert_eq!(
+                refreshed
+                    .headers()
+                    .get(&ord(VARY.as_str()))
+                    .and_then(|v| v.to_str().ok()),
+                Some(updated_vary)
+            );
+
+            let mut old_selector = request(&path);
+            old_selector
+                .headers_mut()
+                .insert(ord("accept-language"), HeaderValue::from_static("en"));
+            old_selector
+                .headers_mut()
+                .insert(ord("x-region"), HeaderValue::from_static("ca"));
+            let old_key = CacheRequestKey::for_lookup(&old_selector, "http")?.expect("cache key");
+            let old_outcome = lookup(
+                &old_selector,
+                &old_key,
+                &case.policy,
+                &case.backends,
+                &revalidations(),
+            )
+            .await?;
+            if expect_hit {
+                let LookupOutcome::Hit(mut hit) = old_outcome else {
+                    panic!(
+                        "unchanged Vary selector should remain cached for {}",
+                        case.name
+                    )
+                };
+                assert_eq!(
+                    collect_body(hit.body_mut()).await?.as_ref(),
+                    b"cached vary body"
+                );
+            } else {
+                assert!(matches!(old_outcome, LookupOutcome::Miss));
+            }
+
+            if updated_vary == "x-region" {
+                let mut new_selector = request(&path);
+                new_selector
+                    .headers_mut()
+                    .insert(ord("accept-language"), HeaderValue::from_static("fr"));
+                new_selector
+                    .headers_mut()
+                    .insert(ord("x-region"), HeaderValue::from_static("us"));
+                let new_key =
+                    CacheRequestKey::for_lookup(&new_selector, "http")?.expect("cache key");
+                assert!(matches!(
+                    lookup(
+                        &new_selector,
+                        &new_key,
+                        &case.policy,
+                        &case.backends,
+                        &revalidations(),
+                    )
+                    .await?,
+                    LookupOutcome::Miss
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn foreground_304_rejects_missing_or_invalid_body() -> Result<()> {
     let backends = backends();
     let policy = policy();
