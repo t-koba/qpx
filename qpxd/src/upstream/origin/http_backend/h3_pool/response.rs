@@ -83,6 +83,16 @@ pub(super) fn declared_h3_response_body_length(
     headers: &http::HeaderMap,
 ) -> Result<Option<u64>> {
     let declared = parse_declared_content_length(headers)?;
+    if status == StatusCode::RESET_CONTENT {
+        // 205 forbids content, but unlike HEAD/204/304 its Content-Length
+        // describes this message's (empty) content, not a representation.
+        if declared.is_some_and(|length| length != 0) {
+            return Err(anyhow!(
+                "HTTP/3 upstream 205 response has nonzero Content-Length"
+            ));
+        }
+        return Ok(Some(0));
+    }
     if *request_method == Method::HEAD
         || response_status_has_no_body(status, false)
         || (*request_method == Method::CONNECT && status.is_success())
@@ -428,10 +438,29 @@ mod tests {
                         .append(CONTENT_LENGTH, HeaderValue::from_static(value));
                 }
                 let result = own_h3_response_head(decoded, &method);
+                let expected = if status == StatusCode::RESET_CONTENT
+                    && matches!(expected, Ok(Some(length)) if length > 0)
+                {
+                    Err(())
+                } else {
+                    expected
+                };
                 match expected {
                     Ok(length) => {
                         let (owner, declared) = result.unwrap();
                         assert_eq!(declared, if no_body { Some(0) } else { length });
+                        if status == StatusCode::RESET_CONTENT {
+                            let mut received = 0;
+                            assert!(
+                                record_h3_body_content_length(
+                                    declared,
+                                    &mut received,
+                                    1,
+                                    "response",
+                                )
+                                .is_err()
+                            );
+                        }
                         let exported = owner.into_http_for_library();
                         let actual: Vec<_> = exported
                             .headers()
