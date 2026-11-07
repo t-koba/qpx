@@ -160,7 +160,12 @@ async fn replay_preserves_duplicates_and_uses_typed_head_body_and_range_lengths(
 
     let nm = not_modified_from_envelope(&Method::GET, &envelope, 2000, "HIT").expect("304");
     assert_eq!(nm.status(), StatusCode::NOT_MODIFIED);
-    assert!(!crate::tests::wire_headers(nm.headers()).contains_key(CONTENT_LENGTH));
+    // The cached GET representation length is valid on a 304 even though the
+    // stored declaration above was malformed and canonicalized for replay.
+    assert_eq!(
+        crate::tests::wire_headers(nm.headers())[CONTENT_LENGTH],
+        "9"
+    );
     assert_eq!(crate::tests::wire_headers(nm.headers())[ETAG], "\"v1\"");
     assert!(
         qpx_http::body::to_bytes(nm.into_head_and_body().1)
