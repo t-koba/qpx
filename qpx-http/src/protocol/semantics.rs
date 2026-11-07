@@ -636,7 +636,9 @@ pub fn normalize_response_for_request_with_options<R: FinalizeResponse>(
         || (request_method == Method::CONNECT && status.is_success());
     if no_body {
         *response.body_mut() = R::Body::default();
-        if request_method == Method::HEAD {
+        if request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+            // HEAD and 304 responses may carry the length of the corresponding
+            // representation even though this message has no body.
             strip_message_body_framing_headers(response.headers_mut());
         } else {
             strip_message_body_headers(response.headers_mut());

@@ -231,6 +231,23 @@ fn normalize_response_keeps_content_length_for_head() {
 }
 
 #[test]
+fn normalize_response_keeps_content_length_for_304() {
+    let mut resp = http::Response::builder()
+        .status(StatusCode::NOT_MODIFIED)
+        .header(CONTENT_LENGTH, "7")
+        .header(TRANSFER_ENCODING, "chunked")
+        .header(TRAILER, "x-trailer")
+        .body("payload".to_string())
+        .expect("response");
+    let changed = normalize_response_for_request(&Method::GET, &mut resp);
+    assert!(changed);
+    assert_eq!(resp.body(), "");
+    assert_eq!(resp.headers().get(CONTENT_LENGTH).unwrap(), "7");
+    assert!(resp.headers().get(TRANSFER_ENCODING).is_none());
+    assert!(resp.headers().get(TRAILER).is_none());
+}
+
+#[test]
 fn validate_rejects_missing_host_for_http11() {
     let req = http::Request::builder()
         .version(Version::HTTP_11)

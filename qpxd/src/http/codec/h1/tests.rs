@@ -22,7 +22,7 @@ fn request_head_with_total_bytes(total_bytes: usize) -> Vec<u8> {
     request
 }
 
-fn finalized_head_response(status: StatusCode) -> OwnerResponse<Body> {
+fn finalized_response(method: &Method, status: StatusCode) -> OwnerResponse<Body> {
     let response = Response::builder()
         .status(status)
         .header(CONTENT_LENGTH, "7")
@@ -30,12 +30,16 @@ fn finalized_head_response(status: StatusCode) -> OwnerResponse<Body> {
         .body(Body::from("payload"))
         .expect("response");
     crate::http::protocol::l7::finalize_response_for_request(
-        &Method::HEAD,
+        method,
         Version::HTTP_11,
         "qpx",
         OwnerResponse::from_http(response),
         false,
     )
+}
+
+fn finalized_head_response(status: StatusCode) -> OwnerResponse<Body> {
+    finalized_response(&Method::HEAD, status)
 }
 
 #[test]
@@ -881,6 +885,74 @@ async fn static_finalized_head_omits_204_length_and_preserves_304_length() {
                 .any(|window| window == b"Trailer:")
         );
     }
+}
+
+#[tokio::test]
+async fn finalized_get_304_preserves_content_length_at_http1_egress() {
+    let response = finalized_response(&Method::GET, StatusCode::NOT_MODIFIED);
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let mut head_buf = BytesMut::new();
+
+    send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &[],
+        true,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("send 304 response");
+    drop(write_half);
+    drop(read_half);
+
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    assert!(raw.starts_with(b"HTTP/1.1 304"));
+    assert_eq!(content_length_lines(&raw), ["content-length: 7"]);
+    assert!(
+        !raw.windows(b"Trailer:".len())
+            .any(|window| window == b"Trailer:")
+    );
+    assert!(raw.ends_with(b"\r\n\r\n"));
+}
+
+#[tokio::test]
+async fn static_finalized_get_304_preserves_content_length() {
+    let response = finalized_response(&Method::GET, StatusCode::NOT_MODIFIED)
+        .into_http_for_codec()
+        .expect("codec response");
+    let (parts, _body) = response.into_parts();
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("listener address");
+    let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+    let mut client = client.expect("connect");
+    let (mut server, _) = accepted.expect("accept");
+    let mut head_buf = BytesMut::new();
+
+    send_static_http1_response(
+        &mut server,
+        &Method::GET,
+        parts.status,
+        parts.headers,
+        Bytes::new(),
+        true,
+        &mut head_buf,
+    )
+    .await
+    .expect("send static 304 response");
+
+    let mut raw = vec![0; head_buf.len()];
+    client.read_exact(&mut raw).await.expect("read response");
+    assert_eq!(content_length_lines(&raw), ["content-length: 7"]);
+    assert!(
+        !raw.windows(b"Trailer:".len())
+            .any(|window| window == b"Trailer:")
+    );
+    assert!(raw.ends_with(b"\r\n\r\n"));
 }
 
 #[tokio::test]

@@ -98,7 +98,8 @@ pub(crate) async fn send_static_http1_response(
     let body_len = body.len() as u64;
     let declared_length = parse_declared_content_length(&headers)?;
     if status_has_no_body {
-        if request_method != Method::HEAD || response_status_forbids_content_length(response_status)
+        if response_status_forbids_content_length(response_status)
+            || (request_method != Method::HEAD && response_status != StatusCode::NOT_MODIFIED)
         {
             headers.remove(CONTENT_LENGTH);
         } else if let Some(length) = declared_length {
@@ -247,8 +248,8 @@ where
         let declared_length = parse_declared_content_length(&headers)?;
         let has_chunked = has_only_chunked_transfer_encoding(&headers)?;
         if no_body {
-            if request_method != Method::HEAD
-                || response_status_forbids_content_length(parts.status)
+            if response_status_forbids_content_length(parts.status)
+                || (request_method != Method::HEAD && parts.status != StatusCode::NOT_MODIFIED)
             {
                 headers.remove(CONTENT_LENGTH);
             } else if let Some(length) = declared_length {
