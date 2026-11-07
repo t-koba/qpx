@@ -7,13 +7,13 @@ use super::freshness::{active_range, freshness_lifetime_secs, initial_age_secs};
 use super::types::{
     BodyStreamWriteOptions, CACHE_HEADER, CacheBackend, CacheRequestKey, CacheWritebackAdmission,
     CacheWritebackPermit, CachedBody, CachedHeaders, CachedResponseEnvelope, INDEX_TTL_SECS,
-    MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives, RevalidationState, VarySpec,
-    cache_body_storage_key, cache_status_header, encode_cached_response_metadata,
+    MAX_CACHE_OBJECT_BYTES, RequestCollapseGuard, ResponseDirectives, RevalidationState,
+    VariantIndex, VarySpec, cache_body_storage_key, cache_status_header,
+    encode_cached_response_metadata,
 };
 use super::util::{cache_namespace, load_variant_index, now_millis, upsert_variant_with_cap};
 use super::vary::{
-    index_storage_key, legacy_variant_retirement_storage_key, parse_vary, variant_storage_key,
-    vary_values_from_request_headers,
+    index_storage_key, parse_vary, variant_storage_key, vary_values_from_request_headers,
 };
 use anyhow::Result;
 use http::header::{CONTENT_LOCATION, EXPIRES, SET_COOKIE};
@@ -37,6 +37,7 @@ use tokio::task::JoinSet;
 use tracing::warn;
 
 mod body;
+pub(crate) mod commit;
 use self::body::{expected_body_length, validate_body_length};
 
 const CACHE_WRITEBACK_MIRROR_CHANNEL_CAPACITY: usize = 128;
@@ -265,55 +266,57 @@ impl CacheWriteback {
                 encode_cached_response_metadata(&envelope)
             }),
         );
-        let index_load = load_variant_index(
-            self.backend.as_ref(),
-            self.namespace.as_str(),
-            self.storage_primary.as_ref(),
-        );
-        // Publishing the index is the only operation that makes a new
-        // generation discoverable. Both split-object (HTTP/Redis) and co-located
-        // (disk) backends must finish the response write before this point.
-        let (_body_len, mut index) = tokio::try_join!(response_put, index_load)?;
-        let legacy_key = variant_storage_key(self.storage_primary.as_ref(), &[]);
-        let legacy_metadata = self
-            .backend
-            .get_decoded_response_metadata_many(
-                self.namespace.as_str(),
-                std::slice::from_ref(&legacy_key),
-            )
-            .await?;
-        if let Some(envelope) = legacy_metadata.into_iter().next().flatten() {
-            // The marker must live at least as long as the superseded canonical
-            // object. Index retention is independent and can be shorter, or the
-            // index can be evicted while that old object is still present.
-            let retention_secs = object_retention_ttl_secs(
-                envelope.freshness_lifetime_secs,
-                envelope.response_directives(),
-            );
-            let expires_at_ms = envelope
-                .stored_at_ms
-                .saturating_add(retention_secs.saturating_mul(1000));
-            let remaining_ms = expires_at_ms.saturating_sub(now_millis());
-            let retirement_ttl = (remaining_ms / 1000 + u64::from(remaining_ms % 1000 != 0)).max(1);
-            self.backend
-                .put(
-                    self.namespace.as_str(),
-                    legacy_variant_retirement_storage_key(self.storage_primary.as_ref()).as_str(),
-                    b"retired",
-                    retirement_ttl,
+        // Stage the immutable object before taking publication coordination:
+        // backend producers/writers must release their operation permits first.
+        let staged = response_put.await;
+        let committed: Result<()> = async {
+            staged?;
+            let obsolete = {
+                let _commit = commit::lock(
+                    self.backend.as_ref(),
+                    &self.namespace,
+                    &self.storage_primary,
+                )
+                .await;
+                let mut index = load_variant_index(
+                    self.backend.as_ref(),
+                    &self.namespace,
+                    &self.storage_primary,
                 )
                 .await?;
+                let legacy_key = variant_storage_key(&self.storage_primary, &[]);
+                if legacy_key != self.variant_key {
+                    self.backend
+                        .retire_response_metadata(&self.namespace, &legacy_key)
+                        .await?;
+                }
+                let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key)
+                    .into_iter()
+                    // Retirement must preserve a historical body's active readers
+                    // even when that canonical key was listed in an old index.
+                    .filter(|key| key != &legacy_key)
+                    .collect::<Vec<_>>();
+                self.backend
+                    .put(
+                        &self.namespace,
+                        &index_storage_key(&self.storage_primary),
+                        &serde_json::to_vec(&index)?,
+                        self.ttl.max(INDEX_TTL_SECS),
+                    )
+                    .await?;
+                obsolete
+            };
+            // Delete I/O must not hold the primary commit lock: the index
+            // already excludes these variants, and invalidation coordinates
+            // through the same lock before this point.
+            delete_obsolete_variants(self.backend.clone(), self.namespace.clone(), obsolete).await;
+            Ok(())
         }
-        let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key);
-        delete_obsolete_variants(self.backend.clone(), self.namespace.clone(), obsolete).await;
-        self.backend
-            .put(
-                self.namespace.as_str(),
-                index_storage_key(self.storage_primary.as_ref()).as_str(),
-                &serde_json::to_vec(&index)?,
-                self.ttl.max(INDEX_TTL_SECS),
-            )
-            .await?;
+        .await;
+        if let Err(err) = committed {
+            invalidate_revalidated(self.backend.as_ref(), &self.namespace, &self.variant_key).await;
+            return Err(err);
+        }
         Ok(())
     }
 }
@@ -350,6 +353,7 @@ pub async fn revalidate_not_modified<B>(
     not_modified: Response<Body>,
     state: RevalidationState,
     response_delay_secs: u64,
+    body_read_timeout: Duration,
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
 ) -> Result<Response<Body>> {
     if !policy.enabled {
@@ -418,6 +422,17 @@ pub async fn revalidate_not_modified<B>(
     } else {
         merged_headers
     };
+    let legacy = primary_from_variant_key(&state.variant_key)
+        .filter(|primary| variant_storage_key(primary, &[]) == state.variant_key)
+        .map(|_| -> Result<_> {
+            Ok(LegacyRefresh {
+                original: encode_cached_response_metadata(&state.envelope)?,
+                body_len: state.envelope.body_len,
+                max_body_bytes: policy.max_object_bytes.min(MAX_CACHE_OBJECT_BYTES),
+                body_read_timeout,
+            })
+        })
+        .transpose()?;
     let updated = CachedResponseEnvelope {
         status: state.envelope.status,
         headers: sanitized,
@@ -497,7 +512,15 @@ pub async fn revalidate_not_modified<B>(
             move |delivery| async move {
                 match (delivery, refresh) {
                     (body::Delivery::Complete, Some((payload, ttl))) => {
-                        let _ = backend.put(&namespace, &variant_key, &payload, ttl).await;
+                        update_revalidated_metadata(
+                            backend.as_ref(),
+                            &namespace,
+                            &variant_key,
+                            &payload,
+                            ttl,
+                            legacy,
+                        )
+                        .await;
                     }
                     (body::Delivery::Abandoned, Some(_)) => {}
                     _ => invalidate_revalidated(backend.as_ref(), &namespace, &variant_key).await,
@@ -509,13 +532,189 @@ pub async fn revalidate_not_modified<B>(
 
     // HEAD and unsatisfiable ranges have no stored-body producer to wait for.
     if let Some((payload, ttl)) = refresh {
-        let _ = backend
-            .put(&state.namespace, &state.variant_key, &payload, ttl)
-            .await;
+        update_revalidated_metadata(
+            backend.as_ref(),
+            &state.namespace,
+            &state.variant_key,
+            &payload,
+            ttl,
+            legacy,
+        )
+        .await;
     } else {
         invalidate_revalidated(backend.as_ref(), &state.namespace, &state.variant_key).await;
     }
     Ok(response)
+}
+
+struct LegacyRefresh {
+    original: Vec<u8>,
+    body_len: u64,
+    max_body_bytes: usize,
+    body_read_timeout: Duration,
+}
+
+async fn update_revalidated_metadata(
+    backend: &dyn CacheBackend,
+    namespace: &str,
+    variant_key: &str,
+    payload: &[u8],
+    ttl: u64,
+    legacy: Option<LegacyRefresh>,
+) {
+    let Some(legacy) = legacy else {
+        let _ = backend.put(namespace, variant_key, payload, ttl).await;
+        return;
+    };
+    if let Err(err) =
+        migrate_revalidated_legacy(backend, namespace, variant_key, payload, ttl, legacy).await
+    {
+        warn!(error = ?err, "legacy cache revalidation migration failed");
+    }
+}
+
+/// A bare canonical fallback is mutable and must never be refreshed in place:
+/// a delayed finalizer could undo retirement after the replacement index is
+/// evicted. Copy into an immutable generation, then recheck and publish under
+/// the same per-primary coordination used by ordinary response writebacks.
+async fn migrate_revalidated_legacy(
+    backend: &dyn CacheBackend,
+    namespace: &str,
+    variant_key: &str,
+    payload: &[u8],
+    ttl: u64,
+    legacy: LegacyRefresh,
+) -> Result<()> {
+    let Some(primary) = primary_from_variant_key(variant_key) else {
+        return Ok(());
+    };
+    // A cheap early check also avoids opening a retired body's producer.
+    if legacy_refresh_index(backend, namespace, variant_key, primary, &legacy.original)
+        .await?
+        .is_none()
+    {
+        return Ok(());
+    }
+    let stream = backend
+        .get_object_stream(
+            namespace,
+            &cache_body_storage_key(variant_key),
+            legacy.body_len,
+            None,
+        )
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("missing legacy cache body"))?;
+    // Bound both the spool and the producer handoff by the configured
+    // body-read timeout so a stalled backend stream cannot retain a
+    // task/permit indefinitely. The commit lock is only taken after staging,
+    // so a timeout here never holds publication coordination.
+    let spool_timeout = legacy.body_read_timeout;
+    let body = CachedBody::from_body_limited(
+        validate_body_length(stream.body, Some(legacy.body_len)),
+        legacy.max_body_bytes,
+        spool_timeout,
+    )
+    .await;
+    // Even an unsuccessful spool must release the source producer's permit
+    // before any backend operation (including cleanup or publication).
+    // Dropping the spooled body wakes backpressured producers; stalled
+    // upstream reads are bounded by the backend's own operation timeout, and
+    // this handoff timeout keeps a never-signalling producer from hanging the
+    // migration task.
+    tokio::time::timeout(spool_timeout, stream.producer_done)
+        .await
+        .map_err(|_| anyhow::anyhow!("legacy body producer timed out"))?
+        .map_err(|_| anyhow::anyhow!("legacy body producer failed"))?;
+    let body = body?;
+    let generation = super::vary::representation_storage_key(variant_key);
+    let payload = payload.to_vec();
+    let staged = backend
+        .put_response(
+            namespace,
+            &generation,
+            body.to_body(),
+            BodyStreamWriteOptions {
+                max_body_bytes: legacy.max_body_bytes,
+                body_read_timeout: legacy.body_read_timeout,
+                ttl_secs: ttl,
+            },
+            Box::new(move |_| Ok(payload)),
+        )
+        .await;
+    let committed = async {
+        staged?;
+        let committed_pair: (bool, Vec<String>) = {
+            let _commit = commit::lock(backend, namespace, primary).await;
+            if let Some(mut index) =
+                legacy_refresh_index(backend, namespace, variant_key, primary, &legacy.original)
+                    .await?
+            {
+                backend
+                    .retire_response_metadata(namespace, variant_key)
+                    .await?;
+                // No newer generation can appear between this check and
+                // publication: invalidation holds the same per-primary lock.
+                let obsolete = upsert_variant_with_cap(&mut index, &generation);
+                backend
+                    .put(
+                        namespace,
+                        &index_storage_key(primary),
+                        &serde_json::to_vec(&index)?,
+                        ttl.max(INDEX_TTL_SECS),
+                    )
+                    .await?;
+                (true, obsolete)
+            } else {
+                (false, Vec::new())
+            }
+        };
+        let (published, evicted) = committed_pair;
+        if !published {
+            return Ok(false);
+        }
+        // Delete I/O must not hold the primary commit lock. The index already
+        // excludes these variants; invalidation coordinated through the same
+        // lock before publication.
+        for key in evicted {
+            // The historical body may still have readers. Its metadata was
+            // retired above; leave the body to its original retention lifetime.
+            if key != variant_key {
+                invalidate_revalidated(backend, namespace, &key).await;
+            }
+        }
+        Ok::<_, anyhow::Error>(true)
+    }
+    .await;
+    if !matches!(committed, Ok(true)) {
+        // A losing or failed staged generation is never left until TTL unless
+        // the backend itself refuses cleanup.
+        invalidate_revalidated(backend, namespace, &generation).await;
+    }
+    committed.map(|_| ())
+}
+
+async fn legacy_refresh_index(
+    backend: &dyn CacheBackend,
+    namespace: &str,
+    variant_key: &str,
+    primary: &str,
+    original: &[u8],
+) -> Result<Option<VariantIndex>> {
+    let values = backend
+        .get_decoded_response_metadata_many(namespace, &[variant_key.to_owned()])
+        .await?;
+    let Some(current) = values.into_iter().next().flatten() else {
+        return Ok(None);
+    };
+    if encode_cached_response_metadata(&current)? != original {
+        return Ok(None);
+    }
+    let index = load_variant_index(backend, namespace, primary).await?;
+    Ok(index
+        .variants
+        .iter()
+        .all(|key| key == variant_key)
+        .then_some(index))
 }
 
 async fn invalidate_revalidated(backend: &dyn CacheBackend, namespace: &str, variant_key: &str) {

@@ -251,6 +251,7 @@ async fn stale_no_cache_entry_revalidates_and_updates() {
         qpx_core::http_message::Response::from_http(not_modified),
         state,
         0,
+        Duration::from_secs(1),
         &backends,
     )
     .await

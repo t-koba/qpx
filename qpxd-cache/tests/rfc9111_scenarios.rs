@@ -610,6 +610,7 @@ async fn foreground_304_replays_persisted_body() -> Result<()> {
                 qpx_core::http_message::Response::from_http(not_modified),
                 state,
                 0,
+                Duration::from_secs(1),
                 &case.backends,
             )
             .await?;
@@ -699,6 +700,7 @@ async fn foreground_304_vary_changes_evict_incoherent_selectors() -> Result<()> 
                 qpx_core::http_message::Response::from_http(not_modified),
                 state,
                 0,
+                Duration::from_secs(1),
                 &case.backends,
             )
             .await?;
@@ -822,6 +824,7 @@ async fn foreground_304_rejects_missing_or_invalid_body() -> Result<()> {
                 qpx_core::http_message::Response::from_http(not_modified),
                 state,
                 0,
+                Duration::from_secs(1),
                 &backends,
             )
             .await

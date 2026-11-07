@@ -195,6 +195,7 @@ pub(crate) async fn process_upstream_response_for_cache(
             response,
             revalidation,
             response_delay_secs,
+            body_read_timeout,
             backends,
         )
         .await?;

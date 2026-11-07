@@ -234,6 +234,15 @@ pub trait CacheBackend: Send + Sync {
         ))
     }
 
+    /// Permanently retire a response's metadata without disrupting an already
+    /// held body stream. Split-object backends delete only the metadata key;
+    /// co-located backends must override this to retire metadata with the body
+    /// object, so independent eviction cannot make the response discoverable.
+    /// An error must prevent publication of the replacement's variant index.
+    async fn retire_response_metadata(&self, namespace: &str, key: &str) -> Result<()> {
+        self.delete(namespace, key).await
+    }
+
     /// Stores a response body together with its envelope metadata.
     /// `encode_metadata` receives the body length and returns the serialized
     /// envelope, so backends can co-locate metadata with the body in a single

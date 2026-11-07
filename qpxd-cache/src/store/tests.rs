@@ -245,3 +245,94 @@ fn refreshed_selectors_preserve_query_digest_and_fail_closed_on_obs_text() {
         Some(vec![previous[1].clone()])
     );
 }
+
+// Normal stores use immutable generation keys, including Vary-less stores.
+// Exercise the canonical-key writeback guard directly without weakening that
+// ownership: replacing the canonical object must never retire the new object.
+#[tokio::test]
+async fn canonical_writeback_remains_available_after_index_eviction() {
+    for disk in [false, true] {
+        let root = std::env::temp_dir().join(format!("qpx-canonical-{}", uuid::Uuid::new_v4()));
+        let backend: Arc<dyn CacheBackend> = if disk {
+            Arc::new(
+                crate::backend_disk::DiskCacheBackend::new(qpx_core::config::CacheBackendConfig {
+                    name: "memory".into(),
+                    kind: "disk".into(),
+                    endpoint: String::new(),
+                    path: Some(root.display().to_string()),
+                    max_bytes: Some(1024 * 1024),
+                    sweep_interval_secs: 60,
+                    timeout_ms: 1000,
+                    max_object_bytes: 1024,
+                    auth_header_env: None,
+                })
+                .unwrap(),
+            )
+        } else {
+            Arc::new(crate::tests::MockBackend::new())
+        };
+        let request = OwnerRequest::from_http(
+            http::Request::builder()
+                .uri("http://example.com/canonical")
+                .header(HOST, "example.com")
+                .body(())
+                .unwrap(),
+        );
+        let key = CacheRequestKey::for_lookup(&request, "http")
+            .unwrap()
+            .unwrap();
+        let policy = test_policy();
+        let namespace = cache_namespace(&policy, "default");
+        let canonical = variant_storage_key(&key.primary_hash(), &[]);
+        for body in ["old", "new"] {
+            let admission = CacheWritebackAdmission::with_default_capacity();
+            CacheWriteback {
+                backend: backend.clone(),
+                namespace: namespace.into(),
+                storage_primary: key.primary_hash_arc(),
+                variant_key: canonical.clone(),
+                status: 200,
+                headers: CachedHeaders::from_pairs(vec![(
+                    "cache-control".into(),
+                    "public, max-age=60".into(),
+                )]),
+                stored_at_ms: now_millis(),
+                initial_age_secs: 0,
+                response_delay_secs: 0,
+                freshness_lifetime_secs: 60,
+                vary_headers: Vec::new(),
+                vary_values: Vec::new(),
+                ttl: 60,
+                max_cacheable_body_bytes: 1024,
+                body_read_timeout: Duration::from_secs(1),
+                _request_collapse_guard: None,
+                _writeback_permit: admission.try_acquire().unwrap(),
+            }
+            .store(Body::from(body))
+            .await
+            .unwrap();
+        }
+        backend
+            .delete(namespace, &index_storage_key(&key.primary_hash()))
+            .await
+            .unwrap();
+        let backends = HashMap::from([("memory".into(), backend)]);
+        let revalidations = Arc::new(crate::types::InFlightRevalidations::with_default_shards());
+        let crate::LookupOutcome::Hit(response) =
+            crate::lookup(&request, &key, &policy, &backends, &revalidations)
+                .await
+                .unwrap()
+        else {
+            panic!("canonical replacement must hit")
+        };
+        assert_eq!(
+            qpx_http::body::to_bytes(response.into_head_and_body().1)
+                .await
+                .unwrap(),
+            "new"
+        );
+        if disk {
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+}

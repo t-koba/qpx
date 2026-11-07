@@ -1257,6 +1257,18 @@ impl CacheBackend for DiskCacheBackend {
         .await?
     }
 
+    async fn retire_response_metadata(&self, namespace: &str, key: &str) -> Result<()> {
+        let path = self.path_for(namespace, cache_body_storage_key(key).as_str());
+        // Drop metadata and compound response candidates before changing the
+        // trailer; body producers retain the unchanged body bytes and offset.
+        self.hot_remove(&path).await;
+        let _update =
+            HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
+        let result = retire_metadata_trailer_sync(&path);
+        drop(_update);
+        result
+    }
+
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
         let path = self.path_for(namespace, key);
         self.delete_path(&path).await;
@@ -1524,7 +1536,42 @@ fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
     }
     let mut meta = vec![0u8; meta_len as usize];
     file.read_exact(&mut meta)?;
+    // NUL cannot begin a serialized JSON envelope. Retirement overwrites the
+    // payload with NULs, retaining its length and all header/body framing.
+    if meta.first() == Some(&0) {
+        return Ok(None);
+    }
     Ok(Some(Bytes::from(meta)))
+}
+
+fn retire_metadata_trailer_sync(path: &Path) -> Result<()> {
+    let read = match read_disk_cache_header_sync(path) {
+        Ok(read) => read,
+        Err(error)
+            if error
+                .downcast_ref::<std::io::Error>()
+                .is_some_and(|error| error.kind() == std::io::ErrorKind::NotFound) =>
+        {
+            return Ok(());
+        }
+        Err(error) => return Err(error),
+    };
+    if read.header.meta_len == 0 {
+        return Ok(());
+    }
+    reject_symlink(path)?;
+    let mut file = OpenOptions::new().write(true).open(path)?;
+    file.seek(std::io::SeekFrom::Start(
+        read.total_len - read.header.meta_len,
+    ))?;
+    let zeros = [0u8; DISK_CACHE_CHUNK_BYTES];
+    let mut remaining = read.header.meta_len;
+    while remaining > 0 {
+        let len = remaining.min(zeros.len() as u64) as usize;
+        file.write_all(&zeros[..len])?;
+        remaining -= len as u64;
+    }
+    Ok(())
 }
 
 fn write_header(file: &mut File, header: &DiskCacheHeader) -> Result<u64> {
@@ -1869,6 +1916,99 @@ mod tests {
             .expect("value");
         assert_eq!(value.as_ref(), b"value");
         let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn metadata_retirement_preserves_body_and_framing_across_restart() {
+        let dir = temp_dir("retired-metadata");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).unwrap();
+        let key = "obj:primary:default";
+        let envelope = CachedResponseEnvelope {
+            status: 200,
+            headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
+            body: CachedBody::default(),
+            body_len: 4,
+            stored_at_ms: now_ms(),
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 600,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        };
+        backend
+            .put_response(
+                "ns",
+                key,
+                Body::from("body"),
+                BodyStreamWriteOptions {
+                    max_body_bytes: 1024,
+                    body_read_timeout: Duration::from_secs(1),
+                    ttl_secs: 600,
+                },
+                Box::new(move |_| super::super::types::encode_cached_response_metadata(&envelope)),
+            )
+            .await
+            .unwrap();
+        backend
+            .put(
+                "ns",
+                "index",
+                &serde_json::to_vec(&VariantIndex {
+                    variants: vec![key.to_string()],
+                })
+                .unwrap(),
+                600,
+            )
+            .await
+            .unwrap();
+        let held = backend
+            .get_response_candidate("ns", "index", key, now_ms())
+            .unwrap()
+            .expect("hot candidate");
+        let path = backend.path_for("ns", &cache_body_storage_key(key));
+        let before = fs::read(&path).unwrap();
+        let header = read_disk_cache_header_sync(&path).unwrap();
+        let payload_offset = (header.total_len - header.header.meta_len) as usize;
+        backend.retire_response_metadata("ns", key).await.unwrap();
+        backend.retire_response_metadata("ns", key).await.unwrap(); // idempotent
+        let after = fs::read(&path).unwrap();
+        assert_eq!(before.len(), after.len());
+        assert_eq!(before[..payload_offset], after[..payload_offset]);
+        assert!(after[payload_offset..].iter().all(|byte| *byte == 0));
+        assert!(
+            backend
+                .get_response_candidate("ns", "index", key, now_ms())
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            backend
+                .read_response_metadata("ns", key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            qpx_http::body::to_bytes(held.body.body).await.unwrap(),
+            "body"
+        );
+        let restarted = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).unwrap();
+        assert!(
+            restarted
+                .read_response_metadata("ns", key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let body = restarted
+            .get_object_stream("ns", &cache_body_storage_key(key), 4, None)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(qpx_http::body::to_bytes(body.body).await.unwrap(), "body");
+        fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]

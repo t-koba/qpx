@@ -25,7 +25,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-struct MockBackend {
+pub(crate) struct MockBackend {
     map: Mutex<HashMap<String, Vec<u8>>>,
     gets: Mutex<Vec<String>>,
 }
@@ -33,7 +33,7 @@ struct MockBackend {
 struct DefaultPutObjectBackend;
 
 impl MockBackend {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             map: Mutex::new(HashMap::new()),
             gets: Mutex::new(Vec::new()),

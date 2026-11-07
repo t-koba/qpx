@@ -76,6 +76,22 @@ impl CacheBackend for StreamingBackend {
         Ok(())
     }
 
+    async fn put_object_stream(
+        &self,
+        ns: &str,
+        key: &str,
+        body: Body,
+        max: usize,
+        timeout: Duration,
+        ttl: u64,
+    ) -> Result<u64> {
+        self.assert_source_stopped(key);
+        let _permit = self.active.acquire().await?;
+        self.inner
+            .put_object_stream(ns, key, body, max, timeout, ttl)
+            .await
+    }
+
     async fn delete(&self, ns: &str, key: &str) -> Result<()> {
         self.assert_source_stopped(key);
         let _permit = self.active.acquire().await?;
@@ -201,7 +217,19 @@ async fn wait_for_mutations(
             originals.iter().all(|(key, original)| {
                 let metadata = map.get(&MockBackend::key("ns", key));
                 if refresh {
-                    metadata.is_some_and(|value| value != original)
+                    let primary = crate::entry::primary_from_variant_key(key).unwrap();
+                    let index = map
+                        .get(&MockBackend::key("ns", &index_storage_key(primary)))
+                        .and_then(|bytes| serde_json::from_slice::<VariantIndex>(bytes).ok());
+                    metadata.is_none()
+                        && index.is_some_and(|index| {
+                            index.variants.iter().any(|generation| {
+                                generation != key
+                                    && map
+                                        .get(&MockBackend::key("ns", generation))
+                                        .is_some_and(|value| value != original)
+                            })
+                        })
                 } else {
                     metadata.is_none()
                         && !map.contains_key(&MockBackend::key("ns", &cache_body_storage_key(key)))
@@ -248,12 +276,16 @@ async fn foreground_304_returns_backpressured_bodies_before_cache_mutations() {
                         }
                         let mut response = revalidate_not_modified(
                             &make_get_request("/delivery"),
-                            &policy(),
+                            &CachePolicyConfig {
+                                max_object_bytes: LENGTH as usize,
+                                ..policy()
+                            },
                             qpx_core::http_message::Response::from_http(
                                 response.body(Body::empty()).unwrap(),
                             ),
                             state,
                             0,
+                            Duration::from_secs(1),
                             &backends,
                         )
                         .await
@@ -350,6 +382,7 @@ async fn foreground_304_cancellation_and_invalid_streams_do_not_refresh() {
                     ),
                     state,
                     0,
+                    Duration::from_secs(1),
                     &backends,
                 )
                 .await;

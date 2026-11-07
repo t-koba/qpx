@@ -102,10 +102,6 @@ pub fn index_storage_key(primary: &str) -> String {
     format!("idx:{}", primary)
 }
 
-pub(crate) fn legacy_variant_retirement_storage_key(primary: &str) -> String {
-    format!("legacy-retired:{}", primary)
-}
-
 fn ord(name: &str) -> OrdinaryHeaderName {
     OrdinaryHeaderName::try_from(name).expect("ordinary header name")
 }

@@ -519,6 +519,7 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
         qpx_core::http_message::Response::from_http(not_modified),
         state,
         0,
+        Duration::from_secs(1),
         &backends,
     )
     .await

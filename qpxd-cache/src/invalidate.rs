@@ -2,7 +2,7 @@ use super::key::normalize_url_authority;
 use super::types::{CacheBackend, CacheRequestKey, cache_body_storage_key};
 use super::util::{cache_namespace, load_variant_index};
 use super::vary::index_storage_key;
-use super::vary::{legacy_variant_retirement_storage_key, variant_storage_key};
+use super::vary::variant_storage_key;
 use anyhow::Result;
 use http::header::{CONTENT_LOCATION, LOCATION};
 use hyper::{Method, StatusCode};
@@ -68,30 +68,34 @@ pub async fn invalidate_primary(
     namespace: &str,
     primary: &str,
 ) -> Result<()> {
-    let index = load_variant_index(backend, namespace, primary).await?;
-    for variant in index.variants {
+    // Retire the canonical fallback and remove the index while coordinated
+    // with writeback/migration. Expensive per-object cleanup can run afterward:
+    // no new lookup can discover the retired fallback or an unindexed variant.
+    // The lock is process-local; see `store::commit` for cross-process limits.
+    let (variants, default_variant) = {
+        let _commit = crate::store::commit::lock(backend, namespace, primary).await;
+        let index = load_variant_index(backend, namespace, primary).await?;
+        let default_variant = variant_storage_key(primary, &[]);
+        let _ = backend
+            .retire_response_metadata(namespace, default_variant.as_str())
+            .await;
+        let _ = backend
+            .delete(namespace, index_storage_key(primary).as_str())
+            .await;
+        (index.variants, default_variant)
+    };
+    for variant in variants {
         let _ = backend.delete(namespace, variant.as_str()).await;
         let _ = backend
             .delete(namespace, cache_body_storage_key(variant.as_str()).as_str())
             .await;
     }
-    // Vary-less responses publish no variant index, so the canonical default
-    // variant is removed directly.
-    let default_variant = variant_storage_key(primary, &[]);
+    // Preserve existing invalidation behavior for the canonical body's bytes.
     let _ = backend.delete(namespace, default_variant.as_str()).await;
     let _ = backend
         .delete(
             namespace,
             cache_body_storage_key(default_variant.as_str()).as_str(),
-        )
-        .await;
-    let _ = backend
-        .delete(namespace, index_storage_key(primary).as_str())
-        .await;
-    let _ = backend
-        .delete(
-            namespace,
-            legacy_variant_retirement_storage_key(primary).as_str(),
         )
         .await;
     Ok(())
