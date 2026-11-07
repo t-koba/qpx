@@ -18,7 +18,9 @@ use hyper::header::{
 };
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
-use qpx_http::protocol::semantics::response_status_has_no_body;
+use qpx_http::protocol::semantics::{
+    response_status_forbids_content_length, response_status_has_no_body,
+};
 #[cfg(not(target_os = "linux"))]
 use std::future::{Future, poll_fn};
 use std::sync::Arc;
@@ -33,10 +35,6 @@ enum ResponseBodyKind {
     ContentLength(u64),
     Chunked,
     CloseDelimited,
-}
-
-fn response_status_forbids_content_length(status: StatusCode) -> bool {
-    status.is_informational() || status == StatusCode::NO_CONTENT
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

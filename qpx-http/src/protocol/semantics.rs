@@ -612,6 +612,14 @@ pub fn response_status_has_no_body(status: StatusCode, allow_switching_protocols
         || status == StatusCode::NOT_MODIFIED
 }
 
+/// Whether HTTP forbids a Content-Length field for this response status.
+///
+/// This is narrower than [`response_status_has_no_body`]: HEAD and 304 may
+/// carry the corresponding representation length, while 1xx and 204 may not.
+pub fn response_status_forbids_content_length(status: StatusCode) -> bool {
+    status.is_informational() || status == StatusCode::NO_CONTENT
+}
+
 pub fn normalize_response_for_request<R: FinalizeResponse>(
     request_method: &Method,
     response: &mut R,

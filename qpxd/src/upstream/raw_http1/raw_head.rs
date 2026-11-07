@@ -6,7 +6,9 @@ use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use http::{Method, StatusCode, Version};
-use qpx_http::protocol::semantics::response_status_has_no_body;
+use qpx_http::protocol::semantics::{
+    response_status_forbids_content_length, response_status_has_no_body,
+};
 use std::cell::RefCell;
 use std::sync::OnceLock;
 use tracing::warn;
@@ -128,7 +130,9 @@ impl RawHttp1ResponseHead {
             Version::HTTP_10 => raw_has_connection_token(headers, b"keep-alive"),
             _ => !raw_has_connection_token(headers, b"close"),
         };
-        let strip_content_length = (no_body && request_method != Method::HEAD) || chunked;
+        let strip_content_length = response_status_forbids_content_length(status)
+            || (no_body && request_method != Method::HEAD && status != StatusCode::NOT_MODIFIED)
+            || chunked;
         let preserve_proxy_auth = status == StatusCode::PROXY_AUTHENTICATION_REQUIRED;
         let has_connection_header = headers
             .iter()
@@ -476,6 +480,50 @@ mod tests {
             assert_eq!(encoded.contains("Proxy-Authentication-Info:"), preserve);
             assert!(!encoded.contains("Proxy-Authorization:"));
         }
+    }
+
+    #[test]
+    fn raw_head_preserves_304_length_but_forbids_204_length_even_for_head() {
+        let headers = [httparse::Header {
+            name: "Content-Length",
+            value: b"42",
+        }];
+
+        let mut not_modified = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::NOT_MODIFIED,
+            Version::HTTP_11,
+        )
+        .expect("304 head");
+        assert_eq!(not_modified.framing(), RawHttp1BodyFraming::Empty);
+        not_modified.finalize("qpx");
+        let encoded = std::str::from_utf8(not_modified.header_lines()).expect("ASCII head");
+        assert_eq!(content_length_lines(encoded), vec!["Content-Length: 42"]);
+
+        let mut head_response = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::HEAD,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("HEAD response");
+        assert_eq!(head_response.framing(), RawHttp1BodyFraming::Empty);
+        head_response.finalize("qpx");
+        let encoded = std::str::from_utf8(head_response.header_lines()).expect("ASCII head");
+        assert_eq!(content_length_lines(encoded), vec!["Content-Length: 42"]);
+
+        let mut no_content = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::HEAD,
+            StatusCode::NO_CONTENT,
+            Version::HTTP_11,
+        )
+        .expect("204 head");
+        assert_eq!(no_content.framing(), RawHttp1BodyFraming::Empty);
+        no_content.finalize("qpx");
+        let encoded = std::str::from_utf8(no_content.header_lines()).expect("ASCII head");
+        assert!(content_length_lines(encoded).is_empty());
     }
 
     #[test]
