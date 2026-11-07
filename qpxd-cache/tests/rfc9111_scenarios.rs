@@ -9,7 +9,7 @@ use qpx_http::body::Body;
 use qpxd_cache::{
     CacheBackend, CacheRequestKey, CacheStoreContext, CacheStoreTiming, CacheWritebackAdmission,
     CachedBody, CachedBodyStream, InFlightRevalidations, LookupOutcome,
-    attach_revalidation_headers, build_backends, lookup, maybe_store,
+    attach_revalidation_headers, build_backends, lookup, maybe_store, revalidate_not_modified,
 };
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -505,6 +505,180 @@ async fn conditional_requests_return_not_modified_or_attach_revalidation_headers
             headers.get(&ord("if-none-match")),
             Some(&HeaderValue::from_static("\"stale-v1\""))
         );
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreground_304_replays_persisted_body() -> Result<()> {
+    for case in backend_cases("foreground-304") {
+        for (index, (method, range, control, status, expected)) in [
+            (
+                Method::GET,
+                None,
+                "public, max-age=300",
+                StatusCode::OK,
+                "cached body",
+            ),
+            (
+                Method::HEAD,
+                None,
+                "public, max-age=300",
+                StatusCode::OK,
+                "",
+            ),
+            (
+                Method::GET,
+                Some("bytes=2-5"),
+                "public, max-age=300",
+                StatusCode::PARTIAL_CONTENT,
+                "ched",
+            ),
+            (
+                Method::GET,
+                Some("bytes=99-"),
+                "public, max-age=300",
+                StatusCode::RANGE_NOT_SATISFIABLE,
+                "",
+            ),
+            (Method::GET, None, "no-store", StatusCode::OK, "cached body"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = format!("/foreground-304/{index}");
+            let mut req = request(&path);
+            let key = CacheRequestKey::for_lookup(&req, "http")?.expect("cache key");
+            store_and_drain(
+                &req,
+                &key,
+                response(
+                    "cached body",
+                    &[
+                        (CACHE_CONTROL.as_str(), "public, no-cache, max-age=60"),
+                        (ETAG.as_str(), "\"v1\""),
+                        ("content-length", "11"),
+                    ],
+                ),
+                &case.policy,
+                &case.backends,
+            )
+            .await?;
+            *req.method_mut() = method.clone();
+            if let Some(range) = range {
+                req.headers_mut()
+                    .insert(ord("range"), HeaderValue::from_static(range));
+            }
+            let lookup_key = CacheRequestKey::for_lookup(&req, "http")?.expect("cache key");
+            let LookupOutcome::Revalidate(state) =
+                wait_for_cached_outcome(&req, &lookup_key, &case.policy, &case.backends).await?
+            else {
+                panic!("expected metadata-backed revalidation for {}", case.name)
+            };
+            let not_modified = Response::builder()
+                .status(StatusCode::NOT_MODIFIED)
+                .header(CACHE_CONTROL, control)
+                .header("content-length", "999")
+                .header("x-refreshed", "yes")
+                .body(Body::empty())?;
+            let mut refreshed = revalidate_not_modified(
+                &req,
+                &case.policy,
+                qpx_core::http_message::Response::from_http(not_modified),
+                state,
+                0,
+                &case.backends,
+            )
+            .await?;
+            assert_eq!(refreshed.status(), status);
+            assert_eq!(
+                refreshed.headers().declared_content_length()?,
+                Some(if method == Method::HEAD {
+                    11
+                } else {
+                    expected.len() as u64
+                })
+            );
+            assert_eq!(
+                refreshed.headers().get(&ord("x-refreshed")),
+                Some(&HeaderValue::from_static("yes"))
+            );
+            assert_eq!(
+                collect_body(refreshed.body_mut()).await?.as_ref(),
+                expected.as_bytes()
+            );
+            // Metadata refresh must leave the complete representation available.
+            let get = request(&path);
+            match lookup(&get, &key, &case.policy, &case.backends, &revalidations()).await? {
+                LookupOutcome::Hit(mut hit) if control != "no-store" => {
+                    assert_eq!(hit.headers().declared_content_length()?, Some(11));
+                    assert_eq!(collect_body(hit.body_mut()).await?.as_ref(), b"cached body");
+                }
+                LookupOutcome::Miss if control == "no-store" => {}
+                _ => panic!("unexpected outcome after 304 for {}", case.name),
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn foreground_304_rejects_missing_or_invalid_body() -> Result<()> {
+    let backends = backends();
+    let policy = policy();
+    for corrupt in [false, true] {
+        let req = request(if corrupt {
+            "/corrupt-304"
+        } else {
+            "/missing-304"
+        });
+        let key = CacheRequestKey::for_lookup(&req, "http")?.expect("cache key");
+        store_and_drain(
+            &req,
+            &key,
+            response(
+                "cached body",
+                &[
+                    (CACHE_CONTROL.as_str(), "public, no-cache, max-age=60"),
+                    (ETAG.as_str(), "\"v1\""),
+                ],
+            ),
+            &policy,
+            &backends,
+        )
+        .await?;
+        let LookupOutcome::Revalidate(state) =
+            wait_for_cached_outcome(&req, &key, &policy, &backends).await?
+        else {
+            panic!("expected metadata-backed revalidation")
+        };
+        let backend = state.backend.clone();
+        let namespace = state.namespace.clone();
+        let variant_key = state.variant_key.clone();
+        let metadata = backend.get(&namespace, &variant_key).await?;
+        let body_key = format!("{variant_key}:body");
+        if corrupt {
+            backend.put(&namespace, &body_key, b"short", 60).await?;
+        } else {
+            backend.delete(&namespace, &body_key).await?;
+        }
+        let not_modified = Response::builder()
+            .status(StatusCode::NOT_MODIFIED)
+            .header(CACHE_CONTROL, "public, max-age=300")
+            .body(Body::empty())?;
+        assert!(
+            revalidate_not_modified(
+                &req,
+                &policy,
+                qpx_core::http_message::Response::from_http(not_modified),
+                state,
+                0,
+                &backends,
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(backend.get(&namespace, &variant_key).await?, metadata);
     }
     Ok(())
 }

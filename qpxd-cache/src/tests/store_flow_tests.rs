@@ -447,6 +447,10 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
     let backend = Arc::new(MockBackend::new());
     let mut backends = HashMap::new();
     backends.insert("b".to_string(), backend.clone() as Arc<dyn CacheBackend>);
+    backend
+        .put("ns", "obj:reval:y:body", b"hello", 60)
+        .await
+        .expect("store representation");
     let state = RevalidationState {
         backend,
         namespace: "ns".to_string(),
@@ -470,7 +474,7 @@ async fn revalidate_not_modified_merges_policy_headers_not_framing() {
                 ("x-origin-policy".to_string(), "old".to_string()),
                 ("content-length".to_string(), "5".to_string()),
             ]),
-            body: CachedBody::from_bytes(bytes::Bytes::from_static(b"hello")),
+            body: CachedBody::default(),
             body_len: 5,
             stored_at_ms: now.saturating_sub(40_000),
             initial_age_secs: 0,

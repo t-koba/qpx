@@ -1,6 +1,9 @@
 use super::directives::{parse_request_directives, parse_response_directives};
-use super::entry::primary_from_variant_key;
-use super::freshness::{freshness_lifetime_secs, initial_age_secs};
+use super::entry::{
+    primary_from_variant_key, resolve_range, response_from_envelope_for_request,
+    response_from_envelope_for_request_with_body,
+};
+use super::freshness::{active_range, freshness_lifetime_secs, initial_age_secs};
 use super::invalidate::invalidate_primary;
 use super::types::{
     BodyStreamWriteOptions, CACHE_HEADER, CacheBackend, CacheRequestKey, CacheWritebackAdmission,
@@ -367,50 +370,19 @@ pub async fn revalidate_not_modified<B>(
         "cached response revalidation",
     )?;
 
-    if !merged_headers.is_revalidation_storable(
+    let storable = merged_headers.is_revalidation_storable(
         status,
         request_headers,
         request_method,
         policy,
         freshness,
         &directives,
-    ) {
-        // The representation is no longer storable (e.g. new no-store/private). Purge it.
-        if let Some(primary) = primary_from_variant_key(state.variant_key.as_str()) {
-            let _ = invalidate_primary(backend.as_ref(), state.namespace.as_str(), primary).await;
-        } else {
-            let _ = backend
-                .delete(state.namespace.as_str(), state.variant_key.as_str())
-                .await;
-        }
-        let volatile = CachedResponseEnvelope {
-            status: state.envelope.status,
-            headers: merged_headers,
-            body: state.envelope.body,
-            body_len: state.envelope.body_len,
-            stored_at_ms: now,
-            initial_age_secs,
-            response_delay_secs,
-            freshness_lifetime_secs: freshness,
-            vary_headers: vary_headers.clone(),
-            vary_values: refreshed_vary_values(
-                request_headers.view(),
-                &vary_headers,
-                &state.envelope.vary_values,
-            ),
-            response_directives: std::sync::OnceLock::new(),
-            response_header_values: std::sync::OnceLock::new(),
-        };
-        return super::entry::response_from_envelope_for_request(
-            request_method,
-            &parse_request_directives(request_headers),
-            &volatile,
-            now,
-            "REVALIDATED",
-        );
-    }
-
-    let sanitized = merged_headers.sanitized(&directives);
+    );
+    let sanitized = if storable {
+        merged_headers.sanitized(&directives)
+    } else {
+        merged_headers
+    };
     let updated = CachedResponseEnvelope {
         status: state.envelope.status,
         headers: sanitized,
@@ -430,24 +402,57 @@ pub async fn revalidate_not_modified<B>(
         response_header_values: std::sync::OnceLock::new(),
     };
 
-    let ttl = object_retention_ttl_secs(updated.freshness_lifetime_secs, &directives);
-    let payload = encode_cached_response_metadata(&updated)?;
-    let _ = backend
-        .put(
-            state.namespace.as_str(),
-            state.variant_key.as_str(),
-            &payload,
-            ttl,
-        )
-        .await;
+    let req = parse_request_directives(request_headers);
+    let range = active_range(&req, &updated);
+    let stream_range = range.and_then(|range| resolve_range(range, updated.body_len));
+    // Persisted metadata carries only the body length, not the representation.
+    // Open the existing object before updating metadata or purging a no-store entry.
+    let response = if *request_method == Method::HEAD || (range.is_some() && stream_range.is_none())
+    {
+        response_from_envelope_for_request(request_method, &req, &updated, now, "REVALIDATED")?
+    } else {
+        let body = backend
+            .get_object_stream(
+                state.namespace.as_str(),
+                cache_body_storage_key(state.variant_key.as_str()).as_str(),
+                updated.body_len,
+                stream_range,
+            )
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("missing or invalid cached body during revalidation"))?;
+        response_from_envelope_for_request_with_body(
+            request_method,
+            &req,
+            &updated,
+            now,
+            "REVALIDATED",
+            body.body,
+            body.len,
+        )?
+    };
 
-    super::entry::response_from_envelope_for_request(
-        request_method,
-        &parse_request_directives(request_headers),
-        &updated,
-        now,
-        "REVALIDATED",
-    )
+    if storable {
+        let ttl = object_retention_ttl_secs(updated.freshness_lifetime_secs, &directives);
+        let payload = encode_cached_response_metadata(&updated)?;
+        let _ = backend
+            .put(
+                state.namespace.as_str(),
+                state.variant_key.as_str(),
+                &payload,
+                ttl,
+            )
+            .await;
+    } else {
+        // The representation is no longer storable (e.g. new no-store/private). Purge it.
+        if let Some(primary) = primary_from_variant_key(state.variant_key.as_str()) {
+            let _ = invalidate_primary(backend.as_ref(), state.namespace.as_str(), primary).await;
+        } else {
+            let _ = backend
+                .delete(state.namespace.as_str(), state.variant_key.as_str())
+                .await;
+        }
+    }
+    Ok(response)
 }
 
 fn object_retention_ttl_secs(freshness_lifetime_secs: u64, directives: &ResponseDirectives) -> u64 {
