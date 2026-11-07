@@ -103,7 +103,11 @@ pub(crate) async fn send_static_http1_response(
         Err(error) => return Err(error.into()),
     };
     if status_has_no_body {
-        if response_status == StatusCode::RESET_CONTENT {
+        if request_method == Method::CONNECT && response_status.is_success() {
+            // Every 2xx CONNECT response establishes a tunnel, including 205.
+            // CONNECT framing takes precedence over ordinary 205 empty framing.
+            headers.remove(CONTENT_LENGTH);
+        } else if response_status == StatusCode::RESET_CONTENT {
             // 205 responses cannot contain content, but unlike 1xx/204/304
             // they are not self-delimiting in HTTP/1. Keep persistent
             // connections usable by explicitly framing their empty content.
@@ -272,7 +276,11 @@ where
         let declared_length = parse_declared_content_length(&headers)?;
         let has_chunked = has_only_chunked_transfer_encoding(&headers)?;
         if no_body {
-            if parts.status == StatusCode::RESET_CONTENT {
+            if request_method == Method::CONNECT && parts.status.is_success() {
+                // Every 2xx CONNECT response establishes a tunnel, including 205.
+                // CONNECT framing takes precedence over ordinary 205 empty framing.
+                headers.remove(CONTENT_LENGTH);
+            } else if parts.status == StatusCode::RESET_CONTENT {
                 headers.insert(
                     CONTENT_LENGTH,
                     qpx_core::http_content_length::canonical_content_length_value(0),

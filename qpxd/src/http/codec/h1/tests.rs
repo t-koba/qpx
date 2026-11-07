@@ -875,6 +875,40 @@ async fn finalized_get_205_is_zero_framed_without_content() {
 }
 
 #[tokio::test]
+async fn successful_connect_205_omits_content_length_at_http1_egress() {
+    let response = Response::builder()
+        .status(StatusCode::RESET_CONTENT)
+        .header(CONTENT_LENGTH, "7")
+        .body(Body::empty())
+        .expect("response");
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let mut head_buf = BytesMut::new();
+
+    let keep_alive = send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::CONNECT,
+        OwnerResponse::from_http(response),
+        &[],
+        true,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("send CONNECT response");
+    drop(write_half);
+    drop(read_half);
+
+    assert!(!keep_alive);
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    assert!(raw.starts_with(b"HTTP/1.1 205"));
+    assert!(content_length_lines(&raw).is_empty());
+    assert!(raw.ends_with(b"\r\n\r\n"));
+}
+
+#[tokio::test]
 async fn static_205_sanitizes_length_and_zero_frames_persistent_response() {
     let mut headers = HeaderMap::new();
     headers.insert(CONTENT_LENGTH, HeaderValue::from_static("invalid"));
@@ -912,6 +946,37 @@ async fn static_205_sanitizes_length_and_zero_frames_persistent_response() {
             .any(|w| w == b"Transfer-Encoding:")
     );
     assert!(!raw.windows(b"Trailer:".len()).any(|w| w == b"Trailer:"));
+    assert!(raw.ends_with(b"\r\n\r\n"));
+}
+
+#[tokio::test]
+async fn static_successful_connect_205_omits_content_length() {
+    let mut headers = HeaderMap::new();
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("7"));
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("listener address");
+    let (client, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+    let mut client = client.expect("connect");
+    let (mut server, _) = accepted.expect("accept");
+    let mut head_buf = BytesMut::new();
+
+    let keep_alive = send_static_http1_response(
+        &mut server,
+        &Method::CONNECT,
+        StatusCode::RESET_CONTENT,
+        headers,
+        Bytes::new(),
+        true,
+        &mut head_buf,
+    )
+    .await
+    .expect("send CONNECT response");
+    assert!(!keep_alive);
+
+    let mut raw = vec![0; head_buf.len()];
+    client.read_exact(&mut raw).await.expect("read response");
+    assert!(raw.starts_with(b"HTTP/1.1 205"));
+    assert!(content_length_lines(&raw).is_empty());
     assert!(raw.ends_with(b"\r\n\r\n"));
 }
 
