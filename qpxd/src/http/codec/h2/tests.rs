@@ -1448,3 +1448,62 @@ async fn h2_no_body_content_length_and_raw_placeholder_keep_interim_order() {
         result_rx.await.unwrap().unwrap();
     }
 }
+
+#[tokio::test]
+async fn classic_connect_marker_bypasses_only_established_tunnel_framing() {
+    for (marked, status, length, expected) in [
+        (true, StatusCode::OK, "0", "wire"),
+        (true, StatusCode::NO_CONTENT, "invalid", "wire"),
+        (false, StatusCode::OK, "invalid", ""),
+        (false, StatusCode::NO_CONTENT, "invalid", ""),
+        (false, StatusCode::FORBIDDEN, "4", "wire"),
+        (true, StatusCode::FORBIDDEN, "4", "wire"),
+    ] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let service = qpx_observability::handler_fn(move |_: http::Request<Body>| async move {
+                let mut response = Response::builder()
+                    .status(status)
+                    .header("content-length", length)
+                    .header("trailer", "x-test")
+                    .body(Body::from("wire"))
+                    .map(OwnerResponse::from_http)
+                    .unwrap();
+                if marked {
+                    response.extensions_mut().insert(ClassicConnectTunnel);
+                }
+                Ok::<_, std::convert::Infallible>(response)
+            });
+            let (client_io, server_io) = tokio::io::duplex(1024);
+            let server = tokio::spawn(crate::http::codec::interim::serve_h2_with_interim(
+                server_io,
+                service,
+                false,
+                Duration::from_secs(5),
+            ));
+            let (mut client, connection) = h2::client::handshake(client_io).await.unwrap();
+            let driver = tokio::spawn(connection);
+            let request = http::Request::builder()
+                .method("CONNECT")
+                .uri("example.test:443")
+                .body(())
+                .unwrap();
+            let (response, _) = client.send_request(request, true).unwrap();
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), status);
+            if status.is_success() {
+                assert!(!response.headers().contains_key("content-length"));
+                assert!(!response.headers().contains_key("trailer"));
+            }
+            assert_eq!(
+                to_bytes(h2_response_to_hyper(response).unwrap().into_body())
+                    .await
+                    .unwrap(),
+                expected
+            );
+            server.abort();
+            driver.abort();
+        })
+        .await
+        .expect("CONNECT framing must complete");
+    }
+}

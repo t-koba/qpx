@@ -62,7 +62,7 @@ pub(super) use self::inspect::{
     not(feature = "http3-backend-qpx")
 ))]
 pub(in crate::forward) use self::tunnel::connect_tls_fingerprints_required;
-use self::tunnel::{TunnelConnectContext, tunnel_connect};
+use self::tunnel::{TunnelConnectClient, TunnelConnectContext, tunnel_connect};
 
 /// Initial Connect-only plan limits (scope `Connect`, cost 1); the context feeds profile merging.
 pub(super) fn acquire_initial_connect_rate_limit(
@@ -422,9 +422,11 @@ pub(super) async fn handle_connect(
                 let identity_for_task = identity.clone();
                 let action_for_task = action.clone();
                 let matched_rule_for_task = matched_rule.as_ref().map(|rule| rule.to_string());
+                let mut response = established_connect_response!();
+                let client = TunnelConnectClient::new(req, &mut response);
                 task::spawn(async move {
                     if let Err(err) = tunnel_connect(
-                        req,
+                        client,
                         upstream_connected,
                         runtime_for_mitm,
                         TunnelConnectContext {
@@ -448,7 +450,7 @@ pub(super) async fn handle_connect(
                         warn!(error = ?err, "mitm tunnel failed");
                     }
                 });
-                Ok(established_connect_response!())
+                Ok(response)
             }
         }
         ActionKind::Tunnel | ActionKind::Direct | ActionKind::Proxy => {
@@ -492,9 +494,11 @@ pub(super) async fn handle_connect(
             let identity_for_task = identity.clone();
             let action_for_task = action.clone();
             let matched_rule_for_task = matched_rule.as_ref().map(|rule| rule.to_string());
+            let mut response = established_connect_response!();
+            let client = TunnelConnectClient::new(req, &mut response);
             task::spawn(async move {
                 if let Err(err) = tunnel_connect(
-                    req,
+                    client,
                     connected,
                     runtime_for_tunnel,
                     TunnelConnectContext {
@@ -518,7 +522,7 @@ pub(super) async fn handle_connect(
                     warn!(error = ?err, "tunnel failed");
                 }
             });
-            Ok(established_connect_response!())
+            Ok(response)
         }
     }
 }

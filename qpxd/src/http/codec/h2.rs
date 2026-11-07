@@ -150,11 +150,19 @@ pub(crate) fn h2_request_to_hyper(req: Http1Request<RecvStream>) -> Result<Reque
     let body = if body.is_end_stream() {
         Body::empty()
     } else {
-        Body::wrap(H2RecvBody::request(body))
+        Body::wrap(H2RecvBody::request(
+            body,
+            parts.method == http::Method::CONNECT
+                && parts.extensions.get::<h2::ext::Protocol>().is_none(),
+        ))
     };
     parts.version = http::Version::HTTP_2;
     Ok(Request::from_parts(parts, body))
 }
+
+/// Established classic CONNECT: DATA is tunnel traffic, not an HTTP body.
+#[derive(Clone, Copy)]
+pub(crate) struct ClassicConnectTunnel;
 
 pub(crate) async fn send_h2_response_with_interim(
     mut respond: SendResponse<Bytes>,
@@ -191,11 +199,18 @@ pub(crate) async fn send_h2_response_with_interim(
         head.status(),
         "HTTP/2 response",
     )?;
-    let no_body = request_method == hyper::Method::HEAD
-        || response_status_has_no_body(head.status(), false)
-        || (request_method == hyper::Method::CONNECT
-            && head.status().is_success()
-            && !allow_successful_connect_body);
+    let classic_tunnel = request_method == hyper::Method::CONNECT
+        && status.is_success()
+        && head
+            .extensions_mut()
+            .remove::<ClassicConnectTunnel>()
+            .is_some();
+    let no_body = !classic_tunnel
+        && (request_method == hyper::Method::HEAD
+            || response_status_has_no_body(head.status(), false)
+            || (request_method == hyper::Method::CONNECT
+                && head.status().is_success()
+                && !allow_successful_connect_body));
     if let Some(raw) = head.extensions_mut().remove::<Arc<RawHttp1ResponseHead>>() {
         let mut raw_response = Http1Response::new(());
         *raw_response.headers_mut() = raw.materialized_headers()?;
@@ -203,8 +218,12 @@ pub(crate) async fn send_h2_response_with_interim(
         // a placeholder and must not be validated.
         head = OwnerResponse::from_http(raw_response);
     }
-    let declared_length =
-        prepare_h2_response_content_length(head.headers_mut(), no_body, request_method, status)?;
+    let declared_length = if classic_tunnel {
+        qpx_http::protocol::semantics::strip_message_body_headers(head.headers_mut());
+        None
+    } else {
+        prepare_h2_response_content_length(head.headers_mut(), no_body, request_method, status)?
+    };
     let headers = head.into_http_for_codec()?.into_parts().0.headers;
     let flow_control_body =
         declared_length.is_none_or(|length| length > H2_DIRECT_SEND_BODY_MAX_BYTES);
@@ -581,10 +600,10 @@ async fn read_h2_response_body_chunk(
     body_read_timeout: Duration,
     body_read_timeout_enforced: bool,
 ) -> Result<H2BodyRead<Option<Result<Bytes, qpx_http::body::BodyError>>>> {
-    if body_read_timeout_enforced {
-        return Ok(H2BodyRead::Value(body.data().await));
-    }
     let read = async {
+        if body_read_timeout_enforced {
+            return Ok(body.data().await);
+        }
         timeout_after_pending(body_read_timeout, body.data())
             .await
             .map_err(|_| anyhow!("HTTP/2 response body read timed out"))
@@ -606,14 +625,10 @@ async fn read_h2_response_trailers(
     body_read_timeout: Duration,
     body_read_timeout_enforced: bool,
 ) -> Result<H2BodyRead<Option<http::HeaderMap>>> {
-    if body_read_timeout_enforced {
-        return body
-            .trailers()
-            .await
-            .map(H2BodyRead::Value)
-            .map_err(Into::into);
-    }
     let read = async {
+        if body_read_timeout_enforced {
+            return body.trailers().await.map_err(Into::into);
+        }
         timeout_after_pending(body_read_timeout, body.trailers())
             .await
             .map_err(|_| anyhow!("HTTP/2 response trailer read timed out"))?
@@ -758,7 +773,7 @@ pub(crate) fn h2_response_to_owner_with_inflight(
 }
 
 enum H2RecvBodyKind {
-    Request { seen: u64 },
+    Request { seen: u64, tunnel: bool },
     Response { _inflight: InflightCounterGuard },
 }
 
@@ -776,10 +791,10 @@ struct H2RecvBody {
 }
 
 impl H2RecvBody {
-    fn request(body: RecvStream) -> Self {
+    fn request(body: RecvStream, tunnel: bool) -> Self {
         Self {
             body: Some(body),
-            kind: H2RecvBodyKind::Request { seen: 0 },
+            kind: H2RecvBodyKind::Request { seen: 0, tunnel },
             state: H2RecvBodyState::Data,
             read_timer: None,
         }
@@ -845,7 +860,11 @@ impl http_body::Body for H2RecvBody {
             match this.state {
                 H2RecvBodyState::Data => match poll_h2_data(this, cx) {
                     Poll::Ready(Ok(Some(chunk))) => {
-                        if let H2RecvBodyKind::Request { seen } = &mut this.kind {
+                        if let H2RecvBodyKind::Request {
+                            seen,
+                            tunnel: false,
+                        } = &mut this.kind
+                        {
                             *seen = match seen.checked_add(chunk.len() as u64) {
                                 Some(seen) => seen,
                                 None => {
@@ -1007,7 +1026,11 @@ async fn drain_abandoned_h2_request(mut body: RecvStream) {
 }
 
 fn ensure_h2_read_timer(body: &mut H2RecvBody) {
-    if body.read_timer.is_none() {
+    // Classic CONNECT uses the shared bidirectional tunnel idle policy, not
+    // a separate HTTP-body deadline that could close an active download.
+    if !matches!(body.kind, H2RecvBodyKind::Request { tunnel: true, .. })
+        && body.read_timer.is_none()
+    {
         body.read_timer = Some(Box::pin(tokio::time::sleep(H2_BODY_IDLE_TIMEOUT)));
     }
 }

@@ -28,7 +28,6 @@ use anyhow::Context;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
 use qpx_core::config::{ActionConfig, ActionKind};
-#[cfg(feature = "mitm")]
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::http_message::{Headers, Request as OwnerRequest};
 use qpx_http::body::Body;
@@ -59,24 +58,105 @@ pub(super) struct TunnelConnectContext {
     pub throttle: Option<BandwidthThrottle>,
 }
 
+// Only an established classic H2 CONNECT gets a streaming response. Other
+// responses (including locally generated 2xx replies) never acquire this marker.
+pub(super) enum TunnelConnectClient {
+    Upgrade(OwnerRequest<Body>),
+    H2(Body, qpx_http::body::Sender),
+}
+
+impl TunnelConnectClient {
+    pub(super) fn new(req: OwnerRequest<Body>, response: &mut OwnerResponse<Body>) -> Self {
+        if req.version() != http::Version::HTTP_2 {
+            return Self::Upgrade(req);
+        }
+        let (sender, body) = Body::channel_with_capacity(1);
+        // The tunnel owns idle/IO deadlines; the codec still watches resets.
+        *response.body_mut() = body.mark_read_timeout_enforced();
+        response
+            .extensions_mut()
+            .insert(crate::http::codec::h2::ClassicConnectTunnel);
+        Self::H2(req.into_head_and_body().1, sender)
+    }
+}
+
 pub(super) async fn tunnel_connect(
-    mut req: OwnerRequest<Body>,
+    client: TunnelConnectClient,
     server: ConnectedTunnel,
     runtime: Runtime,
     ctx: TunnelConnectContext,
 ) -> Result<()> {
+    match client {
+        TunnelConnectClient::Upgrade(mut req) => {
+            let upgrade_wait =
+                Duration::from_millis(runtime.state().plan.limits.timeouts.upgrade_wait_timeout_ms);
+            let upgraded = timeout(
+                upgrade_wait,
+                crate::http::protocol::upgrade::on(req.extensions_mut()),
+            )
+            .await??;
+            tunnel_connect_io(upgraded, server, runtime, ctx).await
+        }
+        TunnelConnectClient::H2(body, sender) => {
+            let mut sender = Some(sender);
+            // One codec-sized buffer and one response frame bound the bridge.
+            // Reading request DATA remains demand-driven by the tunnel relay.
+            let frame_size = crate::http::codec::h2::h2_upstream_response_frame_size();
+            let (writer, mut reader) = tokio::io::duplex(frame_size);
+            let input = futures_util::stream::try_unfold(body, |mut body| async {
+                match body.data().await {
+                    Some(Ok(bytes)) => Ok(Some((bytes, body))),
+                    Some(Err(err)) => Err(std::io::Error::other(err)),
+                    None => Ok(None),
+                }
+            });
+            let io = tokio::io::join(tokio_util::io::StreamReader::new(Box::pin(input)), writer);
+            let download = async {
+                use tokio::io::AsyncReadExt;
+                let mut buffer = vec![0; frame_size];
+                let tx = sender
+                    .as_mut()
+                    .ok_or_else(|| anyhow!("CONNECT sender missing"))?;
+                loop {
+                    let len = tokio::select! {
+                        result = reader.read(&mut buffer) => result?,
+                        _ = tx.closed() => return Err(anyhow!("CONNECT response cancelled")),
+                    };
+                    if len == 0 {
+                        break;
+                    }
+                    tx.send_data(Bytes::copy_from_slice(&buffer[..len])).await?;
+                }
+                // END_STREAM is independent of the still-live upload half.
+                sender.take();
+                Ok(())
+            };
+            let result = tokio::try_join!(tunnel_connect_io(io, server, runtime, ctx), download,);
+            if result.is_err()
+                && let Some(sender) = sender.as_mut()
+            {
+                sender.abort();
+            }
+            result.map(|_| ())
+        }
+    }
+}
+
+async fn tunnel_connect_io<I>(
+    upgraded: I,
+    server: ConnectedTunnel,
+    runtime: Runtime,
+    ctx: TunnelConnectContext,
+) -> Result<()>
+where
+    I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let state = runtime.state();
     let listener_cfg = state
         .ingress_edge_settings(ctx.listener_name.as_str())
         .ok_or_else(|| anyhow!("listener not found"))?;
-    let upgrade_wait = Duration::from_millis(state.plan.limits.timeouts.upgrade_wait_timeout_ms);
     let upstream_timeout =
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms);
-    let upgraded = timeout(
-        upgrade_wait,
-        crate::http::protocol::upgrade::on(req.extensions_mut()),
-    )
-    .await??;
     let (client_io, client_hello, action) =
         prepare_connect_client_io(upgraded, &runtime, &ctx).await?;
     let listener_upstream_trust = listener_cfg.upstream_tls_trust();

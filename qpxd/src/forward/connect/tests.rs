@@ -783,6 +783,12 @@ async fn connect_owned_generated_responses_keep_status_and_tunnel_semantics() {
             .await
             .unwrap();
             assert_eq!(response.status(), status);
+            assert!(
+                response
+                    .extensions()
+                    .get::<crate::http::codec::h2::ClassicConnectTunnel>()
+                    .is_none()
+            );
             let response = response.into_http_for_codec().unwrap();
             assert!(response.headers().contains_key("via"));
             // Local builders retain their default head version; the request
@@ -890,4 +896,188 @@ async fn h2_extended_connect_owned_finalization_keeps_stream_body_and_header_con
             .unwrap(),
         "reply"
     );
+}
+
+// Exercise the real custom H2 codec and CONNECT handler, not Hyper's upgrade API.
+async fn classic_h2_client(
+    tunnel_idle_timeout_ms: u64,
+) -> (
+    h2::client::SendRequest<bytes::Bytes>,
+    [task::JoinHandle<()>; 2],
+) {
+    let mut config = connect_config();
+    config.runtime.tunnel_idle_timeout_ms = tunnel_idle_timeout_ms;
+    let qpx_core::config::EdgeConfig::Forward(edge) = &mut config.edges[0] else {
+        unreachable!()
+    };
+    edge.rules.clear();
+    edge.default_action.kind = ActionKind::Direct;
+    let runtime = Runtime::new(config).unwrap();
+    let service = qpx_observability::handler_fn(move |req| {
+        let runtime = runtime.clone();
+        async move {
+            Ok::<_, std::convert::Infallible>(
+                handle_connect(
+                    OwnerRequest::from_http(req),
+                    runtime,
+                    "forward",
+                    SocketAddr::from(([127, 0, 0, 1], 12345)),
+                )
+                .await
+                .unwrap(),
+            )
+        }
+    });
+    let (client_io, server_io) = tokio::io::duplex(64 * 1024);
+    let server = task::spawn(async move {
+        crate::http::codec::interim::serve_h2_with_interim(
+            server_io,
+            service,
+            false,
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+    });
+    let (client, connection) = h2::client::handshake(client_io).await.unwrap();
+    let driver = task::spawn(async move {
+        let _ = connection.await;
+    });
+    (client, [server, driver])
+}
+
+#[tokio::test]
+async fn classic_h2_connect_relays_data_and_preserves_both_half_closes() {
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for upstream_closes_first in [false, true] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = listener.local_addr().unwrap();
+            let payload = vec![b'x'; 32 * 1024];
+            let expected = payload.clone();
+            let upstream = task::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut received = vec![0; expected.len()];
+                socket.read_exact(&mut received).await.unwrap();
+                assert_eq!(received, expected);
+                socket.write_all(&received).await.unwrap();
+                if upstream_closes_first {
+                    socket.shutdown().await.unwrap();
+                }
+                // The client can continue uploading after response END_STREAM.
+                let mut tail = Vec::new();
+                socket.read_to_end(&mut tail).await.unwrap();
+                assert_eq!(tail, b"after-half-close");
+                if !upstream_closes_first {
+                    // A client END_STREAM only closes the upstream write half.
+                    socket.write_all(b"after-client-eof").await.unwrap();
+                    socket.shutdown().await.unwrap();
+                }
+            });
+            let (mut client, drivers) = classic_h2_client(5_000).await;
+            let request = http::Request::builder()
+                .method("CONNECT")
+                .uri(target.to_string())
+                .body(())
+                .unwrap();
+            let (response, mut upload) = client.send_request(request, false).unwrap();
+            let response = response.await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            for name in ["content-length", "transfer-encoding", "trailer"] {
+                assert!(!response.headers().contains_key(name));
+            }
+            let mut download = response.into_body();
+            assert!(!download.is_end_stream());
+            upload
+                .send_data(Bytes::from(payload.clone()), false)
+                .unwrap();
+            let mut echoed = Vec::new();
+            while echoed.len() < payload.len() {
+                let chunk = download.data().await.unwrap().unwrap();
+                download
+                    .flow_control()
+                    .release_capacity(chunk.len())
+                    .unwrap();
+                echoed.extend_from_slice(&chunk);
+            }
+            assert_eq!(echoed, payload);
+            if upstream_closes_first {
+                while let Some(chunk) = download.data().await {
+                    assert!(chunk.unwrap().is_empty());
+                }
+            }
+            upload
+                .send_data(Bytes::from_static(b"after-half-close"), true)
+                .unwrap();
+            if !upstream_closes_first {
+                let mut tail = Vec::new();
+                while let Some(chunk) = download.data().await {
+                    let chunk = chunk.unwrap();
+                    download
+                        .flow_control()
+                        .release_capacity(chunk.len())
+                        .unwrap();
+                    tail.extend_from_slice(&chunk);
+                }
+                assert_eq!(tail, b"after-client-eof");
+            }
+            assert!(download.trailers().await.unwrap().is_none());
+            upstream.await.unwrap();
+            for driver in drivers {
+                driver.abort();
+            }
+        })
+        .await
+        .expect("classic CONNECT must close normally");
+    }
+}
+
+#[tokio::test]
+async fn classic_h2_connect_reset_and_idle_timeout_release_upstream() {
+    use bytes::Bytes;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    for reset in [true, false] {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let target = listener.local_addr().unwrap();
+            let upstream = task::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut start = [0; 5];
+                socket.read_exact(&mut start).await.unwrap();
+                assert_eq!(&start, b"hello");
+                socket.write_all(b"ready").await.unwrap();
+                let mut rest = Vec::new();
+                socket.read_to_end(&mut rest).await.unwrap();
+                assert!(rest.is_empty());
+            });
+            let (mut client, drivers) = classic_h2_client(if reset { 5_000 } else { 100 }).await;
+            let request = http::Request::builder()
+                .method("CONNECT")
+                .uri(target.to_string())
+                .body(())
+                .unwrap();
+            let (response, mut upload) = client.send_request(request, false).unwrap();
+            let mut download = response.await.unwrap().into_body();
+            upload
+                .send_data(Bytes::from_static(b"hello"), false)
+                .unwrap();
+            assert_eq!(download.data().await.unwrap().unwrap(), "ready");
+            if reset {
+                upload.send_reset(h2::Reason::CANCEL);
+            } else {
+                while let Some(chunk) = download.data().await {
+                    assert!(chunk.unwrap().is_empty());
+                }
+            }
+            upstream.await.unwrap();
+            for driver in drivers {
+                driver.abort();
+            }
+        })
+        .await
+        .expect("reset or tunnel idle timeout must release the TCP tunnel");
+    }
 }
