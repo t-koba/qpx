@@ -82,6 +82,11 @@ pub(super) fn declared_h3_response_body_length(
     status: StatusCode,
     headers: &http::HeaderMap,
 ) -> Result<Option<u64>> {
+    if *request_method == Method::CONNECT && status.is_success() {
+        // RFC 9110 §9.3.6: ignore Content-Length for every successful
+        // CONNECT response, including when its status is 205.
+        return Ok(Some(0));
+    }
     let declared = parse_declared_content_length(headers)?;
     if status == StatusCode::RESET_CONTENT {
         // 205 forbids content, but unlike HEAD/204/304 its Content-Length
@@ -93,10 +98,7 @@ pub(super) fn declared_h3_response_body_length(
         }
         return Ok(Some(0));
     }
-    if *request_method == Method::HEAD
-        || response_status_has_no_body(status, false)
-        || (*request_method == Method::CONNECT && status.is_success())
-    {
+    if *request_method == Method::HEAD || response_status_has_no_body(status, false) {
         Ok(Some(0))
     } else {
         Ok(declared)
@@ -422,6 +424,7 @@ mod tests {
             (Method::GET, StatusCode::NOT_MODIFIED, true),
             (Method::GET, StatusCode::RESET_CONTENT, true),
             (Method::CONNECT, StatusCode::OK, true),
+            (Method::CONNECT, StatusCode::RESET_CONTENT, true),
             (Method::CONNECT, StatusCode::BAD_GATEWAY, false),
         ] {
             for (values, expected) in [
@@ -438,7 +441,10 @@ mod tests {
                         .append(CONTENT_LENGTH, HeaderValue::from_static(value));
                 }
                 let result = own_h3_response_head(decoded, &method);
-                let expected = if status == StatusCode::RESET_CONTENT
+                let successful_connect = method == Method::CONNECT && status.is_success();
+                let expected = if successful_connect {
+                    Ok(Some(0))
+                } else if status == StatusCode::RESET_CONTENT
                     && matches!(expected, Ok(Some(length)) if length > 0)
                 {
                     Err(())
@@ -449,7 +455,7 @@ mod tests {
                     Ok(length) => {
                         let (owner, declared) = result.unwrap();
                         assert_eq!(declared, if no_body { Some(0) } else { length });
-                        if status == StatusCode::RESET_CONTENT {
+                        if status == StatusCode::RESET_CONTENT && !successful_connect {
                             let mut received = 0;
                             assert!(
                                 record_h3_body_content_length(
