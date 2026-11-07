@@ -2032,3 +2032,82 @@ async fn direct_raw_http1_connection_nominated_content_length_closes_downstream(
         assert!(text.ends_with(&format!("\r\n\r\n{body}")), "{text}");
     }
 }
+
+#[tokio::test]
+async fn raw_http1_zero_length_with_chunked_transfer_encoding_uses_chunked_fallback() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream_addr = upstream_listener.local_addr().expect("upstream address");
+    let upstream_server = tokio::spawn(async move {
+        let (mut upstream, _) = upstream_listener.accept().await.expect("accept upstream");
+        upstream
+            .write_all(b"1\r\na\r\n0\r\n\r\n")
+            .await
+            .expect("write chunked body");
+    });
+    let upstream = TcpStream::connect(upstream_addr)
+        .await
+        .expect("connect upstream");
+    let headers = [
+        httparse::Header {
+            name: "Content-Length",
+            value: b"0",
+        },
+        httparse::Header {
+            name: "Transfer-Encoding",
+            value: b"chunked",
+        },
+    ];
+    let raw = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+        &headers,
+        &Method::GET,
+        StatusCode::OK,
+        Version::HTTP_11,
+    )
+    .expect("raw response head");
+    let mut relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
+        interim: Vec::new(),
+        raw: Arc::new(raw),
+        stream: Some(upstream),
+        read_buf: BytesMut::new(),
+        write_buf: BytesMut::new(),
+        recycler: None,
+        active_permit: None,
+    };
+
+    assert!(
+        !relay.supports_direct_relay(1024),
+        "chunked responses must use the body parser, not the bounded direct relay"
+    );
+    relay.finalize("qpx");
+    let proxied = relay.into_http_response().expect("parsed raw response");
+    let (interim, response) = (proxied.interim, proxied.response);
+    let (mut downstream_client, mut downstream_server) = tokio::io::duplex(4096);
+    let mut head_buf = BytesMut::new();
+    let keep_alive = send_http1_response_with_interim(
+        &mut downstream_server,
+        Version::HTTP_11,
+        &Method::GET,
+        response,
+        &interim,
+        true,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("send chunked response");
+    assert!(keep_alive);
+    drop(downstream_server);
+    let mut wire = Vec::new();
+    downstream_client
+        .read_to_end(&mut wire)
+        .await
+        .expect("read chunked response");
+    upstream_server.await.expect("upstream task");
+
+    let text = String::from_utf8(wire).expect("UTF-8 response");
+    assert!(text.contains("Transfer-Encoding: chunked\r\n"), "{text}");
+    assert!(!text.contains("Content-Length:"), "{text}");
+    assert!(text.ends_with("\r\n\r\n1\r\na\r\n0\r\n\r\n"), "{text}");
+}

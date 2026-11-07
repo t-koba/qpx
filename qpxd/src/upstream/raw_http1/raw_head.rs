@@ -137,15 +137,17 @@ impl RawHttp1ResponseHead {
             && !no_body
             && !chunked
             && raw_has_connection_token(headers, b"content-length");
-        let framing = if no_body || content_length == Some(0) {
-            RawHttp1BodyFraming::Empty
-        } else if chunked {
-            RawHttp1BodyFraming::Chunked
-        } else if let Some(length) = content_length {
-            RawHttp1BodyFraming::ContentLength(length)
-        } else {
-            RawHttp1BodyFraming::CloseDelimited
-        };
+        let transfer_encoding_overrides_zero_length = chunked && !successful_connect;
+        let framing =
+            if no_body || (content_length == Some(0) && !transfer_encoding_overrides_zero_length) {
+                RawHttp1BodyFraming::Empty
+            } else if chunked {
+                RawHttp1BodyFraming::Chunked
+            } else if let Some(length) = content_length {
+                RawHttp1BodyFraming::ContentLength(length)
+            } else {
+                RawHttp1BodyFraming::CloseDelimited
+            };
         let upstream_keep_alive = match version {
             Version::HTTP_10 => raw_has_connection_token(headers, b"keep-alive"),
             _ => !raw_has_connection_token(headers, b"close"),
