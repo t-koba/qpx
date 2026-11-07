@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - "**"
+      - "!mizu"
     tags:
       - "v*"
   pull_request:

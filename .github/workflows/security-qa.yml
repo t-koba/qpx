@@ -2,6 +2,11 @@ name: security-qa
 
 on:
   push:
+    branches:
+      - "**"
+      - "!mizu"
+    tags:
+      - "**"
   pull_request:
   workflow_dispatch:
 

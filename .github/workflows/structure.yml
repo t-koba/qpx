@@ -2,6 +2,11 @@ name: structure
 
 on:
   push:
+    branches:
+      - "**"
+      - "!mizu"
+    tags:
+      - "**"
   pull_request:
   workflow_dispatch:
 
@@ -18,6 +23,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: acceptance gate presence checks
         run: bash ./scripts/check-ci-acceptance-gates.sh
+      - name: integration-branch CI trigger contract
+        run: python3 ./scripts/test-ci-branch-triggers.py
       - name: CI runner-minute fixture checks
         run: python3 ./scripts/test-ci-runner-minutes.py
       - name: streaming pairing fixture checks
