@@ -33,7 +33,7 @@ pub(crate) struct RawHttp1ResponseHead {
     header_lines: BytesMut,
     proxy_status: Option<HeaderMap>,
     framing: RawHttp1BodyFraming,
-    connection_nominated_content_length: bool,
+    connection_nominated_length_needs_close: bool,
     upstream_keep_alive: bool,
     has_date: bool,
     finalized: bool,
@@ -59,7 +59,7 @@ impl Clone for RawHttp1ResponseHead {
             header_lines,
             proxy_status: self.proxy_status.clone(),
             framing: self.framing,
-            connection_nominated_content_length: self.connection_nominated_content_length,
+            connection_nominated_length_needs_close: self.connection_nominated_length_needs_close,
             upstream_keep_alive: self.upstream_keep_alive,
             has_date: self.has_date,
             finalized: self.finalized,
@@ -105,9 +105,6 @@ impl RawHttp1ResponseHead {
         }
         let content_length = parse_content_length(headers)?;
         let successful_connect = request_method == Method::CONNECT && status.is_success();
-        let connection_nominated_content_length = content_length.is_some()
-            && !successful_connect
-            && raw_has_connection_token(headers, b"content-length");
         let no_body = request_method == Method::HEAD || response_status_has_no_body(status, false);
         let reset_content_framing = status == StatusCode::RESET_CONTENT
             && request_method != Method::HEAD
@@ -135,6 +132,11 @@ impl RawHttp1ResponseHead {
             )
             .map_err(anyhow::Error::new)?
         };
+        let connection_nominated_length_needs_close = content_length.is_some()
+            && !successful_connect
+            && !no_body
+            && !chunked
+            && raw_has_connection_token(headers, b"content-length");
         let framing = if no_body || content_length == Some(0) {
             RawHttp1BodyFraming::Empty
         } else if chunked {
@@ -220,7 +222,7 @@ impl RawHttp1ResponseHead {
             header_lines,
             proxy_status,
             framing,
-            connection_nominated_content_length,
+            connection_nominated_length_needs_close,
             upstream_keep_alive,
             has_date,
             finalized: false,
@@ -325,8 +327,7 @@ impl RawHttp1ResponseHead {
     /// The incoming length still bounds this hop, but a Connection nomination
     /// removes it from the forwarded head; closing then delimits the body.
     pub(crate) fn requires_close_delimited_egress(&self) -> bool {
-        self.connection_nominated_content_length
-            && matches!(self.framing, RawHttp1BodyFraming::ContentLength(_))
+        self.connection_nominated_length_needs_close
     }
 
     pub(crate) fn is_finalized(&self) -> bool {

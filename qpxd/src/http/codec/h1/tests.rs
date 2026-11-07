@@ -1864,141 +1864,171 @@ async fn assert_owner_raw_head_wire(placeholder_lengths: &[&'static str]) {
 
 #[tokio::test]
 async fn raw_http1_connection_nominated_content_length_closes_downstream() {
-    let (mut client, server) = tokio::io::duplex(4096);
-    let (read_half, mut write_half) = tokio::io::split(server);
-    let parsed = [
-        httparse::Header {
-            name: "Content-Length",
-            value: b"4",
-        },
-        httparse::Header {
-            name: "Connection",
-            value: b"Content-Length",
-        },
-    ];
-    let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
-        &parsed,
-        &Method::GET,
-        StatusCode::OK,
-        Version::HTTP_11,
-    )
-    .expect("raw response head");
-    raw_head.finalize("qpx");
-    let mut response = Response::new(Body::from("body"));
-    response.extensions_mut().insert(Arc::new(raw_head));
-    let mut head_buf = BytesMut::new();
+    for (method, status, length, body, expected_keep_alive) in [
+        (Method::GET, StatusCode::OK, "4", "body", false),
+        (Method::GET, StatusCode::OK, "0", "", false),
+        (Method::HEAD, StatusCode::OK, "7", "", true),
+        (Method::GET, StatusCode::NOT_MODIFIED, "7", "", true),
+    ] {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let (read_half, mut write_half) = tokio::io::split(server);
+        let parsed = [
+            httparse::Header {
+                name: "Content-Length",
+                value: length.as_bytes(),
+            },
+            httparse::Header {
+                name: "Connection",
+                value: b"Content-Length",
+            },
+        ];
+        let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+            &parsed,
+            &method,
+            status,
+            Version::HTTP_11,
+        )
+        .expect("raw response head");
+        raw_head.finalize("qpx");
+        let mut response = Response::new(Body::from(body));
+        *response.status_mut() = status;
+        response.extensions_mut().insert(Arc::new(raw_head));
+        let mut head_buf = BytesMut::new();
 
-    let keep_alive = send_http1_response_with_interim(
-        &mut write_half,
-        Version::HTTP_11,
-        &Method::GET,
-        OwnerResponse::from_http(response),
-        &[],
-        true,
-        Duration::from_secs(30),
-        &mut head_buf,
-    )
-    .await
-    .expect("send response");
-    drop(write_half);
-    drop(read_half);
-
-    assert!(!keep_alive);
-    let mut encoded = Vec::new();
-    client
-        .read_to_end(&mut encoded)
+        let keep_alive = send_http1_response_with_interim(
+            &mut write_half,
+            Version::HTTP_11,
+            &method,
+            OwnerResponse::from_http(response),
+            &[],
+            true,
+            Duration::from_secs(30),
+            &mut head_buf,
+        )
         .await
-        .expect("read response");
-    let text = String::from_utf8(encoded).expect("UTF-8 response");
-    assert!(!text.contains("Content-Length:"));
-    assert!(!text.contains("Transfer-Encoding:"));
-    assert!(text.contains("Connection: close\r\n"));
-    assert!(text.ends_with("\r\n\r\nbody"));
+        .expect("send response");
+        drop(write_half);
+        drop(read_half);
+
+        assert_eq!(
+            keep_alive, expected_keep_alive,
+            "{method} {status}, Content-Length: {length}"
+        );
+        let mut encoded = Vec::new();
+        client
+            .read_to_end(&mut encoded)
+            .await
+            .expect("read response");
+        let text = String::from_utf8(encoded).expect("UTF-8 response");
+        assert!(!text.contains("Content-Length:"), "{text}");
+        assert!(!text.contains("Transfer-Encoding:"), "{text}");
+        assert_eq!(
+            text.contains("Connection: close\r\n"),
+            !expected_keep_alive,
+            "{text}"
+        );
+        assert!(text.ends_with(&format!("\r\n\r\n{body}")), "{text}");
+    }
 }
 
 #[tokio::test]
 async fn direct_raw_http1_connection_nominated_content_length_closes_downstream() {
-    let upstream_listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind upstream");
-    let upstream_addr = upstream_listener.local_addr().expect("upstream address");
-    let upstream_server = tokio::spawn(async move {
-        let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
-        stream
-            .write_all(b"body")
+    for (method, status, length, body, expected_keep_alive) in [
+        (Method::GET, StatusCode::OK, "4", "body", false),
+        (Method::GET, StatusCode::OK, "0", "", false),
+        (Method::HEAD, StatusCode::OK, "7", "", true),
+        (Method::GET, StatusCode::NOT_MODIFIED, "7", "", true),
+    ] {
+        let upstream_listener = TcpListener::bind("127.0.0.1:0")
             .await
-            .expect("write upstream body");
-    });
-    let upstream = TcpStream::connect(upstream_addr)
-        .await
-        .expect("connect upstream");
-    let parsed = [
-        httparse::Header {
-            name: "Content-Length",
-            value: b"4",
-        },
-        httparse::Header {
-            name: "Connection",
-            value: b"Content-Length",
-        },
-    ];
-    let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
-        &parsed,
-        &Method::GET,
-        StatusCode::OK,
-        Version::HTTP_11,
-    )
-    .expect("raw response head");
-    raw_head.finalize("qpx");
-    let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
-        interim: Vec::new(),
-        raw: Arc::new(raw_head),
-        stream: Some(upstream),
-        read_buf: BytesMut::new(),
-        write_buf: BytesMut::new(),
-        recycler: None,
-        active_permit: None,
-    };
-
-    let downstream_listener = TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind downstream");
-    let downstream_addr = downstream_listener
-        .local_addr()
-        .expect("downstream address");
-    let downstream_server = tokio::spawn(async move {
-        let (mut stream, _) = downstream_listener
-            .accept()
+            .expect("bind upstream");
+        let upstream_addr = upstream_listener.local_addr().expect("upstream address");
+        let upstream_body = body.to_owned();
+        let upstream_server = tokio::spawn(async move {
+            let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
+            stream
+                .write_all(upstream_body.as_bytes())
+                .await
+                .expect("write upstream body");
+        });
+        let upstream = TcpStream::connect(upstream_addr)
             .await
-            .expect("accept downstream");
-        let mut head_buf = BytesMut::new();
-        let (keep_alive, reusable) = send_raw_http1_response_relay_with_interim(
-            &mut stream,
+            .expect("connect upstream");
+        let parsed = [
+            httparse::Header {
+                name: "Content-Length",
+                value: length.as_bytes(),
+            },
+            httparse::Header {
+                name: "Connection",
+                value: b"Content-Length",
+            },
+        ];
+        let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+            &parsed,
+            &method,
+            status,
             Version::HTTP_11,
-            &Method::GET,
-            relay,
-            true,
-            &mut head_buf,
         )
-        .await
-        .expect("relay response");
-        assert!(!keep_alive);
-        assert!(reusable.is_some());
-    });
+        .expect("raw response head");
+        raw_head.finalize("qpx");
+        let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
+            interim: Vec::new(),
+            raw: Arc::new(raw_head),
+            stream: Some(upstream),
+            read_buf: BytesMut::new(),
+            write_buf: BytesMut::new(),
+            recycler: None,
+            active_permit: None,
+        };
 
-    let mut downstream = TcpStream::connect(downstream_addr)
-        .await
-        .expect("connect downstream");
-    let mut encoded = Vec::new();
-    downstream
-        .read_to_end(&mut encoded)
-        .await
-        .expect("read response");
-    downstream_server.await.expect("downstream task");
-    upstream_server.await.expect("upstream task");
-    let text = String::from_utf8(encoded).expect("UTF-8 response");
-    assert!(!text.contains("Content-Length:"));
-    assert!(!text.contains("Transfer-Encoding:"));
-    assert!(text.contains("Connection: close\r\n"));
-    assert!(text.ends_with("\r\n\r\nbody"));
+        let downstream_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind downstream");
+        let downstream_addr = downstream_listener
+            .local_addr()
+            .expect("downstream address");
+        let downstream_server = tokio::spawn(async move {
+            let (mut stream, _) = downstream_listener
+                .accept()
+                .await
+                .expect("accept downstream");
+            let mut head_buf = BytesMut::new();
+            let (keep_alive, reusable) = send_raw_http1_response_relay_with_interim(
+                &mut stream,
+                Version::HTTP_11,
+                &method,
+                relay,
+                true,
+                &mut head_buf,
+            )
+            .await
+            .expect("relay response");
+            assert_eq!(
+                keep_alive, expected_keep_alive,
+                "{method} {status}, Content-Length: {length}"
+            );
+            assert!(reusable.is_some());
+        });
+
+        let mut downstream = TcpStream::connect(downstream_addr)
+            .await
+            .expect("connect downstream");
+        let mut encoded = Vec::new();
+        downstream
+            .read_to_end(&mut encoded)
+            .await
+            .expect("read response");
+        downstream_server.await.expect("downstream task");
+        upstream_server.await.expect("upstream task");
+        let text = String::from_utf8(encoded).expect("UTF-8 response");
+        assert!(!text.contains("Content-Length:"), "{text}");
+        assert!(!text.contains("Transfer-Encoding:"), "{text}");
+        assert_eq!(
+            text.contains("Connection: close\r\n"),
+            !expected_keep_alive,
+            "{text}"
+        );
+        assert!(text.ends_with(&format!("\r\n\r\n{body}")), "{text}");
+    }
 }
