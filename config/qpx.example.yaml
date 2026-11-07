@@ -319,6 +319,7 @@ traffic:
 caches:
 - name: edge-cache
   kind: redis
+  writer_mode: single_instance
   endpoint: redis://127.0.0.1:6379/0
   timeout_ms: 1200
   max_object_bytes: 2097152

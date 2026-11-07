@@ -1,9 +1,21 @@
 use super::super::defaults::*;
 use serde::Deserialize;
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheWriterMode {
+    #[default]
+    SingleInstance,
+    Shared,
+}
+
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CacheBackendConfig {
     pub name: String,
+    #[serde(default)]
+    pub writer_mode: CacheWriterMode,
+    #[serde(default = "default_cache_commit_lock_stripes")]
+    pub commit_lock_stripes: usize,
     #[serde(default = "default_cache_backend_kind")]
     pub kind: String,
     #[serde(default)]

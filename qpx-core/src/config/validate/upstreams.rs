@@ -24,7 +24,21 @@ pub(super) fn validate_cache_backends(backends: &[CacheBackendConfig]) -> Result
                 backend.kind
             ));
         }
+        if backend.writer_mode == super::super::types::CacheWriterMode::Shared
+            && (backend.kind != "disk" || !cfg!(unix))
+        {
+            return Err(anyhow!(
+                "cache backend {} writer_mode shared requires disk on Unix",
+                backend.name
+            ));
+        }
         if backend.kind == "disk" {
+            if backend.commit_lock_stripes == 0 {
+                return Err(anyhow!(
+                    "cache backend {} commit_lock_stripes must be > 0",
+                    backend.name
+                ));
+            }
             let Some(path) = backend
                 .path
                 .as_deref()
@@ -331,4 +345,51 @@ pub(super) fn validate_upstream_tls_trust_config(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::CacheWriterMode;
+
+    #[test]
+    fn cache_writer_mode_defaults_and_validation() {
+        let cfg: CacheBackendConfig = serde_json::from_value(serde_json::json!({
+            "name": "disk", "kind": "disk", "path": "cache", "max_bytes": 1048576
+        }))
+        .unwrap();
+        assert_eq!(cfg.writer_mode, CacheWriterMode::SingleInstance);
+        assert_eq!(cfg.commit_lock_stripes, 64);
+        validate_cache_backends(std::slice::from_ref(&cfg)).unwrap();
+        let mut shared = cfg.clone();
+        shared.writer_mode = CacheWriterMode::Shared;
+        assert_eq!(
+            validate_cache_backends(std::slice::from_ref(&shared)).is_ok(),
+            cfg!(unix)
+        );
+        for kind in ["http", "redis"] {
+            shared.kind = kind.into();
+            shared.endpoint = "http://localhost:1".into();
+            assert!(
+                validate_cache_backends(std::slice::from_ref(&shared))
+                    .unwrap_err()
+                    .to_string()
+                    .contains("shared")
+            );
+        }
+        let mut invalid = cfg;
+        invalid.commit_lock_stripes = 0;
+        assert!(
+            validate_cache_backends(&[invalid])
+                .unwrap_err()
+                .to_string()
+                .contains("commit_lock_stripes")
+        );
+        assert!(
+            serde_json::from_value::<CacheBackendConfig>(serde_json::json!({
+                "name": "disk", "writer_mode": "typo"
+            }))
+            .is_err()
+        );
+    }
 }

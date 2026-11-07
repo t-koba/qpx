@@ -20,6 +20,8 @@ async fn http_response_stream_error_does_not_complete_put_or_write_metadata() {
     let endpoint = format!("http://{}", listener.local_addr().expect("address"));
     let backend = HttpCacheBackend::new(
         CacheBackendConfig {
+            writer_mode: Default::default(),
+            commit_lock_stripes: 64,
             name: "http".to_string(),
             kind: "http".to_string(),
             endpoint,
@@ -107,6 +109,8 @@ async fn backend_serving(
     let endpoint = format!("http://{}", listener.local_addr().expect("address"));
     let backend = HttpCacheBackend::new(
         CacheBackendConfig {
+            writer_mode: Default::default(),
+            commit_lock_stripes: 64,
             name: "http".to_string(),
             kind: "http".to_string(),
             endpoint,

@@ -187,6 +187,8 @@ fn temp_dir(name: &str) -> PathBuf {
 fn backend_cases(name: &str) -> Vec<BackendCase> {
     let disk_path = temp_dir(name);
     let disk_cfg = CacheBackendConfig {
+        writer_mode: Default::default(),
+        commit_lock_stripes: 64,
         name: "disk".to_string(),
         kind: "disk".to_string(),
         endpoint: String::new(),

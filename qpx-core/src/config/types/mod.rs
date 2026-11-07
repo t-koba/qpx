@@ -21,7 +21,7 @@ mod security;
 mod upstream;
 
 pub use self::cache::{
-    CacheBackendConfig, CachePolicyConfig, RateLimitApplyTo, RateLimitConfig,
+    CacheBackendConfig, CachePolicyConfig, CacheWriterMode, RateLimitApplyTo, RateLimitConfig,
     RateLimitProfileConfig, RateLimitQuotaConfig, RateLimitRequestsConfig, RateLimitSessionsConfig,
     RateLimitTrafficConfig,
 };

@@ -510,6 +510,10 @@ pub(super) fn default_cache_max_object_bytes() -> usize {
     1024 * 1024
 }
 
+pub(super) fn default_cache_commit_lock_stripes() -> usize {
+    64
+}
+
 pub(super) fn default_cache_disk_sweep_interval_secs() -> u64 {
     60
 }

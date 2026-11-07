@@ -2,6 +2,8 @@ state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 caches:
 - name: local-disk-cache
   kind: disk
+  writer_mode: single_instance # opt in to shared only on a lock-supporting Unix filesystem
+  commit_lock_stripes: 64 # all shared clients of this root must agree
   path: "${QPX_DISK_CACHE_DIR:-./.qpx-cache}"
   max_bytes: 1073741824
   sweep_interval_secs: 60

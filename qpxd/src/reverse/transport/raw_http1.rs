@@ -1280,6 +1280,8 @@ mod tests {
             edges: vec![qpx_core::config::EdgeConfig::Reverse(reverse_cfg.clone())],
             upstreams: vec![upstream_cfg],
             caches: vec![CacheBackendConfig {
+                writer_mode: Default::default(),
+                commit_lock_stripes: 64,
                 name: "disk".to_string(),
                 kind: "disk".to_string(),
                 endpoint: String::new(),

@@ -2,6 +2,7 @@ state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 caches:
 - name: object-store-gateway
   kind: http
+  writer_mode: single_instance
   endpoint: http://127.0.0.1:19080
   timeout_ms: 1500
   max_object_bytes: 2097152

@@ -1,11 +1,7 @@
-//! Same-process publication coordination. Body I/O never holds this lock.
-//! Entries exist only while a commit (or a waiter) references them.
-//!
-//! This lock is process-local: it serialises commits and primary
-//! invalidations that share the same backend object in this process. It
-//! cannot coordinate independent qpx processes (or distinct backend objects)
-//! sharing HTTP/Redis/disk storage; those backends offer no compare-and-swap
-//! for the index, so cross-process races remain possible.
+//! Publication coordination; body I/O never holds this lock.
+//! Single-instance backends use the process-local registry. Shared disk also
+//! holds a backend OS lease, coordinating distinct backend objects/processes.
+//! HTTP/Redis do not provide shared-writer coordination.
 use super::CacheBackend;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -36,14 +32,22 @@ impl Drop for Lease {
 pub(crate) struct CommitGuard {
     // Drop the owned lock before the lease removes the registry entry.
     _guard: OwnedMutexGuard<()>,
+    _backend: Option<Box<dyn Send + Sync>>,
     _lease: Lease,
+}
+
+impl CommitGuard {
+    pub(crate) fn is_shared(&self) -> bool {
+        self._backend.is_some()
+    }
 }
 
 pub(crate) async fn lock(
     backend: &dyn CacheBackend,
     namespace: &str,
     primary: &str,
-) -> CommitGuard {
+) -> anyhow::Result<CommitGuard> {
+    let backend_guard = backend.lock_commit(namespace, primary).await?;
     let key = (
         backend as *const dyn CacheBackend as *const () as usize,
         namespace.to_owned(),
@@ -55,10 +59,11 @@ pub(crate) async fn lock(
         Lease { key, lock }
     };
     let guard = lease.lock.clone().lock_owned().await;
-    CommitGuard {
+    Ok(CommitGuard {
         _guard: guard,
+        _backend: backend_guard,
         _lease: lease,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -70,7 +75,7 @@ mod tests {
     #[tokio::test]
     async fn coordination_is_per_primary_and_cleans_cancelled_waiters() {
         let backend = crate::tests::MockBackend::new();
-        let owner = lock(&backend, "ns", "primary").await;
+        let owner = lock(&backend, "ns", "primary").await.unwrap();
         let key = owner._lease.key.clone();
         let mut waiter = Box::pin(lock(&backend, "ns", "primary"));
         poll_fn(|cx| {
@@ -79,12 +84,12 @@ mod tests {
         })
         .await;
         // Neither unrelated primaries nor namespaces share a lock.
-        drop(lock(&backend, "ns", "other").await);
-        drop(lock(&backend, "other", "primary").await);
+        drop(lock(&backend, "ns", "other").await.unwrap());
+        drop(lock(&backend, "other", "primary").await.unwrap());
         drop(waiter);
         drop(owner);
         assert!(!registry().lock().unwrap().contains_key(&key));
-        let owner = lock(&backend, "ns", "primary").await;
+        let owner = lock(&backend, "ns", "primary").await.unwrap();
         let mut waiter = Box::pin(lock(&backend, "ns", "primary"));
         poll_fn(|cx| {
             assert!(waiter.as_mut().poll(cx).is_pending());
@@ -92,7 +97,7 @@ mod tests {
         })
         .await;
         drop(owner);
-        drop(waiter.await);
+        drop(waiter.await.unwrap());
         assert!(!registry().lock().unwrap().contains_key(&key));
     }
 }

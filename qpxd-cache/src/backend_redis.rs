@@ -64,6 +64,11 @@ pub struct RedisCacheBackend {
 
 impl RedisCacheBackend {
     pub fn new(cfg: CacheBackendConfig) -> Result<Self> {
+        if cfg.writer_mode == qpx_core::config::CacheWriterMode::Shared {
+            return Err(anyhow!(
+                "writer_mode shared is supported only by the disk backend on Unix"
+            ));
+        }
         let endpoint = cfg.endpoint.trim();
         let spec = parse_endpoint(endpoint)?;
 

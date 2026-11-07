@@ -17,6 +17,10 @@ struct ObservedBackend {
 
 #[async_trait]
 impl CacheBackend for ObservedBackend {
+    async fn lock_commit(&self, ns: &str, primary: &str) -> Result<Option<Box<dyn Send + Sync>>> {
+        self.inner.lock_commit(ns, primary).await
+    }
+
     async fn get(&self, ns: &str, key: &str) -> Result<Option<Bytes>> {
         self.inner.get(ns, key).await
     }
@@ -108,9 +112,23 @@ impl CacheBackend for ObservedBackend {
 }
 
 fn legacy_test_backend(disk: bool, root: &std::path::Path) -> Arc<dyn CacheBackend> {
+    legacy_test_backend_mode(disk, root, false)
+}
+
+fn legacy_test_backend_mode(
+    disk: bool,
+    root: &std::path::Path,
+    shared: bool,
+) -> Arc<dyn CacheBackend> {
     if disk {
         Arc::new(
             crate::backend_disk::DiskCacheBackend::new(qpx_core::config::CacheBackendConfig {
+                writer_mode: if shared {
+                    qpx_core::config::CacheWriterMode::Shared
+                } else {
+                    Default::default()
+                },
+                commit_lock_stripes: 64,
                 name: "b".into(),
                 kind: "disk".into(),
                 endpoint: String::new(),
@@ -990,6 +1008,10 @@ struct StalledLegacyBackend {
 
 #[async_trait]
 impl CacheBackend for StalledLegacyBackend {
+    async fn lock_commit(&self, ns: &str, primary: &str) -> Result<Option<Box<dyn Send + Sync>>> {
+        self.inner.lock_commit(ns, primary).await
+    }
+
     async fn get(&self, ns: &str, key: &str) -> Result<Option<Bytes>> {
         self.inner.get(ns, key).await
     }
@@ -1374,13 +1396,23 @@ async fn invalidation_reports_failed_canonical_retirement_before_304_commit() {
 
 #[tokio::test]
 async fn legacy_migration_invalidation_race_cannot_republish_after_final_check() {
+    migration_invalidation_race(&[(false, false), (true, false)]).await;
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_disk_independent_invalidation_cannot_lose_to_paused_legacy_304() {
+    migration_invalidation_race(&[(true, true)]).await;
+}
+
+async fn migration_invalidation_race(modes: &[(bool, bool)]) {
     tokio::time::timeout(Duration::from_secs(20), async {
-        for disk in [false, true] {
+        for &(disk, shared) in modes {
             let root = std::env::temp_dir().join(format!(
                 "qpx-legacy-invalidate-race-{}",
                 uuid::Uuid::new_v4()
             ));
-            let inner = legacy_test_backend(disk, &root);
+            let inner = legacy_test_backend_mode(disk, &root, shared);
             let (mutations, mut completed) = mpsc::unbounded_channel();
             let backend = Arc::new(ObservedBackend {
                 inner: inner.clone(),
@@ -1530,8 +1562,14 @@ async fn legacy_migration_invalidation_race_cannot_republish_after_final_check()
             // and therefore wait while the migration holds it.
             let primary = key.primary_hash();
             let namespace_owned = namespace.to_string();
-            let backend_for_invalidation = backend.clone();
-            let mut invalidation = tokio::spawn(async move {
+            // Distinct disk clients share only the root, never a backend pointer
+            // or process-local cache. Single-instance cases retain their owner.
+            let backend_for_invalidation: Arc<dyn CacheBackend> = if shared {
+                legacy_test_backend_mode(true, &root, true)
+            } else {
+                backend.clone()
+            };
+            let mut invalidation = Box::pin(async {
                 crate::invalidate::invalidate_primary(
                     backend_for_invalidation.as_ref(),
                     &namespace_owned,
@@ -1542,17 +1580,20 @@ async fn legacy_migration_invalidation_race_cannot_republish_after_final_check()
             });
             // While the migration holds the commit lock, invalidation cannot
             // complete: it must wait rather than miss the staged generation.
-            assert!(
-                tokio::time::timeout(Duration::from_millis(200), &mut invalidation)
-                    .await
-                    .is_err(),
-                "invalidation must wait for the migration commit lock"
-            );
+            use std::future::{Future, poll_fn};
+            use std::task::Poll;
+            poll_fn(|cx| {
+                assert!(
+                    invalidation.as_mut().poll(cx).is_pending(),
+                    "invalidation must wait for the migration commit lock"
+                );
+                Poll::Ready(())
+            })
+            .await;
             index_release.notify_one();
             tokio::time::timeout(Duration::from_secs(5), &mut invalidation)
                 .await
-                .expect("invalidation must complete after release")
-                .expect("join");
+                .expect("invalidation must complete after release");
             let client_body = tokio::time::timeout(Duration::from_secs(5), migration)
                 .await
                 .expect("migration must complete")
@@ -1576,8 +1617,15 @@ async fn legacy_migration_invalidation_race_cannot_republish_after_final_check()
             .await
             .expect("published index write");
             assert!(saw_index_write);
+            // A newly constructed observer cannot be helped by the writer's
+            // hot-cache invalidation or decoded-index state.
+            let observer: Arc<dyn CacheBackend> = if shared {
+                legacy_test_backend_mode(true, &root, true)
+            } else {
+                backend.clone()
+            };
             assert!(
-                backend
+                observer
                     .get(namespace, &index_storage_key(key.primary_hash().as_str()))
                     .await
                     .unwrap()
@@ -1585,7 +1633,7 @@ async fn legacy_migration_invalidation_race_cannot_republish_after_final_check()
                 "invalidated index must not resurface"
             );
             assert!(
-                backend
+                observer
                     .get_decoded_response_metadata_many(
                         namespace,
                         std::slice::from_ref(&legacy_key)
@@ -1599,7 +1647,7 @@ async fn legacy_migration_invalidation_race_cannot_republish_after_final_check()
                 "invalidated legacy metadata must stay retired"
             );
             assert!(
-                backend
+                observer
                     .get_decoded_response_metadata_many(
                         namespace,
                         std::slice::from_ref(&staged_key)
@@ -1612,12 +1660,13 @@ async fn legacy_migration_invalidation_race_cannot_republish_after_final_check()
                     .is_none(),
                 "invalidated staged generation must not remain"
             );
+            let observer_backends = HashMap::from([("b".into(), observer)]);
             assert!(matches!(
                 lookup(
                     &request,
                     &key,
                     &cache_policy,
-                    &backends,
+                    &observer_backends,
                     &test_revalidations()
                 )
                 .await
@@ -1633,4 +1682,91 @@ async fn legacy_migration_invalidation_race_cannot_republish_after_final_check()
     })
     .await
     .expect("bounded invalidation race regression");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shared_disk_warm_readers_observe_independent_publication_and_invalidation() {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let root = std::env::temp_dir().join(format!("qpx-shared-reader-{}", uuid::Uuid::new_v4()));
+        let writer = legacy_test_backend_mode(true, &root, true);
+        let reader = legacy_test_backend_mode(true, &root, true);
+        let writers = HashMap::from([("b".into(), writer.clone())]);
+        let readers = HashMap::from([("b".into(), reader.clone())]);
+        let request = make_get_request("/shared-reader");
+        let key = CacheRequestKey::for_lookup(&request, "http")
+            .unwrap()
+            .unwrap();
+        let namespace = super::util::cache_namespace(&policy(), "default").to_owned();
+        let index_key = index_storage_key(key.primary_hash().as_str());
+        // Repeated reads would populate every single-instance hot/decoded path.
+        // A same-selector replacement changes only the generation in the index.
+        for version in ["first", "replacement"] {
+            publish(
+                &request,
+                &key,
+                &writers,
+                "public, max-age=300",
+                version,
+                version,
+                true,
+            )
+            .await;
+            for _ in 0..2 {
+                let index = reader
+                    .get_decoded_variant_index(&namespace, &index_key)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(index.variants.len(), 1);
+                assert!(reader.get(&namespace, &index_key).await.unwrap().is_some());
+                assert!(
+                    reader
+                        .get_many(&namespace, std::slice::from_ref(&index_key))
+                        .await
+                        .unwrap()[0]
+                        .is_some()
+                );
+                let LookupOutcome::Hit(response) =
+                    lookup(&request, &key, &policy(), &readers, &test_revalidations())
+                        .await
+                        .unwrap()
+                else {
+                    panic!("shared reader must see the latest generation")
+                };
+                assert_eq!(
+                    qpx_http::body::to_bytes(response.into_head_and_body().1)
+                        .await
+                        .unwrap(),
+                    version
+                );
+            }
+        }
+        crate::invalidate::invalidate_primary(
+            writer.as_ref(),
+            &namespace,
+            key.primary_hash().as_str(),
+        )
+        .await
+        .unwrap();
+        assert!(
+            reader
+                .get_decoded_variant_index(&namespace, &index_key)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(reader.get(&namespace, &index_key).await.unwrap().is_none());
+        assert!(reader.get_many(&namespace, &[index_key]).await.unwrap()[0].is_none());
+        assert!(matches!(
+            lookup(&request, &key, &policy(), &readers, &test_revalidations())
+                .await
+                .unwrap(),
+            LookupOutcome::Miss
+        ));
+        drop((writer, reader, writers, readers));
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    })
+    .await
+    .expect("bounded shared-reader regression");
 }

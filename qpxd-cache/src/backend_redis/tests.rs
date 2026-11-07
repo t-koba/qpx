@@ -8,6 +8,8 @@ use super::{RedisCacheBackend, RedisConnection, RedisTransport};
 
 fn cfg(endpoint: &str) -> CacheBackendConfig {
     CacheBackendConfig {
+        writer_mode: Default::default(),
+        commit_lock_stripes: 64,
         name: "cache-a".to_string(),
         kind: "redis".to_string(),
         endpoint: endpoint.to_string(),

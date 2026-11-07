@@ -43,6 +43,11 @@ pub struct HttpCacheBackend {
 
 impl HttpCacheBackend {
     pub fn new(cfg: CacheBackendConfig, generated_user_agent: Option<&str>) -> Result<Self> {
+        if cfg.writer_mode == qpx_core::config::CacheWriterMode::Shared {
+            return Err(anyhow!(
+                "writer_mode shared is supported only by the disk backend on Unix"
+            ));
+        }
         let endpoint = cfg.endpoint.trim().trim_end_matches('/').to_string();
         if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
             return Err(anyhow!(

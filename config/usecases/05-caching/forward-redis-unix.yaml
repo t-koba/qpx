@@ -2,6 +2,7 @@ state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 caches:
 - name: redis-local-unix
   kind: redis
+  writer_mode: single_instance
   endpoint: redis+unix:///tmp/redis.sock?db=0
   timeout_ms: 1200
   max_object_bytes: 1048576

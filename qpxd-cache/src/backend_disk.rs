@@ -1,3 +1,6 @@
+#[cfg(unix)]
+mod commit;
+
 use super::types::{
     BodyStreamWriteOptions, CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate,
     CachedResponseEnvelope, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
@@ -52,6 +55,9 @@ struct DiskCacheFileId([u8; 32]);
 #[derive(Clone)]
 pub struct DiskCacheBackend {
     root: PathBuf,
+    shared: bool,
+    #[cfg(unix)]
+    commit_locks: Option<std::sync::Arc<commit::CommitLocks>>,
     max_bytes: u64,
     sweep_interval: Duration,
     hot_max_bytes: u64,
@@ -89,6 +95,8 @@ impl Default for DiskCacheState {
 
 #[derive(Clone)]
 struct DiskCacheIndexEntry {
+    #[cfg(unix)]
+    identity: Option<commit::FileIdentity>,
     total_len: u64,
     expires_at_ms: u64,
     touched_at_ms: u64,
@@ -208,6 +216,7 @@ impl DiskCacheHeader {
 }
 
 struct DiskCacheRead {
+    file: File,
     path: PathBuf,
     header: DiskCacheHeader,
     body_offset: u64,
@@ -241,6 +250,15 @@ fn same_bytes_allocation(left: &Bytes, right: &Bytes) -> bool {
 
 impl DiskCacheBackend {
     pub fn new(cfg: CacheBackendConfig) -> Result<Self> {
+        let shared = cfg.writer_mode == qpx_core::config::CacheWriterMode::Shared;
+        if shared && !cfg!(unix) {
+            return Err(anyhow!("writer_mode shared requires disk OS locks on Unix"));
+        }
+        if cfg.commit_lock_stripes == 0 || cfg.timeout_ms == 0 {
+            return Err(anyhow!(
+                "disk commit_lock_stripes and timeout_ms must be > 0"
+            ));
+        }
         let root = cfg
             .path
             .as_deref()
@@ -258,8 +276,21 @@ impl DiskCacheBackend {
             ));
         }
         ensure_private_dir(&root)?;
+        #[cfg(unix)]
+        let commit_locks = if shared {
+            Some(std::sync::Arc::new(commit::CommitLocks::new(
+                &root,
+                cfg.commit_lock_stripes,
+                Duration::from_millis(cfg.timeout_ms),
+            )?))
+        } else {
+            None
+        };
         let backend = Self {
             root,
+            shared,
+            #[cfg(unix)]
+            commit_locks,
             max_bytes,
             sweep_interval: Duration::from_secs(cfg.sweep_interval_secs.max(1)),
             hot_max_bytes: max_bytes.min(DISK_CACHE_HOT_MAX_BYTES),
@@ -328,9 +359,14 @@ impl DiskCacheBackend {
         let mut total_bytes = 0u64;
         for path in collect_cache_files(&self.root)? {
             let Some(id) = cache_file_id_from_path(&self.root, &path) else {
-                let _ = fs::remove_file(&path);
+                if !self.shared {
+                    let _ = fs::remove_file(&path);
+                }
                 continue;
             };
+            // Re-read only after acquiring the object stripe: the directory
+            // listing and all per-instance state may predate a replacement.
+            let _object = self.lock_object(&path).await?;
             match read_disk_cache_header_sync(&path) {
                 Ok(read) => {
                     if read.header.expires_at_ms <= now_ms() {
@@ -342,6 +378,8 @@ impl DiskCacheBackend {
                     entries.insert(
                         id,
                         DiskCacheIndexEntry {
+                            #[cfg(unix)]
+                            identity: Some(commit::FileIdentity::of(&read.file.metadata()?)),
                             total_len: read.total_len,
                             expires_at_ms: read.header.expires_at_ms,
                             touched_at_ms,
@@ -378,12 +416,13 @@ impl DiskCacheBackend {
 
     async fn open_valid(&self, path: PathBuf) -> Result<Option<DiskCacheRead>> {
         self.ensure_indexed().await?;
+        let _object = self.lock_object(&path).await?;
         let read = match read_disk_cache_header_sync(&path) {
             Ok(read) => read,
             Err(_) => return Ok(None),
         };
         if read.header.expires_at_ms <= now_ms() {
-            self.delete_path(&path).await;
+            let _ = self.delete_path_locked(&path).await;
             return Ok(None);
         }
         let mut state = self.state.lock().await;
@@ -396,6 +435,9 @@ impl DiskCacheBackend {
     }
 
     async fn hot_get(&self, namespace: &str, key: &str) -> HotCacheLookup {
+        if self.shared {
+            return HotCacheLookup::Miss(self.path_for(namespace, key));
+        }
         let now = now_ms();
         if let Some(result) = self.hot_recent_lookup(namespace, key, now) {
             if let HotCacheLookup::Miss(path) = &result {
@@ -408,6 +450,9 @@ impl DiskCacheBackend {
     }
 
     fn hot_recent_lookup(&self, namespace: &str, key: &str, now: u64) -> Option<HotCacheLookup> {
+        if self.shared {
+            return None;
+        }
         let recent = self.hot_recent.load();
         let entry = recent_hot_entry_at(&recent, hot_slot(namespace, key))?;
         if entry.namespace.as_ref() != namespace || entry.key.as_ref() != key {
@@ -476,6 +521,9 @@ impl DiskCacheBackend {
         key: &str,
         raw: Bytes,
     ) -> Result<std::sync::Arc<VariantIndex>> {
+        if self.shared {
+            return Ok(std::sync::Arc::new(serde_json::from_slice(&raw)?));
+        }
         let slot = qpx_http::sharding::modulo(&(namespace, key), self.decoded_variants.len());
         if let Some(entry) = self.decoded_variants[slot].load_full()
             && entry.namespace.as_ref() == namespace
@@ -501,6 +549,9 @@ impl DiskCacheBackend {
         key: &str,
         raw: Bytes,
     ) -> Result<std::sync::Arc<CachedResponseEnvelope>> {
+        if self.shared {
+            return Ok(std::sync::Arc::new(decode_cached_response_metadata(raw)?));
+        }
         let slot = qpx_http::sharding::modulo(&(namespace, key), self.decoded_metadata.len());
         if let Some(entry) = self.decoded_metadata[slot].load_full()
             && entry.namespace.as_ref() == namespace
@@ -529,7 +580,8 @@ impl DiskCacheBackend {
         body_offset: u64,
     ) {
         let value_len = value.len() as u64;
-        if self.hot_max_bytes == 0
+        if self.shared
+            || self.hot_max_bytes == 0
             || value_len > self.hot_max_object_bytes
             || value_len > self.hot_max_bytes
             || expires_at_ms <= now_ms()
@@ -582,8 +634,37 @@ impl DiskCacheBackend {
         }
     }
 
-    async fn delete_path(&self, path: &Path) {
-        let _ = tokio::fs::remove_file(path).await;
+    // Optional guard keeps the default single-instance path free of OS locks.
+    async fn lock_object(&self, path: &Path) -> Result<Option<File>> {
+        #[cfg(unix)]
+        if let Some(locks) = &self.commit_locks {
+            let id = cache_file_id_from_path(&self.root, path)
+                .ok_or_else(|| anyhow!("invalid shared disk object path"))?;
+            return Ok(Some(locks.lock_object(id).await?));
+        }
+        let _ = path;
+        Ok(None)
+    }
+
+    async fn delete_path(&self, path: &Path) -> Result<()> {
+        let _object = self.lock_object(path).await?;
+        self.delete_path_locked(path).await
+    }
+
+    // Caller holds the object stripe in shared mode. The unlink must complete
+    // before cancellation can drop that guard (no detached tokio filesystem op).
+    async fn delete_path_locked(&self, path: &Path) -> Result<()> {
+        let result = if self.shared {
+            fs::remove_file(path)
+        } else {
+            tokio::fs::remove_file(path).await
+        };
+        if let Err(error) = result
+            && self.shared
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(error.into());
+        }
         self.hot_recent_remove(path);
         let mut state = self.state.lock().await;
         if let Some(entry) = state.hot_entries.pop(path) {
@@ -594,6 +675,7 @@ impl DiskCacheBackend {
         {
             state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
         }
+        Ok(())
     }
 
     fn hot_recent_upsert(&self, entry: RecentHotCacheEntry, removed: &[PathBuf]) {
@@ -649,11 +731,34 @@ impl DiskCacheBackend {
         self.ensure_indexed().await?;
         let id = cache_file_id_from_path(&self.root, &path)
             .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
+        let object = self.lock_object(&path).await?;
+        let current = if self.shared {
+            // Publication may have been replaced/deleted before bookkeeping.
+            let Ok(read) = read_disk_cache_header_sync(&path) else {
+                return Ok(());
+            };
+            Some(read)
+        } else {
+            None
+        };
+        let (total_len, expires_at_ms) =
+            current.as_ref().map_or((total_len, expires_at_ms), |read| {
+                (read.total_len, read.header.expires_at_ms)
+            });
         {
             let mut state = self.state.lock().await;
             if let Some(old) = state.entries.insert(
                 id,
                 DiskCacheIndexEntry {
+                    #[cfg(unix)]
+                    identity: current
+                        .as_ref()
+                        .map(|read| {
+                            read.file
+                                .metadata()
+                                .map(|meta| commit::FileIdentity::of(&meta))
+                        })
+                        .transpose()?,
                     total_len,
                     expires_at_ms,
                     touched_at_ms: now_ms(),
@@ -663,6 +768,7 @@ impl DiskCacheBackend {
             }
             state.total_bytes = state.total_bytes.saturating_add(total_len);
         }
+        drop(object);
         self.evict_if_needed().await
     }
 
@@ -682,8 +788,19 @@ impl DiskCacheBackend {
         };
         for id in expired {
             let path = self.path_for_id(id);
-            self.delete_path(&path).await;
+            let _ = self.cleanup_expired(&path).await;
         }
+    }
+
+    async fn cleanup_expired(&self, path: &Path) -> Result<()> {
+        let _object = self.lock_object(path).await?;
+        if self.shared
+            && read_disk_cache_header_sync(path)
+                .is_ok_and(|read| read.header.expires_at_ms > now_ms())
+        {
+            return Ok(());
+        }
+        self.delete_path_locked(path).await
     }
 
     async fn evict_if_needed(&self) -> Result<()> {
@@ -697,13 +814,31 @@ impl DiskCacheBackend {
                     .entries
                     .iter()
                     .min_by_key(|(_, entry)| entry.touched_at_ms)
-                    .map(|(id, _)| *id)
+                    .map(|(id, entry)| (*id, entry.clone()))
             };
-            let Some(id) = victim else {
+            let Some((id, candidate)) = victim else {
                 return Ok(());
             };
             let path = self.path_for_id(id);
-            self.delete_path(&path).await;
+            let _object = self.lock_object(&path).await?;
+            #[cfg(unix)]
+            if self.shared {
+                let identity = fs::symlink_metadata(&path)
+                    .ok()
+                    .map(|meta| commit::FileIdentity::of(&meta));
+                if identity != candidate.identity {
+                    // Forget stale capacity data, not the replacement. Capacity
+                    // is per-instance best effort, not a shared-root quota.
+                    let mut state = self.state.lock().await;
+                    if let Some(old) = state.entries.remove(&id) {
+                        state.total_bytes = state.total_bytes.saturating_sub(old.total_len);
+                    }
+                    continue;
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = candidate;
+            self.delete_path_locked(&path).await?;
         }
     }
 
@@ -717,7 +852,10 @@ impl DiskCacheBackend {
     ) -> Result<()> {
         let write_path = path.to_path_buf();
         let value = Bytes::copy_from_slice(value);
+        let object = self.lock_object(path).await?;
         let (write, value) = tokio::task::spawn_blocking(move || {
+            // A cancelled async caller must not unlock a still-running rename.
+            let _object = object;
             write_cached_bytes_sync(write_path.as_path(), value, ttl_secs)
         })
         .await
@@ -769,7 +907,9 @@ impl DiskCacheBackend {
     async fn read_response_metadata(&self, namespace: &str, key: &str) -> Result<Option<Bytes>> {
         let now = now_ms();
         let recent = self.hot_recent.load();
-        if let Some(entry) = recent_hot_entry(&recent, namespace, key, now) {
+        if !self.shared
+            && let Some(entry) = recent_hot_entry(&recent, namespace, key, now)
+        {
             return Ok(Some(entry.value.clone()));
         }
         let body_key = cache_body_storage_key(key);
@@ -793,7 +933,9 @@ impl DiskCacheBackend {
             let value = value.clone();
             let meta_key = metadata.as_ref().map(|(meta_key, _)| meta_key.clone());
             let meta_bytes = metadata.as_ref().map(|(_, meta)| meta.clone());
+            let object = self.lock_object(path).await?;
             let (write, value, written_meta) = tokio::task::spawn_blocking(move || {
+                let _object = object;
                 write_cached_object_sync(write_path.as_path(), value, meta_bytes, ttl_secs)
             })
             .await
@@ -865,6 +1007,7 @@ impl DiskCacheBackend {
             // Cache objects are re-fetchable, so commit to the page cache and
             // publish atomically via rename instead of paying for an fsync.
             drop(file);
+            let _object = self.lock_object(path).await?;
             fs::rename(&tmp_path, path).with_context(|| {
                 format!("failed to commit disk cache object {}", path.display())
             })?;
@@ -896,6 +1039,19 @@ impl DiskCacheBackend {
 
 #[async_trait]
 impl CacheBackend for DiskCacheBackend {
+    async fn lock_commit(
+        &self,
+        namespace: &str,
+        primary: &str,
+    ) -> Result<Option<Box<dyn Send + Sync>>> {
+        #[cfg(unix)]
+        if let Some(locks) = &self.commit_locks {
+            return Ok(Some(Box::new(locks.lock(namespace, primary).await?)));
+        }
+        let _ = (namespace, primary);
+        Ok(None)
+    }
+
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>> {
         self.ensure_background_sweep();
         let path = match self.hot_get(namespace, key).await {
@@ -905,7 +1061,7 @@ impl CacheBackend for DiskCacheBackend {
         let Some(read) = self.open_valid(path).await? else {
             return Ok(None);
         };
-        let mut file = TokioFile::open(&read.path).await?;
+        let mut file = TokioFile::from_std(read.file);
         file.seek(std::io::SeekFrom::Start(read.body_offset))
             .await?;
         let mut out = Vec::with_capacity(read.header.body_len.min(usize::MAX as u64) as usize);
@@ -984,6 +1140,9 @@ impl CacheBackend for DiskCacheBackend {
         _default_variant_key: &str,
         now: u64,
     ) -> Result<Option<CachedResponseCandidate>> {
+        if self.shared {
+            return Ok(None);
+        }
         let slot_index = hot_slot(namespace, index_key);
         let slot = &self.hot_responses[slot_index];
         let generation = self.hot_recent_generation.load(Ordering::Acquire);
@@ -1094,7 +1253,16 @@ impl CacheBackend for DiskCacheBackend {
             return Ok(None);
         }
         if read.header.body_len <= self.hot_max_object_bytes {
-            let mut file = TokioFile::open(&read.path).await?;
+            // Pin the validated inode for zero-copy too; reopening the pathname
+            // after reading could attach a replacement's bytes to this body.
+            let source_file = if is_cache_body_storage_key(key)
+                && read.header.body_len >= DISK_CACHE_ZERO_COPY_MIN_BYTES
+            {
+                read.file.try_clone().ok().map(std::sync::Arc::new)
+            } else {
+                None
+            };
+            let mut file = TokioFile::from_std(read.file);
             file.seek(std::io::SeekFrom::Start(read.body_offset))
                 .await?;
             let mut out = Vec::with_capacity(read.header.body_len as usize);
@@ -1118,7 +1286,7 @@ impl CacheBackend for DiskCacheBackend {
                 value,
                 expected_len,
                 range,
-                open_zero_copy_source(key, &read.path, read.header.body_len),
+                source_file,
                 read.body_offset,
             ));
         }
@@ -1132,7 +1300,7 @@ impl CacheBackend for DiskCacheBackend {
         let (done, producer_done) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = async {
-                let mut file = TokioFile::open(&read.path).await?;
+                let mut file = TokioFile::from_std(read.file);
                 file.seek(std::io::SeekFrom::Start(start_offset)).await?;
                 let mut remaining = body_len;
                 let mut buf = BytesMut::with_capacity(DISK_CACHE_CHUNK_BYTES);
@@ -1262,6 +1430,7 @@ impl CacheBackend for DiskCacheBackend {
         // Drop metadata and compound response candidates before changing the
         // trailer; body producers retain the unchanged body bytes and offset.
         self.hot_remove(&path).await;
+        let _object = self.lock_object(&path).await?;
         let _update =
             HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
         let result = retire_metadata_trailer_sync(&path);
@@ -1271,8 +1440,7 @@ impl CacheBackend for DiskCacheBackend {
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
         let path = self.path_for(namespace, key);
-        self.delete_path(&path).await;
-        Ok(())
+        self.delete_path(&path).await
     }
 }
 
@@ -1510,6 +1678,7 @@ fn read_disk_cache_header_sync(path: &Path) -> Result<DiskCacheRead> {
         header,
         body_offset,
         total_len: meta.len(),
+        file,
     })
 }
 
@@ -1525,7 +1694,7 @@ fn read_metadata_trailer_sync(path: &Path) -> Result<Option<Bytes>> {
     if read.header.expires_at_ms <= now_ms() {
         return Ok(None);
     }
-    let mut file = File::open(path)?;
+    let mut file = read.file;
     let trailer_start = read.total_len - 4 - read.header.meta_len;
     file.seek(std::io::SeekFrom::Start(trailer_start))?;
     let mut len = [0u8; 4];
@@ -1800,6 +1969,8 @@ mod tests {
 
     fn cfg(path: PathBuf, max_bytes: u64) -> CacheBackendConfig {
         CacheBackendConfig {
+            writer_mode: Default::default(),
+            commit_lock_stripes: 64,
             name: "disk".to_string(),
             kind: "disk".to_string(),
             endpoint: String::new(),

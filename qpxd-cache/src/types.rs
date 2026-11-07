@@ -145,6 +145,17 @@ impl InFlightRevalidations {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait CacheBackend: Send + Sync {
+    /// Owned backend publication lease; dropping it (including cancellation)
+    /// releases coordination. None means single-instance only; shared disk
+    /// supplies an OS lock. Wrappers must delegate this capability.
+    async fn lock_commit(
+        &self,
+        _namespace: &str,
+        _primary: &str,
+    ) -> Result<Option<Box<dyn Send + Sync>>> {
+        Ok(None)
+    }
+
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>>;
     async fn get_many(&self, namespace: &str, keys: &[String]) -> Result<Vec<Option<Bytes>>>;
     async fn get_decoded_variant_index(

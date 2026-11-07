@@ -256,6 +256,8 @@ async fn canonical_writeback_remains_available_after_index_eviction() {
         let backend: Arc<dyn CacheBackend> = if disk {
             Arc::new(
                 crate::backend_disk::DiskCacheBackend::new(qpx_core::config::CacheBackendConfig {
+                    writer_mode: Default::default(),
+                    commit_lock_stripes: 64,
                     name: "memory".into(),
                     kind: "disk".into(),
                     endpoint: String::new(),

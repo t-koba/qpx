@@ -2,6 +2,7 @@ state_dir: "${QPX_STATE_DIR:-~/.local/share/qpx}"
 caches:
 - name: redis-remote-tls
   kind: redis
+  writer_mode: single_instance
   endpoint: rediss://cache.example.com:6380/2
   timeout_ms: 2000
   max_object_bytes: 1048576
