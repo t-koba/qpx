@@ -725,54 +725,63 @@ async fn early_h2_response_drains_abandoned_request_body() {
 
 #[tokio::test]
 async fn send_h2_response_with_interim_rejects_content_length_mismatch() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().expect("addr");
-    tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.expect("accept");
-        let mut conn = h2::server::handshake(socket).await.expect("handshake");
-        while let Some(result) = conn.accept().await {
-            let (_request, respond) = result.expect("request");
-            tokio::spawn(async move {
-                let response = Response::builder()
-                    .status(StatusCode::OK)
-                    .header(http::header::CONTENT_LENGTH, "4")
-                    .body(Body::from("OK"))
-                    .expect("response");
-                let err = send_h2_response_with_interim(
-                    respond,
-                    OwnerResponse::from_http(response),
-                    &[],
-                    &hyper::Method::GET,
-                    false,
-                    H2_BODY_IDLE_TIMEOUT,
-                    1,
-                )
-                .await
-                .expect_err("mismatch should fail");
-                assert!(
-                    err.to_string()
-                        .contains("ended before declared content-length")
-                );
-            });
-        }
-    });
+    for (declared_length, response_body, expected_error) in [
+        ("4", "OK", "ended before declared content-length"),
+        ("1", "OK", "exceeded declared content-length"),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let mut conn = h2::server::handshake(socket).await.expect("handshake");
+            let mut error_tx = Some(error_tx);
+            while let Some(result) = conn.accept().await {
+                let (_request, respond) = result.expect("request");
+                let Some(error_tx) = error_tx.take() else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    let response = Response::builder()
+                        .status(StatusCode::OK)
+                        .header(http::header::CONTENT_LENGTH, declared_length)
+                        .body(Body::from(response_body))
+                        .expect("response");
+                    let err = send_h2_response_with_interim(
+                        respond,
+                        OwnerResponse::from_http(response),
+                        &[],
+                        &hyper::Method::GET,
+                        false,
+                        H2_BODY_IDLE_TIMEOUT,
+                        1,
+                    )
+                    .await
+                    .expect_err("mismatch should fail");
+                    let _ = error_tx.send(err.to_string());
+                });
+            }
+        });
 
-    let socket = TcpStream::connect(addr).await.expect("connect");
-    let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
+        let socket = TcpStream::connect(addr).await.expect("connect");
+        let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
 
-    let mut client = client.ready().await.expect("ready");
-    let request = ::http::Request::builder()
-        .method("GET")
-        .uri("https://reverse_edges.test/mismatch")
-        .body(())
-        .expect("request");
-    let (response_future, _) = client.send_request(request, true).expect("send");
-    let err = response_future.await.expect_err("response should reset");
-    assert!(err.is_reset());
-    assert_eq!(err.reason(), Some(Reason::PROTOCOL_ERROR));
+        let mut client = client.ready().await.expect("ready");
+        let request = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/mismatch")
+            .body(())
+            .expect("request");
+        let (response_future, _) = client.send_request(request, true).expect("send");
+        let err = response_future.await.expect_err("response should reset");
+        assert!(err.is_reset());
+        assert_eq!(err.reason(), Some(Reason::PROTOCOL_ERROR));
+        let writer_error = error_rx.await.expect("writer result");
+        assert!(writer_error.contains(expected_error), "{writer_error}");
+    }
 }
 
 #[tokio::test]
