@@ -1576,6 +1576,44 @@ async fn h1_owner_conversion_preserves_ordinary_framing() {
 }
 
 #[tokio::test]
+async fn h1_owner_no_body_responses_drop_invalid_content_length() {
+    for (method, status, value) in [
+        (Method::HEAD, StatusCode::OK, "invalid"),
+        (Method::GET, StatusCode::NOT_MODIFIED, "0, 1"),
+        (Method::HEAD, StatusCode::NO_CONTENT, "invalid"),
+    ] {
+        let response = Response::builder()
+            .status(status)
+            .header(CONTENT_LENGTH, value)
+            .body(Body::empty())
+            .expect("response");
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        send_http1_response_with_interim(
+            &mut server,
+            Version::HTTP_11,
+            &method,
+            OwnerResponse::from_http(response),
+            &[],
+            true,
+            Duration::from_secs(1),
+            &mut BytesMut::new(),
+        )
+        .await
+        .expect("invalid no-body Content-Length is removed");
+        drop(server);
+
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).await.expect("read response");
+        assert!(wire.starts_with(format!("HTTP/1.1 {status}").as_bytes()));
+        assert!(
+            content_length_lines(&wire).is_empty(),
+            "{method} {status}: {wire:?}"
+        );
+        assert!(wire.ends_with(b"\r\n\r\n"), "{method} {status}: {wire:?}");
+    }
+}
+
+#[tokio::test]
 async fn h1_owner_invalid_length_fails_after_interim() {
     let (mut client, mut server) = tokio::io::duplex(4096);
     let interim = [InterimResponseHead::new(

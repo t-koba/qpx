@@ -225,6 +225,17 @@ where
         // The finalized raw head owns egress framing; the placeholder's
         // Content-Length is unused and must neither be validated nor emitted.
         response.headers_mut().remove_content_length();
+    } else {
+        let status = response.status();
+        let no_body = request_method == Method::HEAD
+            || response_status_has_no_body(status, false)
+            || (request_method == Method::CONNECT && status.is_success());
+        if no_body && response.headers().declared_content_length().is_err() {
+            // The method/status already determines that there is no body, so
+            // an invalid declaration cannot affect framing. Remove it before
+            // the owner-to-codec boundary validates Content-Length.
+            response.headers_mut().remove_content_length();
+        }
     }
     let response = response.into_http_for_codec()?;
     let (parts, mut body) = response.into_parts();
