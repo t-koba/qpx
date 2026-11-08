@@ -1027,46 +1027,70 @@ async fn send_h2_response_with_interim_preserves_successful_extended_connect_bod
 
 #[tokio::test]
 async fn h2_request_to_hyper_rejects_content_length_mismatch() {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-    let addr: SocketAddr = listener.local_addr().expect("addr");
-    let server = tokio::spawn(async move {
-        let (socket, _) = listener.accept().await.expect("accept");
-        let mut conn = h2::server::handshake(socket).await.expect("handshake");
-        let Some(result) = conn.accept().await else {
-            panic!("request");
-        };
-        let (request, _respond) = result.expect("request");
-        let request = h2_request_to_hyper(request).expect("convert");
-        let err = to_bytes(request.into_body())
-            .await
-            .expect_err("mismatch should fail");
-        assert!(
-            err.to_string().contains("content-length mismatch")
-                || err.to_string().contains("body aborted")
-                || err.to_string().contains("stream error detected"),
-            "unexpected error: {err}"
-        );
-    });
+    for (case, tail) in [
+        ("underflow", b"".as_slice()),
+        ("overflow", b"BAD".as_slice()),
+    ] {
+        timeout(Duration::from_secs(5), async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("addr");
+            let (request_tx, request_rx) = tokio::sync::oneshot::channel();
+            let server = tokio::spawn(async move {
+                let (socket, _) = listener.accept().await.expect("accept");
+                let mut conn = h2::server::handshake(socket).await.expect("handshake");
+                let request = conn.accept().await.expect("request").expect("request");
+                request_tx.send(request).expect("deliver request");
+                // Keep driving DATA and RST_STREAM while the test reads the body.
+                let _ = conn.accept().await;
+            });
 
-    let socket = TcpStream::connect(addr).await.expect("connect");
-    let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
-    tokio::spawn(async move {
-        let _ = connection.await;
-    });
+            let socket = TcpStream::connect(addr).await.expect("connect");
+            let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
+            let client_driver = tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let mut client = client.ready().await.expect("ready");
+            let request = ::http::Request::builder()
+                .method("POST")
+                .uri("https://reverse_edges.test/upload")
+                .header(::http::header::CONTENT_LENGTH, "4")
+                .body(())
+                .expect("request");
+            let (response_future, mut send_stream) =
+                client.send_request(request, false).expect("send");
+            send_stream
+                .send_data(Bytes::from_static(b"OK"), false)
+                .expect("prefix");
 
-    let mut client = client.ready().await.expect("ready");
-    let request = ::http::Request::builder()
-        .method("POST")
-        .uri("https://reverse_edges.test/upload")
-        .header(::http::header::CONTENT_LENGTH, "4")
-        .body(())
-        .expect("request");
-    let (_response_future, mut send_stream) = client.send_request(request, false).expect("send");
-    send_stream
-        .send_data(Bytes::from_static(b"OK"), true)
-        .expect("data");
+            // Consume a valid prefix before ending the stream, so both cases exercise
+            // the converted streaming body rather than rejection at header import.
+            let (request, _respond) = request_rx.await.expect("receive request");
+            let mut body = h2_request_to_hyper(request).expect("convert").into_body();
+            assert_eq!(
+                body.data().await.expect("prefix").expect("prefix data"),
+                "OK"
+            );
+            send_stream
+                .send_data(Bytes::from_static(tail), true)
+                .expect("mismatched END_STREAM");
+            body.data()
+                .await
+                .expect("body error, not clean EOF")
+                .expect_err("mismatched DATA must not be delivered");
 
-    server.await.expect("server");
+            // BodyError erases the typed transport error. Assert its protocol cause
+            // at the peer instead of depending on h2's internal Display wording.
+            let err = response_future.await.expect_err("stream must reset");
+            assert!(err.is_reset(), "{case}: {err}");
+            assert_eq!(err.reason(), Some(Reason::PROTOCOL_ERROR), "{case}: {err}");
+            server.abort();
+            client_driver.abort();
+            let _ = server.await;
+            let _ = client_driver.await;
+        })
+        .await
+        .unwrap_or_else(|_| panic!("{case} timed out"));
+    }
 }
 
 #[test]
