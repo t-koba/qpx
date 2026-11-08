@@ -66,6 +66,8 @@ def tcp_snapshot(diag, ports, sequence):
                     "receive_queue": struct.unpack_from("=I", payload, 56)[0],
                     "write_queue": struct.unpack_from("=I", payload, 60)[0],
                     "unacked": u32(24), "retransmission_timeout_us": u32(8), "total_retrans": u32(100),
+                    "congestion_state": info[1], "sacked": u32(28),
+                    "lost": u32(32), "retrans_outstanding": u32(36),
                     "send_mss": u32(16), "receive_mss": u32(20),
                     "last_data_sent_ms": u32(44), "last_data_received_ms": u32(52),
                     "last_ack_received_ms": u32(56), "rtt_us": u32(68),
@@ -73,6 +75,8 @@ def tcp_snapshot(diag, ports, sequence):
                     "notsent_bytes": u32(144), "bytes_acked": u64(120),
                     "bytes_received": u64(128), "bytes_sent": u64(200),
                     "bytes_retransmitted": u64(208), "rwnd_limited_us": u64(176),
+                    "dsack_duplicates": u32(216), "reordering_events": u32(220),
+                    "receive_out_of_order_packets": u32(224),
                     "tcp_info_bytes": len(info),
                 })
             offset += (length + 3) & ~3

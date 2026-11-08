@@ -161,6 +161,10 @@ without decoding payload buffers. The real TCP ownership probe verifies this
 format before measurement. The same diagnostic also reuses the Linux TCP_INFO
 sampler at its existing 100 ms interval for both cache listeners, retaining
 socket cookies, queue/window counters, monotonic timestamps and sampling overhead.
+Loss estimates, outstanding retransmissions, DSACK duplicates and reordering
+counters follow the [Linux TCP_INFO UAPI](https://github.com/torvalds/linux/blob/master/include/uapi/linux/tcp.h).
+These distinguish transport recovery observations; retransmission alone does not
+prove packet loss, and 100 ms snapshots cannot resolve individual recovery events.
 Its real TCP probe must pass before recording. Set the workflow's `socket_syscalls`
 input to false to record the same TCP counters without syscall tracing, checking
 whether queue and retransmission observations persist without strace overhead.
