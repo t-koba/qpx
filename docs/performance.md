@@ -502,12 +502,13 @@ event-loop starvation even when bulk throughput remains high.
 
 ## Allocation gate
 
-The production binary uses mimalloc by default. The allocation profiler builds
-the same code with the `system-allocator` feature so Valgrind DHAT can observe
-every allocation accurately. `scripts/check-allocation-budget.sh` enforces the
+The production binary uses the system allocator by default. Mimalloc is opt-in
+through `mimalloc-allocator`; an explicit `system-allocator` takes precedence
+when both features are enabled. The allocation profiler explicitly selects
+`system-allocator` so Valgrind DHAT can observe allocations.
+`scripts/check-allocation-budget.sh` enforces the
 per-request byte and allocation-count budgets in `perf/allocation-budget.json`.
-The profiling allocator switch changes only allocation instrumentation; it does
-not disable HTTP functionality.
+This explicit profiler selection does not disable HTTP functionality.
 
 Tracked lanes:
 
