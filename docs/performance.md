@@ -3724,7 +3724,17 @@ The historical LTO pair `b91a395`/`27d2c2d` also differs in WebDAV filesystem
 and response-region handling. Its HTTP/2 measurements are useful observations,
 but binary layout and cross-crate optimization can change when other compiled
 code changes; the results do not isolate the LTO setting. Restore the original
-thin release setting while evaluating a new pair against `88f842d`, whose only
-executable-source difference is the LTO profile. Keep codegen units, features,
-panic behavior and all acceptance criteria unchanged. No LTO gain is established
-by the previous mixed comparisons or by this configuration change alone.
+thin release setting and isolate the profile difference with `acb832f` versus
+`88f842d`, holding codegen units, features, panic behavior and all acceptance
+criteria constant. First comparison `42519014875` has two incomplete reference
+triples: clean transfers take 7.97 s and 12.52 s, outside the 8–12.5 s budget.
+Do not combine its partial samples with another independent run.
+
+Reverse-order comparison `42523044254` passes both measurement-quality checks
+and all 72 complete, error-free owned windows, with scheduler family sums
+matching the workload records. Thin versus fat total CPU efficiency changes
+by -0.73%, +4.62%, -0.21% and -4.03% for 1 KiB/one stream, 1 KiB/100 streams,
+1 MiB/one stream and 1 MiB/100 streams respectively. The last lane's p99 rises
+9.24%; both profiles still fail the required HTTP/2 objectives. These mixed
+results establish no general LTO improvement. Retain the original thin setting
+and do not repeat profile-only trials without new causal evidence.
