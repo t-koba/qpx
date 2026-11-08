@@ -129,6 +129,10 @@ elif mode in ('monitor', 'rss-monitor'):
     maps_enabled = sys.argv[6] if len(sys.argv) > 6 else '0'
     if maps_enabled not in ('0', '1'):
         raise SystemExit('memory map diagnostics must be 0 or 1')
+    targets_enabled = sys.argv[7] if len(sys.argv) > 7 else '0'
+    if targets_enabled not in ('0', '1'):
+        raise SystemExit('descriptor target diagnostics must be 0 or 1')
+    peak_targets = None
     interval = 0.01 if mode == 'rss-monitor' else 0.05
     snapshot = (lambda: rss(root)) if mode == 'rss-monitor' else (lambda: len(descriptors(root)))
     started = time.monotonic()
@@ -156,6 +160,17 @@ elif mode in ('monitor', 'rss-monitor'):
                 if mode == "rss-monitor":
                     row.extend(observation[field] for field in ("RssAnon", "RssFile", "RssShmem"))
                 writer.writerow(row)
+                if mode == 'monitor' and targets_enabled == '1' and (count == 1 or value > peak):
+                    capture_start = time.monotonic_ns()
+                    targets = descriptors(root, True)
+                    peak_targets = {
+                        'root_pid': int(root),
+                        'trigger_monotonic_ns': row[0], 'trigger_count': value,
+                        'started_monotonic_ns': capture_start,
+                        'finished_monotonic_ns': time.monotonic_ns(),
+                        'descriptors': targets,
+                        'window': 'after_peak_count_observation',
+                    }
                 if count == 1:
                     handle.flush()
                     Path(str(output) + '.ready').write_text('1\n')
@@ -173,7 +188,11 @@ elif mode in ('monitor', 'rss-monitor'):
             'maximum_gap_seconds': maximum_gap,
             'elapsed_ns': elapsed_ns, 'cpu_time_ns': cpu_time_ns,
             'cpu_fraction_of_one_core': cpu_time_ns / elapsed_ns,
+            'descriptor_target_diagnostics': targets_enabled == '1' and mode == 'monitor',
         }, sort_keys=True) + '\n')
+        if peak_targets is not None:
+            Path(str(output) + '.peak-descriptors.json').write_text(
+                json.dumps(peak_targets, sort_keys=True) + '\n')
         if mode == 'rss-monitor' and maps_enabled == '1':
             # Procfs map walks happen after all workload observations and
             # sampler CPU accounting, never inside the measured polling loop.

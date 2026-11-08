@@ -175,7 +175,13 @@ The `http2-native` variant records the 1 KiB, 100-stream workload in the same
 way. HTTP/2 schema 11 requires explicit instrumentation provenance and workload-only
 CPU and scheduler counter windows. Counter snapshots surround the completed
 client workload before stopping samplers or processing their output. Native
-diagnostic rows and rows missing that provenance are rejected by the required
+HTTP/2 diagnostics also retain descriptor targets after the first FD observation
+and each new peak, reusing the process-tree snapshot reader. Each retained record
+contains the triggering count and observation/capture timestamps. Descriptors may
+close or change between these reads, so target counts are not an atomic breakdown
+of the earlier peak. Sampler CPU accounting includes capture work; normal gates
+do not enable it, and HTTP/2 rejects target capture without diagnostic provenance.
+These diagnostic rows and rows missing that provenance are rejected by the required
 gate. Reports are restricted to the workload windows recorded by the real RSS
 sampler's monotonic timestamps, separating warmup and the individual samples.
 The `streaming-native` variant records the fast and slow 100 MiB transfers with

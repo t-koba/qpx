@@ -245,7 +245,7 @@ process_tree_scheduler_delta_ns() {
 start_process_tree_peak() {
   local mode="$1" root="$2" output="$3" initial="$4"
   local deadline=$((SECONDS + 20))
-  rm -f "${output}.ready" "${output}.error" "${output}.sampling.json"
+  rm -f "${output}.ready" "${output}.error" "${output}.sampling.json" "${output}.peak-descriptors.json"
   monitor_process_tree_peak "$mode" "$root" "$output" "$initial" &
   PERF_PROCESS_PEAK_PID=$!
   # A complete first observation owns readiness; interpreter startup does not.
@@ -272,7 +272,8 @@ monitor_process_tree_peak() {
   # Keep one reader alive across samples so privilege setup and interpreter
   # startup do not compete with the load generator on every polling interval.
   perf_proc_python "$(dirname "${BASH_SOURCE[0]}")/perf-process-fds.py" \
-    "$mode" "$root" "$output" "$stop" "$initial" "${QPX_PERF_MEMORY_MAP_DIAGNOSTICS:-0}" &
+    "$mode" "$root" "$output" "$stop" "$initial" "${QPX_PERF_MEMORY_MAP_DIAGNOSTICS:-0}" \
+    "${QPX_PERF_NATIVE_FD_TARGETS:-0}" &
   reader=$!
   trap 'touch "$stop"' TERM INT
   if wait "$reader"; then

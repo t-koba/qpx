@@ -22,6 +22,7 @@ import ctypes
 import os
 from pathlib import Path
 import sys
+import socket
 import threading
 import time
 if ctypes.CDLL(None).prctl(4, 0, 0, 0, 0) != 0:
@@ -32,8 +33,12 @@ def churn_threads():
         worker.start()
         worker.join()
 threading.Thread(target=churn_threads, daemon=True).start()
-Path(sys.argv[1]).write_text(str(os.getpid()))
 work = Path(sys.argv[1]).parent
+descriptor_file = (work / 'descriptor-probe').open('wb')
+descriptor_socket = socket.socket()
+descriptor_socket.bind(('127.0.0.1', 0))
+descriptor_socket.listen(1)
+Path(sys.argv[1]).write_text(str(os.getpid()))
 deadline = time.monotonic() + 30
 while time.monotonic() < deadline:
     if (work / 'cpu-work').exists() and not (work / 'cpu-done').exists():
@@ -81,7 +86,7 @@ fi
 fd_before="$(process_tree_fd_count "$root")"
 rss_before="$(process_tree_status_kb "$root" VmRSS)"
 snapshot_process_tree_fds "$root" "$work/descriptors.json"
-start_process_tree_peak monitor "$root" "$work/fd" "$fd_before"
+QPX_PERF_NATIVE_FD_TARGETS=1 start_process_tree_peak monitor "$root" "$work/fd" "$fd_before"
 fd_monitor=$PERF_PROCESS_PEAK_PID
 start_process_tree_peak rss-monitor "$root" "$work/rss" "$rss_before"
 rss_monitor=$PERF_PROCESS_PEAK_PID
@@ -108,6 +113,13 @@ for kind in ('fd', 'rss'):
     assert math.isfinite(metadata['cpu_fraction_of_one_core'])
     assert metadata['cpu_fraction_of_one_core'] == metadata['cpu_time_ns'] / metadata['elapsed_ns']
 assert json.loads((root / 'descriptors.json').read_text())
+peak = json.loads((root / 'fd.peak-descriptors.json').read_text())
+assert peak['window'] == 'after_peak_count_observation'
+assert peak['trigger_monotonic_ns'] <= peak['started_monotonic_ns'] <= peak['finished_monotonic_ns']
+targets = [row['target'] for row in peak['descriptors']]
+assert str(root / 'descriptor-probe') in targets
+assert any(target.startswith('socket:[') for target in targets)
+assert peak['trigger_count'] > 0
 PY_RESULTS
 cpu_before="$(process_tree_cpu_clock_ms "$root" "$work/cpu-before.json")"
 scheduler_before="$(QPX_PERF_PROCESS_IO_COUNTERS=1 process_tree_scheduler_run_delay_ns "$root" "$work/scheduler-before.json")"
