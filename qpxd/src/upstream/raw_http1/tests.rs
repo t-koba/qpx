@@ -119,6 +119,37 @@ async fn send_http1_request_with_interim_parses_early_hints() {
 }
 
 #[tokio::test]
+async fn raw_response_with_chunked_and_zero_length_relays_chunk_payload() {
+    let (mut proxy, mut origin) = tokio::io::duplex(1024);
+    origin
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 0\r\n\r\n5\r\nHELLO\r\n0\r\n\r\n",
+        )
+        .await
+        .expect("write upstream response");
+    drop(origin);
+
+    let (interim, head, prefix) = read_finalized_raw_response_head_with_interim(
+        &mut proxy,
+        BytesMut::new(),
+        &Method::GET,
+        Version::HTTP_11,
+        "qpx",
+        RawResponseHeadDeadline::CallerManaged,
+    )
+    .await
+    .expect("parse raw response head");
+    assert!(interim.is_empty());
+
+    let response = build_raw_response(proxy, head, prefix, BytesMut::new(), None);
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("response body"),
+        Bytes::from_static(b"HELLO")
+    );
+}
+
+#[tokio::test]
 async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
     let response_bytes = Bytes::from_static(
         b"HTTP/1.1 200 OK\r\nX-Partial: segmented\r\nContent-Length: 4\r\n\r\nBODY",

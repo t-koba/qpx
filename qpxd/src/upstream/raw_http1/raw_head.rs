@@ -476,6 +476,32 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ordinary_raw_head_prefers_chunked_over_zero_content_length() {
+        let headers = [
+            httparse::Header {
+                name: "Transfer-Encoding",
+                value: b"chunked",
+            },
+            httparse::Header {
+                name: "Content-Length",
+                value: b"0",
+            },
+        ];
+        let mut raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("ordinary response head");
+
+        assert_eq!(raw.framing(), RawHttp1BodyFraming::Chunked);
+        raw.finalize("qpx");
+        let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+        assert!(content_length_lines(encoded).is_empty());
+    }
+
     /// The content-length field lines of a head.
     ///
     /// The field's name is matched case-insensitively, as HTTP requires,
