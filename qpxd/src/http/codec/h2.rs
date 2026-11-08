@@ -142,19 +142,22 @@ pub(crate) fn h2_request_to_hyper(req: Http1Request<RecvStream>) -> Result<Reque
     if parts.headers.len() > H2_MAX_HEADER_COUNT {
         return Err(H2HeaderCountTooLarge.into());
     }
-    // The h2 transport already enforces RFC 9113 content-length reconciliation
-    // while decoding DATA / END_STREAM on the inbound stream. We still parse the
-    // header locally to reject conflicting field-values before handing the
-    // request to Hyper, but body-length mismatches surface via the body stream.
-    let _declared_length = parse_declared_content_length(&parts.headers)?;
+    // h2 0.4.20 applies Content-Length to all DATA on a stream, including
+    // classic CONNECT tunnel DATA after a successful response. Since qpx cannot
+    // clear that transport counter after the handshake, reject a declared
+    // length before passing the CONNECT request to the handler.
+    let declared_length = parse_declared_content_length(&parts.headers)?;
+    let tunnel = parts.method == http::Method::CONNECT
+        && parts.extensions.get::<h2::ext::Protocol>().is_none();
+    if tunnel && declared_length.is_some() {
+        return Err(anyhow!(
+            "Content-Length is unsupported on classic HTTP/2 CONNECT"
+        ));
+    }
     let body = if body.is_end_stream() {
         Body::empty()
     } else {
-        Body::wrap(H2RecvBody::request(
-            body,
-            parts.method == http::Method::CONNECT
-                && parts.extensions.get::<h2::ext::Protocol>().is_none(),
-        ))
+        Body::wrap(H2RecvBody::request(body, tunnel))
     };
     parts.version = http::Version::HTTP_2;
     Ok(Request::from_parts(parts, body))

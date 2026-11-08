@@ -15,7 +15,7 @@ Not on internal behavioral equivalence with earlier config shapes.
 HTTP substrate:
 
 - HTTP/1.1 proxy semantics, including `CONNECT`
-- HTTP/2 downstream proxying, including RFC 8441 extended CONNECT on the supported forward path
+- HTTP/2 downstream proxying, including RFC 8441 extended CONNECT on the supported forward path. Classic CONNECT requests must omit `Content-Length`; qpx rejects a declared length before tunnel handoff. Extended CONNECT and ordinary H2 request-body length validation are unchanged.
 - HTTP/3 per RFC 9114
 - QPACK per RFC 9204
 - HTTP Datagrams / Capsules per RFC 9297

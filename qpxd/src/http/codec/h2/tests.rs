@@ -1516,3 +1516,160 @@ async fn classic_connect_marker_bypasses_only_established_tunnel_framing() {
         .expect("CONNECT framing must complete");
     }
 }
+
+#[tokio::test]
+async fn classic_connect_content_length_is_rejected_but_extended_connect_is_unchanged() {
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let service_calls = Arc::new(AtomicUsize::new(0));
+    let service = qpx_observability::handler_fn({
+        let service_calls = Arc::clone(&service_calls);
+        move |_request: http::Request<Body>| {
+            service_calls.fetch_add(1, Ordering::Relaxed);
+            async move {
+                Ok::<_, std::convert::Infallible>(
+                    Response::builder()
+                        .status(StatusCode::OK)
+                        .body(Body::empty())
+                        .map(OwnerResponse::from_http)
+                        .expect("response"),
+                )
+            }
+        }
+    });
+    let server = tokio::spawn(crate::http::codec::interim::serve_h2_with_interim(
+        server_io,
+        service,
+        true,
+        tokio::time::Duration::from_secs(5),
+    ));
+    let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+    let driver = tokio::spawn(connection);
+    client = client.ready().await.expect("client ready");
+    for _ in 0..20 {
+        if client.is_extended_connect_protocol_enabled() {
+            break;
+        }
+        tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
+    }
+    assert!(client.is_extended_connect_protocol_enabled());
+
+    let classic = http::Request::builder()
+        .method("CONNECT")
+        .uri("example.test:443")
+        .header(http::header::CONTENT_LENGTH, "0")
+        .body(())
+        .expect("classic CONNECT request");
+    let (response, _) = client
+        .send_request(classic, true)
+        .expect("send classic CONNECT");
+    let err = response
+        .await
+        .expect_err("Content-Length on classic CONNECT must be rejected before handoff");
+    assert!(err.is_reset());
+    assert_eq!(err.reason(), Some(h2::Reason::PROTOCOL_ERROR));
+    assert_eq!(service_calls.load(Ordering::Relaxed), 0);
+
+    client = client
+        .ready()
+        .await
+        .expect("client ready after stream reset");
+    let mut extended = http::Request::builder()
+        .method("CONNECT")
+        .uri("https://example.test/chat")
+        .header(http::header::CONTENT_LENGTH, "0")
+        .body(())
+        .expect("extended CONNECT request");
+    extended
+        .extensions_mut()
+        .insert(h2::ext::Protocol::from("websocket"));
+    let (response, _) = client
+        .send_request(extended, true)
+        .expect("send extended CONNECT");
+    assert_eq!(
+        response.await.expect("extended response").status(),
+        StatusCode::OK
+    );
+    assert_eq!(service_calls.load(Ordering::Relaxed), 1);
+
+    server.abort();
+    driver.abort();
+}
+
+#[tokio::test]
+async fn classic_connect_without_content_length_accepts_tunnel_data_beyond_one_window() {
+    const CHUNK_SIZE: usize = 16 * 1024;
+    const CHUNK_COUNT: usize = 16;
+    const EXPECTED_BYTES: usize = CHUNK_SIZE * CHUNK_COUNT;
+
+    let (client_io, server_io) = tokio::io::duplex(4096);
+    let (received_tx, mut received_rx) =
+        tokio::sync::mpsc::unbounded_channel::<std::result::Result<usize, String>>();
+    let service = qpx_observability::handler_fn(move |request: http::Request<Body>| {
+        let received_tx = received_tx.clone();
+        async move {
+            tokio::spawn(async move {
+                let result = to_bytes(request.into_body())
+                    .await
+                    .map(|bytes| bytes.len())
+                    .map_err(|err| err.to_string());
+                let _ = received_tx.send(result);
+            });
+
+            let mut response = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .map(OwnerResponse::from_http)
+                .expect("response");
+            response.extensions_mut().insert(ClassicConnectTunnel);
+            Ok::<_, std::convert::Infallible>(response)
+        }
+    });
+    let server = tokio::spawn(crate::http::codec::interim::serve_h2_with_interim(
+        server_io,
+        service,
+        false,
+        tokio::time::Duration::from_secs(5),
+    ));
+    let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+    let driver = tokio::spawn(connection);
+    client = client.ready().await.expect("client ready");
+
+    let request = http::Request::builder()
+        .method("CONNECT")
+        .uri("example.test:443")
+        .body(())
+        .expect("classic CONNECT request");
+    let (response, mut send_stream) = client.send_request(request, false).expect("send CONNECT");
+    let response = tokio::time::timeout(tokio::time::Duration::from_secs(5), response)
+        .await
+        .expect("CONNECT response timeout")
+        .expect("CONNECT response");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    for index in 0..CHUNK_COUNT {
+        let data = Bytes::from(vec![0x5a; CHUNK_SIZE]);
+        send_stream.reserve_capacity(data.len());
+        let capacity = tokio::time::timeout(
+            tokio::time::Duration::from_secs(5),
+            poll_fn(|cx| send_stream.poll_capacity(cx)),
+        )
+        .await
+        .expect("tunnel send-capacity timeout")
+        .expect("tunnel stream closed")
+        .expect("tunnel send capacity");
+        assert!(capacity >= data.len(), "capacity {capacity} is too small");
+        send_stream
+            .send_data(data, index + 1 == CHUNK_COUNT)
+            .expect("send tunnel DATA");
+    }
+
+    let received = tokio::time::timeout(tokio::time::Duration::from_secs(5), received_rx.recv())
+        .await
+        .expect("tunnel receive timeout")
+        .expect("tunnel receiver closed")
+        .expect("tunnel body");
+    assert_eq!(received, EXPECTED_BYTES);
+
+    server.abort();
+    driver.abort();
+}
