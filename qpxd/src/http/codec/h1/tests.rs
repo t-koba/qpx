@@ -158,6 +158,31 @@ impl http_body::Body for CompleteAfterDataBody {
     }
 }
 
+struct OneFrameThenEofBody {
+    emitted: bool,
+}
+
+impl http_body::Body for OneFrameThenEofBody {
+    type Data = Bytes;
+    type Error = qpx_http::body::BodyError;
+
+    fn poll_frame(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        if self.emitted {
+            Poll::Ready(None)
+        } else {
+            self.emitted = true;
+            Poll::Ready(Some(Ok(Frame::data(Bytes::from_static(b"complete")))))
+        }
+    }
+
+    fn size_hint(&self) -> http_body::SizeHint {
+        http_body::SizeHint::with_exact(if self.emitted { 0 } else { 8 })
+    }
+}
+
 #[derive(Clone)]
 struct StaticInterimService;
 
@@ -1709,6 +1734,59 @@ async fn h1_owner_conversion_preserves_ordinary_framing() {
     );
     assert!(text.contains("chunked-body"));
     assert!(text.ends_with("0\r\n\r\n"));
+}
+
+#[tokio::test]
+async fn h1_streamed_response_content_length_mismatch_preserves_error_order() {
+    for (declared, expected_error, expected_wire_body) in [
+        (
+            "9",
+            "response body ended before declared content-length was satisfied",
+            Some(b"complete".as_slice()),
+        ),
+        ("7", "response body exceeded declared content-length", None),
+    ] {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_LENGTH, declared)
+            .body(Body::wrap(OneFrameThenEofBody { emitted: false }))
+            .expect("streamed response");
+        let (mut client, mut server) = tokio::io::duplex(4096);
+        let error = send_http1_response_with_interim(
+            &mut server,
+            Version::HTTP_11,
+            &Method::GET,
+            OwnerResponse::from_http(response),
+            &[],
+            true,
+            Duration::from_secs(1),
+            &mut BytesMut::new(),
+        )
+        .await
+        .expect_err("declared and streamed body lengths differ");
+        assert!(error.to_string().contains(expected_error), "{error}");
+        drop(server);
+
+        let mut wire = Vec::new();
+        client
+            .read_to_end(&mut wire)
+            .await
+            .expect("read response bytes");
+        match expected_wire_body {
+            Some(body) => {
+                assert!(wire.starts_with(b"HTTP/1.1 200 OK\r\n"));
+                assert!(
+                    wire.windows(b"content-length: 9\r\n".len())
+                        .any(|window| { window.eq_ignore_ascii_case(b"content-length: 9\r\n") })
+                );
+                assert!(wire.ends_with(body), "underflow bytes: {wire:?}");
+            }
+            None => assert!(
+                wire.is_empty(),
+                "first-frame overflow must fail before writing the response head: {wire:?}"
+            ),
+        }
+    }
 }
 
 #[tokio::test]
