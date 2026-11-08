@@ -3704,3 +3704,11 @@ Feature-rich 1 KiB RSS increases 8.86% and 7.95% across the two comparisons;
 ordinary 1 MiB hit CPU efficiency decreases in both. These mixed results do
 not establish a performance benefit. Restore the previous cold-key construction
 without changing storage probes, error propagation or acceptance criteria.
+
+Reject the 64 KiB memory-response write budget (3fbadf8). Same-runner comparison
+42514177182 against b0133b1 passes both quality checks and all 68 complete,
+error-free owned workload windows. Ordinary 1 MiB CPU efficiency falls 23.60%
+and queue delay rises 67.30%; feature-rich 1 MiB CPU efficiency falls 29.04%
+and queue delay rises 81.80%. Restore the previous vectored write construction.
+Retain the real TCP large-body and subsequent keep-alive response integrity test.
+The observed loss-probe/DSACK activity does not justify repeating this write cap.

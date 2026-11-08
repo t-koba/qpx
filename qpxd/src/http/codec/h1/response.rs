@@ -978,22 +978,15 @@ where
         }
         let mut io_slices = std::array::from_fn::<_, 4, _>(|_| IoSlice::new(&[]));
         let mut io_slice_count = 0usize;
-        // Bound each socket write so Tokio's operation budget also bounds bytes.
-        let mut remaining = 64 * 1024;
-        for (position, slice) in slices[index..].iter().enumerate() {
-            let slice = if position == 0 {
-                &slice[offset..]
-            } else {
-                slice
-            };
+        io_slices[io_slice_count] = IoSlice::new(&slices[index][offset..]);
+        io_slice_count += 1;
+        for slice in &slices[index + 1..] {
             if !slice.is_empty() {
-                if io_slice_count == io_slices.len() || remaining == 0 {
+                if io_slice_count == io_slices.len() {
                     break;
                 }
-                let len = slice.len().min(remaining);
-                io_slices[io_slice_count] = IoSlice::new(&slice[..len]);
+                io_slices[io_slice_count] = IoSlice::new(slice);
                 io_slice_count += 1;
-                remaining -= len;
             }
         }
         let written = writer.write_vectored(&io_slices[..io_slice_count]).await?;
