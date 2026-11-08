@@ -782,15 +782,28 @@ mod tests {
             .expect("declared"),
             Some(0)
         );
+        let mut reset_content_headers = http::HeaderMap::new();
+        reset_content_headers.insert(
+            http::header::CONTENT_LENGTH,
+            http::HeaderValue::from_static("0"),
+        );
         assert_eq!(
             declared_h3_response_body_length(
                 &http::Method::GET,
                 StatusCode::RESET_CONTENT,
-                &headers,
+                &reset_content_headers,
             )
-            .expect("declared"),
+            .expect("zero-length 205"),
             Some(0)
         );
+
+        let err = declared_h3_response_body_length(
+            &http::Method::GET,
+            StatusCode::RESET_CONTENT,
+            &headers,
+        )
+        .expect_err("nonzero 205 Content-Length must be rejected");
+        assert!(err.to_string().contains("nonzero Content-Length"));
         assert_eq!(
             declared_h3_response_body_length(&http::Method::GET, StatusCode::OK, &headers)
                 .expect("declared"),
