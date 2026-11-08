@@ -286,10 +286,28 @@ mod tests {
         announced_request_trailer_names, classify_bodyless_http1_request,
         serialize_bodyless_http1_request,
     };
-    use bytes::BytesMut;
+    use bytes::{Bytes, BytesMut};
     use hyper::header::{CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue};
     use hyper::{Method, Request};
     use qpx_http::body::Body;
+    use tokio::io::AsyncReadExt;
+
+    async fn write_and_collect_content_length_body(
+        mut body: Body,
+        declared_length: u64,
+    ) -> (anyhow::Result<()>, Vec<u8>) {
+        let (mut upstream, mut downstream) = tokio::io::duplex(64);
+        let result =
+            super::write_content_length_body(&mut upstream, &mut body, declared_length).await;
+        drop(upstream);
+
+        let mut sent = Vec::new();
+        downstream
+            .read_to_end(&mut sent)
+            .await
+            .expect("read request body");
+        (result, sent)
+    }
 
     #[test]
     fn announced_request_trailer_names_reject_prohibited_fields() {
@@ -341,6 +359,36 @@ mod tests {
             classify_bodyless_http1_request(request).expect("content-length validation");
 
         assert!(classified.is_err());
+    }
+
+    #[tokio::test]
+    async fn content_length_request_body_rejects_underflow_after_forwarding_available_bytes() {
+        let body = Body::replay_chunks(
+            vec![Bytes::from_static(b"O"), Bytes::from_static(b"K")],
+            None,
+        );
+        let (error, sent) = write_and_collect_content_length_body(body, 3).await;
+
+        assert_eq!(
+            error.expect_err("short body must fail").to_string(),
+            "request body ended before declared content-length was satisfied"
+        );
+        assert_eq!(sent, b"OK");
+    }
+
+    #[tokio::test]
+    async fn content_length_request_body_rejects_overflow_after_valid_prefix() {
+        let body = Body::replay_chunks(
+            vec![Bytes::from_static(b"O"), Bytes::from_static(b"K!")],
+            None,
+        );
+        let (error, sent) = write_and_collect_content_length_body(body, 1).await;
+
+        assert_eq!(
+            error.expect_err("excess body bytes must fail").to_string(),
+            "request body exceeded declared content-length"
+        );
+        assert_eq!(sent, b"O");
     }
 
     #[test]
