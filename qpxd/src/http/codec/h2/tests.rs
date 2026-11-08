@@ -785,6 +785,127 @@ async fn send_h2_response_with_interim_rejects_content_length_mismatch() {
 }
 
 #[tokio::test]
+async fn send_h2_response_with_interim_rejects_streamed_content_length_mismatches() {
+    let first_chunk = Bytes::from(vec![b'a'; 8 * 1024]);
+    let second_chunk = Bytes::from(vec![b'b'; 8 * 1024]);
+    for (declared_length, chunks, expected_body, expected_error) in [
+        (
+            "16385",
+            vec![first_chunk.clone(), second_chunk.clone()],
+            [first_chunk.as_ref(), second_chunk.as_ref()].concat(),
+            "HTTP/2 response body ended before declared content-length was satisfied",
+        ),
+        (
+            "16385",
+            vec![
+                first_chunk.clone(),
+                second_chunk.clone(),
+                Bytes::from_static(b"x"),
+                Bytes::from_static(b"y"),
+            ],
+            [first_chunk.as_ref(), second_chunk.as_ref()].concat(),
+            "HTTP/2 response body exceeded declared content-length",
+        ),
+    ] {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr: SocketAddr = listener.local_addr().expect("addr");
+        let (error_tx, error_rx) = tokio::sync::oneshot::channel();
+        let (start_tx, start_rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let mut conn = h2::server::handshake(socket).await.expect("handshake");
+            let mut error_tx = Some(error_tx);
+            let mut start_rx = Some(start_rx);
+            let mut chunks = Some(chunks);
+            while let Some(result) = conn.accept().await {
+                let (_request, respond) = result.expect("request");
+                let Some(error_tx) = error_tx.take() else {
+                    continue;
+                };
+                let Some(start_rx) = start_rx.take() else {
+                    continue;
+                };
+                let Some(chunks) = chunks.take() else {
+                    continue;
+                };
+                tokio::spawn(async move {
+                    start_rx.await.expect("client response reader is ready");
+                    let response = Response::builder()
+                        .status(StatusCode::OK)
+                        .header(http::header::CONTENT_LENGTH, declared_length)
+                        .body(Body::replay_chunks(chunks, None))
+                        .expect("response");
+                    let err = send_h2_response_with_interim(
+                        respond,
+                        OwnerResponse::from_http(response),
+                        &[],
+                        &hyper::Method::GET,
+                        false,
+                        H2_BODY_IDLE_TIMEOUT,
+                        2,
+                    )
+                    .await
+                    .expect_err("streamed mismatch should fail");
+                    let _ = error_tx.send(err.to_string());
+                });
+            }
+        });
+
+        let socket = TcpStream::connect(addr).await.expect("connect");
+        let (client, connection) = h2::client::handshake(socket).await.expect("handshake");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let mut client = client.ready().await.expect("ready");
+        let request = ::http::Request::builder()
+            .method("GET")
+            .uri("https://reverse_edges.test/streamed-mismatch")
+            .body(())
+            .expect("request");
+        let (response_future, _) = client.send_request(request, true).expect("send");
+        let client_task = tokio::spawn(async move {
+            let response = response_future
+                .await
+                .expect("response headers precede streamed body mismatch");
+            assert_eq!(response.status(), ::http::StatusCode::OK);
+            let mut body = response.into_body();
+            let mut observed_body = Vec::new();
+            let reset = loop {
+                match body.data().await {
+                    Some(Ok(chunk)) => {
+                        observed_body.extend_from_slice(&chunk);
+                        body.flow_control()
+                            .release_capacity(chunk.len())
+                            .expect("release response flow-control capacity");
+                    }
+                    Some(Err(error)) => break error,
+                    None => panic!("mismatched response body ended without a stream reset"),
+                }
+            };
+            assert!(reset.is_reset());
+            assert_eq!(reset.reason(), Some(Reason::PROTOCOL_ERROR));
+            observed_body
+        });
+        start_tx
+            .send(())
+            .expect("start response after client is polling");
+        let observed_body = client_task.await.expect("client response task");
+        let writer_error = error_rx.await.expect("writer result");
+        assert_eq!(writer_error, expected_error);
+        assert_eq!(
+            observed_body.len(),
+            expected_body.len(),
+            "observed body length for Content-Length {declared_length}"
+        );
+        assert!(
+            observed_body == expected_body,
+            "observed body bytes for Content-Length {declared_length}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn send_h2_response_resets_when_response_body_limit_is_exceeded() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let addr: SocketAddr = listener.local_addr().expect("addr");
