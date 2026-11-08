@@ -3674,3 +3674,14 @@ without a new causal hypothesis. Historical measurements above remain evidence
 for rejection. Normal streaming acceptance, same-runner revision comparison,
 native CPU/TCP recording and retained-profile analysis remain available.
 No mandatory workload, threshold, error check or real TCP test changes.
+
+Reject request-derived key reuse in cold cache lookups (7943790). Paired
+comparisons 37703610935 and 37707423668 use opposite revision orders against
+5e64d50. In the reverse-order run, all 68 actual workload windows complete
+without errors, miss writeback is verified, and owned scheduler deltas match
+the raw samples. Miss throughput improves 4.53%, but p99 rises 7.15% and queue
+delay rises 3.21%; the reference queue ratio is still 1.548829 against 1.0.
+Feature-rich 1 KiB RSS increases 8.86% and 7.95% across the two comparisons;
+ordinary 1 MiB hit CPU efficiency decreases in both. These mixed results do
+not establish a performance benefit. Restore the previous cold-key construction
+without changing storage probes, error propagation or acceptance criteria.
