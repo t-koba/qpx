@@ -675,6 +675,10 @@ proxy at 30.13 minutes; HTTP/2 took 12.25 minutes and netem 17.73 minutes.
 Repeat this accounting after all required measurements pass at the final commit.
 
 The `http2-events` diagnostic records kernel syscall tracepoints without ptrace.
+Its workload reuses the required HTTP/2 network namespace, MTU 1500, balanced
+client/server CPU partition and eight-second minimum calibration. The recorder
+and SOCK_DIAG sampler run inside that namespace; the pre-build socket probe
+remains a separate recorder functionality check.
 It observes enter/exit events for epoll waits and connect calls with
 `CLOCK_MONOTONIC`, retaining process and thread IDs for alignment with resource
 sample windows. Linux SOCK_DIAG snapshots retain acknowledged, sent, received,

@@ -2,7 +2,22 @@
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PERF_BIN="${QPX_NATIVE_PERF_BIN:?native perf executable is required}"
-if [ "$#" -gt 1 ] || { [ "$#" -eq 1 ] && [ "$1" != --probe-only ]; }; then
+if [ "$#" -eq 0 ]; then
+  exec bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" --events \
+    "$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl"
+fi
+output="$ROOT_DIR/target/perf/perf-audit-http2-compare.jsonl"
+if [ "$#" -eq 2 ] && [ "$1" = --inside-isolated ]; then
+  if [ ! -f "${QPX_HTTP2_COMPARE_ENVIRONMENT_JSON:-}" ] \
+    || [ "${QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS:-0}" != 1 ]; then
+    echo "kernel wait diagnostics require the isolated measurement environment" >&2
+    exit 2
+  fi
+  output="$2"
+  if [ "${QPX_PERF_NATIVE_IO_TIMELINE:-0}" = 1 ]; then
+    export RUST_LOG=warn,qpx_perf_phase=debug
+  fi
+elif [ "$#" -ne 1 ] || [ "$1" != --probe-only ]; then
   echo "unsupported kernel wait diagnostic argument" >&2
   exit 2
 fi
@@ -125,7 +140,7 @@ QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 \
   QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
   "$PERF_BIN" record --no-buildid --clockid CLOCK_MONOTONIC -a -m 8M -e "$EVENTS" \
     "${tcp_record_args[@]}" \
-    -o "$PROFILE_DIR/measurement.data" -- bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" \
+    -o "$PROFILE_DIR/measurement.data" -- bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$output" \
     || status=$?
 touch "$STOP_FILE"
 wait "$sampler_pid"

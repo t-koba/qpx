@@ -7,21 +7,23 @@ if [ "$(uname -s)" != Linux ]; then
   exit 1
 fi
 if [ "${1:-}" != --inside ]; then
-  if [ "$#" -ne 1 ] && { [ "$#" -ne 2 ] || { [ "$1" != --native ] && [ "$1" != --phases ]; }; }; then
-    echo "usage: perf-audit-http2-isolated.sh [--native|--phases] <comparison-jsonl>" >&2
+  if [ "$#" -ne 1 ] && { [ "$#" -ne 2 ] || { [ "$1" != --native ] && [ "$1" != --phases ] && [ "$1" != --events ]; }; }; then
+    echo "usage: perf-audit-http2-isolated.sh [--native|--phases|--events] <comparison-jsonl>" >&2
     exit 2
   fi
-  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR,QPXD_REAL_BIN,QPX_NATIVE_PROFILE_DIR,QPX_NATIVE_PERF_BIN,QPX_NATIVE_WRAPPER_SOURCE,QPX_PERF_NATIVE_IO_TIMELINE,QPX_PERF_MEMORY_MAP_DIAGNOSTICS,QPX_PERF_PROCESS_IO_COUNTERS,QPX_PERF_NATIVE_FD_TARGETS \
+  exec sudo --preserve-env=QPXD_BIN,GITHUB_SHA,QPX_HTTP2_COMPARE_LOG_DIR,QPXD_REAL_BIN,QPX_NATIVE_PROFILE_DIR,QPX_NATIVE_PERF_BIN,QPX_NATIVE_WRAPPER_SOURCE,QPX_PERF_NATIVE_IO_TIMELINE,QPX_PERF_MEMORY_MAP_DIAGNOSTICS,QPX_PERF_PROCESS_IO_COUNTERS,QPX_PERF_NATIVE_FD_TARGETS,QPX_HTTP2_COMPARE_BODY_SIZES \
     unshare --net bash "$ROOT_DIR/scripts/perf-audit-http2-isolated.sh" --inside "$@"
 fi
 shift
 native=0
 phases=0
+events=0
 body_sizes="1024 1048576"
 stream_values="1 100"
 case "${1:-}" in
   --native) native=1; shift ;;
   --phases) native=1; phases=1; shift ;;
+  --events) native=1; events=1; body_sizes="${QPX_HTTP2_COMPARE_BODY_SIZES:-1048576}"; stream_values=100; shift ;;
 esac
 if [ "$phases" = 1 ]; then
   export RUST_LOG=warn,qpx_perf_phase=debug
@@ -95,12 +97,16 @@ if set(os.sched_getaffinity(0)) != {int(value) for value in sys.argv[1].split(",
 PY
 done
 chown -R "$SUDO_UID:$SUDO_GID" "$work_dir" "$output.environment.json"
+comparison=(bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$output")
+if [ "$events" = 1 ]; then
+  comparison=(bash "$ROOT_DIR/scripts/perf-diagnose-http2-events.sh" --inside-isolated "$output")
+fi
 taskset -c "$server_cpus" setpriv --reuid "$SUDO_UID" --regid "$SUDO_GID" --init-groups env \
   PATH="$work_dir:$PATH" QPX_HTTP2_COMPARE_ENVIRONMENT_JSON="$output.environment.json" \
   QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS="$native" QPX_HTTP2_COMPARE_CALIBRATION_MIN_DURATION_MS=8000 \
   QPX_HTTP2_COMPARE_BODY_SIZES="$body_sizes" \
   QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES="$stream_values" QPX_HTTP2_COMPARE_SAMPLE_ATTEMPTS=3 \
-  bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" "$output"
+  "${comparison[@]}"
 if [ "${QPX_PERF_MEMORY_MAP_DIAGNOSTICS:-0}" = 1 ]; then
   python3 - "$QPX_HTTP2_COMPARE_LOG_DIR" <<'PY_MAPS'
 import json
