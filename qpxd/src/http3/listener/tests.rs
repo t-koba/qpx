@@ -381,3 +381,140 @@ async fn standard_h3_request_content_length_mismatches_fail_reads_and_drains() -
     })
     .await?
 }
+
+#[tokio::test]
+async fn standard_h3_open_send_overflow_aborts_without_panicking() -> Result<()> {
+    use bytes::Bytes;
+
+    #[derive(Clone)]
+    struct ReadOverflow;
+
+    #[async_trait]
+    impl H3RequestHandler for ReadOverflow {
+        type Response = Response<Body>;
+
+        fn limits(&self) -> H3Limits {
+            let mut limits =
+                CountLimitSelections(Arc::new(std::sync::atomic::AtomicUsize::new(0))).limits();
+            limits.streaming.max_request_body_bytes = 1024;
+            limits
+        }
+
+        async fn handle_http(&self, mut req: Request<Body>, _: H3ConnInfo) -> Self::Response {
+            if req.method() == http::Method::POST {
+                // h3 keeps a trailing-frame lookahead pending while exposing the
+                // decoded DATA body. Rejecting its overrun must safely abort
+                // that in-flight transport read, despite the missing FIN.
+                let err = req
+                    .body_mut()
+                    .data()
+                    .await
+                    .expect("oversized request must fail")
+                    .expect_err("oversized request must not yield body data");
+                assert_eq!(
+                    err.to_string(),
+                    "HTTP/3 request body exceeds Content-Length"
+                );
+            }
+            Response::new(Body::empty())
+        }
+
+        async fn handle_connect(
+            &self,
+            _: Request<()>,
+            _: H3ServerRequestStream,
+            _: H3ConnInfo,
+            _: H3ConnectKind,
+            _: Option<H3StreamDatagrams>,
+        ) -> Result<()> {
+            panic!("ordinary request must not enter CONNECT handling")
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (endpoint, _client, server_conn, conn) = h3_loopback().await?;
+        let info = H3ConnInfo {
+            remote_addr: server_conn.remote_address(),
+            dst_port: endpoint.local_addr()?.port(),
+            tls_sni: None,
+            peer_certificates: None,
+        };
+        let mut connection_tasks = tokio::task::JoinSet::new();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        connection_tasks.spawn(async move {
+            let mut connection = ::h3::server::builder()
+                .build::<_, Bytes>(h3_quinn::Connection::new(server_conn))
+                .await
+                .unwrap();
+            while let Some(resolver) = connection.accept().await.unwrap() {
+                tx.send(resolver.resolve_request().await.unwrap())
+                    .await
+                    .unwrap();
+            }
+        });
+        let mut control = conn.open_uni().await?;
+        control.write_all(&[0x00, 0x04, 0x00]).await?;
+        let (mut remote, _response) = conn.open_bi().await?;
+        // Static-only QPACK: POST, https, /, :authority localhost, CL: 4.
+        let headers = b"\x00\x00\xd4\xd7\xc1\x50\x09localhost\x54\x014";
+        remote.write_all(&[0x01, headers.len() as u8]).await?;
+        remote.write_all(headers).await?;
+        remote.write_all(b"\x00\x05abcde").await?;
+        // Keep the send half open: the decoded overrun must still abort its
+        // pending trailing-frame lookahead with the H3 message error code.
+        let (head, stream) = rx.recv().await.expect("decoded standard H3 request");
+        assert_eq!(head.headers()[http::header::CONTENT_LENGTH], "4");
+        let mut request_tasks = tokio::task::JoinSet::new();
+        let handler = ReadOverflow;
+        request_tasks.spawn(handle_stream(
+            head,
+            stream,
+            info.clone(),
+            handler,
+            ReadOverflow.limits(),
+            None,
+            None,
+        ));
+        let result = request_tasks.join_next().await.expect("request task");
+        assert!(
+            result.is_ok(),
+            "standard H3 request task panicked: {result:?}"
+        );
+        assert_eq!(
+            remote.stopped().await?,
+            Some(
+                quinn::VarInt::from_u64(::h3::error::Code::H3_MESSAGE_ERROR.value())
+                    .expect("valid H3 error code"),
+            ),
+            "open request must receive STOP_SENDING with H3_MESSAGE_ERROR"
+        );
+        assert!(conn.close_reason().is_none(), "connection must stay open");
+
+        // A second request must still complete on this same connection.
+        let (mut next, mut response) = conn.open_bi().await?;
+        let headers = b"\x00\x00\xd1\xd7\xc1\x50\x09localhost";
+        next.write_all(&[0x01, headers.len() as u8]).await?;
+        next.write_all(headers).await?;
+        next.finish()?;
+        let (head, stream) = rx.recv().await.expect("second standard H3 request");
+        request_tasks.spawn(handle_stream(
+            head,
+            stream,
+            info,
+            ReadOverflow,
+            ReadOverflow.limits(),
+            None,
+            None,
+        ));
+        let result = request_tasks
+            .join_next()
+            .await
+            .expect("second request task");
+        assert!(result.is_ok(), "second request task panicked: {result:?}");
+        let response = response.read_to_end(1024).await?;
+        assert_eq!(response.first(), Some(&0x01), "response HEADERS frame");
+        assert!(conn.close_reason().is_none(), "connection must stay open");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
