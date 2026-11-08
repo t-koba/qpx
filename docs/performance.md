@@ -3712,3 +3712,12 @@ and queue delay rises 67.30%; feature-rich 1 MiB CPU efficiency falls 29.04%
 and queue delay rises 81.80%. Restore the previous vectored write construction.
 Retain the real TCP large-body and subsequent keep-alive response integrity test.
 The observed loss-probe/DSACK activity does not justify repeating this write cap.
+
+The historical LTO pair `b91a395`/`27d2c2d` also differs in WebDAV filesystem
+and response-region handling. Its HTTP/2 measurements are useful observations,
+but binary layout and cross-crate optimization can change when other compiled
+code changes; the results do not isolate the LTO setting. Restore the original
+thin release setting while evaluating a new pair against `88f842d`, whose only
+executable-source difference is the LTO profile. Keep codegen units, features,
+panic behavior and all acceptance criteria unchanged. No LTO gain is established
+by the previous mixed comparisons or by this configuration change alone.

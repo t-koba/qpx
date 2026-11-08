@@ -137,8 +137,8 @@ byteorder_slice = "3"
 mimalloc = { version = "0.1.52", default-features = false }
 
 [profile.release]
-# Optimize across crates with one code generation unit.
-lto = "fat"
+# Keep the original release LTO mode until an isolated comparison establishes a gain.
+lto = "thin"
 codegen-units = 1
 strip = "symbols"
 
