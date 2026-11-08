@@ -70,12 +70,13 @@ for role in $roles; do
   report_suffix=cpu-report
   callchain_suffix=callchains
   if [ "$role" = streaming-backend ]; then
-    samples=("$role_log_directory"/streaming.qpxd.*.backend-rss-peak.samples.csv
-             "$role_log_directory"/streaming.lighttpd.*.backend-rss-peak.samples.csv)
+    samples=("$role_log_directory"/streaming.qpxd.*.attempt-*.backend-rss-peak.samples.csv
+             "$role_log_directory"/streaming.lighttpd.*.attempt-*.backend-rss-peak.samples.csv)
     report_suffix=backend-cpu-report
     callchain_suffix=backend-callchains
   else
-    samples=("$role_log_directory"/*."$sample_role".*.rss-peak.samples.csv)
+    # Calibration selects request counts; only timed attempts need workload reports.
+    samples=("$role_log_directory"/*."$sample_role".*.attempt-*.rss-peak.samples.csv)
   fi
   for sample in "${samples[@]}"; do
     [ -f "$sample" ] || continue

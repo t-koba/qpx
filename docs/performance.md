@@ -139,7 +139,9 @@ and symbol reports for the cache and feature-rich roles. The exact ELF executabl
 is preserved as gzip with its SHA-256 and uncompressed size before measurement,
 so raw addresses and DWARF stacks can be resolved after the runner is removed.
 Report generation verifies the executable's ELF format, size and SHA-256 against
-that recording before decoding any addresses. All reports
+that recording before decoding any addresses. Per-window reports select timed
+attempts; calibration retains its raw evidence without generating separate
+workload reports. All reports
 are retained before sampling-quality validation; any lost samples fail the
 diagnostic and are recorded explicitly in `sampling-quality.json`. Each perf
 ring uses 8 MiB to retain DWARF samples during report-consumer scheduling delays;
