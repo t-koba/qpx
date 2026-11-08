@@ -638,6 +638,97 @@ async fn direct_content_length_relay_preserves_pipelined_upstream_bytes() {
 }
 
 #[tokio::test]
+async fn direct_content_length_relay_reports_upstream_underflow_after_forwarding_prefix() {
+    let upstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind upstream");
+    let upstream_addr = upstream_listener.local_addr().expect("upstream address");
+    let upstream_server = tokio::spawn(async move {
+        let (mut stream, _) = upstream_listener.accept().await.expect("accept upstream");
+        stream.write_all(b"K").await.expect("write upstream prefix");
+    });
+    let upstream = TcpStream::connect(upstream_addr)
+        .await
+        .expect("connect upstream");
+
+    let parsed = [httparse::Header {
+        name: "Content-Length",
+        value: b"4",
+    }];
+    let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+        &parsed,
+        &Method::GET,
+        StatusCode::OK,
+        Version::HTTP_11,
+    )
+    .expect("raw response head");
+    raw_head.finalize("qpx");
+    let mut expected_wire = raw_head.serialized_http11_head().to_vec();
+    expected_wire.extend_from_slice(b"OK");
+
+    let recycled = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
+        interim: Vec::new(),
+        raw: Arc::new(raw_head),
+        stream: Some(upstream),
+        read_buf: BytesMut::from(&b"O"[..]),
+        write_buf: BytesMut::new(),
+        recycler: Some(crate::upstream::raw_http1::Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            },
+        )),
+        active_permit: None,
+    };
+
+    let downstream_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind downstream");
+    let downstream_addr = downstream_listener
+        .local_addr()
+        .expect("downstream address");
+    let downstream_server = tokio::spawn(async move {
+        let (mut stream, _) = downstream_listener
+            .accept()
+            .await
+            .expect("accept downstream");
+        let mut head_buf = BytesMut::new();
+        let error = match send_raw_http1_response_relay_with_interim(
+            &mut stream,
+            Version::HTTP_11,
+            &Method::GET,
+            relay,
+            true,
+            &mut head_buf,
+        )
+        .await
+        {
+            Ok(_) => panic!("truncated direct response body must fail"),
+            Err(error) => error,
+        };
+        assert_eq!(
+            error.to_string(),
+            "response body ended before declared content-length was satisfied"
+        );
+    });
+
+    let mut downstream = TcpStream::connect(downstream_addr)
+        .await
+        .expect("connect downstream");
+    let mut encoded = Vec::new();
+    downstream
+        .read_to_end(&mut encoded)
+        .await
+        .expect("read truncated response");
+    downstream_server.await.expect("downstream task");
+    upstream_server.await.expect("upstream task");
+
+    assert_eq!(encoded, expected_wire);
+    assert_eq!(recycled.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn interim_precedes_unchanged_raw_final_http1_relay() {
     check_raw_relay_with_interim(true).await;
 }
