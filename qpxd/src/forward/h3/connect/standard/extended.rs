@@ -424,7 +424,7 @@ mod tests {
     fn successful_extended_connect_head_strips_content_length_for_tunnel_data() {
         let response = ::http::Response::builder()
             .status(::http::StatusCode::OK)
-            .header(::http::header::CONTENT_LENGTH, "0")
+            .header(::http::header::CONTENT_LENGTH, "17")
             .header("trailer", "x-end")
             .header("x-upstream", "preserved")
             .body(())
