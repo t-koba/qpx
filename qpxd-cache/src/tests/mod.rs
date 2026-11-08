@@ -25,6 +25,14 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
+// Disk-cache fixtures need physical ancestors: system temp paths may contain
+// symlinks (for example /var on macOS), which the cache correctly rejects.
+pub(crate) fn canonical_temp_dir() -> std::path::PathBuf {
+    std::env::temp_dir()
+        .canonicalize()
+        .expect("canonicalize the system temp directory for disk-cache test fixtures")
+}
+
 pub(crate) struct MockBackend {
     map: Mutex<HashMap<String, Vec<u8>>>,
     gets: Mutex<Vec<String>>,

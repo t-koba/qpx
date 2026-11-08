@@ -259,7 +259,7 @@ async fn publish(
 async fn retired_legacy_canonical_does_not_resurface_after_short_generation_index_eviction() {
     tokio::time::timeout(Duration::from_secs(15), async {
         for disk in [false, true] {
-            let root = std::env::temp_dir().join(format!(
+            let root = crate::tests::canonical_temp_dir().join(format!(
                 "qpx-cache-legacy-retirement-{}",
                 uuid::Uuid::new_v4()
             ));
@@ -411,7 +411,7 @@ async fn legacy_304_persists_merged_policy_in_a_generation() {
                 (Method::GET, Some("bytes=1-3")),
                 (Method::GET, Some("bytes=9999999-")),
             ] {
-                let root = std::env::temp_dir()
+                let root = crate::tests::canonical_temp_dir()
                     .join(format!("qpx-legacy-refresh-{}", uuid::Uuid::new_v4()));
                 let inner = legacy_test_backend(disk, &root);
                 let (mutations, mut completed) = mpsc::unbounded_channel();
@@ -542,8 +542,8 @@ async fn legacy_304_persists_merged_policy_in_a_generation() {
 async fn staged_legacy_refresh_loses_to_replacement_even_after_index_eviction() {
     tokio::time::timeout(Duration::from_secs(15), async {
         for disk in [false, true] {
-            let root =
-                std::env::temp_dir().join(format!("qpx-legacy-stage-{}", uuid::Uuid::new_v4()));
+            let root = crate::tests::canonical_temp_dir()
+                .join(format!("qpx-legacy-stage-{}", uuid::Uuid::new_v4()));
             let inner = legacy_test_backend(disk, &root);
             let (mutations, mut completed) = mpsc::unbounded_channel();
             let backend = Arc::new(ObservedBackend {
@@ -659,8 +659,8 @@ async fn staged_legacy_refresh_loses_to_replacement_even_after_index_eviction() 
 async fn delayed_legacy_revalidation_cannot_restore_retired_canonical_after_index_eviction() {
     tokio::time::timeout(Duration::from_secs(10), async {
         for (disk, evict_before) in [(false, false), (false, true), (true, false), (true, true)] {
-            let root =
-                std::env::temp_dir().join(format!("qpx-legacy-delayed-{}", uuid::Uuid::new_v4()));
+            let root = crate::tests::canonical_temp_dir()
+                .join(format!("qpx-legacy-delayed-{}", uuid::Uuid::new_v4()));
             let inner = legacy_test_backend(disk, &root);
             let (mutations, mut completed) = mpsc::unbounded_channel();
             let backend = Arc::new(ObservedBackend {
@@ -837,8 +837,8 @@ async fn delayed_legacy_revalidation_cannot_restore_retired_canonical_after_inde
 async fn delayed_304_finalizers_cannot_mutate_a_published_replacement() {
     tokio::time::timeout(Duration::from_secs(5), async {
         for disk in [false, true] {
-            let root =
-                std::env::temp_dir().join(format!("qpx-cache-generation-{}", uuid::Uuid::new_v4()));
+            let root = crate::tests::canonical_temp_dir()
+                .join(format!("qpx-cache-generation-{}", uuid::Uuid::new_v4()));
             let inner = legacy_test_backend(disk, &root);
             let (mutations, mut completed) = mpsc::unbounded_channel();
             let backend = Arc::new(ObservedBackend {
@@ -1098,8 +1098,8 @@ impl CacheBackend for StalledLegacyBackend {
 async fn stalled_legacy_body_timeout_releases_producer_without_publishing() {
     tokio::time::timeout(Duration::from_secs(15), async {
         for disk in [false, true] {
-            let root =
-                std::env::temp_dir().join(format!("qpx-legacy-stall-{}", uuid::Uuid::new_v4()));
+            let root = crate::tests::canonical_temp_dir()
+                .join(format!("qpx-legacy-stall-{}", uuid::Uuid::new_v4()));
             let inner = legacy_test_backend(disk, &root);
             let request = make_get_request("/legacy-stall");
             let head_request = OwnerRequest::from_http(
@@ -1230,7 +1230,7 @@ async fn stalled_legacy_body_timeout_releases_producer_without_publishing() {
 async fn invalidation_reports_failed_canonical_retirement_before_304_commit() {
     tokio::time::timeout(Duration::from_secs(20), async {
         for disk in [false, true] {
-            let root = std::env::temp_dir().join(format!(
+            let root = crate::tests::canonical_temp_dir().join(format!(
                 "qpx-legacy-retire-failure-invalidate-{}",
                 uuid::Uuid::new_v4()
             ));
@@ -1408,7 +1408,7 @@ async fn shared_disk_independent_invalidation_cannot_lose_to_paused_legacy_304()
 async fn migration_invalidation_race(modes: &[(bool, bool)]) {
     tokio::time::timeout(Duration::from_secs(20), async {
         for &(disk, shared) in modes {
-            let root = std::env::temp_dir().join(format!(
+            let root = crate::tests::canonical_temp_dir().join(format!(
                 "qpx-legacy-invalidate-race-{}",
                 uuid::Uuid::new_v4()
             ));
@@ -1688,7 +1688,8 @@ async fn migration_invalidation_race(modes: &[(bool, bool)]) {
 #[tokio::test]
 async fn shared_disk_warm_readers_observe_independent_publication_and_invalidation() {
     tokio::time::timeout(Duration::from_secs(5), async {
-        let root = std::env::temp_dir().join(format!("qpx-shared-reader-{}", uuid::Uuid::new_v4()));
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-shared-reader-{}", uuid::Uuid::new_v4()));
         let writer = legacy_test_backend_mode(true, &root, true);
         let reader = legacy_test_backend_mode(true, &root, true);
         let writers = HashMap::from([("b".into(), writer.clone())]);

@@ -166,7 +166,8 @@ mod tests {
 
     #[tokio::test]
     async fn independent_lock_contention_timeout_cancellation_and_layout_are_fail_closed() {
-        let root = std::env::temp_dir().join(format!("qpx-shared-lock-{}", uuid::Uuid::new_v4()));
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-shared-lock-{}", uuid::Uuid::new_v4()));
         let cfg = config(&root);
         let first = DiskCacheBackend::new(cfg.clone()).unwrap();
         let second = DiskCacheBackend::new(cfg.clone()).unwrap();
@@ -249,7 +250,8 @@ mod tests {
 
     #[tokio::test]
     async fn stale_expiry_and_capacity_entries_cannot_unlink_a_replacement() {
-        let root = std::env::temp_dir().join(format!("qpx-stale-cleanup-{}", uuid::Uuid::new_v4()));
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-stale-cleanup-{}", uuid::Uuid::new_v4()));
         let mut first = foreground_backend(&root);
         let second = foreground_backend(&root);
         first.ensure_indexed().await.unwrap();
@@ -293,7 +295,8 @@ mod tests {
 
     #[tokio::test]
     async fn indexing_and_open_cleanup_read_after_the_publication_lock() {
-        let root = std::env::temp_dir().join(format!("qpx-index-cleanup-{}", uuid::Uuid::new_v4()));
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-index-cleanup-{}", uuid::Uuid::new_v4()));
         let publisher = foreground_backend(&root);
         // Exercise both invalid-file indexing and open-time expiration. Hold
         // the publisher's object stripe at its pre-rename boundary; explicitly
@@ -331,7 +334,8 @@ mod tests {
 
     #[tokio::test]
     async fn object_locks_bound_cancelled_writers_and_deletes_and_pin_readers() {
-        let root = std::env::temp_dir().join(format!("qpx-object-lock-{}", uuid::Uuid::new_v4()));
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-object-lock-{}", uuid::Uuid::new_v4()));
         let first = foreground_backend(&root);
         let second = foreground_backend(&root);
         first.put("ns", "key", b"original", 60).await.unwrap();
@@ -393,7 +397,8 @@ mod tests {
     #[tokio::test]
     async fn lock_files_reject_symlinks_and_nonprivate_state() {
         use std::os::unix::fs::{PermissionsExt, symlink};
-        let root = std::env::temp_dir().join(format!("qpx-unsafe-lock-{}", uuid::Uuid::new_v4()));
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-unsafe-lock-{}", uuid::Uuid::new_v4()));
         let cfg = config(&root);
         let backend = DiskCacheBackend::new(cfg.clone()).unwrap();
         let directory = root.join(".qpx-commit-locks");

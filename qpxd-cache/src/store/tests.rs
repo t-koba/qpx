@@ -252,7 +252,8 @@ fn refreshed_selectors_preserve_query_digest_and_fail_closed_on_obs_text() {
 #[tokio::test]
 async fn canonical_writeback_remains_available_after_index_eviction() {
     for disk in [false, true] {
-        let root = std::env::temp_dir().join(format!("qpx-canonical-{}", uuid::Uuid::new_v4()));
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-canonical-{}", uuid::Uuid::new_v4()));
         let backend: Arc<dyn CacheBackend> = if disk {
             Arc::new(
                 crate::backend_disk::DiskCacheBackend::new(qpx_core::config::CacheBackendConfig {
