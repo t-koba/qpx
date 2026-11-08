@@ -43,9 +43,8 @@ jobs:
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     env:
       RUSTUP_TOOLCHAIN: "1.99.1"
-      CURRENT_SHA: ef8541cc4f9b89e3a89feda8ef4da4c15938cb69
-      # Local source commit corresponding to the published baseline.
-      SOURCE_COMMIT: bead51d033f8dac90a8d3b335565eb1ee4e4dd39
+      # Use the immutable source selected by this workflow_dispatch run.
+      CURRENT_SHA: ${{ github.sha }}
       CARGO_INCREMENTAL: "0"
       # Required for Linux to accumulate schedstat field 2; restore after tracing.
       SCHED_SCHEDSTATS: "1"
@@ -55,7 +54,7 @@ jobs:
         run: python3 scripts/test-streaming-schedstat.py
       - uses: actions/checkout@v5
         with:
-          ref: ef8541cc4f9b89e3a89feda8ef4da4c15938cb69
+          ref: ${{ github.sha }}
           path: .trace-current
       - uses: dtolnay/rust-toolchain@master
         with:
@@ -66,8 +65,9 @@ jobs:
           set -euo pipefail
           mkdir -p target/scheduler-trace
           exec > >(tee target/scheduler-trace/build.log) 2>&1
+          test "$CURRENT_SHA" = "$GITHUB_SHA"
           {
-            printf 'harness=%s\nbaseline=%s\nsource_commit=%s\n' "$GITHUB_SHA" "$CURRENT_SHA" "$SOURCE_COMMIT"
+            printf 'dispatch_sha=%s\nbaseline_sha=%s\n' "$GITHUB_SHA" "$CURRENT_SHA"
             printf 'run=%s attempt=%s runner=%s image=%s version=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME" "$ImageOS" "$ImageVersion"
             rustc +1.99.1 -Vv
             cargo +1.99.1 -V

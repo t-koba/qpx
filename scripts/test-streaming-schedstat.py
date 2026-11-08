@@ -57,10 +57,12 @@ class WorkflowRegistrationTest(unittest.TestCase):
 
     def test_same_source_ab_workflow_patch_and_harness_identities(self):
         workflow = (ROOT / ".github/workflows/streaming-scheduler-trace.yml").read_text()
-        baseline = "ef8541cc4f9b89e3a89feda8ef4da4c15938cb69"
-        self.assertIn(f"CURRENT_SHA: {baseline}", workflow)
-        self.assertIn(f"ref: {baseline}", workflow)
-        self.assertIn("SOURCE_COMMIT: bead51d033f8dac90a8d3b335565eb1ee4e4dd39", workflow)
+        self.assertIn("CURRENT_SHA: ${{ github.sha }}", workflow)
+        self.assertIn("ref: ${{ github.sha }}", workflow)
+        self.assertIn('test "$CURRENT_SHA" = "$GITHUB_SHA"', workflow)
+        self.assertNotIn("SOURCE_COMMIT", workflow)
+        self.assertNotIn("ef8541cc4f9b89e3a89feda8ef4da4c15938cb69", workflow)
+        self.assertNotIn("bead51d033f8dac90a8d3b335565eb1ee4e4dd39", workflow)
         self.assertEqual(workflow.count("runs-on:"), 1)
         self.assertIn("runs-on: ubuntu-24.04", workflow)
         self.assertEqual(workflow.count("cargo +1.99.1 build"), 2)
@@ -71,7 +73,7 @@ class WorkflowRegistrationTest(unittest.TestCase):
             'test "$(git -C "$EXPERIMENT_DIR" rev-parse HEAD^)" = "$CURRENT_SHA"',
             'diff --name-only)" = qpxd/src/startup.rs',
             'diff > target/scheduler-trace/experiment.patch',
-            'harness=%s', 'rustc +1.99.1 -Vv', 'cargo +1.99.1 -V',
+            'dispatch_sha=%s', 'baseline_sha=%s', 'rustc +1.99.1 -Vv', 'cargo +1.99.1 -V',
             '/proc/sys/kernel/random/boot_id', 'sha256sum',
             'export QPXD_BIN="$RUNNER_TEMP/trace-current/release/qpxd"',
             'export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-experiment/release/qpxd"',
