@@ -1,7 +1,7 @@
 name: streaming scheduler trace
 
 # Diagnostic only; the path-scoped push is registration-only and skips the job.
-# Manual dispatch runs the trace; no objectives or release-gate dependency.
+# Manual dispatch runs one same-source runtime-flavor A/B, not an objective gate.
 # Sampling adds overhead and misses tasks that live entirely between polls or
 # exit tails. Raw task counts/read errors expose partial coverage, not causality.
 on:
@@ -18,7 +18,7 @@ on:
         options: ["30", "60"]
         default: "60"
       workload_timeout_minutes:
-        description: Fast-stream workload bound excluding builds
+        description: Both paired workloads bound excluding builds
         type: choice
         options: ["5", "10"]
         default: "10"
@@ -39,12 +39,13 @@ permissions:
 jobs:
   trace:
     if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: ${{ fromJSON(inputs.timeout_minutes) }}
     env:
       RUSTUP_TOOLCHAIN: "1.99.1"
-      CURRENT_SHA: 66a3124fff808ddb6a8cb88d850aad1a425129f0
-      REFERENCE_SHA: d67a148e7ccbbd272750415213601005af0f38c5
+      CURRENT_SHA: ef8541cc4f9b89e3a89feda8ef4da4c15938cb69
+      # Local source commit corresponding to the published baseline.
+      SOURCE_COMMIT: bead51d033f8dac90a8d3b335565eb1ee4e4dd39
       CARGO_INCREMENTAL: "0"
       # Required for Linux to accumulate schedstat field 2; restore after tracing.
       SCHED_SCHEDSTATS: "1"
@@ -54,57 +55,111 @@ jobs:
         run: python3 scripts/test-streaming-schedstat.py
       - uses: actions/checkout@v5
         with:
-          ref: 66a3124fff808ddb6a8cb88d850aad1a425129f0
+          ref: ef8541cc4f9b89e3a89feda8ef4da4c15938cb69
           path: .trace-current
-      - uses: actions/checkout@v5
-        with:
-          ref: d67a148e7ccbbd272750415213601005af0f38c5
-          path: .trace-reference
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.1"
-      - name: capture identity and build both exact sources
+      - name: capture identity and build same-source runtime variants
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p target/scheduler-trace
           exec > >(tee target/scheduler-trace/build.log) 2>&1
-          test "$(git -C .trace-current rev-parse HEAD)" = "$CURRENT_SHA"
-          test "$(git -C .trace-reference rev-parse HEAD)" = "$REFERENCE_SHA"
           {
-            printf 'harness=%s\ncurrent=%s\nreference=%s\n' "$GITHUB_SHA" "$CURRENT_SHA" "$REFERENCE_SHA"
-            printf 'run=%s attempt=%s runner=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME"
+            printf 'harness=%s\nbaseline=%s\nsource_commit=%s\n' "$GITHUB_SHA" "$CURRENT_SHA" "$SOURCE_COMMIT"
+            printf 'run=%s attempt=%s runner=%s image=%s version=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME" "$ImageOS" "$ImageVersion"
             rustc +1.99.1 -Vv
             cargo +1.99.1 -V
             uname -a
             cat /proc/sys/kernel/random/boot_id
           } > target/scheduler-trace/identity.txt
+          test "$(git -C .trace-current rev-parse HEAD)" = "$CURRENT_SHA"
+          export EXPERIMENT_DIR="$RUNNER_TEMP/trace-experiment-source"
+          git -C .trace-current worktree add --detach "$EXPERIMENT_DIR" "$CURRENT_SHA"
+          python3 - <<'PY'
+          import os
+          from pathlib import Path
+
+          path = Path(os.environ["EXPERIMENT_DIR"]) / "qpxd/src/startup.rs"
+          source = path.read_text()
+          baseline = """    let mut builder = if worker_threads == 1 {
+                  tokio::runtime::Builder::new_current_thread()
+              } else {
+                  let mut builder = tokio::runtime::Builder::new_multi_thread();
+                  builder.worker_threads(worker_threads);
+                  builder
+              };
+              builder
+                  .max_blocking_threads(max_blocking_threads)"""
+          experiment = """    let mut builder = tokio::runtime::Builder::new_multi_thread();
+              builder
+                  .worker_threads(worker_threads)
+                  .max_blocking_threads(max_blocking_threads)"""
+          if source.count(baseline) != 1:
+              raise SystemExit("baseline runtime builder differs; refusing experimental patch")
+          path.write_text(source.replace(baseline, experiment, 1))
+          PY
+          test "$(git -C "$EXPERIMENT_DIR" diff --name-only)" = qpxd/src/startup.rs
+          git -C "$EXPERIMENT_DIR" diff --check
+          git -C "$EXPERIMENT_DIR" diff > target/scheduler-trace/experiment.patch
+          git -C "$EXPERIMENT_DIR" add qpxd/src/startup.rs
+          git -C "$EXPERIMENT_DIR" -c user.name='Scheduler diagnostic' -c user.email='diagnostic@example.invalid' commit -m 'test: isolate forced multi-thread runtime experiment'
+          REFERENCE_SHA="$(git -C "$EXPERIMENT_DIR" rev-parse HEAD)"
+          test "$(git -C "$EXPERIMENT_DIR" rev-parse HEAD^)" = "$CURRENT_SHA"
+          printf 'experiment=%s\nbaseline_runtime=CurrentThread\nexperiment_runtime=MultiThread\nworker_threads=1\n' "$REFERENCE_SHA" >> target/scheduler-trace/identity.txt
+          printf 'REFERENCE_SHA=%s\n' "$REFERENCE_SHA" >> "$GITHUB_ENV"
           (cd .trace-current && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-current" RUSTFLAGS="-D warnings" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
-          (cd .trace-reference && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-reference" RUSTFLAGS="" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
-          sha256sum "$RUNNER_TEMP/trace-current/release/qpxd" "$RUNNER_TEMP/trace-reference/release/qpxd" >> target/scheduler-trace/identity.txt
-      - name: trace existing fast-stream paired workload
+          sha256sum "$RUNNER_TEMP/trace-current/release/qpxd" >> target/scheduler-trace/identity.txt
+          (cd "$EXPERIMENT_DIR" && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-experiment" RUSTFLAGS="-D warnings" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
+          sha256sum "$RUNNER_TEMP/trace-experiment/release/qpxd" >> target/scheduler-trace/identity.txt
+      - name: trace one fast and one slow paired workload
         timeout-minutes: ${{ fromJSON(inputs.workload_timeout_minutes) }}
         env:
           QPX_STREAMING_SCHEDSTAT_INTERVAL: ${{ inputs.interval_seconds }}
+          QPX_STREAMING_COMPARE_BYTES: "104857600"
+          QPX_STREAMING_COMPARE_CHUNK_BYTES: "65536"
+          QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS: "3"
+          QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES: "2"
+          QPX_STREAMING_COMPARE_FAST_TRANSFERS: "8"
+          QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS: "1"
         shell: bash
         run: |
           set -euo pipefail
           sysctl -n kernel.sched_schedstats > target/scheduler-trace/schedstats-before.txt
           sudo sysctl -w kernel.sched_schedstats="$SCHED_SCHEDSTATS" | tee target/scheduler-trace/schedstats-enabled.txt
           export QPXD_BIN="$RUNNER_TEMP/trace-current/release/qpxd"
-          export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-reference/release/qpxd"
+          export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-experiment/release/qpxd"
           export QPX_PREVIOUS_SOURCE_SHA="$REFERENCE_SHA"
           export GITHUB_SHA="$CURRENT_SHA"
-          export QPX_STREAMING_COMPARE_PAIR_ONLY_MODE=fast
-          export QPX_STREAMING_SCHEDSTAT_DIR="$GITHUB_WORKSPACE/target/scheduler-trace/tasks"
-          export QPX_STREAMING_COMPARE_LOG_DIR="$GITHUB_WORKSPACE/target/scheduler-trace/logs"
-          bash scripts/perf-audit-streaming-compare.sh target/scheduler-trace/measurements.jsonl 2>&1 | tee target/scheduler-trace/workload.log
+          env | LC_ALL=C sort | grep -E '^(QPX_STREAMING_|QPXD_BIN=|QPX_PREVIOUS_|GITHUB_SHA=)' > target/scheduler-trace/workload-parameters.txt
+          result=0
+          for mode in fast slow; do
+            directory="$GITHUB_WORKSPACE/target/scheduler-trace/$mode"
+            mkdir -p "$directory"
+            export QPX_STREAMING_COMPARE_PAIR_ONLY_MODE="$mode"
+            export QPX_STREAMING_SCHEDSTAT_DIR="$directory/tasks"
+            export QPX_STREAMING_COMPARE_LOG_DIR="$directory/logs"
+            env | LC_ALL=C sort | grep -E '^(QPX_STREAMING_|QPXD_BIN=|QPX_PREVIOUS_|GITHUB_SHA=)' > "$directory/parameters.txt"
+            status=0
+            bash scripts/perf-audit-streaming-compare.sh "$directory/measurements.jsonl" 2>&1 | tee "$directory/workload.log" || status=$?
+            printf '%s\n' "$status" > "$directory/exit-status.txt"
+            if [ "$status" -ne 0 ]; then result=1; fi
+          done
+          exit "$result"
       - name: restore runner scheduler statistics setting
         if: always()
         shell: bash
         run: |
           if [ -f target/scheduler-trace/schedstats-before.txt ]; then
             sudo sysctl -w kernel.sched_schedstats="$(cat target/scheduler-trace/schedstats-before.txt)" > target/scheduler-trace/schedstats-restored.txt
+          fi
+      - name: remove temporary experimental source
+        if: always()
+        shell: bash
+        run: |
+          if [ -d "$RUNNER_TEMP/trace-experiment-source" ]; then
+            git -C .trace-current worktree remove --force "$RUNNER_TEMP/trace-experiment-source"
           fi
       - name: upload raw scheduler diagnostic even on failure
         if: always()

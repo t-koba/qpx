@@ -68,6 +68,7 @@ collect_artifacts() {
   rm -rf "$LOG_ARTIFACT_DIR"
   mkdir -p "$LOG_ARTIFACT_DIR"
   cp -R "$LOG_DIR"/. "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
+  cp "$TMP_DIR/interleaved-raw.jsonl" "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   cp "$TMP_DIR"/*.yaml "$LOG_ARTIFACT_DIR"/ 2>/dev/null || true
   find "$TMP_DIR" -name '*.conf' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
   find "$TMP_DIR" -name '*.valid-samples.jsonl' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \; 2>/dev/null || true
@@ -734,8 +735,8 @@ PY
     "$CHUNK_BYTES" "$SAMPLE_ATTEMPTS" "$valid_sample_count" "$commit"
 }
 
-if [ -n "${QPX_STREAMING_SCHEDSTAT_DIR:-}" ] && [ "$PAIR_ONLY_MODE" != fast ]; then
-  echo "scheduler trace requires the manual fast pair-only workload" >&2
+if [ -n "${QPX_STREAMING_SCHEDSTAT_DIR:-}" ] && [ -z "$PAIR_ONLY_MODE" ]; then
+  echo "scheduler trace requires the manual fast or slow pair-only workload" >&2
   exit 1
 fi
 

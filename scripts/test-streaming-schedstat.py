@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import textwrap
 import tempfile
 import unittest
 
@@ -41,6 +42,76 @@ class WorkflowRegistrationTest(unittest.TestCase):
         self.assertIn(
             "  trace:\n    if: github.event_name == 'workflow_dispatch'\n", workflow
         )
+
+    def test_pair_only_trace_guard_accepts_both_modes_not_matrix(self):
+        source = (ROOT / "scripts/perf-audit-streaming-compare.sh").read_text()
+        start = source.index('if [ -n "${QPX_STREAMING_SCHEDSTAT_DIR:-}" ] &&')
+        guard = source[start:source.index("require_cmd curl", start)]
+        for mode, tracing, expected in (("fast", "trace", 0), ("slow", "trace", 0),
+                                        ("", "trace", 1), ("", "", 0)):
+            with self.subTest(mode=mode, tracing=tracing):
+                result = subprocess.run(["bash", "-eu", "-c", guard], capture_output=True,
+                                        env=dict(os.environ, PAIR_ONLY_MODE=mode,
+                                                 QPX_STREAMING_SCHEDSTAT_DIR=tracing))
+                self.assertEqual(result.returncode, expected, result.stderr)
+
+    def test_same_source_ab_workflow_patch_and_harness_identities(self):
+        workflow = (ROOT / ".github/workflows/streaming-scheduler-trace.yml").read_text()
+        baseline = "ef8541cc4f9b89e3a89feda8ef4da4c15938cb69"
+        self.assertIn(f"CURRENT_SHA: {baseline}", workflow)
+        self.assertIn(f"ref: {baseline}", workflow)
+        self.assertIn("SOURCE_COMMIT: bead51d033f8dac90a8d3b335565eb1ee4e4dd39", workflow)
+        self.assertEqual(workflow.count("runs-on:"), 1)
+        self.assertIn("runs-on: ubuntu-24.04", workflow)
+        self.assertEqual(workflow.count("cargo +1.99.1 build"), 2)
+        self.assertEqual(workflow.count('RUSTFLAGS="-D warnings" cargo'), 2)
+        for contract in (
+            'worktree add --detach "$EXPERIMENT_DIR" "$CURRENT_SHA"',
+            'test "$(git -C .trace-current rev-parse HEAD)" = "$CURRENT_SHA"',
+            'test "$(git -C "$EXPERIMENT_DIR" rev-parse HEAD^)" = "$CURRENT_SHA"',
+            'diff --name-only)" = qpxd/src/startup.rs',
+            'diff > target/scheduler-trace/experiment.patch',
+            'harness=%s', 'rustc +1.99.1 -Vv', 'cargo +1.99.1 -V',
+            '/proc/sys/kernel/random/boot_id', 'sha256sum',
+            'export QPXD_BIN="$RUNNER_TEMP/trace-current/release/qpxd"',
+            'export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-experiment/release/qpxd"',
+            'export QPX_PREVIOUS_SOURCE_SHA="$REFERENCE_SHA"',
+            'export GITHUB_SHA="$CURRENT_SHA"',
+            'for mode in fast slow; do',
+            'export QPX_STREAMING_COMPARE_PAIR_ONLY_MODE="$mode"',
+            'export QPX_STREAMING_SCHEDSTAT_DIR="$directory/tasks"',
+            'QPX_STREAMING_COMPARE_BYTES: "104857600"',
+            'QPX_STREAMING_COMPARE_CHUNK_BYTES: "65536"',
+            'QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS: "3"',
+            'QPX_STREAMING_COMPARE_FAST_TRANSFERS: "8"',
+            'QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS: "1"',
+            'if: always()', 'path: target/scheduler-trace/',
+        ):
+            self.assertIn(contract, workflow)
+        self.assertEqual(workflow.count("bash scripts/perf-audit-streaming-compare.sh"), 1)
+        self.assertNotIn("check-streaming", workflow)
+        self.assertNotIn("performance-objectives", workflow)
+        # Execute the exact embedded patch against a disposable startup copy.
+        patch = textwrap.dedent(workflow.split("python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
+        original = (ROOT / "qpxd/src/startup.rs").read_text()
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "qpxd/src/startup.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(original)
+            env = dict(os.environ, EXPERIMENT_DIR=tmp)
+            result = subprocess.run(["python3", "-c", patch], env=env, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            start = original.index("    let mut builder = if worker_threads == 1 {")
+            end = original.index("        .max_blocking_threads", start)
+            self.assertEqual(path.read_text(), original[:start] +
+                             "    let mut builder = tokio::runtime::Builder::new_multi_thread();\n"
+                             "    builder\n        .worker_threads(worker_threads)\n" + original[end:])
+            # A different runtime builder must fail closed, not silently build a third variant.
+            result = subprocess.run(["python3", "-c", patch], env=env, capture_output=True)
+            self.assertNotEqual(result.returncode, 0)
+        harness = (ROOT / "scripts/perf-audit-streaming-compare.sh").read_text()
+        self.assertIn("runtime:\n  worker_threads: 1\n", harness)
+        self.assertIn('cp "$TMP_DIR/interleaved-raw.jsonl" "$LOG_ARTIFACT_DIR"/', harness)
 
 
 class CollectorTest(unittest.TestCase):
