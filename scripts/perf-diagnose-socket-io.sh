@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+workload="${1:-http2}"
+if [ "$#" -gt 1 ]; then
+  echo "socket I/O diagnostic accepts one workload" >&2
+  exit 2
+fi
+case "$workload" in
+  http2) expected_role=qpxd-h2 ;;
+  feature-large) expected_role=qpxd-feature-rich ;;
+  *) echo "unsupported socket I/O workload: $workload" >&2; exit 2 ;;
+esac
 export QPX_REAL_QPXD="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 export QPX_REAL_NGINX QPX_REAL_H2LOAD QPX_NATIVE_PERF_BIN QPX_NATIVE_WRAPPER_SOURCE
 QPX_REAL_NGINX="$(command -v nginx)"
@@ -10,7 +20,7 @@ QPX_NATIVE_WRAPPER_SOURCE="$ROOT_DIR/scripts/lib/perf-native-process.py"
 export QPX_NATIVE_PROFILE_MODE=syscalls
 export QPX_NATIVE_PROFILE_DIR
 mkdir -p "$ROOT_DIR/target/perf/profiles"
-QPX_NATIVE_PROFILE_DIR="$(mktemp -d "$ROOT_DIR/target/perf/profiles/http2-io.XXXXXX")"
+QPX_NATIVE_PROFILE_DIR="$(mktemp -d "$ROOT_DIR/target/perf/profiles/socket-io.XXXXXX")"
 mkdir -p "$QPX_NATIVE_PROFILE_DIR/tools"
 for program in qpxd nginx h2load; do
   wrapper="$QPX_NATIVE_PROFILE_DIR/tools/$program"
@@ -29,12 +39,21 @@ IO_WRAPPER
 done
 bash "$ROOT_DIR/scripts/check-perf-native-process.sh" "$QPX_NATIVE_PROFILE_DIR/tools/qpxd"
 status=0
-PATH="$QPX_NATIVE_PROFILE_DIR/tools:$PATH" QPXD_BIN="$QPX_NATIVE_PROFILE_DIR/tools/qpxd" \
-  QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
-  QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
-  bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" || status=$?
-python3 - "$QPX_NATIVE_PROFILE_DIR" <<'IO_SUMMARY'
+if [ "$workload" = http2 ]; then
+  PATH="$QPX_NATIVE_PROFILE_DIR/tools:$PATH" QPXD_BIN="$QPX_NATIVE_PROFILE_DIR/tools/qpxd" \
+    QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
+    QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
+    bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" || status=$?
+else
+  PATH="$QPX_NATIVE_PROFILE_DIR/tools:$PATH" QPXD_BIN="$QPX_NATIVE_PROFILE_DIR/tools/qpxd" \
+    QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+    QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-feature-rich,nginx-feature-rich \
+    QPX_PROXY_COMPARE_BODY_SIZES=1048576 \
+    bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh" || status=$?
+fi
+python3 - "$QPX_NATIVE_PROFILE_DIR" "$expected_role" <<'IO_SUMMARY'
 import json
+import os
 from pathlib import Path
 import re
 import sys
@@ -42,9 +61,11 @@ root = Path(sys.argv[1])
 lifecycle = [json.loads(path.read_text()) for path in root.glob('*.lifecycle.json')]
 if not lifecycle or any(row['forced_shutdown'] for row in lifecycle):
     raise SystemExit('syscall tracer lifecycle is missing or incomplete')
-if not any(row['role'] == 'qpxd-h2' for row in lifecycle):
+if not any(row['role'] == sys.argv[2] for row in lifecycle):
     raise SystemExit('syscall trace lacks the actual qpxd server')
 for row in lifecycle:
+    if os.environ.get('QPX_NATIVE_SOCKET_WRITES') == '1' and row.get('raw_write_syscalls') != ['write', 'writev', 'sendto', 'sendmsg']:
+        raise SystemExit('socket write trace lacks raw argument formatting')
     if row['role'].startswith('h2load-'):
         if row['requested_signal'] is not None or row['exit_status'] != 0:
             raise SystemExit('real h2load syscall trace did not complete cleanly')

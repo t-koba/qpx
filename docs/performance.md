@@ -154,6 +154,12 @@ retain the owner, timestamps, exit status, and any forced shutdown; incomplete
 shutdown is a diagnostic failure. CPU diagnostics have a 20-minute deadline,
 and individual symbol reports have a three-minute deadline. Self-CPU reports omit
 rendered call graphs while raw DWARF stacks remain available for further analysis.
+The `feature-large-io` diagnostic reuses the HTTP/2 syscall tracer for the real
+1 MiB feature-rich cache pair. Socket writes retain timestamps, return sizes
+and durations using [raw argument formatting](https://github.com/strace/strace/blob/master/doc/strace.1.in),
+without decoding payload buffers. The real TCP ownership probe verifies this
+format before measurement. Tracing overhead makes these records diagnostic;
+they do not replace normal performance acceptance.
 The `http2-native` variant records the 1 KiB, 100-stream workload in the same
 way. HTTP/2 schema 11 requires explicit instrumentation provenance and workload-only
 CPU and scheduler counter windows. Counter snapshots surround the completed

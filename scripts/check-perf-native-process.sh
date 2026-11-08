@@ -77,6 +77,8 @@ fi
 python3 - "$probe_dir/qpxd-native-probe.lifecycle.json" <<'PY'
 import json
 import os
+from pathlib import Path
+import re
 import sys
 record = json.load(open(sys.argv[1]))
 if (record.get("forced_shutdown") is not False or record.get("requested_signal") != 15
@@ -84,6 +86,16 @@ if (record.get("forced_shutdown") is not False or record.get("requested_signal")
     raise SystemExit("native profiler probe did not stop gracefully")
 if record.get("mode") == "syscalls" and record.get("seccomp_filter_observed") is not True:
     raise SystemExit("real syscall trace lacks the required kernel filter")
+if os.environ.get("QPX_NATIVE_SOCKET_WRITES") == "1":
+    if record.get("raw_write_syscalls") != ["write", "writev", "sendto", "sendmsg"]:
+        raise SystemExit("real socket write trace lacks raw argument formatting")
+    writes = []
+    for path in Path(sys.argv[1]).parent.glob("qpxd-native-probe.syscalls.*"):
+        for line in path.read_text().splitlines():
+            if re.search(r"\b(?:write|writev|sendto|sendmsg)\(", line):
+                writes.append(line)
+    if not writes or any('"' in line for line in writes):
+        raise SystemExit("real socket write probe is missing or decoded payload data")
 try:
     os.killpg(record["process_group"], 0)
 except ProcessLookupError:

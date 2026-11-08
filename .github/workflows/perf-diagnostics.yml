@@ -18,7 +18,7 @@ on:
       category:
         description: Diagnostic workload; does not replace required CI gates
         type: choice
-        options: [streaming, streaming-scheduler, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, feature-large-native, http1-native, http2-native, http2-timeline-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
+        options: [streaming, streaming-scheduler, streaming-revision, proxy-threads, proxy-phases, cache-writer-phases, cache-writeback, feature-callgrind, cache-miss-callgrind, proxy-native, feature-large-native, feature-large-io, http1-native, http2-native, http2-timeline-native, http2-phases, http2-client, streaming-native, webdav-native, webdav-revision, cache-revision, http2-revision, webdav-sockets, webdav-scheduling, origin-cache, http2, http2-windows, http2-io, http2-events, http2-io-timeline, http2-mtu, http2-observer, http2-quality, http2-affinity, http2-balanced-affinity, scheduler-accounting]
         default: streaming
       baseline_ref:
         description: Baseline commit for a same-runner revision comparison
@@ -374,8 +374,11 @@ jobs:
             http2-client)
               python3 scripts/perf-evaluate.py "HTTP/2 load-generator CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-mtu.sh --full-client
               ;;
+            feature-large-io)
+              QPX_NATIVE_SOCKET_WRITES=1 python3 scripts/perf-evaluate.py "feature-rich 1 MiB socket write diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-socket-io.sh feature-large
+              ;;
             http2-io)
-              python3 scripts/perf-evaluate.py "HTTP/2 syscall wait diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-io.sh
+              python3 scripts/perf-evaluate.py "HTTP/2 syscall wait diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-socket-io.sh
               ;;
             http2-windows)
               python3 scripts/perf-evaluate.py "HTTP/2 client window diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-window.sh

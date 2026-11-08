@@ -14,6 +14,9 @@ def main():
     arguments = sys.argv[1:]
     server = os.environ["QPXD_REAL_BIN"]
     mode = os.environ.get("QPX_NATIVE_PROFILE_MODE", "cpu")
+    socket_writes = os.environ.get("QPX_NATIVE_SOCKET_WRITES", "0")
+    if socket_writes not in ("0", "1") or (socket_writes == "1" and mode != "syscalls"):
+        raise SystemExit("socket write tracing requires syscall mode and a boolean setting")
     reference_role = os.environ.get("QPX_NATIVE_REFERENCE_ROLE")
     if reference_role is not None and (reference_role not in ("apache-webdav", "streaming-backend") or mode != "cpu"):
         raise SystemExit("unsupported native reference profile role")
@@ -79,8 +82,15 @@ def main():
     else:
         # Observe waits and socket ownership without recording payload buffers.
         syscalls = "epoll_wait,epoll_pwait,epoll_pwait2,epoll_ctl,poll,ppoll,select,pselect6,futex,connect,setsockopt,getsockopt,shutdown,close"
+        formatting = []
+        if socket_writes == "1":
+            writes = "write,writev,sendto,sendmsg"
+            syscalls += "," + writes + ",accept,accept4"
+            # Raw argument formatting records pointers and lengths, never payload buffers.
+            formatting = ["-e", f"raw={writes}"]
+            lifecycle["raw_write_syscalls"] = writes.split(",")
         command = [observer, "--seccomp-bpf", "-ff", "-qq", "-ttt", "-T", "-yy", "-v", "-s", "0",
-                   "-e", f"trace={syscalls}", "-o", str(directory / f"{role}.syscalls"),
+                   *formatting, "-e", f"trace={syscalls}", "-o", str(directory / f"{role}.syscalls"),
                    "--", server, *arguments]
         lifecycle["syscalls"] = syscalls.split(",")
         lifecycle["seccomp_filter_observed"] = False
