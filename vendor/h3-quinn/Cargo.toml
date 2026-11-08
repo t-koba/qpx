@@ -62,11 +62,6 @@ version = "0.11.7"
 features = ["futures-io"]
 default-features = false
 
-[dependencies.tokio]
-version = "1"
-features = ["io-util"]
-default-features = false
-
 [dependencies.tokio-util]
 version = "0.7.9"
 

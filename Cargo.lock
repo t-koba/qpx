@@ -1326,7 +1326,6 @@ dependencies = [
  "h3",
  "h3-datagram",
  "quinn",
- "tokio",
  "tokio-util",
  "tracing",
 ]
