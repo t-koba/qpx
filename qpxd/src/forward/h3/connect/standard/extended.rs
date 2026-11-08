@@ -331,7 +331,8 @@ pub(super) async fn relay_h3_extended_connect_stream(
 mod tests {
     use super::{h1_headers_to_http, owner_h3_connect_error_response};
     use crate::forward::h3::connect::{
-        finalize_h3_connect_owner_response, finalize_h3_connect_response,
+        finalize_h3_connect_head_response, finalize_h3_connect_owner_response,
+        finalize_h3_connect_response,
     };
     use qpx_core::{config::HeaderControl, rules::CompiledHeaderControl};
     use qpx_http::body::Body;
@@ -417,5 +418,34 @@ mod tests {
         assert_eq!(set_cookie[0].as_bytes(), b"first=1");
         assert_eq!(set_cookie[1].as_bytes(), b"second=2");
         assert_eq!(actual.headers().get("x-finalized").unwrap(), "configured");
+    }
+
+    #[test]
+    fn successful_extended_connect_head_strips_content_length_for_tunnel_data() {
+        let response = ::http::Response::builder()
+            .status(::http::StatusCode::OK)
+            .header(::http::header::CONTENT_LENGTH, "0")
+            .header("trailer", "x-end")
+            .header("x-upstream", "preserved")
+            .body(())
+            .expect("upstream CONNECT response");
+
+        let actual = finalize_h3_connect_head_response(
+            response,
+            "qpx-test",
+            None,
+            "HTTP/3 extended CONNECT response",
+        )
+        .expect("normalize successful CONNECT head");
+
+        assert_eq!(actual.status(), ::http::StatusCode::OK);
+        assert!(
+            !actual
+                .headers()
+                .contains_key(::http::header::CONTENT_LENGTH)
+        );
+        assert!(!actual.headers().contains_key("transfer-encoding"));
+        assert!(!actual.headers().contains_key("trailer"));
+        assert_eq!(actual.headers().get("x-upstream").unwrap(), "preserved");
     }
 }
