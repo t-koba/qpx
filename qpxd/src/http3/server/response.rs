@@ -159,7 +159,7 @@ where
             && next as u64 > content_length
         {
             stop_body_error!(
-                ::h3::error::Code::H3_INTERNAL_ERROR,
+                ::h3::error::Code::H3_MESSAGE_ERROR,
                 anyhow!("HTTP/3 response body exceeds Content-Length")
             );
         }
