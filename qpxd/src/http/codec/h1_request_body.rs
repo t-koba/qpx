@@ -340,6 +340,57 @@ mod tests {
         assert!(err.to_string().contains("request body read timed out"));
     }
 
+    #[tokio::test]
+    async fn content_length_request_body_rejects_eof_after_buffered_prefix() {
+        let (sender, mut body) = Body::channel();
+
+        let err = forward_content_length_request_body(
+            tokio::io::empty(),
+            BytesMut::from(&b"abc"[..]),
+            4,
+            sender,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("EOF before declared length must fail");
+        assert_eq!(
+            err.to_string(),
+            "client request body closed before content-length completed"
+        );
+        assert_eq!(
+            body.data()
+                .await
+                .expect("buffered prefix")
+                .expect("body data"),
+            &b"abc"[..]
+        );
+        assert!(body.data().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn content_length_request_body_preserves_buffered_pipelined_request() {
+        let (sender, mut body) = Body::channel();
+        let next_request = b"GET /next HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let mut read_buf = BytesMut::from(&b"BODY"[..]);
+        read_buf.extend_from_slice(next_request);
+
+        let (_, read_buf) = forward_content_length_request_body(
+            tokio::io::empty(),
+            read_buf,
+            4,
+            sender,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("complete buffered body");
+        assert_eq!(read_buf.as_ref(), next_request);
+        assert_eq!(
+            body.data().await.expect("request body").expect("body data"),
+            &b"BODY"[..]
+        );
+        assert!(body.data().await.is_none());
+    }
+
     #[test]
     fn chunk_size_partial_line_times_out_instead_of_spinning() {
         run_with_hard_timeout(std::time::Duration::from_secs(2), || {
