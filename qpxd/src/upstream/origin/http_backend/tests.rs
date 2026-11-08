@@ -148,30 +148,35 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
     let first_connection = PreparedPlainHttp1ConnectionAffinity::default();
     let second_connection = PreparedPlainHttp1ConnectionAffinity::default();
 
+    let send =
+        async |connection: &PreparedPlainHttp1ConnectionAffinity, path: &str| -> Result<()> {
+            let request = prepare_proxy_http1_request(
+                Request::builder()
+                    .method(http::Method::GET)
+                    .uri(path)
+                    .body(Body::empty())?,
+                host_authority.as_ref(),
+                "qpx-test",
+            )?;
+            let response = proxy_direct_plain_http1_raw_response_with_interim(
+                &pools,
+                request,
+                connect_authority.as_ref(),
+                host_authority.as_ref(),
+                http::Version::HTTP_2,
+                "qpx-test",
+                Some(connection),
+            )
+            .await?;
+            assert_eq!(to_bytes(response.response.into_body()).await?, "OK");
+            Ok(())
+        };
     for (connection, path) in [
         (&first_connection, "/first"),
         (&second_connection, "/second"),
         (&first_connection, "/third"),
     ] {
-        let request = prepare_proxy_http1_request(
-            Request::builder()
-                .method(http::Method::GET)
-                .uri(path)
-                .body(Body::empty())?,
-            host_authority.as_ref(),
-            "qpx-test",
-        )?;
-        let response = proxy_direct_plain_http1_raw_response_with_interim(
-            &pools,
-            request,
-            connect_authority.as_ref(),
-            host_authority.as_ref(),
-            http::Version::HTTP_2,
-            "qpx-test",
-            Some(connection),
-        )
-        .await?;
-        assert_eq!(to_bytes(response.response.into_body()).await?, "OK");
+        send(connection, path).await?;
     }
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
@@ -184,7 +189,11 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
     assert_eq!(slot.idle_connection_count(), 2);
     drop(first_connection);
     drop(second_connection);
-    assert_eq!(slot.idle_connection_count(), 0);
+    assert_eq!(slot.idle_connection_count(), 2);
+    let next_connection = PreparedPlainHttp1ConnectionAffinity::default();
+    send(&next_connection, "/after-disconnect").await?;
+    assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    assert_eq!(slot.idle_connection_count(), 2);
     Ok(())
 }
 
@@ -259,6 +268,7 @@ async fn bodyless_raw_response_path_discards_closed_idle_connection() -> Result<
     let default_port = origin.default_port_hint();
     let connect_authority = origin.connect_authority_ref(default_port)?;
     let host_authority = origin.host_header_authority_ref(default_port)?;
+    let first_connection = PreparedPlainHttp1ConnectionAffinity::default();
 
     let first = prepare_proxy_http1_request(
         Request::builder()
@@ -275,10 +285,11 @@ async fn bodyless_raw_response_path_discards_closed_idle_connection() -> Result<
         host_authority.as_ref(),
         http::Version::HTTP_2,
         "qpx-test",
-        None,
+        Some(&first_connection),
     )
     .await?;
     assert_eq!(to_bytes(first.response.into_body()).await?, "OK");
+    drop(first_connection);
     while closes.load(Ordering::SeqCst) == 0 {
         let notified = closed.notified();
         if closes.load(Ordering::SeqCst) == 0 {
@@ -287,6 +298,7 @@ async fn bodyless_raw_response_path_discards_closed_idle_connection() -> Result<
     }
 
     await_pooled_plain_http1_eof(&pools, &origin).await?;
+    let next_connection = PreparedPlainHttp1ConnectionAffinity::default();
 
     let second = prepare_proxy_http1_request(
         Request::builder()
@@ -303,7 +315,7 @@ async fn bodyless_raw_response_path_discards_closed_idle_connection() -> Result<
         host_authority.as_ref(),
         http::Version::HTTP_2,
         "qpx-test",
-        None,
+        Some(&next_connection),
     )
     .await?;
     assert!(second.response_finalized);

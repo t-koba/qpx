@@ -67,13 +67,15 @@ impl PreparedPlainHttp1ConnectionAffinity {
 
 impl PreparedPlainHttp1ConnectionAffinityTarget {
     fn pop_idle(&self) -> Option<pool::PlainHttp1OriginConnection> {
-        self.slot.pop_idle_affinity(self.idle_affinity)
+        self.slot
+            .pop_idle_affinity(self.idle_affinity)
+            .or_else(|| self.slot.pop_idle())
     }
 }
 
 impl Drop for PreparedPlainHttp1ConnectionAffinityTarget {
     fn drop(&mut self) {
-        self.slot.remove_idle_affinity(self.idle_affinity);
+        self.slot.release_idle_affinity(self.idle_affinity);
     }
 }
 
