@@ -142,16 +142,22 @@ pub(crate) fn h2_request_to_hyper(req: Http1Request<RecvStream>) -> Result<Reque
     if parts.headers.len() > H2_MAX_HEADER_COUNT {
         return Err(H2HeaderCountTooLarge.into());
     }
-    // h2 0.4.20 applies Content-Length to all DATA on a stream, including
-    // classic CONNECT tunnel DATA after a successful response. Since qpx cannot
-    // clear that transport counter after the handshake, reject a declared
-    // length before passing the CONNECT request to the handler.
+    // h2 0.4.20 applies Content-Length to all DATA on a CONNECT stream,
+    // including tunnel DATA after a successful classic or extended handshake.
+    // qpx cannot clear that transport counter at the handoff, so reject a
+    // declared length before passing either tunnel request to the handler.
     let declared_length = parse_declared_content_length(&parts.headers)?;
-    let tunnel = parts.method == http::Method::CONNECT
-        && parts.extensions.get::<h2::ext::Protocol>().is_none();
-    if tunnel && declared_length.is_some() {
+    let connect = parts.method == http::Method::CONNECT;
+    let extended_connect = connect && parts.extensions.get::<h2::ext::Protocol>().is_some();
+    let tunnel = connect && !extended_connect;
+    if connect && declared_length.is_some() {
+        let form = if extended_connect {
+            "extended"
+        } else {
+            "classic"
+        };
         return Err(anyhow!(
-            "Content-Length is unsupported on classic HTTP/2 CONNECT"
+            "Content-Length is unsupported on {form} HTTP/2 CONNECT"
         ));
     }
     let body = if body.is_end_stream() {

@@ -1518,13 +1518,22 @@ async fn classic_connect_marker_bypasses_only_established_tunnel_framing() {
 }
 
 #[tokio::test]
-async fn classic_connect_content_length_is_rejected_but_extended_connect_is_unchanged() {
+async fn h2_connect_content_length_rejection_preserves_extended_tunnel_data() {
     let (client_io, server_io) = tokio::io::duplex(4096);
     let service_calls = Arc::new(AtomicUsize::new(0));
+    let (body_tx, mut body_rx) = tokio::sync::mpsc::unbounded_channel();
     let service = qpx_observability::handler_fn({
         let service_calls = Arc::clone(&service_calls);
-        move |_request: http::Request<Body>| {
+        move |request: http::Request<Body>| {
+            let body_tx = body_tx.clone();
             service_calls.fetch_add(1, Ordering::Relaxed);
+            tokio::spawn(async move {
+                let result = to_bytes(request.into_body())
+                    .await
+                    .map(|bytes| bytes.to_vec())
+                    .map_err(|err| err.to_string());
+                let _ = body_tx.send(result);
+            });
             async move {
                 Ok::<_, std::convert::Infallible>(
                     Response::builder()
@@ -1572,22 +1581,55 @@ async fn classic_connect_content_length_is_rejected_but_extended_connect_is_unch
     client = client
         .ready()
         .await
-        .expect("client ready after stream reset");
-    let mut extended = http::Request::builder()
+        .expect("client ready after classic stream reset");
+    let mut extended_with_length = http::Request::builder()
         .method("CONNECT")
         .uri("https://example.test/chat")
         .header(http::header::CONTENT_LENGTH, "0")
         .body(())
         .expect("extended CONNECT request");
-    extended
+    extended_with_length
         .extensions_mut()
         .insert(h2::ext::Protocol::from("websocket"));
     let (response, _) = client
-        .send_request(extended, true)
+        .send_request(extended_with_length, true)
+        .expect("send extended CONNECT with Content-Length");
+    let err = response
+        .await
+        .expect_err("Content-Length on extended CONNECT must be rejected before handoff");
+    assert!(err.is_reset());
+    assert_eq!(err.reason(), Some(h2::Reason::PROTOCOL_ERROR));
+    assert_eq!(service_calls.load(Ordering::Relaxed), 0);
+
+    client = client
+        .ready()
+        .await
+        .expect("client ready after extended stream reset");
+    let mut extended = http::Request::builder()
+        .method("CONNECT")
+        .uri("https://example.test/chat")
+        .body(())
+        .expect("extended CONNECT request without Content-Length");
+    extended
+        .extensions_mut()
+        .insert(h2::ext::Protocol::from("websocket"));
+    let (response, mut send_stream) = client
+        .send_request(extended, false)
         .expect("send extended CONNECT");
     assert_eq!(
         response.await.expect("extended response").status(),
         StatusCode::OK
+    );
+    send_stream
+        .send_data(bytes::Bytes::from_static(b"ws-frame"), true)
+        .expect("queue tunnel data");
+    let body_result = tokio::time::timeout(tokio::time::Duration::from_secs(2), body_rx.recv())
+        .await
+        .expect("body reader should finish")
+        .expect("body reader result");
+    assert_eq!(
+        body_result.expect("tunnel body must not be reset"),
+        b"ws-frame".to_vec()
     );
     assert_eq!(service_calls.load(Ordering::Relaxed), 1);
 
