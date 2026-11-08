@@ -1518,12 +1518,14 @@ async fn read_http1_response_head(stream: &mut TcpStream) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn http10_transfer_encoding_is_rejected_and_closes_without_reaching_service() {
+async fn invalid_transfer_encoding_framing_is_rejected_and_closes_without_reaching_service() {
     for head in [
-        // Lone chunked framing.
+        // HTTP/1.0 does not define Transfer-Encoding.
         "POST /first HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n",
-        // Chunked framing that also carries Content-Length.
+        // HTTP/1.0 does not define Transfer-Encoding, even with Content-Length.
         "POST /first HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello",
+        // HTTP/1.1 forbids combining Transfer-Encoding and Content-Length.
+        "POST /first HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello",
     ] {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let service = CountingService {
@@ -1570,7 +1572,7 @@ async fn http10_transfer_encoding_is_rejected_and_closes_without_reaching_servic
         assert_eq!(
             calls.load(std::sync::atomic::Ordering::SeqCst),
             0,
-            "faulty HTTP/1.0 head {head:?} must not reach the service"
+            "invalid framing in {head:?} must not reach the service"
         );
     }
 }
