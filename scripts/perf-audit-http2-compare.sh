@@ -86,6 +86,7 @@ collect_artifacts() {
   find "$TMP_DIR" -name '*.samples.csv' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.sampling.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.memory-maps.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
+  find "$TMP_DIR" -name '*.peak-descriptors.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*.error' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
   find "$TMP_DIR" -name '*scheduler-*.json' -type f -exec cp {} "$LOG_ARTIFACT_DIR"/ \;
 }
