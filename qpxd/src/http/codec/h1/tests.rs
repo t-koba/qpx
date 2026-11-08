@@ -376,6 +376,67 @@ async fn static_response_recycles_header_storage() {
 }
 
 #[tokio::test]
+async fn large_static_response_preserves_bytes_and_keep_alive_on_real_tcp() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let (client, accepted) = tokio::join!(
+        TcpStream::connect(listener.local_addr().expect("address")),
+        listener.accept()
+    );
+    let mut client = client.expect("connect");
+    let (mut server, _) = accepted.expect("accept");
+    let body = Bytes::from(
+        (0..1024 * 1024 + 17)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let expected = body.clone();
+    let send = async move {
+        let mut head = BytesMut::new();
+        for body in [body, Bytes::from_static(b"next response")] {
+            assert!(
+                send_static_http1_response(
+                    &mut server,
+                    &Method::GET,
+                    StatusCode::OK,
+                    HeaderMap::new(),
+                    body,
+                    true,
+                    &mut head,
+                )
+                .await
+                .expect("send static response")
+            );
+        }
+    };
+    let receive = async {
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).await.expect("read responses");
+        let mut cursor = wire.as_slice();
+        for body in [expected.as_ref(), b"next response".as_slice()] {
+            let end = cursor
+                .windows(4)
+                .position(|v| v == b"\r\n\r\n")
+                .expect("response head");
+            let head = std::str::from_utf8(&cursor[..end]).expect("ASCII head");
+            assert!(head.starts_with("HTTP/1.1 200"));
+            assert!(
+                head.to_ascii_lowercase()
+                    .contains(&format!("content-length: {}", body.len()))
+            );
+            cursor = &cursor[end + 4..];
+            assert!(cursor.starts_with(body));
+            cursor = &cursor[body.len()..];
+        }
+        assert!(cursor.is_empty());
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(send, receive);
+    })
+    .await
+    .expect("real TCP response deadline");
+}
+
+#[tokio::test]
 async fn finalized_raw_response_head_uses_direct_http1_serialization() {
     let (mut client, server) = tokio::io::duplex(4096);
     let (read_half, mut write_half) = tokio::io::split(server);
