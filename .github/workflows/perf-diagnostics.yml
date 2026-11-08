@@ -37,6 +37,10 @@ on:
         description: Existing http2-client or streaming-native run to reanalyze without repeating requests
         type: string
         default: ""
+      socket_syscalls:
+        description: Trace syscalls in feature-large-io; false records TCP_INFO without strace
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -375,7 +379,11 @@ jobs:
               python3 scripts/perf-evaluate.py "HTTP/2 load-generator CPU diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-http2-mtu.sh --full-client
               ;;
             feature-large-io)
-              QPX_NATIVE_SOCKET_WRITES=1 python3 scripts/perf-evaluate.py "feature-rich 1 MiB socket write diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-socket-io.sh feature-large
+              socket_workload=feature-large
+              if [ "${{ inputs.socket_syscalls }}" = false ]; then
+                socket_workload=feature-large-tcp
+              fi
+              QPX_NATIVE_SOCKET_WRITES=1 python3 scripts/perf-evaluate.py "feature-rich 1 MiB transport diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-socket-io.sh "$socket_workload"
               ;;
             http2-io)
               python3 scripts/perf-evaluate.py "HTTP/2 syscall wait diagnostics" -- timeout --signal=TERM --kill-after=40s 20m bash scripts/perf-diagnose-socket-io.sh

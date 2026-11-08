@@ -8,7 +8,7 @@ if [ "$#" -gt 1 ]; then
 fi
 case "$workload" in
   http2) expected_role=qpxd-h2 ;;
-  feature-large) expected_role=qpxd-feature-rich ;;
+  feature-large|feature-large-tcp) expected_role=qpxd-feature-rich ;;
   *) echo "unsupported socket I/O workload: $workload" >&2; exit 2 ;;
 esac
 export QPX_REAL_QPXD="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
@@ -37,8 +37,15 @@ exec python3 "$QPX_NATIVE_WRAPPER_SOURCE" "$@"
 IO_WRAPPER
   chmod 755 "$wrapper"
 done
-bash "$ROOT_DIR/scripts/check-perf-native-process.sh" "$QPX_NATIVE_PROFILE_DIR/tools/qpxd"
-if [ "$workload" = feature-large ]; then
+measure_path="$QPX_NATIVE_PROFILE_DIR/tools:$PATH"
+measure_qpx="$QPX_NATIVE_PROFILE_DIR/tools/qpxd"
+if [ "$workload" = feature-large-tcp ]; then
+  measure_path="$PATH"
+  measure_qpx="$QPX_REAL_QPXD"
+else
+  bash "$ROOT_DIR/scripts/check-perf-native-process.sh" "$measure_qpx"
+fi
+if [ "$workload" != http2 ]; then
   python3 "$ROOT_DIR/scripts/lib/perf-tcp-sampler.py" --probe-only
   stop_file="$QPX_NATIVE_PROFILE_DIR/tcp-sampler.stop"
   python3 "$ROOT_DIR/scripts/lib/perf-tcp-sampler.py" \
@@ -62,18 +69,18 @@ if [ "$workload" = feature-large ]; then
 fi
 status=0
 if [ "$workload" = http2 ]; then
-  PATH="$QPX_NATIVE_PROFILE_DIR/tools:$PATH" QPXD_BIN="$QPX_NATIVE_PROFILE_DIR/tools/qpxd" \
+  PATH="$measure_path" QPXD_BIN="$measure_qpx" \
     QPX_HTTP2_COMPARE_NATIVE_DIAGNOSTICS=1 QPX_HTTP2_COMPARE_BODY_SIZES=1048576 \
     QPX_HTTP2_COMPARE_MAX_CONCURRENT_STREAMS_VALUES=100 \
     bash "$ROOT_DIR/scripts/perf-audit-http2-compare.sh" || status=$?
 else
-  PATH="$QPX_NATIVE_PROFILE_DIR/tools:$PATH" QPXD_BIN="$QPX_NATIVE_PROFILE_DIR/tools/qpxd" \
+  PATH="$measure_path" QPXD_BIN="$measure_qpx" \
     QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
     QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-feature-rich,nginx-feature-rich \
     QPX_PROXY_COMPARE_BODY_SIZES=1048576 \
     bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh" || status=$?
 fi
-if [ "$workload" = feature-large ]; then
+if [ "$workload" != http2 ]; then
   touch "$stop_file"
   sampler_status=0
   wait "$sampler_pid" || sampler_status=$?
@@ -82,6 +89,9 @@ if [ "$workload" = feature-large ]; then
     cat "$QPX_NATIVE_PROFILE_DIR/tcp-sampler.log" >&2
     exit "$sampler_status"
   fi
+fi
+if [ "$workload" = feature-large-tcp ]; then
+  exit "$status"
 fi
 python3 - "$QPX_NATIVE_PROFILE_DIR" "$expected_role" <<'IO_SUMMARY'
 import json

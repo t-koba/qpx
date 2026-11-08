@@ -161,7 +161,11 @@ without decoding payload buffers. The real TCP ownership probe verifies this
 format before measurement. The same diagnostic also reuses the Linux TCP_INFO
 sampler at its existing 100 ms interval for both cache listeners, retaining
 socket cookies, queue/window counters, monotonic timestamps and sampling overhead.
-Its real TCP probe must pass before recording. Tracing overhead makes these records diagnostic;
+Its real TCP probe must pass before recording. Set the workflow's `socket_syscalls`
+input to false to record the same TCP counters without syscall tracing, checking
+whether queue and retransmission observations persist without strace overhead.
+Both modes retain diagnostic provenance and cannot satisfy acceptance gates.
+Tracing overhead makes these records diagnostic;
 they do not replace normal performance acceptance.
 The `http2-native` variant records the 1 KiB, 100-stream workload in the same
 way. HTTP/2 schema 11 requires explicit instrumentation provenance and workload-only
