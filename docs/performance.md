@@ -158,7 +158,10 @@ The `feature-large-io` diagnostic reuses the HTTP/2 syscall tracer for the real
 1 MiB feature-rich cache pair. Socket writes retain timestamps, return sizes
 and durations using [raw argument formatting](https://github.com/strace/strace/blob/master/doc/strace.1.in),
 without decoding payload buffers. The real TCP ownership probe verifies this
-format before measurement. Tracing overhead makes these records diagnostic;
+format before measurement. The same diagnostic also reuses the Linux TCP_INFO
+sampler at its existing 100 ms interval for both cache listeners, retaining
+socket cookies, queue/window counters, monotonic timestamps and sampling overhead.
+Its real TCP probe must pass before recording. Tracing overhead makes these records diagnostic;
 they do not replace normal performance acceptance.
 The `http2-native` variant records the 1 KiB, 100-stream workload in the same
 way. HTTP/2 schema 11 requires explicit instrumentation provenance and workload-only

@@ -38,6 +38,28 @@ IO_WRAPPER
   chmod 755 "$wrapper"
 done
 bash "$ROOT_DIR/scripts/check-perf-native-process.sh" "$QPX_NATIVE_PROFILE_DIR/tools/qpxd"
+if [ "$workload" = feature-large ]; then
+  python3 "$ROOT_DIR/scripts/lib/perf-tcp-sampler.py" --probe-only
+  stop_file="$QPX_NATIVE_PROFILE_DIR/tcp-sampler.stop"
+  python3 "$ROOT_DIR/scripts/lib/perf-tcp-sampler.py" \
+    --output "$QPX_NATIVE_PROFILE_DIR/tcp-state.jsonl.gz" --stop-file "$stop_file" \
+    --ports "${QPX_PROXY_COMPARE_QPX_FEATURE_RICH_PORT:-18090}" \
+    "${QPX_PROXY_COMPARE_NGINX_FEATURE_RICH_PORT:-18091}" \
+    > "$QPX_NATIVE_PROFILE_DIR/tcp-sampler.log" 2>&1 &
+  sampler_pid=$!
+  # Preserve the workload failure while still reporting sampler cleanup failures.
+  # shellcheck disable=SC2329
+  cleanup_sampler() {
+    local result=$?
+    touch "$stop_file"
+    if ! wait "$sampler_pid"; then
+      echo "TCP state sampler did not finish successfully" >&2
+      result=1
+    fi
+    exit "$result"
+  }
+  trap cleanup_sampler EXIT
+fi
 status=0
 if [ "$workload" = http2 ]; then
   PATH="$QPX_NATIVE_PROFILE_DIR/tools:$PATH" QPXD_BIN="$QPX_NATIVE_PROFILE_DIR/tools/qpxd" \
@@ -50,6 +72,16 @@ else
     QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-feature-rich,nginx-feature-rich \
     QPX_PROXY_COMPARE_BODY_SIZES=1048576 \
     bash "$ROOT_DIR/scripts/perf-audit-proxy-compare.sh" || status=$?
+fi
+if [ "$workload" = feature-large ]; then
+  touch "$stop_file"
+  sampler_status=0
+  wait "$sampler_pid" || sampler_status=$?
+  trap - EXIT
+  if [ "$sampler_status" -ne 0 ]; then
+    cat "$QPX_NATIVE_PROFILE_DIR/tcp-sampler.log" >&2
+    exit "$sampler_status"
+  fi
 fi
 python3 - "$QPX_NATIVE_PROFILE_DIR" "$expected_role" <<'IO_SUMMARY'
 import json
