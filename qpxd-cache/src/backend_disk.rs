@@ -454,7 +454,6 @@ impl DiskCacheBackend {
         let file_id = cache_file_id(namespace, key);
         let path = self.path_for_id(file_id);
         self.hot_get_from_lru(namespace, key, file_id, path, now)
-            .await
     }
 
     fn hot_recent_lookup(&self, namespace: &str, key: &str, now: u64) -> Option<HotCacheLookup> {
@@ -473,7 +472,7 @@ impl DiskCacheBackend {
         })
     }
 
-    async fn hot_get_from_lru(
+    fn hot_get_from_lru(
         &self,
         namespace: &str,
         key: &str,
@@ -482,7 +481,13 @@ impl DiskCacheBackend {
         now: u64,
     ) -> HotCacheLookup {
         let wait = crate::perf_diagnostics::phase_timer!("cache_lru_lookup_wait");
-        let mut state = self.state.lock().await;
+        // The LRU is an optional memory tier, not the authoritative disk index.
+        // Queueing a cold probe behind bookkeeping delays even absent objects.
+        // On contention, let the caller perform its normal secure disk read;
+        // that read still propagates filesystem and metadata errors.
+        let Ok(mut state) = self.state.try_lock() else {
+            return HotCacheLookup::Miss(path);
+        };
         let hold = wait.child("cache_lru_lookup_hold");
         let waited = wait.defer_record();
         let expired = state
@@ -1990,6 +1995,52 @@ mod tests {
             max_object_bytes: 1024 * 1024,
             auth_header_env: None,
         }
+    }
+
+    #[tokio::test]
+    async fn disk_backend_missing_lookup_does_not_wait_for_lru_bookkeeping() {
+        let dir = temp_dir("contended-missing-lookup");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .ensure_indexed()
+            .await
+            .expect("index real directory");
+        let state = backend.state.lock().await;
+        let result = tokio::time::timeout(Duration::from_millis(100), backend.get("ns", "missing"))
+            .await
+            .expect("missing disk lookup waited for unrelated LRU bookkeeping")
+            .expect("read real missing object");
+        assert!(result.is_none());
+        drop(state);
+        fs::remove_dir_all(dir).expect("remove real cache directory");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn disk_backend_contended_lookup_preserves_secure_disk_errors() {
+        let dir = temp_dir("contended-lookup-symlink");
+        let storage = dir.join("cache");
+        let backend = DiskCacheBackend::new(cfg(storage.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .ensure_indexed()
+            .await
+            .expect("index real directory");
+        let outside = dir.join("outside");
+        fs::create_dir(&outside).expect("create outside directory");
+        fs::write(outside.join("evidence"), b"unchanged").expect("write outside evidence");
+        fs::rename(&storage, dir.join("original")).expect("move original cache directory");
+        std::os::unix::fs::symlink(&outside, &storage).expect("replace cache with symlink");
+        let state = backend.state.lock().await;
+        let result = tokio::time::timeout(Duration::from_millis(100), backend.get("ns", "missing"))
+            .await
+            .expect("secure disk error waited for unrelated LRU bookkeeping");
+        assert!(result.is_err(), "secure disk error must propagate");
+        assert_eq!(
+            fs::read(outside.join("evidence")).expect("read outside evidence"),
+            b"unchanged"
+        );
+        drop(state);
+        fs::remove_dir_all(dir).expect("remove real cache directory");
     }
 
     #[tokio::test]

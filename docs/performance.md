@@ -3951,3 +3951,23 @@ aggregation subtracts it before checking both interval boundaries. Hold
 intervals include unlocking, and wall time alone cannot distinguish CPU
 work from descheduling. All six phases must be present in the diagnostic;
 normal acceptance remains uninstrumented and all performance goals remain.
+
+Cache holder diagnostic `42619963873` retains all 16 complete owned windows,
+zero request errors and exact scheduler/summary replay. Across its five
+miss windows, sampled LRU lookup hold medians are below 1 us while later
+wait medians reach 1.7--2.4 ms. Insertion holds are about 2 us and index-write
+holds about 1 us; an 8.28 ms index-write hold outlier is retained. These
+wall intervals do not prove holder CPU cost or justify another mutex swap.
+A real-filesystem regression test holding the bookkeeping guard reproduces
+an absent object's 100 ms lookup timeout before the proposed change.
+
+Trial an uncontended-only LRU probe: when its existing Tokio mutex cannot
+be acquired immediately, continue through the normal secure disk read.
+The LRU is an advisory memory tier; a busy LRU does not mean the object is
+absent from disk, and disk errors still propagate. Recent memory hits,
+disk indexing, expiration, capacity/eviction, publication, invalidation and
+all write-side locking remain. The LRU helper becomes synchronous because
+it no longer suspends. Extra disk reads on contended memory hits can cost
+CPU or I/O; this is a measured-root hypothesis, not an adopted improvement.
+Compare all 68 cache windows against `4b17ec3`, including hot/rich lanes,
+miss CPU/throughput/queue, p99 and RSS, before retaining the trial.
