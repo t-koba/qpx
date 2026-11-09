@@ -75,7 +75,8 @@ download_pebble_binary() {
       exit 1
       ;;
   esac
-  url="https://github.com/letsencrypt/pebble/releases/latest/download/${asset_prefix}-${platform}.tar.gz"
+  # Keep both test tools on the same verified release without latest redirects.
+  url="https://github.com/letsencrypt/pebble/releases/download/v2.10.1/${asset_prefix}-${platform}.tar.gz"
   archive="$BIN_DIR/${asset_prefix}.tar.gz"
   # Command substitutions do not reliably inherit errexit. Propagate each
   # failure explicitly and extract only after the complete download succeeds.
