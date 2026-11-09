@@ -3654,11 +3654,16 @@ and its phase summary exactly reproduces from the raw logs. Across 118 sampled
 removals, per-round median state updates take 3.7–10.2 microseconds; waiting
 for the shared async state mutex takes 3.6–938.6 microseconds. Hot-view
 invalidation takes 4.9–6.5 microseconds. These marginal medians must not be
-summed. Trial a synchronous mutex for the existing map/LRU state, whose guards
-cross neither awaits nor filesystem operations, to avoid async handoffs for
-short updates. Keep filesystem work, admission, publication and all accounting
-unchanged. Blocking a worker on contention can still regress performance;
-adoption requires the unchanged independent cache comparison against `92ff0cf`.
+summed. Reject the synchronous state-mutex trial `f2479ca` after comparison
+`42572187888` against `92ff0cf`. Both versions pass measurement quality and
+all 68 owned workload windows are complete and error-free. Miss throughput
+rises 7.85%, but CPU efficiency falls 10.85% and queue delay rises 8.28%.
+Reference miss CPU efficiency falls 2.05%; the current/reference miss queue
+ratio remains 1.438918 against the strong maximum 1.0. Feature-rich 1 MiB
+queue delay rises 20.94%. A shorter p99 alone does not justify these losses.
+Restore the async state mutex and remove the trial helper. Preserve all
+accounting, error propagation, Vary correctness fixes and diagnostic coverage;
+do not replace this with arbitrary spinning or lock-priority tuning.
 
 A separate deterministic regression reproduces a lost request-collapse wakeup:
 the leader completes after a follower joins but before it first polls `wait`.
