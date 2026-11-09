@@ -59,7 +59,7 @@ download_pebble_binary() {
   local name="$1"
   local asset_prefix="$2"
   local output="$BIN_DIR/$name"
-  local os arch platform url
+  local os arch platform url archive
   if command -v "$name" >/dev/null 2>&1; then
     command -v "$name"
     return
@@ -76,8 +76,14 @@ download_pebble_binary() {
       ;;
   esac
   url="https://github.com/letsencrypt/pebble/releases/latest/download/${asset_prefix}-${platform}.tar.gz"
-  curl -fsSL "$url" | tar xz -C "$BIN_DIR" --strip-components=3
-  chmod +x "$output"
+  archive="$BIN_DIR/${asset_prefix}.tar.gz"
+  # Command substitutions do not reliably inherit errexit. Propagate each
+  # failure explicitly and extract only after the complete download succeeds.
+  curl -fsSL --retry 3 --retry-delay 1 --connect-timeout 10 --max-time 120 \
+    -o "$archive" "$url" || return
+  tar xzf "$archive" -C "$BIN_DIR" --strip-components=3 || return
+  chmod +x "$output" || return
+  rm "$archive" || return
   printf '%s\n' "$output"
 }
 
