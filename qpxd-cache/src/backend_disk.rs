@@ -72,22 +72,24 @@ pub struct DiskCacheBackend {
     indexed_flag: std::sync::Arc<AtomicBool>,
     blocking_writer_slots: std::sync::Arc<Semaphore>,
     state: std::sync::Arc<Mutex<DiskCacheState>>,
+    hot_state: std::sync::Arc<Mutex<HotCacheState>>,
 }
 
+#[derive(Default)]
 struct DiskCacheState {
     indexed: bool,
     total_bytes: u64,
     entries: HashMap<DiskCacheFileId, DiskCacheIndexEntry>,
+}
+
+struct HotCacheState {
     hot_bytes: u64,
     hot_entries: LruCache<DiskCacheFileId, HotCacheEntry>,
 }
 
-impl Default for DiskCacheState {
+impl Default for HotCacheState {
     fn default() -> Self {
         Self {
-            indexed: false,
-            total_bytes: 0,
-            entries: HashMap::new(),
             hot_bytes: 0,
             hot_entries: LruCache::unbounded(),
         }
@@ -312,6 +314,7 @@ impl DiskCacheBackend {
             indexed_flag: std::sync::Arc::new(AtomicBool::new(false)),
             blocking_writer_slots: std::sync::Arc::new(Semaphore::new(writer_slots)),
             state: std::sync::Arc::new(Mutex::new(DiskCacheState::default())),
+            hot_state: std::sync::Arc::new(Mutex::new(HotCacheState::default())),
         };
         backend.ensure_background_sweep();
         Ok(backend)
@@ -481,7 +484,7 @@ impl DiskCacheBackend {
         path: PathBuf,
         now: u64,
     ) -> HotCacheLookup {
-        let mut state = self.state.lock().await;
+        let mut state = self.hot_state.lock().await;
         let expired = state
             .hot_entries
             .peek(&file_id)
@@ -625,7 +628,7 @@ impl DiskCacheBackend {
             expires_at_ms,
             body_offset,
         };
-        let mut state = self.state.lock().await;
+        let mut state = self.hot_state.lock().await;
         if let Some(previous) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(previous.memory_len());
         }
@@ -661,7 +664,7 @@ impl DiskCacheBackend {
         let file_id = cache_file_id_from_path(&self.root, path)
             .expect("hot cache removal must reference a canonical disk object");
         self.hot_recent_remove(file_id);
-        let mut state = self.state.lock().await;
+        let mut state = self.hot_state.lock().await;
         if let Some(entry) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
         }
@@ -685,10 +688,13 @@ impl DiskCacheBackend {
         resume_phase.enter("cache_removal_hot_invalidate");
         self.hot_recent_remove(file_id);
         resume_phase.enter("cache_removal_state_wait");
+        // Acquire hot before disk and update both without another await, so
+        // cancellation cannot split the two accounting updates.
+        let mut hot_state = self.hot_state.lock().await;
         let mut state = self.state.lock().await;
         resume_phase.enter("cache_removal_state_update");
-        if let Some(entry) = state.hot_entries.pop(&file_id) {
-            state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
+        if let Some(entry) = hot_state.hot_entries.pop(&file_id) {
+            hot_state.hot_bytes = hot_state.hot_bytes.saturating_sub(entry.memory_len());
         }
         if let Some(entry) = state.entries.remove(&file_id) {
             state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
@@ -2790,7 +2796,7 @@ mod tests {
             )
             .await
             .expect("persist body and metadata within hot capacity");
-        assert_eq!(backend.state.lock().await.hot_bytes, 16);
+        assert_eq!(backend.hot_state.lock().await.hot_bytes, 16);
         backend
             .put("ns", "other", b"replaced", 60)
             .await
@@ -2805,7 +2811,7 @@ mod tests {
                 .hot_recent_lookup("ns", metadata_key, now_ms())
                 .is_none()
         );
-        assert!(backend.state.lock().await.hot_bytes <= 16);
+        assert!(backend.hot_state.lock().await.hot_bytes <= 16);
         assert_eq!(
             backend
                 .get("ns", &body_key)
@@ -2844,7 +2850,7 @@ mod tests {
             backend.hot_recent_lookup("ns", metadata_key, now_ms()),
             Some(HotCacheLookup::Hit { .. })
         ));
-        assert_eq!(backend.state.lock().await.hot_bytes, 8);
+        assert_eq!(backend.hot_state.lock().await.hot_bytes, 8);
         assert_eq!(
             backend
                 .get("ns", &body_key)
@@ -2874,7 +2880,7 @@ mod tests {
             )
             .await
             .expect("persist object exceeding combined hot capacity");
-        assert_eq!(backend.state.lock().await.hot_bytes, 0);
+        assert_eq!(backend.hot_state.lock().await.hot_bytes, 0);
         assert!(
             backend
                 .hot_recent_lookup("ns", &body_key, now_ms())

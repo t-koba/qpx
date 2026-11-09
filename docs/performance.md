@@ -3925,3 +3925,18 @@ post-arrival delay alone does not establish the 61-tick interval as its cause.
 Ticks can include multiple LIFO task polls, and changing their interval cannot
 interrupt an individual long poll. No stream quota, timer handoff, worker
 change or separate driver is retained.
+
+
+The cache-state separation trial follows removal profile `42570493278`:
+118 owned removals have state-update medians of 3.7–10.2 us, while combined
+shared-state waits reach a per-window median of 938.6 us. Hot LRU operations
+and disk indexing/capacity accounting previously shared that Tokio mutex.
+Keep the mutex type and both capacity limits, but give the hot LRU its own
+state lock. Deletion acquires hot state before disk state and updates both
+without another await, preserving cancellation behavior after acquisition.
+No other path holds both locks, and filesystem work remains outside them.
+Recent/decoded view invalidation, required index deletion, secure filesystem
+operations and error propagation remain unchanged. This differs from the
+rejected synchronous-mutex trial and does not add a negative index cache.
+The extra lock acquisition may cost CPU; only an unchanged same-runner cache
+comparison can determine whether separating the contention is useful.
