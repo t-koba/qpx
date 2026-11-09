@@ -106,8 +106,9 @@ impl PhaseTimer {
                     first_notification_ns: 0,
                     #[cfg(target_os = "linux")]
                     request_started_monotonic_ns: 0,
-                    poll_cpu: (cfg!(target_os = "linux") && phase == "h2_connection_poll")
-                        .then(PollCpu::default),
+                    poll_cpu: (cfg!(target_os = "linux")
+                        && matches!(phase, "h2_connection_poll" | "file_body_send"))
+                    .then(PollCpu::default),
                 })
             }),
         }
@@ -383,6 +384,12 @@ mod tests {
 
     #[tokio::test]
     async fn sampled_future_forwards_real_tcp_readiness() {
+        for phase in ["h2_connection_poll", "file_body_send"] {
+            assert_sampled_future_forwards_real_tcp_readiness(phase).await;
+        }
+    }
+
+    async fn assert_sampled_future_forwards_real_tcp_readiness(phase: &'static str) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -394,7 +401,7 @@ mod tests {
             socket.write_all(b"ready").await.unwrap();
         });
         let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
-        let mut timer = PhaseTimer::begin_sampled("h2_connection_poll", true);
+        let mut timer = PhaseTimer::begin_sampled(phase, true);
         #[cfg(target_os = "linux")]
         timer.mark_tcp_request_start().unwrap();
         client.write_all(&[1]).await.unwrap();

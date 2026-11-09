@@ -2600,6 +2600,16 @@ returning, and `webdav_blocking_resume` ends after the join resumes. Service
 and join errors still propagate. These are sampled wall intervals, not CPU
 measurements; independent phase medians must not be subtracted per request.
 
+The corrected run `42594108086` validates six owned windows. Each qpx round
+has 37 complete dispatch, service and resume samples. Dispatch medians are
+26–34 us, service 24–32 us and resume 23–124 us; resume p99 is 1.6–1.9 ms.
+File poll wall medians are 213–224 us, with only nine of 111 sampled bodies
+yielding explicitly. These wall intervals do not identify CPU occupancy.
+Reuse the existing Linux thread-CPU poll clock for sampled file-body sends,
+as already done for HTTP/2, and retain the same clock-error and accounting
+checks in the summarizer. Normal unsampled requests do not read that clock.
+No new worker count, transfer cap or scheduling policy follows from this data.
+
 Same-runner window run `37463590497` at `a57fa3a` has a complete normal
 phase but an invalid extended phase. Apache completes only six of 64
 fast transfers within 184 seconds, receiving 26,281,878 bytes of the next

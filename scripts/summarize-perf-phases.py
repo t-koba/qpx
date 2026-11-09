@@ -118,19 +118,19 @@ for path in sorted(root.rglob("*.log")):
                         "unnotified_wait_ns")) > elapsed):
                 raise SystemExit(f"inconsistent phase poll accounting in {path}")
             counters["outside_poll_ns"] = elapsed - counters["active_poll_ns"]
-            if fields["phase"] == "h2_connection_poll":
+            if fields["phase"] == "h2_connection_poll" or fields.get("poll_cpu_enabled") is True:
                 cpu_metrics = ("active_poll_cpu_ns", "max_active_poll_cpu_ns", "cpu_at_max_wall_poll_ns")
                 if (fields.get("poll_cpu_enabled") is not True
                         or fields.get("poll_cpu_samples") != counters["polls"]
                         or fields.get("poll_cpu_errors") != 0
                         or any(type(fields.get(name)) is not int or fields[name] < 0
                                for name in cpu_metrics)):
-                    raise SystemExit(f"HTTP/2 parent poll lacks complete thread CPU measurements in {path}")
+                    raise SystemExit(f"phase poll lacks complete thread CPU measurements in {path}")
                 if (fields["active_poll_cpu_ns"] > counters["active_poll_ns"]
                         or fields["max_active_poll_cpu_ns"] > counters["max_active_poll_ns"]
                         or fields["max_active_poll_cpu_ns"] > fields["active_poll_cpu_ns"]
                         or fields["cpu_at_max_wall_poll_ns"] > fields["max_active_poll_cpu_ns"]):
-                    raise SystemExit(f"HTTP/2 parent poll thread CPU accounting is inconsistent in {path}")
+                    raise SystemExit(f"phase poll thread CPU accounting is inconsistent in {path}")
                 counters.update({name: fields[name] for name in cpu_metrics})
                 counters["non_cpu_at_max_wall_poll_ns"] = (
                     counters["max_active_poll_ns"] - fields["cpu_at_max_wall_poll_ns"])
@@ -211,7 +211,7 @@ for record in records:
               f"before_notify_median_us={record['before_notify_ns']['median'] / 1000:.3f} "
               f"notified_wait_median_us={record['notified_wait_ns']['median'] / 1000:.3f} "
               f"unnotified_wait_median_us={record['unnotified_wait_ns']['median'] / 1000:.3f}")
-    if record["phase"] == "h2_connection_poll" and record.get("observed_future_samples"):
+    if "max_active_poll_cpu_ns" in record:
         print(f"{record['source']} {record['phase']}: "
               f"max_poll_cpu_p99_us={record['max_active_poll_cpu_ns']['p99'] / 1000:.3f} "
               f"cpu_at_max_wall_poll_p99_us={record['cpu_at_max_wall_poll_ns']['p99'] / 1000:.3f} "
