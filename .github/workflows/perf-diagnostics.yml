@@ -297,6 +297,7 @@ jobs:
               ;;
             webdav-scheduling)
               RUST_LOG=warn,qpx_perf_phase=debug QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 \
+                QPX_PROXY_COMPARE_WEBDAV_QPXD_ENV="MALLOC_ARENA_MAX=2 MALLOC_TRIM_THRESHOLD_=134217728" \
                 QPX_PROXY_COMPARE_PROXY_FILTER=qpxd-webdav,apache-webdav \
                 QPX_PROXY_COMPARE_BODY_SIZES=1048576 \
                 QPX_PROXY_COMPARE_SAMPLE_ATTEMPTS=3 \

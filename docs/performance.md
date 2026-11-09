@@ -2570,6 +2570,25 @@ uncontended scheduling, queue restoration and all deadlines remain unchanged.
 This can add a seventeenth sendfile call for 1 MiB and can lose CPU efficiency;
 it is a hypothesis pending an unchanged same-runner comparison, not adoption.
 
+MSS-aligned trial `ba71c07` has two complete same-runner comparisons, with
+24 owned windows each and both quality checks passing. Run `42584272922`
+(baseline then current) improves 1 MiB CPU efficiency by 5.38% and p99 by
+9.69%, but increases scheduler queue delay by 13.40%. Reverse-order run
+`42587971105` improves CPU by 8.18% and p99 by 28.77%, while queue delay
+increases by 8.58%. The first run passes the strong goals; the second has
+CPU efficiency ratio 1.282879 against Apache, below 1.5. Normal CI at the
+same revision also fails that requirement with ratio 1.407209. Its binary
+SHA matches the first paired candidate, and the declared workload,
+allocator environment and worker counts match. These results do not
+establish three passing comparisons or justify declaring adoption.
+
+The next existing file-scheduling diagnostic examines sampled explicit
+yields, reactor pending polls, queued bytes and owned thread delays after
+alignment. Its allocator environment now matches normal WebDAV and the
+revision comparison (two arenas and a 128 MiB trim threshold); the previous
+scheduling entry omitted it. This diagnostic does not replace acceptance
+or change any scheduling limit, duration or performance requirement.
+
 Same-runner window run `37463590497` at `a57fa3a` has a complete normal
 phase but an invalid extended phase. Apache completes only six of 64
 fast transfers within 184 seconds, receiving 26,281,878 bytes of the next
