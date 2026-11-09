@@ -2562,25 +2562,24 @@ crossing their bounds. Its 1 MiB MSS is 65,483 bytes. Qpx's per-round
 median bytes per segment are 56,376, 37,441 and 52,399, versus Apache's
 48,477, 48,392 and 48,476. Density alone does not establish a cause.
 
-Trial rounding only Linux contended file submissions down to a negotiated
-MSS multiple within the existing 64 KiB cap, rather than crossing that MSS
-by 53 bytes. Read MSS once per contended transfer and propagate query errors;
-retain the original cap when MSS exceeds it. Socket relays, small files,
-uncontended scheduling, queue restoration and all deadlines remain unchanged.
-This can add a seventeenth sendfile call for 1 MiB and can lose CPU efficiency;
-it is a hypothesis pending an unchanged same-runner comparison, not adoption.
+MSS-aligned trial `ba71c07` is rejected and its 47 added runtime/test
+lines are removed. The shared 64 KiB contended file quantum is restored;
+existing exact-region, tail, caller-cork, backpressure, queue restoration,
+failure and cancellation tests remain. No per-transfer MSS query remains.
 
-MSS-aligned trial `ba71c07` has two complete same-runner comparisons, with
-24 owned windows each and both quality checks passing. Run `42584272922`
-(baseline then current) improves 1 MiB CPU efficiency by 5.38% and p99 by
-9.69%, but increases scheduler queue delay by 13.40%. Reverse-order run
-`42587971105` improves CPU by 8.18% and p99 by 28.77%, while queue delay
-increases by 8.58%. The first run passes the strong goals; the second has
-CPU efficiency ratio 1.282879 against Apache, below 1.5. Normal CI at the
-same revision also fails that requirement with ratio 1.407209. Its binary
-SHA matches the first paired candidate, and the declared workload,
-allocator environment and worker counts match. These results do not
-establish three passing comparisons or justify declaring adoption.
+Both same-runner comparisons retain 24 complete owned windows and pass
+both quality checks. Run `42584272922` (baseline then current) improves
+1 MiB CPU efficiency by 5.38% and p99 by 9.69%, but increases scheduler
+queue delay by 13.40%. Reverse-order run `42587971105` improves CPU by
+8.18% and p99 by 28.77%, while queue delay increases by 8.58%. The first
+run passes the strong goals; the second has CPU efficiency ratio 1.282879
+against Apache, below 1.5. Normal CI also fails with ratio 1.407209.
+The candidate binary SHA, declared workload, allocator environment and
+worker counts match. These CPU gains do not establish the complete goal,
+and both comparisons regress scheduler delay. Later socket observations
+show denser qpx segments than Apache; inclusive TCP-push stacks do not
+prove that MSS alignment fixes the remaining bottleneck. Do not repeat
+this trial without new causal evidence.
 
 The next existing file-scheduling diagnostic examines sampled explicit
 yields, reactor pending polls, queued bytes and owned thread delays after

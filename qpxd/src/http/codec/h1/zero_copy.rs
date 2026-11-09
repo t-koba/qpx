@@ -141,26 +141,10 @@ async fn send_file_inner(
     // Reuse the writer's reactor registration instead of duplicating
     // and registering its descriptor for every file response.
     let mut bytes_since_yield = 0_u64;
-    #[cfg(target_os = "linux")]
-    let mut aligned_quantum = None;
     let mut io_pending_polls = 0_u64;
     let mut explicit_yields = 0_u64;
     while offset < end {
         let scheduling_quantum = zero_copy_scheduling_quantum(ZeroCopyTransferKind::File);
-        #[cfg(target_os = "linux")]
-        let scheduling_quantum = if scheduling_quantum == CONTENDED_FILE_ZERO_COPY_QUANTUM
-            && region.len() > CONTENDED_FILE_ZERO_COPY_QUANTUM
-        {
-            if let Some(quantum) = aligned_quantum {
-                quantum
-            } else {
-                let quantum = contended_file_quantum(stream)?;
-                aligned_quantum = Some(quantum);
-                quantum
-            }
-        } else {
-            scheduling_quantum
-        };
         let remaining = (end - offset).min(scheduling_quantum);
         let written = if sampled_scheduling {
             let transfer = stream.async_io(Interest::WRITABLE, || {
@@ -231,20 +215,6 @@ async fn send_file_inner(
     #[cfg(target_os = "linux")]
     send_queue.restore()?;
     Ok(())
-}
-
-#[cfg(any(target_os = "linux", all(test, target_os = "macos")))]
-fn contended_file_quantum(stream: &TcpStream) -> io::Result<u64> {
-    let mss = u64::from(socket2::SockRef::from(stream).tcp_mss()?);
-    if mss == 0 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "TCP socket reported a zero maximum segment size",
-        ));
-    }
-    // Align bounded submissions without increasing the fairness cap.
-    let quantum = (CONTENDED_FILE_ZERO_COPY_QUANTUM / mss).max(1) * mss;
-    Ok(quantum.min(CONTENDED_FILE_ZERO_COPY_QUANTUM))
 }
 
 #[cfg(target_os = "linux")]
@@ -619,23 +589,6 @@ mod tests {
     use std::sync::Arc;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-
-    #[tokio::test]
-    async fn real_tcp_file_quantum_aligns_to_mss_within_the_fairness_cap() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
-        let _client = TcpStream::connect(listener.local_addr().expect("listener address"))
-            .await
-            .expect("connect");
-        let (server, _) = listener.accept().await.expect("accept");
-        let mss = u64::from(socket2::SockRef::from(&server).tcp_mss().expect("read MSS"));
-        let quantum = contended_file_quantum(&server).expect("derive file quantum");
-        assert!(quantum > 0 && quantum <= CONTENDED_FILE_ZERO_COPY_QUANTUM);
-        if mss <= CONTENDED_FILE_ZERO_COPY_QUANTUM {
-            assert_eq!(quantum % mss, 0);
-        } else {
-            assert_eq!(quantum, CONTENDED_FILE_ZERO_COPY_QUANTUM);
-        }
-    }
 
     #[test]
     fn scheduling_quantum_adapts_to_active_transfer_pressure() {
