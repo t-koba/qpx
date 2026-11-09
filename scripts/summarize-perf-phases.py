@@ -176,12 +176,16 @@ for (source, phase, interval), values in sorted(samples.items()):
 if owned_cache_misses:
     required = {"cache_writer_execution", "cache_removal_execution", "cache_directory_validation",
                 "cache_object_create", "cache_object_encode_write", "cache_object_commit"}
+    removal = {"cache_removal_hot_invalidate", "cache_removal_state_wait", "cache_removal_state_update"}
     for name, _, _ in windows:
         observed = {record["phase"] for record in records
                     if record["source"] == f"{name}/qpxd-cache.log"
                     and record.get("observed_sync_cpu_samples", 0) > 0}
         if not required <= observed:
             raise SystemExit(f"cache miss window {name} lacks complete writer phase CPU evidence")
+        if not removal <= {record["phase"] for record in records
+                           if record["source"] == f"{name}/qpxd-cache.log" and record["samples"] > 0}:
+            raise SystemExit(f"cache miss window {name} lacks removal lock timing evidence")
 output.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
 socket_records = []
 for (source, body_bytes, interval), values in sorted(socket_samples.items()):

@@ -682,9 +682,11 @@ impl DiskCacheBackend {
         .await
         .context("disk cache removal task failed")?;
         result?;
-        resume_phase.enter("cache_removal_bookkeeping");
+        resume_phase.enter("cache_removal_hot_invalidate");
         self.hot_recent_remove(file_id);
+        resume_phase.enter("cache_removal_state_wait");
         let mut state = self.state.lock().await;
+        resume_phase.enter("cache_removal_state_update");
         if let Some(entry) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
         }
