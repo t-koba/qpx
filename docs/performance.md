@@ -3649,6 +3649,17 @@ of the five owned miss windows, alongside the existing writer stages. Missing
 coverage fails the diagnostic. No caching shortcut or performance threshold
 changes; these measurements are not acceptance runs.
 
+The refined diagnostic `42570493278` passes all 16 complete owned windows
+and its phase summary exactly reproduces from the raw logs. Across 118 sampled
+removals, per-round median state updates take 3.7–10.2 microseconds; waiting
+for the shared async state mutex takes 3.6–938.6 microseconds. Hot-view
+invalidation takes 4.9–6.5 microseconds. These marginal medians must not be
+summed. Trial a synchronous mutex for the existing map/LRU state, whose guards
+cross neither awaits nor filesystem operations, to avoid async handoffs for
+short updates. Keep filesystem work, admission, publication and all accounting
+unchanged. Blocking a worker on contention can still regress performance;
+adoption requires the unchanged independent cache comparison against `92ff0cf`.
+
 A separate deterministic regression reproduces a lost request-collapse wakeup:
 the leader completes after a follower joins but before it first polls `wait`.
 Create the owned notification future while joining under the registry lock,

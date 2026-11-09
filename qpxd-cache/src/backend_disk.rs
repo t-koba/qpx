@@ -18,11 +18,12 @@ use std::fs::OpenOptions;
 use std::fs::{self, File};
 use std::io::{IoSlice, Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File as TokioFile;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
-use tokio::sync::{Mutex, Semaphore};
+use tokio::sync::Semaphore;
 use tokio::time::timeout;
 use tracing::warn;
 
@@ -342,6 +343,12 @@ impl DiskCacheBackend {
         });
     }
 
+    // State guards never cross an await or filesystem operation. A synchronous
+    // mutex avoids scheduling a new task poll for each short map/LRU update.
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, DiskCacheState> {
+        self.state.lock().expect("disk cache state lock poisoned")
+    }
+
     fn path_for(&self, namespace: &str, key: &str) -> PathBuf {
         self.path_for_id(cache_file_id(namespace, key))
     }
@@ -402,7 +409,7 @@ impl DiskCacheBackend {
                 Err(error) => return Err(error),
             }
         }
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state();
         if state.indexed {
             return Ok(());
         }
@@ -434,7 +441,7 @@ impl DiskCacheBackend {
             self.delete_path(&path).await?;
             return Ok(None);
         }
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state();
         if let Some(id) = cache_file_id_from_path(&self.root, &path)
             && let Some(entry) = state.entries.get_mut(&id)
         {
@@ -481,7 +488,7 @@ impl DiskCacheBackend {
         path: PathBuf,
         now: u64,
     ) -> HotCacheLookup {
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state();
         let expired = state
             .hot_entries
             .peek(&file_id)
@@ -625,7 +632,7 @@ impl DiskCacheBackend {
             expires_at_ms,
             body_offset,
         };
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state();
         if let Some(previous) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(previous.memory_len());
         }
@@ -661,7 +668,7 @@ impl DiskCacheBackend {
         let file_id = cache_file_id_from_path(&self.root, path)
             .expect("hot cache removal must reference a canonical disk object");
         self.hot_recent_remove(file_id);
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state();
         if let Some(entry) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
         }
@@ -685,7 +692,7 @@ impl DiskCacheBackend {
         resume_phase.enter("cache_removal_hot_invalidate");
         self.hot_recent_remove(file_id);
         resume_phase.enter("cache_removal_state_wait");
-        let mut state = self.state.lock().await;
+        let mut state = self.lock_state();
         resume_phase.enter("cache_removal_state_update");
         if let Some(entry) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
@@ -779,7 +786,7 @@ impl DiskCacheBackend {
         let id = cache_file_id_from_path(&self.root, &path)
             .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
         {
-            let mut state = self.state.lock().await;
+            let mut state = self.lock_state();
             if let Some(old) = state.entries.insert(
                 id,
                 DiskCacheIndexEntry {
@@ -799,7 +806,7 @@ impl DiskCacheBackend {
         self.ensure_indexed().await?;
         let now = now_ms();
         let expired = {
-            let state = self.state.lock().await;
+            let state = self.lock_state();
             state
                 .entries
                 .iter()
@@ -817,7 +824,7 @@ impl DiskCacheBackend {
     async fn evict_if_needed(&self) -> Result<()> {
         loop {
             let victim = {
-                let state = self.state.lock().await;
+                let state = self.lock_state();
                 if state.total_bytes <= self.max_bytes {
                     return Ok(());
                 }
@@ -2198,9 +2205,9 @@ mod tests {
             let size = fs::metadata(&path).expect("persisted cache file").len();
             physical_bytes += size;
             let id = cache_file_id("ns", key);
-            assert_eq!(backend.state.lock().await.entries[&id].total_len, size);
+            assert_eq!(backend.lock_state().entries[&id].total_len, size);
         }
-        assert_eq!(backend.state.lock().await.total_bytes, physical_bytes);
+        assert_eq!(backend.lock_state().total_bytes, physical_bytes);
         for &(key, size) in objects {
             let stored = backend
                 .get_object_stream("ns", key, size as u64, None)
@@ -2790,7 +2797,7 @@ mod tests {
             )
             .await
             .expect("persist body and metadata within hot capacity");
-        assert_eq!(backend.state.lock().await.hot_bytes, 16);
+        assert_eq!(backend.lock_state().hot_bytes, 16);
         backend
             .put("ns", "other", b"replaced", 60)
             .await
@@ -2805,7 +2812,7 @@ mod tests {
                 .hot_recent_lookup("ns", metadata_key, now_ms())
                 .is_none()
         );
-        assert!(backend.state.lock().await.hot_bytes <= 16);
+        assert!(backend.lock_state().hot_bytes <= 16);
         assert_eq!(
             backend
                 .get("ns", &body_key)
@@ -2844,7 +2851,7 @@ mod tests {
             backend.hot_recent_lookup("ns", metadata_key, now_ms()),
             Some(HotCacheLookup::Hit { .. })
         ));
-        assert_eq!(backend.state.lock().await.hot_bytes, 8);
+        assert_eq!(backend.lock_state().hot_bytes, 8);
         assert_eq!(
             backend
                 .get("ns", &body_key)
@@ -2874,7 +2881,7 @@ mod tests {
             )
             .await
             .expect("persist object exceeding combined hot capacity");
-        assert_eq!(backend.state.lock().await.hot_bytes, 0);
+        assert_eq!(backend.lock_state().hot_bytes, 0);
         assert!(
             backend
                 .hot_recent_lookup("ns", &body_key, now_ms())
@@ -3075,19 +3082,19 @@ mod tests {
             .expect("put first");
         let path = backend.path_for("ns", "first");
         let id = cache_file_id("ns", "first");
-        let first_len = backend.state.lock().await.total_bytes;
+        let first_len = backend.lock_state().total_bytes;
         fs::remove_file(&path).expect("remove first object");
         fs::create_dir(&path).expect("replace first object with directory");
         assert!(backend.delete("ns", "first").await.is_err());
         {
-            let state = backend.state.lock().await;
+            let state = backend.lock_state();
             assert_eq!(state.total_bytes, first_len);
             assert!(state.entries.contains_key(&id));
         }
         tokio::time::sleep(Duration::from_millis(2)).await;
         assert!(backend.put("ns", "second", &value, 60).await.is_err());
         {
-            let state = backend.state.lock().await;
+            let state = backend.lock_state();
             assert!(state.total_bytes > backend.max_bytes);
             assert!(state.entries.contains_key(&id));
         }
@@ -3096,7 +3103,7 @@ mod tests {
             .evict_if_needed()
             .await
             .expect("reconcile absent object");
-        assert!(backend.state.lock().await.total_bytes <= backend.max_bytes);
+        assert!(backend.lock_state().total_bytes <= backend.max_bytes);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -3119,9 +3126,7 @@ mod tests {
         assert!(remove_cache_file_sync(&path).is_err());
         assert!(
             backend
-                .state
-                .lock()
-                .await
+                .lock_state()
                 .entries
                 .contains_key(&cache_file_id("ns", "key"))
         );
