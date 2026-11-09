@@ -3646,6 +3646,14 @@ later generation. This removes the explicit early-poll workaround from the
 real disk publication test. No extra registry, task, or completion flag is
 introduced; this is a correctness fix, not a measured performance gain.
 
+Real filesystem error testing also exposes silent failures in obsolete-variant
+cleanup: both backend deletion results and deletion-task failures were dropped.
+Propagate these failures through writeback before publishing the updated index.
+A symlink-replacement regression checks the actual disk backend, preserves the
+outside sentinel and original cache files on failure, then restores the parent
+and verifies removal of both metadata and body. The existing concurrency bound
+is unchanged; no failed cleanup is reported as successful.
+
 The retained cache-miss native profile contains 4,546 stacks, including
 311 publication stacks and 84 mkdir frames. Trial creating only missing
 directory suffixes: existing ancestors previously incurred mkdirat/openat

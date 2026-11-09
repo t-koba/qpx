@@ -15,7 +15,7 @@ use super::util::{
 use super::vary::{
     index_storage_key, parse_vary, variant_storage_key, vary_values_from_request_headers,
 };
-use anyhow::Result;
+use anyhow::{Context, Result};
 use http::header::{AUTHORIZATION, CONTENT_LOCATION, EXPIRES, SET_COOKIE};
 use hyper::{Method, Response, StatusCode};
 use qpx_core::config::CachePolicyConfig;
@@ -251,7 +251,7 @@ impl CacheWriteback {
         let index_payload = match loaded_index {
             Some(mut index) => {
                 let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key);
-                let (_, payload) = tokio::join!(
+                let (cleanup, payload) = tokio::join!(
                     delete_obsolete_variants(
                         self.backend.clone(),
                         self.namespace.clone(),
@@ -259,6 +259,7 @@ impl CacheWriteback {
                     ),
                     async { serde_json::to_vec(&index) },
                 );
+                cleanup?;
                 Some(payload?)
             }
             None => None,
@@ -294,7 +295,7 @@ async fn delete_obsolete_variants(
     backend: Arc<dyn CacheBackend>,
     namespace: String,
     variants: Vec<String>,
-) {
+) -> Result<()> {
     const DELETE_CONCURRENCY: usize = 16;
     for chunk in variants.chunks(DELETE_CONCURRENCY) {
         let mut tasks = JoinSet::new();
@@ -303,13 +304,16 @@ async fn delete_obsolete_variants(
             let namespace = namespace.clone();
             let variant = variant.clone();
             tasks.spawn(async move {
-                let _ = backend.delete(namespace.as_str(), variant.as_str()).await;
+                backend.delete(namespace.as_str(), variant.as_str()).await?;
                 let body_key = cache_body_storage_key(variant.as_str());
-                let _ = backend.delete(namespace.as_str(), body_key.as_str()).await;
+                backend.delete(namespace.as_str(), body_key.as_str()).await
             });
         }
-        while tasks.join_next().await.is_some() {}
+        while let Some(result) = tasks.join_next().await {
+            result.context("obsolete cache variant deletion task failed")??;
+        }
     }
+    Ok(())
 }
 
 pub async fn revalidate_not_modified(
