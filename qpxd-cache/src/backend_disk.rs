@@ -671,9 +671,18 @@ impl DiskCacheBackend {
         let file_id = cache_file_id_from_path(&self.root, path)
             .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
         let path = path.to_path_buf();
-        tokio::task::spawn_blocking(move || remove_cache_file_sync(&path))
-            .await
-            .context("disk cache removal task failed")??;
+        let mut phase = crate::perf_diagnostics::phase_timer!("cache_removal_dispatch");
+        let (result, mut resume_phase) = tokio::task::spawn_blocking(move || {
+            phase.enter("cache_removal_execution");
+            let result = phase.measure_sync(|| remove_cache_file_sync(&path));
+            let resume_phase = phase.child("cache_removal_resume");
+            drop(phase);
+            (result, resume_phase)
+        })
+        .await
+        .context("disk cache removal task failed")?;
+        result?;
+        resume_phase.enter("cache_removal_bookkeeping");
         self.hot_recent_remove(file_id);
         let mut state = self.state.lock().await;
         if let Some(entry) = state.hot_entries.pop(&file_id) {

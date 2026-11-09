@@ -3637,6 +3637,18 @@ completion synchronization. Cache tests and Clippy pass. The extra deletion
 requires independent performance measurement; correctness validation does not
 establish throughput, CPU or scheduler-delay acceptance.
 
+Comparison `42562539131` isolates that fix against `6c49eed` and passes
+both quality checks and all 68 complete owned workload windows. Cache-miss
+throughput falls 19.53% and CPU efficiency falls 20.06%; the reference also
+loses 3.40% throughput and 10.97% CPU efficiency. These changes do not isolate
+the deletion cost from runner drift. Preserve the correctness fix and measure
+the newly required deletion before changing its implementation. The existing
+cache-writer diagnostic now separates removal dispatch, synchronous filesystem
+wall/CPU time, resumption and bookkeeping. Require removal CPU samples in each
+of the five owned miss windows, alongside the existing writer stages. Missing
+coverage fails the diagnostic. No caching shortcut or performance threshold
+changes; these measurements are not acceptance runs.
+
 A separate deterministic regression reproduces a lost request-collapse wakeup:
 the leader completes after a follower joins but before it first polls `wait`.
 Create the owned notification future while joining under the registry lock,

@@ -149,7 +149,7 @@ for (source, phase, interval), values in sorted(samples.items()):
         "max_ns": values[-1],
     }
     synchronous = sync_cpu_samples[(source, phase, interval)]
-    if phase in {"cache_writer_execution", "cache_directory_validation",
+    if phase in {"cache_writer_execution", "cache_removal_execution", "cache_directory_validation",
                  "cache_object_create", "cache_object_encode_write", "cache_object_commit"} \
             and len(synchronous) != len(values):
         raise SystemExit(f"{phase} lacks complete synchronous CPU coverage in {source}")
@@ -174,7 +174,7 @@ for (source, phase, interval), values in sorted(samples.items()):
             }
     records.append(record)
 if owned_cache_misses:
-    required = {"cache_writer_execution", "cache_directory_validation",
+    required = {"cache_writer_execution", "cache_removal_execution", "cache_directory_validation",
                 "cache_object_create", "cache_object_encode_write", "cache_object_commit"}
     for name, _, _ in windows:
         observed = {record["phase"] for record in records
