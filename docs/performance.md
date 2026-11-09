@@ -3780,9 +3780,15 @@ individual sample gives per-round medians of 51–62% of origin-read elapsed
 time. Marginal medians must not be added; these are instrumented diagnostics,
 not acceptance results.
 
-Trial checking runtime I/O after every scheduler task rather than Tokio's
-default 61-task interval. This targets the measured external-event delivery
-delay without adding stream quotas, elapsed-time handoffs or a new driver.
-It cannot interrupt an individual long poll. Adoption requires isolated
-same-runner comparisons against `735033a` and all existing performance gates,
-including CPU overhead in the other workloads; no improvement is assumed.
+Reject the per-tick runtime I/O trial (`e6969c8`) after comparison
+`42550024004` against `735033a`. Both revisions pass measurement quality
+and all 72 complete, error-free owned windows match their scheduler sums.
+For 1 KiB/one stream, p99 rises 42.78% and total CPU efficiency falls 1.72%.
+For 1 KiB/100 streams, throughput changes only 0.006% and CPU efficiency
+falls 0.078%. The 1 MiB/100-stream p99 improves 24.59%, but queue delay rises
+52.73% and CPU efficiency falls 1.32%. Restore Tokio's default I/O interval;
+do not retune arbitrary intervals from these mixed results. The observed
+post-arrival delay alone does not establish the 61-tick interval as its cause.
+Ticks can include multiple LIFO task polls, and changing their interval cannot
+interrupt an individual long poll. No stream quota, timer handoff, worker
+change or separate driver is retained.

@@ -18,8 +18,6 @@ fn build_runtime(worker_threads: usize, max_blocking_threads: usize) -> Result<R
         builder
     };
     builder
-        // Check ready I/O between tasks even when connection polls take milliseconds.
-        .event_interval(1)
         .max_blocking_threads(max_blocking_threads)
         .enable_all();
     Ok(builder.build()?)
