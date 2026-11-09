@@ -28,7 +28,7 @@ for line in (root / "qpxd-h2.log").read_text().splitlines():
     if record.get("target") != "qpx_perf_phase":
         continue
     fields = record["fields"]
-    if fields.get("phase") not in phases:
+    if fields.get("phase") not in phases | {"h2_connection_poll"}:
         continue
     if fields.get("message") == "native TCP phase identity":
         identity = fields.get("io_sample_id")
@@ -113,6 +113,37 @@ for before_path in sorted(root.glob("http2.qpxd.1024.m100.round-*.attempt-1.sche
                 records[-1][f"median_{key}"] = statistics.median(fields[key] for fields in selected)
             records[-1]["notified_resumptions"] = sum(
                 fields["notified_resumptions"] for fields in selected)
+    # A parent connection owns many stream phases. Include it only when its
+    # complete lifetime belongs to this workload, excluding warmup/calibration.
+    parents = [fields for epoch, fields in samples
+               if fields["phase"] == "h2_connection_poll"
+               and lower <= epoch - fields["elapsed_ns"] <= epoch <= upper]
+    if len(parents) != 1 or parents[0].get("sample_interval") != 1:
+        raise SystemExit("HTTP/2 phase window requires one fully owned parent connection")
+    parent = parents[0]
+    cpu_fields = ("active_poll_ns", "max_active_poll_ns", "active_poll_cpu_ns",
+                  "max_active_poll_cpu_ns", "cpu_at_max_wall_poll_ns", "polls")
+    if (parent.get("poll_cpu_enabled") is not True
+            or parent.get("poll_cpu_errors") != 0
+            or parent.get("poll_cpu_samples") != parent.get("polls")
+            or any(type(parent.get(key)) is not int or parent[key] < 0 for key in cpu_fields)
+            or parent["polls"] < 1
+            or not (parent["cpu_at_max_wall_poll_ns"] <= parent["max_active_poll_cpu_ns"]
+                    <= parent["active_poll_cpu_ns"] <= parent["active_poll_ns"]
+                    <= parent["elapsed_ns"])
+            or not (parent["max_active_poll_cpu_ns"] <= parent["max_active_poll_ns"]
+                    <= parent["active_poll_ns"])):
+        raise SystemExit("Owned HTTP/2 parent lacks consistent thread CPU measurements")
+    records.append({"body_bytes": 1024, "max_concurrent_streams": 100,
+                    "round": int(match[1]), "phase": "h2_connection_poll",
+                    "samples": 1, "sample_interval": 1,
+                    "median_ns": parent["elapsed_ns"], "p99_ns": parent["elapsed_ns"],
+                    "max_ns": parent["elapsed_ns"],
+                    "migrated_samples": int(parent["migrated"]),
+                    "completion_threads": [parent["thread"]],
+                    "window_start_epoch_ns": lower, "window_end_epoch_ns": upper,
+                    "clock_tolerance_ns": clock_tolerance_ns,
+                    **{key: parent[key] for key in cpu_fields}})
 if len(windows) != 3 or {record["round"] for record in records} != {1, 2, 3}:
     raise SystemExit("HTTP/2 phase diagnostics require three timed rounds")
 windows.sort()
@@ -121,6 +152,10 @@ if any(a[1] >= b[0] for a, b in zip(windows, windows[1:])):
 output.write_text(json.dumps(records, indent=2, sort_keys=True) + "\n")
 for record in records:
     poll_detail = ""
+    if record["phase"] == "h2_connection_poll":
+        poll_detail = (f" max_poll_wall_us={record['max_active_poll_ns'] / 1000:.3f}"
+                       f" max_poll_cpu_us={record['max_active_poll_cpu_ns'] / 1000:.3f}"
+                       f" cpu_at_max_wall_poll_us={record['cpu_at_max_wall_poll_ns'] / 1000:.3f}")
     if record["phase"] == "plain_origin_read":
         poll_detail = (f" active_poll_median_us={record['median_active_poll_ns'] / 1000:.3f}"
                        f" outside_poll_median_us={record['median_outside_poll_ns'] / 1000:.3f}"

@@ -2005,6 +2005,13 @@ A retained real native dataset is correctly rejected as instrumented.
 Linux phase logs are needed to distinguish service latency from transport
 progress before choosing the next optimization.
 
+The timed phase summary also includes one fully owned `h2_connection_poll`
+record per round, with validated thread CPU counters. Its complete connection
+lifetime must lie inside that round's recorded workload boundaries. Warmup and
+calibration connections remain in the general poll summary, but are excluded
+from these timed parent records. Replaying diagnostic `42543199714` preserves
+all 21 existing timed phase records and selects three parents out of 15.
+
 The 32 KiB trial's first normal CI streaming gate (`37249737007`) passes:
 throughput ratio 2.1177, total CPU efficiency 1.5918, slow queue-delay ratio
 0.9402. Native run `37249771572` (artifact `11320128027`) observes no
