@@ -3769,3 +3769,20 @@ affinity-owned idle connection cleanup on downstream retirement, preserving
 live-owner isolation, aggregate pool limits, closed/dirty peer checks and error
 propagation. Reconsider retention only with new evidence accounting for both
 reuse benefits and retained resources.
+
+Isolated 1 KiB/100-stream TCP timeline `42544735103` completes nine clean
+owned workload windows. Replaying all 28,593,975 kernel event lines verifies
+the archive CRC and zero lost events; all 373 request correlations exactly
+match the runner report. Per-round receive-to-notification medians are
+165–285 microseconds and notification-to-resumption medians are 587–660
+microseconds. Computing the combined post-arrival fraction within each
+individual sample gives per-round medians of 51–62% of origin-read elapsed
+time. Marginal medians must not be added; these are instrumented diagnostics,
+not acceptance results.
+
+Trial checking runtime I/O after every scheduler task rather than Tokio's
+default 61-task interval. This targets the measured external-event delivery
+delay without adding stream quotas, elapsed-time handoffs or a new driver.
+It cannot interrupt an individual long poll. Adoption requires isolated
+same-runner comparisons against `735033a` and all existing performance gates,
+including CPU overhead in the other workloads; no improvement is assumed.
