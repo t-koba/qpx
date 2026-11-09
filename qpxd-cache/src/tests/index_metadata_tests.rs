@@ -239,3 +239,39 @@ fn vary_matching_works() {
     };
     assert!(matches_vary(&req_headers, None, &envelope));
 }
+
+#[tokio::test]
+async fn request_collapse_retains_completion_before_followers_start_waiting() {
+    let req = make_get_request("/collapse-late-wait");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("lookup key");
+    let collapse = test_request_collapse();
+    let leader = match collapse.begin(&key) {
+        RequestCollapseJoin::Leader(guard) => guard,
+        RequestCollapseJoin::Follower(_) => panic!("expected first leader"),
+    };
+    let follower = || match collapse.begin(&key) {
+        RequestCollapseJoin::Follower(waiter) => waiter,
+        RequestCollapseJoin::Leader(_) => panic!("expected follower"),
+    };
+    let followers: Vec<_> = (0..3).map(|_| follower()).collect();
+    drop(leader);
+    let next_leader = match collapse.begin(&key) {
+        RequestCollapseJoin::Leader(guard) => guard,
+        RequestCollapseJoin::Follower(_) => panic!("expected next generation leader"),
+    };
+    for waiter in followers {
+        assert!(
+            waiter.wait(Duration::from_millis(50)).await,
+            "completed generation must remain observable before first poll"
+        );
+    }
+    assert!(
+        !follower().wait(Duration::ZERO).await,
+        "previous completion must not release the next generation"
+    );
+    let next_waiter = follower();
+    drop(next_leader);
+    assert!(next_waiter.wait(Duration::from_millis(50)).await);
+}

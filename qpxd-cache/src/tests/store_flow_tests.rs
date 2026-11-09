@@ -273,13 +273,6 @@ async fn disk_cache_vary_transitions_publish_the_latest_response() {
             RequestCollapseJoin::Follower(waiter) => waiter,
             RequestCollapseJoin::Leader(_) => panic!("expected publication follower"),
         };
-        let completion = waiter.wait(Duration::from_secs(2));
-        tokio::pin!(completion);
-        std::future::poll_fn(|cx| {
-            assert!(std::future::Future::poll(completion.as_mut(), cx).is_pending());
-            std::task::Poll::Ready(())
-        })
-        .await;
         store_and_drain(
             req.method(),
             req.headers(),
@@ -295,7 +288,10 @@ async fn disk_cache_vary_transitions_publish_the_latest_response() {
         )
         .await
         .expect("store response");
-        assert!(completion.await, "disk writeback did not complete");
+        assert!(
+            waiter.wait(Duration::from_secs(2)).await,
+            "disk writeback did not complete"
+        );
         let restarted = Arc::new(
             crate::backend_disk::DiskCacheBackend::new(config.clone())
                 .expect("restart disk backend"),

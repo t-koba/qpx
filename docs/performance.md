@@ -3637,6 +3637,15 @@ completion synchronization. Cache tests and Clippy pass. The extra deletion
 requires independent performance measurement; correctness validation does not
 establish throughput, CPU or scheduler-delay acceptance.
 
+A separate deterministic regression reproduces a lost request-collapse wakeup:
+the leader completes after a follower joins but before it first polls `wait`.
+Create the owned notification future while joining under the registry lock,
+so it retains that generation's completion even before its first poll. The
+one-shot waiter still enforces its timeout, and completion cannot release a
+later generation. This removes the explicit early-poll workaround from the
+real disk publication test. No extra registry, task, or completion flag is
+introduced; this is a correctness fix, not a measured performance gain.
+
 The retained cache-miss native profile contains 4,546 stacks, including
 311 publication stacks and 84 mkdir frames. Trial creating only missing
 directory suffixes: existing ancestors previously incurred mkdirat/openat

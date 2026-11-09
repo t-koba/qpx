@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 pub const CACHE_HEADER: &str = "cache-status";
@@ -606,7 +607,8 @@ impl InFlightLookups {
         let mut entries = self.shards[shard].lock().unwrap_or_else(|p| p.into_inner());
         if let Some(notify) = entries.get(key.as_ref()) {
             return RequestCollapseJoin::Follower(RequestCollapseWaiter {
-                notify: notify.clone(),
+                // Capture this generation before the leader can leave the registry.
+                notified: notify.clone().notified_owned(),
             });
         }
         let notify = Arc::new(Notify::new());
@@ -637,7 +639,7 @@ pub struct RequestCollapseGuard {
 }
 
 pub struct RequestCollapseWaiter {
-    notify: Arc<Notify>,
+    notified: OwnedNotified,
 }
 
 impl Drop for BackgroundRevalidationGuard {
@@ -647,8 +649,8 @@ impl Drop for BackgroundRevalidationGuard {
 }
 
 impl RequestCollapseWaiter {
-    pub async fn wait(&self, timeout_dur: std::time::Duration) -> bool {
-        tokio::time::timeout(timeout_dur, self.notify.notified())
+    pub async fn wait(self, timeout_dur: std::time::Duration) -> bool {
+        tokio::time::timeout(timeout_dur, self.notified)
             .await
             .is_ok()
     }
