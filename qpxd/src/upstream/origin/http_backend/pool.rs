@@ -185,16 +185,24 @@ impl<T> Http1IdleShards<T> {
         None
     }
 
-    fn update_entries<F>(&self, mut update: F)
+    fn remove_matching<F>(&self, mut predicate: F)
     where
-        F: FnMut(&mut T),
+        F: FnMut(&T) -> bool,
     {
+        let mut removed = Vec::new();
         for shard in self.shards.iter() {
             let mut entries = shard.lock();
-            for entry in entries.iter_mut() {
-                update(entry);
+            let mut index = 0;
+            while index < entries.len() {
+                if predicate(&entries[index]) {
+                    removed.push(entries.swap_remove(index));
+                } else {
+                    index += 1;
+                }
             }
         }
+        self.len.fetch_sub(removed.len(), Ordering::Relaxed);
+        drop(removed);
     }
 
     fn push(&self, entry: T, max: &AtomicUsize) {
@@ -341,12 +349,9 @@ impl PlainHttpOriginSlot {
         })
     }
 
-    pub(super) fn release_idle_affinity(&self, affinity: u64) {
-        self.idle.update_entries(|connection| {
-            if connection.idle_affinity == Some(affinity) {
-                connection.idle_affinity = None;
-            }
-        });
+    pub(super) fn remove_idle_affinity(&self, affinity: u64) {
+        self.idle
+            .remove_matching(|connection| connection.idle_affinity == Some(affinity));
     }
 
     #[cfg(test)]

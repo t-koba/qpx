@@ -3742,3 +3742,23 @@ by -0.73%, +4.62%, -0.21% and -4.03% for 1 KiB/one stream, 1 KiB/100 streams,
 9.24%; both profiles still fail the required HTTP/2 objectives. These mixed
 results establish no general LTO improvement. Retain the original thin setting
 and do not repeat profile-only trials without new causal evidence.
+
+Retired downstream-affinity connection reuse (`ccc9806`) is not adopted.
+Comparisons `42534782527` and `42538969911` use opposite revision orders
+against `636d411`. The first has 72 complete, error-free owned windows with
+matching scheduler family sums, but both revisions fail the existing sample
+spread limits. In the reverse-order comparison, the current 1 MiB/100-stream
+throughput and CPU spreads are 1.116785 and 1.108445, exceeding 1.1. These
+comparisons do not establish a repeatable performance benefit; partial valid
+lanes must not be combined across runs.
+
+A separate macOS functional reproduction uses actual qpxd and nginx servers,
+an actual 1 MiB file and 332 successful HTTP/2 requests. After 100 concurrent
+streams, the qpxd process retains 100 upstream TCP connections when subsequent
+loads use 64 downstream connections and then one connection. This is consistent
+with the elevated pre-window descriptor counts in the paired raw data; it is
+not a Linux performance acceptance result or proof of a socket leak. Restore
+affinity-owned idle connection cleanup on downstream retirement, preserving
+live-owner isolation, aggregate pool limits, closed/dirty peer checks and error
+propagation. Reconsider retention only with new evidence accounting for both
+reuse benefits and retained resources.

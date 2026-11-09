@@ -112,7 +112,7 @@ fn preferred_http1_idle_pop_falls_back_to_other_shards() {
 }
 
 #[test]
-fn matching_http1_idle_pop_and_release_preserve_ownership() {
+fn matching_http1_idle_pop_and_remove_preserve_ownership() {
     let pool = Http1IdleShards::new();
     let max = AtomicUsize::new(3);
     pool.push_preferred((1_u64, 11), &max, 1);
@@ -123,16 +123,7 @@ fn matching_http1_idle_pop_and_release_preserve_ownership() {
         pool.pop_matching(1, |(owner, _)| *owner == 1),
         Some((1, 11))
     );
-    pool.update_entries(|(owner, _)| {
-        if *owner == 9 {
-            *owner = 0;
-        }
-    });
-    assert_eq!(pool.len.load(Ordering::Relaxed), 2);
-    assert_eq!(
-        pool.pop_matching(9, |(owner, _)| *owner == 0),
-        Some((0, 99))
-    );
+    pool.remove_matching(|(owner, _)| *owner == 9);
     assert_eq!(pool.len.load(Ordering::Relaxed), 1);
     assert_eq!(pool.pop(), Some((0, 22)));
     assert_eq!(pool.len.load(Ordering::Relaxed), 0);
