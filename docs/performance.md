@@ -2553,6 +2553,23 @@ justify adoption. Automatic file corking is removed. Real tail-delivery
 and caller-cork preservation tests remain, together with failure and
 cancellation checks; queue bounds and scheduling quanta are unchanged.
 
+Current native profile `42576666545` retains 12 complete owned windows,
+zero lost samples and a fully verified ELF. The 1 MiB qpx window has
+1,776 stacks, including 1,163 sendfile and 718 TCP-push ancestries; these
+overlap and are not syscall counts. Socket diagnostic `42580063570` has
+221 wholly owned observations across all 12 windows, with no observations
+crossing their bounds. Its 1 MiB MSS is 65,483 bytes. Qpx's per-round
+median bytes per segment are 56,376, 37,441 and 52,399, versus Apache's
+48,477, 48,392 and 48,476. Density alone does not establish a cause.
+
+Trial rounding only Linux contended file submissions down to a negotiated
+MSS multiple within the existing 64 KiB cap, rather than crossing that MSS
+by 53 bytes. Read MSS once per contended transfer and propagate query errors;
+retain the original cap when MSS exceeds it. Socket relays, small files,
+uncontended scheduling, queue restoration and all deadlines remain unchanged.
+This can add a seventeenth sendfile call for 1 MiB and can lose CPU efficiency;
+it is a hypothesis pending an unchanged same-runner comparison, not adoption.
+
 Same-runner window run `37463590497` at `a57fa3a` has a complete normal
 phase but an invalid extended phase. Apache completes only six of 64
 fast transfers within 184 seconds, receiving 26,281,878 bytes of the next
