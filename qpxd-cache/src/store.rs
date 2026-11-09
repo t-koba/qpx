@@ -232,8 +232,8 @@ impl CacheWriteback {
         );
         let index_load = async {
             // Vary-less responses use the deterministic `obj:{primary}:default`
-            // variant key and publish no variant index, removing one read and
-            // one write per store for the common case.
+            // key without loading or publishing an index. Remove an older Vary
+            // index only after the replacement object has been published.
             if vary_less {
                 return Ok(None);
             }
@@ -270,6 +270,15 @@ impl CacheWriteback {
                     index_storage_key(self.storage_primary.as_ref()).as_str(),
                     &index_payload,
                     self.ttl.max(INDEX_TTL_SECS),
+                )
+                .await?;
+        } else {
+            // Publish the default object before removing an older Vary index.
+            // Otherwise its variants continue to shadow the replacement.
+            self.backend
+                .delete(
+                    self.namespace.as_str(),
+                    index_storage_key(self.storage_primary.as_ref()).as_str(),
                 )
                 .await?;
         }

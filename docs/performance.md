@@ -3625,6 +3625,18 @@ failure message. Complete framing still delivers clean EOF. Failed DAV
 compliance runs retain the fixture, server log and client communication
 dump for diagnosis rather than suppressing the tester's unknown result.
 
+A real-filesystem regression at `6c49eed` exposes an independent cache
+correctness bug while investigating these reads: publishing a Vary-less
+replacement leaves an earlier Vary index intact, so matching requests still
+receive the superseded variant. Publish the replacement object first, then
+remove the old index with error propagation. The regression covers Vary-less
+to Vary to Vary-less transitions through both warm and restarted disk backends;
+an actual qpxd/origin TCP test verifies the same transition and persisted hit
+after restart. Removing the fix reproduces the stale response with the same
+completion synchronization. Cache tests and Clippy pass. The extra deletion
+requires independent performance measurement; correctness validation does not
+establish throughput, CPU or scheduler-delay acceptance.
+
 The retained cache-miss native profile contains 4,546 stacks, including
 311 publication stacks and 84 mkdir frames. Trial creating only missing
 directory suffixes: existing ancestors previously incurred mkdirat/openat

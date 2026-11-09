@@ -220,3 +220,110 @@ async fn vary_less_store_publishes_no_variant_index() {
         "lookup must hit the canonical default variant without an index"
     );
 }
+
+#[tokio::test]
+async fn disk_cache_vary_transitions_publish_the_latest_response() {
+    let directory = std::env::temp_dir()
+        .canonicalize()
+        .expect("canonical temporary directory")
+        .join(format!(
+            "qpx-cache-vary-transition-{}-{}",
+            std::process::id(),
+            super::super::util::now_millis()
+        ));
+    let config = qpx_core::config::CacheBackendConfig {
+        name: "b".into(),
+        kind: "disk".into(),
+        path: Some(directory.display().to_string()),
+        max_bytes: Some(16 * 1024 * 1024),
+        max_object_bytes: 1024 * 1024,
+        sweep_interval_secs: 3600,
+        timeout_ms: 500,
+        endpoint: String::new(),
+        auth_header_env: None,
+    };
+    let backend = Arc::new(
+        crate::backend_disk::DiskCacheBackend::new(config.clone())
+            .expect("create real disk backend"),
+    );
+    let backends = HashMap::from([("b".into(), backend.clone() as Arc<dyn CacheBackend>)]);
+    let mut req = make_get_request("/vary-transition");
+    req.headers_mut()
+        .insert("accept-language", "en".parse().expect("language"));
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("cache key");
+    for (varies, body) in [
+        (false, "initial"),
+        (true, "english"),
+        (false, "replacement"),
+    ] {
+        let mut response = make_response(StatusCode::OK, "max-age=60", body);
+        if varies {
+            response
+                .headers_mut()
+                .insert(VARY, "accept-language".parse().expect("vary"));
+        }
+        let collapse = test_request_collapse();
+        let leader = match collapse.begin(&key) {
+            RequestCollapseJoin::Leader(guard) => guard,
+            RequestCollapseJoin::Follower(_) => panic!("expected publication leader"),
+        };
+        let waiter = match collapse.begin(&key) {
+            RequestCollapseJoin::Follower(waiter) => waiter,
+            RequestCollapseJoin::Leader(_) => panic!("expected publication follower"),
+        };
+        let completion = waiter.wait(Duration::from_secs(2));
+        tokio::pin!(completion);
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(completion.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        store_and_drain(
+            req.method(),
+            req.headers(),
+            &key,
+            &policy(),
+            response,
+            CacheStoreTiming {
+                response_delay_secs: 0,
+                body_read_timeout: Duration::from_secs(2),
+                request_collapse_guard: Some(leader),
+            },
+            &backends,
+        )
+        .await
+        .expect("store response");
+        assert!(completion.await, "disk writeback did not complete");
+        let restarted = Arc::new(
+            crate::backend_disk::DiskCacheBackend::new(config.clone())
+                .expect("restart disk backend"),
+        );
+        let cold_backends = HashMap::from([("b".into(), restarted as Arc<dyn CacheBackend>)]);
+        for view in [&backends, &cold_backends] {
+            let outcome = lookup(
+                req.method(),
+                req.headers(),
+                &key,
+                &policy(),
+                view,
+                &test_revalidations(),
+            )
+            .await
+            .expect("lookup latest response");
+            let LookupOutcome::Hit(response) = outcome else {
+                panic!("published response was not a cache hit")
+            };
+            assert_eq!(
+                qpx_http::body::to_bytes(response.into_body())
+                    .await
+                    .expect("read cached response"),
+                body
+            );
+        }
+    }
+    drop(backends);
+    drop(backend);
+    std::fs::remove_dir_all(directory).expect("remove real cache directory");
+}
