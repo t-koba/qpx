@@ -2819,6 +2819,25 @@ Each interval runs synchronously on the same writer thread; normal comparisons
 perform no additional clock reads. The report requires complete paired coverage
 for every interval and rejects clock failures. This separates filesystem waiting
 from CPU work before selecting a storage change; it does not establish acceptance.
+Writer diagnostic `42554262402` at `d2db48d` validates 16 complete hit/miss
+windows, with no request errors and writeback enabled in all ten miss samples.
+Within the five actual Qpx miss windows, 129 writer samples and all 645
+synchronous stage CPU pairs are complete. Per-round admission medians are
+1.670–4.559 ms, dispatch medians 31.587–40.626 microseconds, execution CPU
+medians 87.426–103.404 microseconds and execution non-CPU medians
+1.973–2.173 microseconds. Thread observations include `jbd2_log_wait_commit`
+in every miss window (59 observations total), plus journal transaction/write
+access waits. These observations do not make journal waiting the cause of
+every admission delay: sampled execution non-CPU maxima are only
+56.124–359.767 microseconds, and independent marginal medians cannot be added.
+No writer limit, durability or filesystem safety change is justified by this
+instrumented run alone. The diagnostic now reports each owned miss window
+separately using `--cache-miss-windows`; it excludes phases whose full lifetime
+crosses a boundary, rejects missing CPU pairs or clock correlations, and
+requires all five writer stages in every window. The default global report
+remains available for other diagnostics. Replaying the retained real logs
+reproduces all owned stage statistics and leaves the default report identical.
+
 The `http2-native` diagnostic also records Linux process I/O counters
 (`rchar`, `wchar`, `syscr`, `syscw`) in the existing scheduler snapshots.
 Read failures, missing counters, identity changes and counter regression fail
