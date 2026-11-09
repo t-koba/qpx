@@ -3927,16 +3927,16 @@ interrupt an individual long poll. No stream quota, timer handoff, worker
 change or separate driver is retained.
 
 
-The cache-state separation trial follows removal profile `42570493278`:
-118 owned removals have state-update medians of 3.7–10.2 us, while combined
-shared-state waits reach a per-window median of 938.6 us. Hot LRU operations
-and disk indexing/capacity accounting previously shared that Tokio mutex.
-Keep the mutex type and both capacity limits, but give the hot LRU its own
-state lock. Deletion acquires hot state before disk state and updates both
-without another await, preserving cancellation behavior after acquisition.
-No other path holds both locks, and filesystem work remains outside them.
-Recent/decoded view invalidation, required index deletion, secure filesystem
-operations and error propagation remain unchanged. This differs from the
-rejected synchronous-mutex trial and does not add a negative index cache.
-The extra lock acquisition may cost CPU; only an unchanged same-runner cache
-comparison can determine whether separating the contention is useful.
+The cache-state separation trial `f07131c` is rejected. Comparison
+`42605909790` retains all 68 complete owned windows, exact scheduler deltas,
+zero request errors and passing quality checks for both revisions. Separating
+the hot LRU from disk indexing/capacity accounting regresses cache-miss
+throughput by 7.95%, CPU efficiency by 8.95%, scheduler queue delay by 15.90%
+and RSS by 18.03%. The reference gains 8.02% throughput and loses 3.93% CPU
+efficiency, so those shifts do not justify the candidate regression. Current
+strong miss ratios are throughput 0.939116, CPU 1.000604, p99 0.690166 and
+queue 1.969344; the complete goal fails. The 1 MiB hot-hit p99 also increases
+by 18.50%. Private state splitting and its additional mutex are removed.
+The prior shared Tokio mutex, all capacity limits, real safety tests, secure
+filesystem operations, Vary invalidation and error propagation are restored
+unchanged. Shared wait evidence alone does not justify another lock rewrite.
