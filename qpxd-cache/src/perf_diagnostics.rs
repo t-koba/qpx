@@ -27,6 +27,20 @@ impl PhaseTimer {
         }
     }
 
+    pub(crate) fn defer_record(mut self) -> DeferredPhaseRecord {
+        let finished = self.started.map(|_| Instant::now());
+        let elapsed_ns = self
+            .started
+            .take()
+            .zip(finished)
+            .map(|(start, end)| end.duration_since(start).as_nanos() as u64);
+        DeferredPhaseRecord {
+            timer: self,
+            elapsed_ns,
+            finished,
+        }
+    }
+
     pub(crate) fn enter(&mut self, phase: &'static str) {
         if let Some(started) = self.started {
             let now = Instant::now();
@@ -65,9 +79,28 @@ impl PhaseTimer {
     }
 
     fn record(&self, elapsed_ns: u64) {
+        self.record_delayed(elapsed_ns, 0);
+    }
+
+    fn record_delayed(&self, elapsed_ns: u64, record_delay_ns: u64) {
         tracing::debug!(target: "qpx_perf_phase", phase = self.phase,
-            elapsed_ns, sample_interval = SAMPLE_INTERVAL,
+            elapsed_ns, record_delay_ns, sample_interval = SAMPLE_INTERVAL,
             thread = ?std::thread::current().id(), "performance phase completed");
+    }
+}
+
+pub(crate) struct DeferredPhaseRecord {
+    timer: PhaseTimer,
+    elapsed_ns: Option<u64>,
+    finished: Option<Instant>,
+}
+
+impl Drop for DeferredPhaseRecord {
+    fn drop(&mut self) {
+        if let Some((elapsed_ns, finished)) = self.elapsed_ns.zip(self.finished) {
+            self.timer
+                .record_delayed(elapsed_ns, finished.elapsed().as_nanos() as u64);
+        }
     }
 }
 

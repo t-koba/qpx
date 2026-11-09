@@ -260,6 +260,7 @@ jobs:
                 python3 scripts/perf-evaluate.py "1 KiB cache writer CPU and wait diagnostics" -- bash scripts/perf-audit-proxy-compare.sh
               python3 scripts/summarize-perf-phases.py target/perf/proxy-compare-logs target/perf/phase-summary.json --cache-miss-windows
               jq -e '. as $rows | ["cache_writer_execution", "cache_removal_execution", "cache_directory_validation", "cache_object_create", "cache_object_encode_write", "cache_object_commit"] | all(.[]; . as $phase | any($rows[]; .phase == $phase and .observed_sync_cpu_samples == .samples and .samples > 0))' target/perf/phase-summary.json
+              jq -e '. as $rows | ["cache_lru_lookup_wait", "cache_lru_lookup_hold", "cache_lru_insert_wait", "cache_lru_insert_hold", "cache_index_write_wait", "cache_index_write_hold"] | all(.[]; . as $phase | any($rows[]; .phase == $phase and .samples > 0))' target/perf/phase-summary.json
               ;;
             cache-writeback)
               QPX_PROXY_COMPARE_THREAD_DIAGNOSTICS=1 QPX_PROXY_COMPARE_WRITEBACK_DIAGNOSTICS=1 \

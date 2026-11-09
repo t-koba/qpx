@@ -63,11 +63,15 @@ for path in sorted(root.rglob("*.log")):
             elapsed = fields["elapsed_ns"]
             if type(elapsed) is not int or elapsed < 0:
                 raise SystemExit(f"invalid phase duration in {path}")
+            record_delay = fields.get("record_delay_ns", 0)
+            if type(record_delay) is not int or record_delay < 0:
+                raise SystemExit(f"invalid phase recording delay in {path}")
             stamp = datetime.datetime.fromisoformat(record["timestamp"].replace("Z", "+00:00"))
             if stamp.utcoffset() != datetime.timedelta(0):
                 raise SystemExit("cache phase timestamp must be UTC")
             delta = stamp - datetime.datetime(1970, 1, 1, tzinfo=datetime.timezone.utc)
             epoch_ns = (delta.days * 86400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1000
+            epoch_ns -= record_delay
             selected = [name for name, lower, upper in windows if lower <= epoch_ns - elapsed and epoch_ns <= upper]
             if not selected:
                 continue

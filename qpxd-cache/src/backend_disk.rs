@@ -481,7 +481,10 @@ impl DiskCacheBackend {
         path: PathBuf,
         now: u64,
     ) -> HotCacheLookup {
+        let wait = crate::perf_diagnostics::phase_timer!("cache_lru_lookup_wait");
         let mut state = self.state.lock().await;
+        let hold = wait.child("cache_lru_lookup_hold");
+        let waited = wait.defer_record();
         let expired = state
             .hot_entries
             .peek(&file_id)
@@ -490,6 +493,9 @@ impl DiskCacheBackend {
             if let Some(entry) = state.hot_entries.pop(&file_id) {
                 state.hot_bytes = state.hot_bytes.saturating_sub(entry.memory_len());
             }
+            drop(state);
+            drop(hold);
+            drop(waited);
             return HotCacheLookup::Miss(path);
         }
         let value = state.hot_entries.get(&file_id).and_then(|entry| {
@@ -499,6 +505,8 @@ impl DiskCacheBackend {
                 .map(|value| (value.clone(), entry.expires_at_ms, entry.body_offset))
         });
         drop(state);
+        drop(hold);
+        drop(waited);
         if let Some((value, expires_at_ms, body_offset)) = value {
             let file = open_zero_copy_source(key, &path, value.len() as u64);
             self.hot_recent_upsert(
@@ -625,7 +633,10 @@ impl DiskCacheBackend {
             expires_at_ms,
             body_offset,
         };
+        let wait = crate::perf_diagnostics::phase_timer!("cache_lru_insert_wait");
         let mut state = self.state.lock().await;
+        let hold = wait.child("cache_lru_insert_hold");
+        let waited = wait.defer_record();
         if let Some(previous) = state.hot_entries.pop(&file_id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(previous.memory_len());
         }
@@ -643,6 +654,8 @@ impl DiskCacheBackend {
             state.hot_bytes = state.hot_bytes.saturating_sub(evicted.memory_len());
         }
         drop(state);
+        drop(hold);
+        drop(waited);
         let retained = !evicted_ids.contains(&file_id);
         // Publish the completed file's eligible views together and remove
         // obsolete views from this publication snapshot.
@@ -778,8 +791,13 @@ impl DiskCacheBackend {
         self.ensure_indexed().await?;
         let id = cache_file_id_from_path(&self.root, &path)
             .ok_or_else(|| anyhow!("invalid disk cache object path: {}", path.display()))?;
+        let wait = crate::perf_diagnostics::phase_timer!("cache_index_write_wait");
+        let hold;
+        let waited;
         {
             let mut state = self.state.lock().await;
+            hold = wait.child("cache_index_write_hold");
+            waited = wait.defer_record();
             if let Some(old) = state.entries.insert(
                 id,
                 DiskCacheIndexEntry {
@@ -792,6 +810,8 @@ impl DiskCacheBackend {
             }
             state.total_bytes = state.total_bytes.saturating_add(total_len);
         }
+        drop(hold);
+        drop(waited);
         self.evict_if_needed().await
     }
 

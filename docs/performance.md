@@ -3939,3 +3939,15 @@ by 18.50%. Private state splitting and its additional mutex are removed.
 The prior shared Tokio mutex, all capacity limits, real safety tests, secure
 filesystem operations, Vary invalidation and error propagation are restored
 unchanged. Shared wait evidence alone does not justify another lock rewrite.
+
+The rejected mutex-type and state-splitting trials do not identify the
+holder behind the measured shared-state waits. The existing cache-writer
+phase diagnostic now samples LRU lookup, LRU insertion and disk-index
+publication wait/hold pairs at its existing 1/1024 interval. It changes no
+lock type, layout, admission or capacity policy. Wait recording is deferred
+until after unlocking so tracing cannot lengthen the measured critical
+section. Deferred records carry their recording delay; owned-window
+aggregation subtracts it before checking both interval boundaries. Hold
+intervals include unlocking, and wall time alone cannot distinguish CPU
+work from descheduling. All six phases must be present in the diagnostic;
+normal acceptance remains uninstrumented and all performance goals remain.
