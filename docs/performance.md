@@ -2589,6 +2589,17 @@ revision comparison (two arenas and a 128 MiB trim threshold); the previous
 scheduling entry omitted it. This diagnostic does not replace acceptance
 or change any scheduling limit, duration or performance requirement.
 
+Scheduling run `42591779071` has six complete owned windows and 111 sampled
+file sends wholly inside the three qpx windows. Five yield explicitly and
+one reports reactor pending polls; most sampled bodies complete in one poll.
+The existing `webdav_blocking_dispatch` timer incorrectly spans the entire
+blocking call, including service and async resumption, so its 214–413 us
+per-round medians cannot be attributed to dispatch alone. Its boundary is
+moved into the start of the blocking closure, the service timer ends before
+returning, and `webdav_blocking_resume` ends after the join resumes. Service
+and join errors still propagate. These are sampled wall intervals, not CPU
+measurements; independent phase medians must not be subtracted per request.
+
 Same-runner window run `37463590497` at `a57fa3a` has a complete normal
 phase but an invalid extended phase. Apache completes only six of 64
 fast transfers within 184 seconds, receiving 26,281,878 bytes of the next

@@ -1312,17 +1312,22 @@ async fn execute_webdav_service(
         assurance: identity.auth_strength.clone(),
     };
     let blocking_phase = crate::perf_diagnostics::phase_timer!("webdav_blocking_dispatch");
-    let response = tokio::task::spawn_blocking(move || {
-        let _phase = crate::perf_diagnostics::phase_timer!("webdav_service");
-        if allow_file_backed {
+    let (response, resume_phase) = tokio::task::spawn_blocking(move || {
+        drop(blocking_phase);
+        let service_phase = crate::perf_diagnostics::phase_timer!("webdav_service");
+        let response = if allow_file_backed {
             service.handle_bytes_for_resource_file_backed(request, &context, request_resource)
         } else {
             service.handle_bytes_for_resource(request, &context, request_resource)
-        }
+        };
+        drop(service_phase);
+        let resume_phase = crate::perf_diagnostics::phase_timer!("webdav_blocking_resume");
+        (response, resume_phase)
     })
     .await
-    .map_err(|error| anyhow!("WebDAV worker failed: {error}"))??;
-    drop(blocking_phase);
+    .map_err(|error| anyhow!("WebDAV worker failed: {error}"))?;
+    drop(resume_phase);
+    let response = response?;
     let (mut parts, body) = response.into_parts();
     let file_region = parts.extensions.remove::<qpx_webdav::ResourceFileRegion>();
     let body_len = body.len() as u64;
