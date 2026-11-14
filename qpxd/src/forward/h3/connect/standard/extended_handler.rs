@@ -87,10 +87,6 @@ pub(crate) async fn handle_h3_extended_connect(
         rate_limit_profile.as_deref(),
         TransportScope::Connect,
     )?;
-    let body_send_timeout = crate::forward::h3::h3_response_send_timeout(
-        state.plan.limits.timeouts.h3_read_timeout_ms,
-        Some(selected_plan.streaming.body_send_timeout_ms),
-    );
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
     });
@@ -194,7 +190,7 @@ pub(crate) async fn handle_h3_extended_connect(
         proxy_name.as_str(),
         response_headers.as_deref(),
         tunnel_idle_timeout,
-        body_send_timeout,
+        selected_plan,
     )
     .await
 }
@@ -212,7 +208,7 @@ async fn finish_h3_extended_connect_stream(
     proxy_name: &str,
     response_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     tunnel_idle_timeout: Duration,
-    body_send_timeout: Duration,
+    selected_plan: &crate::runtime::ExecutionPlan,
 ) -> Result<()> {
     let UpstreamExtendedConnectStream {
         interim,
@@ -239,15 +235,8 @@ async fn finish_h3_extended_connect_stream(
             response_headers,
             body_read_timeout,
         )?;
-        send_h3_response_with_timeouts(
-            response,
-            &http::Method::CONNECT,
-            &mut req_stream,
-            state.plan.limits.body.max_h3_response_body_bytes,
-            body_read_timeout,
-            body_send_timeout,
-        )
-        .await?;
+        send_h3_extended_connect_error_response(response, &mut req_stream, state, selected_plan)
+            .await?;
         abort_h3_extended_driver(datagram_task, driver).await;
         return Ok(());
     }
@@ -276,6 +265,29 @@ async fn finish_h3_extended_connect_stream(
     Ok(())
 }
 
+async fn send_h3_extended_connect_error_response(
+    response: qpx_core::http_message::Response<qpx_http::body::Body>,
+    req_stream: &mut H3ServerRequestStream,
+    state: &crate::runtime::RuntimeState,
+    selected_plan: &crate::runtime::ExecutionPlan,
+) -> Result<()> {
+    let h3_read_timeout_ms = state.plan.limits.timeouts.h3_read_timeout_ms;
+    let body_read_timeout = Duration::from_millis(h3_read_timeout_ms.max(1));
+    let body_send_timeout = crate::forward::h3::h3_response_send_timeout(
+        h3_read_timeout_ms,
+        Some(selected_plan.streaming.body_send_timeout_ms),
+    );
+    send_h3_response_with_timeouts(
+        response,
+        &http::Method::CONNECT,
+        req_stream,
+        state.plan.limits.body.max_h3_response_body_bytes,
+        body_read_timeout,
+        body_send_timeout,
+    )
+    .await
+}
+
 async fn abort_h3_extended_driver(
     datagram_task: Option<tokio::task::JoinHandle<()>>,
     driver: tokio::task::JoinHandle<()>,
@@ -285,4 +297,165 @@ async fn abort_h3_extended_driver(
         let _ = task.await;
     }
     let _ = driver.await;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::send_h3_extended_connect_error_response;
+    use bytes::Bytes;
+    use qpx_core::http_message::Response as OwnerResponse;
+    use qpx_http::body::Body;
+    use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
+    use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+    use std::sync::Arc;
+    use tokio::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn selected_plan_send_budget_stops_extended_connect_error_on_peer_flow_control()
+    -> anyhow::Result<()> {
+        let config: qpx_core::config::Config = serde_yaml::from_str(
+            r#"runtime:
+  h3_read_timeout_ms: 2000
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:0
+  default_action: { type: direct }
+  http3: { enabled: true }
+  streaming:
+    body_read_timeout_ms: 2000
+    body_send_timeout_ms: 40
+  rules:
+  - name: selected
+    match:
+      host: [selected.example]
+    action: { type: direct }
+"#,
+        )?;
+        let runtime = crate::runtime::Runtime::new(config)?;
+        let state = runtime.state();
+        let selected_plan = state
+            .plan
+            .ingress_edge_execution_plan("forward", Some("selected"))
+            .expect("matched execution plan");
+        assert_eq!(selected_plan.streaming.body_read_timeout_ms, 2000);
+        assert_eq!(selected_plan.streaming.body_send_timeout_ms, 40);
+        assert_eq!(state.plan.limits.timeouts.h3_read_timeout_ms, 2000);
+
+        let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
+        let der = cert.cert.der().clone();
+        let provider = quinn::rustls::crypto::ring::default_provider();
+        let mut server_tls =
+            quinn::rustls::ServerConfig::builder_with_provider(provider.clone().into())
+                .with_protocol_versions(&[&quinn::rustls::version::TLS13])?
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![der.clone()],
+                    PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+                        cert.signing_key.serialize_der(),
+                    )),
+                )?;
+        server_tls.alpn_protocols = vec![b"h3".to_vec()];
+        let endpoint = quinn::Endpoint::server(
+            quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_tls)?)),
+            "127.0.0.1:0".parse()?,
+        )?;
+        let addr = endpoint.local_addr()?;
+        let (result_tx, result_rx) = tokio::sync::oneshot::channel();
+        let server_state = state.clone();
+        let server = tokio::spawn(async move {
+            let conn = endpoint.accept().await.unwrap().await.unwrap();
+            let mut builder = ::h3::server::builder();
+            builder.enable_extended_connect(true);
+            let mut connection = builder
+                .build::<_, Bytes>(h3_quinn::Connection::new(conn))
+                .await
+                .unwrap();
+            let resolver = connection.accept().await.unwrap().unwrap();
+            let (_, mut request_stream) = resolver.resolve_request().await.unwrap();
+            let selected_plan = server_state
+                .plan
+                .ingress_edge_execution_plan("forward", Some("selected"))
+                .unwrap();
+            let response = OwnerResponse::from_http(
+                http::Response::builder()
+                    .status(http::StatusCode::FORBIDDEN)
+                    .body(Body::from(Bytes::from(vec![b'x'; 1024 * 1024])))
+                    .unwrap(),
+            );
+            let started = Instant::now();
+            let result = tokio::time::timeout(
+                Duration::from_millis(500),
+                send_h3_extended_connect_error_response(
+                    response,
+                    &mut request_stream,
+                    &server_state,
+                    selected_plan,
+                ),
+            )
+            .await;
+            let elapsed = started.elapsed();
+            let error = match result {
+                Ok(Err(err)) => err.to_string(),
+                Ok(Ok(())) => "response unexpectedly completed".to_owned(),
+                Err(_) => "send exceeded outer test deadline".to_owned(),
+            };
+            let _ = result_tx.send((error, elapsed));
+            let _ = connection.accept().await;
+        });
+
+        let mut roots = quinn::rustls::RootCertStore::empty();
+        roots.add(der)?;
+        let mut client_tls = quinn::rustls::ClientConfig::builder_with_provider(provider.into())
+            .with_protocol_versions(&[&quinn::rustls::version::TLS13])?
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        client_tls.alpn_protocols = vec![b"h3".to_vec()];
+        let mut client = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
+        let mut client_config =
+            quinn::ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_tls)?));
+        let mut transport = quinn::TransportConfig::default();
+        transport.stream_receive_window(quinn::VarInt::from_u32(1024));
+        transport.receive_window(quinn::VarInt::from_u32(4096));
+        client_config.transport_config(Arc::new(transport));
+        client.set_default_client_config(client_config);
+        let conn = client.connect(addr, "localhost")?.await?;
+        let mut builder = ::h3::client::builder();
+        builder.enable_extended_connect(true);
+        let (mut connection, mut sender) = builder
+            .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
+            .await?;
+        let driver =
+            tokio::spawn(async move { std::future::poll_fn(|cx| connection.poll_close(cx)).await });
+        let uri = http::Uri::builder()
+            .scheme("https")
+            .authority("localhost")
+            .path_and_query("/")
+            .build()?;
+        let mut request = http::Request::builder()
+            .method(http::Method::CONNECT)
+            .uri(uri)
+            .body(())?;
+        request
+            .extensions_mut()
+            .insert(::h3::ext::Protocol::CONNECT_UDP);
+        let mut request_stream = sender.send_request(request).await?;
+        request_stream.finish().await?;
+        let response = request_stream.recv_response().await?;
+        assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+
+        let (error, elapsed) = tokio::time::timeout(Duration::from_secs(3), result_rx).await??;
+        assert!(
+            error.contains("HTTP/3 response DATA send timed out"),
+            "unexpected response send result: {error}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "send took {elapsed:?}"
+        );
+
+        driver.abort();
+        server.abort();
+        Ok(())
+    }
 }
