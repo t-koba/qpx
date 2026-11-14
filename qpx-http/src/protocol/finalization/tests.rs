@@ -57,7 +57,9 @@ fn standard_and_owner_normalization_preserve_framing_distinctions() {
                     );
                     assert_eq!(standard.body(), owner.body());
                     assert_eq!(owner.body(), if no_body { "" } else { "abc" });
-                    if informational
+                    let content_length_forbidden =
+                        status < 200 || status == StatusCode::NO_CONTENT.as_u16();
+                    if content_length_forbidden
                         || (no_body
                             && method != Method::HEAD
                             && status != StatusCode::NOT_MODIFIED.as_u16())

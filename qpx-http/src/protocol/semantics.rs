@@ -642,15 +642,21 @@ pub fn normalize_response_for_request_with_options<R: FinalizeResponse>(
     let no_body = request_method == Method::HEAD
         || response_status_has_no_body(status, allow_switching_protocols)
         || (request_method == Method::CONNECT && status.is_success());
+    let content_length_forbidden = response_status_forbids_content_length(status);
     if no_body {
         *response.body_mut() = R::Body::default();
-        if request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED {
+        if (request_method == Method::HEAD || status == StatusCode::NOT_MODIFIED)
+            && !content_length_forbidden
+        {
             // HEAD and 304 responses may carry the length of the corresponding
             // representation even though this message has no body.
             strip_message_body_framing_headers(response.headers_mut());
         } else {
             strip_message_body_headers(response.headers_mut());
         }
+    } else if content_length_forbidden {
+        // A permitted 101 upgrade still cannot carry Content-Length.
+        response.headers_mut().remove_content_length();
     }
     no_body
 }
