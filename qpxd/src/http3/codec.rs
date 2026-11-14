@@ -21,20 +21,25 @@ pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::Header
         if name == COOKIE
             && let Some(existing) = headers.get(COOKIE).cloned()
         {
-            let sensitive = existing.is_sensitive() || value.is_sensitive();
-            let mut merged =
-                Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
-            merged.extend_from_slice(existing.as_bytes());
-            merged.extend_from_slice(b"; ");
-            merged.extend_from_slice(value.as_bytes());
-            let mut merged = http::HeaderValue::from_bytes(merged.as_slice())?;
-            merged.set_sensitive(sensitive);
-            headers.insert(COOKIE, merged);
+            headers.insert(COOKIE, join_cookie_values(&existing, &value)?);
             continue;
         }
         headers.append(name, value);
     }
     Ok(headers)
+}
+
+pub(crate) fn join_cookie_values(
+    existing: &http::HeaderValue,
+    value: &http::HeaderValue,
+) -> Result<http::HeaderValue> {
+    let mut merged = Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
+    merged.extend_from_slice(existing.as_bytes());
+    merged.extend_from_slice(b"; ");
+    merged.extend_from_slice(value.as_bytes());
+    let mut merged = http::HeaderValue::from_bytes(&merged)?;
+    merged.set_sensitive(existing.is_sensitive() || value.is_sensitive());
+    Ok(merged)
 }
 
 pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {

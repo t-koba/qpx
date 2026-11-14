@@ -1,11 +1,15 @@
 use crate::forward::h3::connect::finalize_h3_connect_owner_response;
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
 use crate::http::protocol::l7::finalize_response_for_request;
+#[cfg(test)]
 use crate::http3::codec::h1_headers_to_http;
+use crate::http3::codec::join_cookie_values;
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::StatusCode;
-use qpx_core::http_message::{OrdinaryHeaderName, Response as OwnerResponse};
+use qpx_core::http_message::{
+    Headers as OwnerHeaders, OrdinaryHeaderName, Response as OwnerResponse,
+};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use std::time::Duration;
@@ -89,17 +93,9 @@ pub(super) fn upstream_qpx_extended_connect_error_response(
     header_control: Option<&CompiledHeaderControl>,
     body_read_timeout: Duration,
 ) -> Result<OwnerResponse<Body>> {
-    let (parts, _) = response.into_parts();
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        parts.status,
-        "QPX HTTP/3 extended CONNECT response",
-    )?;
-    let headers = h1_headers_to_http(&parts.headers)?;
-    let downstream = owner_qpx_connect_error_response(
-        status,
-        &headers,
-        body_from_upstream_qpx_stream(upstream, body_read_timeout),
-    )?;
+    let response = owner_qpx_connect_error_response(response)?;
+    let downstream =
+        response.map_body(|_| body_from_upstream_qpx_stream(upstream, body_read_timeout));
     Ok(finalize_h3_connect_owner_response(
         proxy_name,
         downstream,
@@ -107,7 +103,39 @@ pub(super) fn upstream_qpx_extended_connect_error_response(
     ))
 }
 
-fn owner_qpx_connect_error_response(
+fn owner_qpx_connect_error_response(response: http::Response<()>) -> Result<OwnerResponse<()>> {
+    let status = qpx_http::protocol::semantics::validate_http_status_class(
+        response.status(),
+        "QPX HTTP/3 extended CONNECT response",
+    )?;
+    let mut response = OwnerResponse::from_http(response);
+    *response.status_mut() = status;
+    *response.version_mut() = http::Version::HTTP_11;
+    response.extensions_mut().clear();
+    join_qpx_h3_cookie_fields(response.headers_mut())?;
+    Ok(response)
+}
+
+fn join_qpx_h3_cookie_fields(headers: &mut OwnerHeaders) -> Result<()> {
+    let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE)?;
+    let mut values = headers.get_all(&cookie);
+    let Some(first) = values.next() else {
+        return Ok(());
+    };
+    let Some(second) = values.next() else {
+        return Ok(());
+    };
+
+    let mut merged = join_cookie_values(first, second)?;
+    for value in values {
+        merged = join_cookie_values(&merged, value)?;
+    }
+    headers.insert(cookie, merged);
+    Ok(())
+}
+
+#[cfg(test)]
+fn legacy_owner_qpx_connect_error_response(
     status: StatusCode,
     headers: &http::HeaderMap,
     body: Body,
@@ -156,6 +184,15 @@ mod tests {
         )
         .expect_err("status should be rejected");
         assert!(err.to_string().contains("out of range"));
+
+        let invalid = http::Response::builder()
+            .status(700)
+            .version(http::Version::HTTP_3)
+            .body(())
+            .expect("upstream error head");
+        let err = owner_qpx_connect_error_response(invalid)
+            .expect_err("error response status should be rejected");
+        assert!(err.to_string().contains("out of range"));
     }
 
     #[tokio::test]
@@ -198,6 +235,7 @@ mod tests {
             sensitive.set_sensitive(true);
             decoded.append("x-repeat", sensitive);
             decoded.append("cookie", http::HeaderValue::from_static("a=1"));
+            decoded.append("cookie", http::HeaderValue::from_static(""));
             let mut cookie = http::HeaderValue::from_static("b=2");
             cookie.set_sensitive(true);
             decoded.append("cookie", cookie);
@@ -210,11 +248,14 @@ mod tests {
                 decoded.append(http::header::CONTENT_LENGTH, value);
             }
             let headers = h1_headers_to_http(&decoded).expect("convert H3 headers");
+            let joined_cookie = headers.get("cookie").expect("joined cookies");
+            assert_eq!(joined_cookie.as_bytes(), b"a=1; ; b=2");
+            assert!(joined_cookie.is_sensitive());
             let status = StatusCode::BAD_GATEWAY;
             let body = b"oops";
 
             // Compare the imported head before finalization can normalize framing.
-            let imported = owner_qpx_connect_error_response(status, &headers, Body::empty())
+            let imported = legacy_owner_qpx_connect_error_response(status, &headers, Body::empty())
                 .expect("owner import")
                 .into_http_for_library();
             assert_eq!(imported.status(), status);
@@ -228,12 +269,41 @@ mod tests {
                 .collect();
             assert_eq!(imported_lengths, lengths);
 
+            let mut direct_error_head = http::Response::builder()
+                .status(status)
+                .version(http::Version::HTTP_3)
+                .body(())
+                .expect("upstream error head");
+            *direct_error_head.headers_mut() = decoded.clone();
+            direct_error_head
+                .extensions_mut()
+                .insert(UpstreamHeadMarker);
+            let direct_imported = owner_qpx_connect_error_response(direct_error_head)
+                .expect("direct owner import")
+                .into_http_for_library();
+            assert_eq!(direct_imported.status(), status);
+            assert_eq!(direct_imported.version(), http::Version::HTTP_11);
+            assert_headers_eq(direct_imported.headers(), imported.headers());
+            let direct_lengths: Vec<_> = direct_imported
+                .headers()
+                .get_all(http::header::CONTENT_LENGTH)
+                .iter()
+                .map(http::HeaderValue::as_bytes)
+                .collect();
+            assert_eq!(direct_lengths, lengths);
+            assert!(
+                direct_imported
+                    .extensions()
+                    .get::<UpstreamHeadMarker>()
+                    .is_none()
+            );
+
             let mut upstream_head = http::Response::builder()
                 .status(StatusCode::OK)
                 .version(http::Version::HTTP_3)
                 .body(())
                 .expect("upstream response head");
-            *upstream_head.headers_mut() = decoded;
+            *upstream_head.headers_mut() = decoded.clone();
             upstream_head.extensions_mut().insert(UpstreamHeadMarker);
             let actual_head = finalize_h3_connect_head_response(
                 upstream_head,
@@ -266,8 +336,18 @@ mod tests {
             );
             assert_headers_eq(actual_head.headers(), expected_head.headers());
 
-            let owner = owner_qpx_connect_error_response(status, &headers, Body::from(&body[..]))
-                .expect("owner import");
+            let mut direct_error_head = http::Response::builder()
+                .status(status)
+                .version(http::Version::HTTP_3)
+                .body(())
+                .expect("upstream error head");
+            *direct_error_head.headers_mut() = decoded;
+            direct_error_head
+                .extensions_mut()
+                .insert(UpstreamHeadMarker);
+            let owner = owner_qpx_connect_error_response(direct_error_head)
+                .expect("direct owner import")
+                .map_body(|_| Body::from(&body[..]));
             let actual = finalize_h3_connect_owner_response("qpx-test", owner, Some(&control))
                 .into_http_for_library();
             let mut standard = http::Response::builder()
