@@ -219,11 +219,12 @@ thread_local! {
     };
 }
 
-pub fn sync_host_header_from_absolute_target(headers: &mut HeaderMap, target: &http::Uri) {
+pub fn sync_host_header_from_absolute_target(headers: &mut Headers, target: &http::Uri) {
     if let Some(authority) = target.authority()
         && let Ok(value) = HeaderValue::from_str(authority.as_str())
     {
-        headers.insert(HOST, value);
+        let host = OrdinaryHeaderName::try_from(HOST.clone()).expect("Host is an ordinary field");
+        headers.insert(host, value);
     }
 }
 

@@ -1,6 +1,28 @@
 use crate::protocol::semantics::*;
 
 #[test]
+fn sync_host_header_from_absolute_target_uses_owned_headers() {
+    use qpx_core::http_message::{Headers, OrdinaryHeaderName};
+
+    let host = OrdinaryHeaderName::try_from(HOST.clone()).expect("Host is ordinary");
+    let extra = OrdinaryHeaderName::try_from("x-extra").expect("ordinary header");
+    let mut headers = Headers::new();
+    headers.insert(host.clone(), HeaderValue::from_static("old.example"));
+    headers.insert(extra.clone(), HeaderValue::from_static("preserved"));
+
+    let absolute: http::Uri = "http://upstream.example:8080/path"
+        .parse()
+        .expect("absolute URI");
+    sync_host_header_from_absolute_target(&mut headers, &absolute);
+    assert_eq!(headers.get(&host).unwrap(), "upstream.example:8080");
+    assert_eq!(headers.get(&extra).unwrap(), "preserved");
+
+    let relative: http::Uri = "/relative".parse().expect("relative URI");
+    sync_host_header_from_absolute_target(&mut headers, &relative);
+    assert_eq!(headers.get(&host).unwrap(), "upstream.example:8080");
+}
+
+#[test]
 fn connection_nominated_header_names_normalizes_valid_tokens() {
     let mut headers = HeaderMap::new();
     headers.append(
