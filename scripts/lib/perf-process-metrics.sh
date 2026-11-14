@@ -176,10 +176,16 @@ process_tree_fd_count() {
 }
 
 process_tree_scheduler_run_delay_ns() {
-  local root="$1"
-  local pid schedstat task total value
+  local root="$1" track_completeness="${2:-false}"
+  local pid schedstat task total value complete read_count
+  complete=true
+  read_count=0
   if [ -z "$root" ] || [ ! -d /proc ]; then
-    echo 0
+    if [ "$track_completeness" = true ]; then
+      printf "0\tfalse"
+    else
+      echo 0
+    fi
     return
   fi
   total=0
@@ -187,20 +193,38 @@ process_tree_scheduler_run_delay_ns() {
     for task in "/proc/${pid}/task"/*; do
       schedstat="${task}/schedstat"
       if [ ! -r "$schedstat" ]; then
+        if [ "$track_completeness" = true ]; then
+          complete=false
+        fi
         continue
       fi
       value="$(awk '{ print $2 }' "$schedstat")"
+      if [ "$track_completeness" = true ]; then
+        if [[ "$value" =~ ^[0-9]+$ ]]; then
+          read_count=$((read_count + 1))
+        else
+          complete=false
+        fi
+      fi
       total=$((total + value))
     done
   done
-  echo "$total"
+  if [ "$track_completeness" = true ]; then
+    if [ "$read_count" -eq 0 ]; then
+      complete=false
+    fi
+    printf "%s\t%s" "$total" "$complete"
+  else
+    echo "$total"
+  fi
 }
 
 process_tree_scheduler_run_delay_components_ns() {
-  local proxy_before="$1" proxy_after="$2" backend_before="$3" backend_after="$4" same_tree="$5"
+  local proxy_before="$1" proxy_after="$2" backend_before="$3" backend_after="$4"
+  local same_tree="$5" counters_complete="${6:-true}"
   awk -v proxy_before="$proxy_before" -v proxy_after="$proxy_after" \
     -v backend_before="$backend_before" -v backend_after="$backend_after" \
-    -v same_tree="$same_tree" 'BEGIN {
+    -v same_tree="$same_tree" -v counters_complete="$counters_complete" 'BEGIN {
       proxy = proxy_after - proxy_before
       backend = backend_after - backend_before
       if (same_tree == "true") {
@@ -209,7 +233,7 @@ process_tree_scheduler_run_delay_components_ns() {
       }
       total = proxy + backend
       if (total < 0) total = 0
-      if (proxy < 0 || backend < 0) {
+      if (proxy < 0 || backend < 0 || counters_complete != "true") {
         printf "null\tnull\t%.0f\tfalse", total
       } else {
         printf "%.0f\t%.0f\t%.0f\ttrue", proxy, backend, total

@@ -483,7 +483,9 @@ run_one() {
   local fd_baseline fd_peak fd_growth fd_peak_file fd_peak_monitor_pid
   local backend_fd_baseline backend_fd_peak backend_fd_growth backend_fd_peak_file backend_fd_peak_monitor_pid
   local total_fd_peak total_fd_growth
-  local scheduler_before_ns scheduler_after_ns backend_scheduler_before_ns backend_scheduler_after_ns
+  local scheduler_before_ns scheduler_after_ns scheduler_before_complete scheduler_after_complete
+  local backend_scheduler_before_ns backend_scheduler_after_ns
+  local backend_scheduler_before_complete backend_scheduler_after_complete component_reads_complete
   local proxy_scheduler_run_delay_ns backend_scheduler_run_delay_ns total_scheduler_run_delay_ns
   local scheduler_delay_components_complete scheduler_queue_delay_us_per_transfer kernel_resource_metrics
   local requests_per_cpu_second requests_per_total_cpu_second
@@ -516,7 +518,13 @@ run_one() {
     fd_peak_monitor_pid=""
     backend_fd_peak_monitor_pid=""
     scheduler_before_ns=0
+    scheduler_after_ns=0
+    scheduler_before_complete=false
+    scheduler_after_complete=false
     backend_scheduler_before_ns=0
+    backend_scheduler_after_ns=0
+    backend_scheduler_before_complete=false
+    backend_scheduler_after_complete=false
     if [ -d /proc ]; then
       kernel_resource_metrics=true
       rss_baseline_kb="$(process_tree_status_kb "$resource_pid" "VmRSS")"
@@ -527,7 +535,8 @@ run_one() {
       fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.fd-peak"
       monitor_process_tree_fd_peak "$resource_pid" "$fd_peak_file" "$fd_baseline" &
       fd_peak_monitor_pid=$!
-      scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      read -r scheduler_before_ns scheduler_before_complete \
+        <<<"$(process_tree_scheduler_run_delay_ns "$resource_pid" true)"
       if [ "$resource_pid" != "$BACKEND_PID" ]; then
         backend_rss_baseline_kb="$(process_tree_status_kb "$BACKEND_PID" "VmRSS")"
         backend_rss_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-rss-peak"
@@ -537,7 +546,8 @@ run_one() {
         backend_fd_peak_file="$TMP_DIR/${artifact}.attempt-${attempt}.backend-fd-peak"
         monitor_process_tree_fd_peak "$BACKEND_PID" "$backend_fd_peak_file" "$backend_fd_baseline" &
         backend_fd_peak_monitor_pid=$!
-        backend_scheduler_before_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
+        read -r backend_scheduler_before_ns backend_scheduler_before_complete \
+          <<<"$(process_tree_scheduler_run_delay_ns "$BACKEND_PID" true)"
       else
         backend_rss_baseline_kb="$rss_baseline_kb"
         backend_fd_baseline="$fd_baseline"
@@ -615,9 +625,11 @@ run_one() {
     scheduler_after_ns="$scheduler_before_ns"
     backend_scheduler_after_ns="$backend_scheduler_before_ns"
     if [ "$kernel_resource_metrics" = true ]; then
-      scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$resource_pid")"
+      read -r scheduler_after_ns scheduler_after_complete \
+        <<<"$(process_tree_scheduler_run_delay_ns "$resource_pid" true)"
       if [ "$resource_pid" != "$BACKEND_PID" ]; then
-        backend_scheduler_after_ns="$(process_tree_scheduler_run_delay_ns "$BACKEND_PID")"
+        read -r backend_scheduler_after_ns backend_scheduler_after_complete \
+          <<<"$(process_tree_scheduler_run_delay_ns "$BACKEND_PID" true)"
       fi
     fi
     total_rss_peak_kb=$((rss_peak_kb + backend_rss_peak_kb))
@@ -640,11 +652,22 @@ run_one() {
       same_scheduler_tree=false
     fi
     if [ "$kernel_resource_metrics" = true ]; then
+      component_reads_complete=false
+      if [ "$same_scheduler_tree" = true ]; then
+        if [ "$scheduler_before_complete" = true ] && [ "$scheduler_after_complete" = true ]; then
+          component_reads_complete=true
+        fi
+      elif [ "$scheduler_before_complete" = true ] && [ "$scheduler_after_complete" = true ] \
+        && [ "$backend_scheduler_before_complete" = true ] \
+        && [ "$backend_scheduler_after_complete" = true ]; then
+        component_reads_complete=true
+      fi
       read -r proxy_scheduler_run_delay_ns backend_scheduler_run_delay_ns total_scheduler_run_delay_ns \
         scheduler_delay_components_complete \
         <<<"$(process_tree_scheduler_run_delay_components_ns \
           "$scheduler_before_ns" "$scheduler_after_ns" \
-          "$backend_scheduler_before_ns" "$backend_scheduler_after_ns" "$same_scheduler_tree")"
+          "$backend_scheduler_before_ns" "$backend_scheduler_after_ns" \
+          "$same_scheduler_tree" "$component_reads_complete")"
     else
       proxy_scheduler_run_delay_ns=null
       backend_scheduler_run_delay_ns=null

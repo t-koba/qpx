@@ -129,10 +129,56 @@ process_tree_scheduler_run_delay_components_ns 100 130 0 0 true
 printf "\n"
 process_tree_scheduler_run_delay_components_ns 150 140 200 230 false
 printf "\n"
+process_tree_scheduler_run_delay_components_ns 100 150 200 230 false false
+printf "\n"
+process_tree_scheduler_run_delay_components_ns 100 130 0 0 true false
+printf "\n"
 '''
         result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.splitlines(), ["50\t30\t80\ttrue", "0\t30\t30\ttrue", "null\tnull\t20\tfalse"])
+        self.assertEqual(
+            result.stdout.splitlines(),
+            [
+                "50\t30\t80\ttrue",
+                "0\t30\t30\ttrue",
+                "null\tnull\t20\tfalse",
+                "null\tnull\t80\tfalse",
+                "null\tnull\t30\tfalse",
+            ],
+        )
+
+    @unittest.skipUnless(Path("/proc").is_dir(), "requires Linux procfs")
+    def test_process_tree_counter_marks_missing_and_partial_schedstat_reads(self):
+        source = (ROOT / "scripts/lib/perf-process-metrics.sh").read_text()
+        start = source.index("process_tree_scheduler_run_delay_ns() {")
+        end = source.index("\n}\n", start) + 2
+        function = source[start:end]
+        script = function + '''
+process_tree_pids() { echo 999999999; }
+read -r missing_total missing_complete <<<"$(process_tree_scheduler_run_delay_ns 1 true)"
+printf "%s\t%s\n" "$missing_total" "$missing_complete"
+process_tree_pids() { echo "$$"; }
+read -r complete_total complete_read <<<"$(process_tree_scheduler_run_delay_ns 1 true)"
+printf "%s\t%s\n" "$complete_total" "$complete_read"
+process_tree_pids() { echo "$$"; echo 999999999; }
+read -r partial_total partial_complete <<<"$(process_tree_scheduler_run_delay_ns 1 true)"
+printf "%s\t%s\n" "$partial_total" "$partial_complete"
+process_tree_pids() { echo "$$"; }
+legacy_total="$(process_tree_scheduler_run_delay_ns 1)"
+printf "%s\n" "$legacy_total"
+'''
+        result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        missing, complete, partial, legacy = result.stdout.splitlines()
+        self.assertEqual(missing, "0\tfalse")
+        complete_total, complete_read = complete.split("\t")
+        self.assertRegex(complete_total, r"^[0-9]+$")
+        self.assertEqual(complete_read, "true")
+        partial_total, partial_complete = partial.split("\t")
+        self.assertRegex(partial_total, r"^[0-9]+$")
+        self.assertEqual(partial_complete, "false")
+        self.assertRegex(legacy, r"^[0-9]+$")
+        self.assertNotIn("\t", legacy)
 
     def test_sample_writer_preserves_identity_and_component_units(self):
         source = (ROOT / "scripts/perf-audit-streaming-compare.sh").read_text()
@@ -178,7 +224,7 @@ printf "\n"
                                     capture_output=True, text=True)
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("do not sum to total", result.stderr)
-            args[22:27] = ["null", "null", "20000", "false", "0.004000"]
+            args[22:27] = ["null", "null", "20000", "false", "4.000000"]
             result = subprocess.run(["python3", "-", *args], input=writer,
                                     capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
@@ -187,7 +233,7 @@ printf "\n"
             self.assertIsNone(incomplete["proxy_scheduler_run_delay_ns"])
             self.assertIsNone(incomplete["backend_scheduler_run_delay_ns"])
             self.assertEqual(incomplete["total_scheduler_run_delay_ns"], 20000)
-            self.assertEqual(incomplete["scheduler_queue_delay_us_per_transfer"], 0.004)
+            self.assertEqual(incomplete["scheduler_queue_delay_us_per_transfer"], 4.0)
 
 
 class CollectorTest(unittest.TestCase):
