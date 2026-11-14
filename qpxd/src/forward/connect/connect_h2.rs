@@ -9,7 +9,9 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::forward::request::resolve_upstream_url;
-use crate::http::codec::h2::{h1_headers_to_http, h2_response_to_owner, own_h2_response};
+#[cfg(test)]
+use crate::http::codec::h2::h1_headers_to_http;
+use crate::http::codec::h2::{h2_response_to_owner, own_h2_response};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
 #[cfg(feature = "auth-basic")]
@@ -398,7 +400,7 @@ pub(super) async fn handle_h2_extended_connect(
     if let Some(offered) = websocket_protocols.as_deref() {
         crate::http::protocol::websocket::validate_extended_connect_websocket_response(
             response.status(),
-            &h1_headers_to_http(response.headers())?,
+            response.headers(),
             offered,
         )?;
     }
@@ -455,6 +457,43 @@ mod tests {
     use super::*;
     use http::header::{CONTENT_LENGTH, COOKIE, SET_COOKIE};
     use http::{HeaderValue, Response, Version};
+
+    #[test]
+    fn websocket_response_validation_does_not_need_cookie_normalization() {
+        let offered = ["chat".to_owned()];
+        for cookies in [["a=1", "b=2"], ["", "a=1"]] {
+            let mut response = Response::builder()
+                .status(StatusCode::OK)
+                .header("sec-websocket-protocol", "chat")
+                .body(())
+                .unwrap();
+            for cookie in cookies {
+                response
+                    .headers_mut()
+                    .append(COOKIE, HeaderValue::from_static(cookie));
+            }
+
+            let direct =
+                crate::http::protocol::websocket::validate_extended_connect_websocket_response(
+                    response.status(),
+                    response.headers(),
+                    &offered,
+                );
+            let normalized = h1_headers_to_http(response.headers()).unwrap();
+            let prior =
+                crate::http::protocol::websocket::validate_extended_connect_websocket_response(
+                    response.status(),
+                    &normalized,
+                    &offered,
+                );
+            assert!(direct.is_ok());
+            assert_eq!(direct.is_ok(), prior.is_ok());
+            assert_eq!(
+                response.headers().get_all(COOKIE).iter().count(),
+                cookies.len()
+            );
+        }
+    }
 
     #[test]
     fn h2_extended_connect_owner_cookie_parity() {
