@@ -738,11 +738,14 @@ pub(crate) fn h2_response_body_with_inflight(
     Body::wrap(H2RecvBody::response(body, inflight))
 }
 
-fn own_h2_response<B>(response: ::http::Response<B>) -> Result<OwnerResponse<B>> {
+pub(crate) fn own_h2_response<B>(
+    response: ::http::Response<B>,
+    status_context: &str,
+) -> Result<OwnerResponse<B>> {
     let mut response = OwnerResponse::from_http(response);
     *response.status_mut() = qpx_http::protocol::semantics::validate_http_status_class(
         response.status(),
-        "HTTP/2 response",
+        status_context,
     )?;
     *response.version_mut() = http::Version::HTTP_2;
 
@@ -763,7 +766,7 @@ fn own_h2_response<B>(response: ::http::Response<B>) -> Result<OwnerResponse<B>>
 pub(crate) fn h2_response_to_owner(
     response: ::http::Response<RecvStream>,
 ) -> Result<OwnerResponse<Body>> {
-    Ok(own_h2_response(response)?.map_body(h2_response_body))
+    Ok(own_h2_response(response, "HTTP/2 response")?.map_body(h2_response_body))
 }
 
 /// Export the decoded response to a standard HTTP carrier for codec tests.
@@ -778,7 +781,8 @@ pub(crate) fn h2_response_to_owner_with_inflight(
     response: ::http::Response<RecvStream>,
     inflight: InflightCounterGuard,
 ) -> Result<OwnerResponse<Body>> {
-    Ok(own_h2_response(response)?.map_body(|body| h2_response_body_with_inflight(body, inflight)))
+    Ok(own_h2_response(response, "HTTP/2 response")?
+        .map_body(|body| h2_response_body_with_inflight(body, inflight)))
 }
 
 enum H2RecvBodyKind {

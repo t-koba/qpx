@@ -9,9 +9,7 @@ use crate::forward::policy::{ForwardPolicyDecision, evaluate_forward_policy};
 #[cfg(feature = "auth-basic")]
 use crate::forward::request::proxy_auth_required;
 use crate::forward::request::resolve_upstream_url;
-use crate::http::codec::h2::{
-    h1_headers_to_http, h2_response_to_owner, join_duplicate_cookie_values,
-};
+use crate::http::codec::h2::{h1_headers_to_http, h2_response_to_owner, own_h2_response};
 use crate::http::dispatch::{DispatchOutcome, ProxyKind};
 use crate::http::local_response::finalized_local_response;
 #[cfg(feature = "auth-basic")]
@@ -35,7 +33,7 @@ use ::http::{Method, StatusCode};
 use anyhow::{Result, anyhow};
 use h2::ext::Protocol as H2Protocol;
 use qpx_core::config::ActionKind;
-use qpx_core::http_message::{OrdinaryHeaderName, Request, Response as OwnerResponse};
+use qpx_core::http_message::{Request, Response as OwnerResponse};
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
 use qpx_http::protocol::address::parse_authority_host_port;
@@ -447,24 +445,8 @@ pub(super) async fn handle_h2_extended_connect(
 
 // Import the successful H2 library response before in-domain relay/finalization.
 fn own_h2_extended_connect_response<B>(response: http::Response<B>) -> Result<OwnerResponse<B>> {
-    let mut response = OwnerResponse::from_http(response);
-    *response.status_mut() = qpx_http::protocol::semantics::validate_http_status_class(
-        response.status(),
-        "HTTP/2 CONNECT response",
-    )?;
-    *response.version_mut() = http::Version::HTTP_2;
+    let mut response = own_h2_response(response, "HTTP/2 CONNECT response")?;
     response.extensions_mut().clear();
-
-    // Preserve a single Cookie (including an empty one); only duplicate fields
-    // pass through the shared H2 joining rule.
-    let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE)?;
-    if response.headers().get_all(&cookie).count() > 1 {
-        let merged_cookie = join_duplicate_cookie_values(response.headers().get_all(&cookie))?;
-        response.headers_mut().remove(&cookie);
-        if let Some(value) = merged_cookie {
-            response.headers_mut().insert(cookie, value);
-        }
-    }
     Ok(response)
 }
 

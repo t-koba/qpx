@@ -1124,7 +1124,7 @@ fn h2_response_owner_import_preserves_other_headers_and_message_metadata() {
         .append(SET_COOKIE, HeaderValue::from_static("second=2"));
     let expected_headers = h1_headers_to_http(response.headers()).expect("expected headers");
 
-    let owner = own_h2_response(response).expect("own response");
+    let owner = own_h2_response(response, "HTTP/2 response").expect("own response");
     assert_eq!(owner.status(), StatusCode::NON_AUTHORITATIVE_INFORMATION);
     assert_eq!(owner.version(), Version::HTTP_2);
     assert_eq!(owner.extensions().get::<u32>(), Some(&42));
