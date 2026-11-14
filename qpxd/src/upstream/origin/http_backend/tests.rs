@@ -261,8 +261,36 @@ async fn connection_local_pool_keeps_reusable_origins_isolated() -> Result<()> {
 
 #[tokio::test]
 async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()> {
-    let (origin, accepts, closes, closed) = spawn_closing_keepalive_http1_origin().await?;
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let origin = OriginEndpoint::direct(format!("http://{addr}"));
+    let accepts = Arc::new(AtomicUsize::new(0));
+    let accepts_task = accepts.clone();
+    let (close_first, allow_close) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        for allow_close in [Some(allow_close), None] {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            accepts_task.fetch_add(1, Ordering::SeqCst);
+            let mut raw = Vec::new();
+            let mut buf = [0_u8; 1024];
+            crate::test_util::read_request_head(&mut stream, &mut raw, &mut buf).await;
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+                .await
+                .expect("write response");
+            if let Some(allow_close) = allow_close {
+                allow_close.await.expect("allow first connection close");
+            }
+            drop(stream);
+        }
+    });
     let pools = crate::pool::PoolRegistry::new();
+    let default_port = origin.default_port_hint();
+    let connect_authority = origin.connect_authority_ref(default_port)?;
+    let host_authority = origin.host_header_authority_ref(default_port)?;
+    let slot = pools
+        .direct_origin
+        .plain_slot_for(connect_authority.as_ref(), host_authority.as_ref());
 
     let first = proxy_http_with_interim(
         &pools,
@@ -277,12 +305,20 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
     )
     .await?;
     assert_eq!(to_bytes(first.response.into_head_and_body().1).await?, "OK");
-    while closes.load(Ordering::SeqCst) == 0 {
-        let notified = closed.notified();
-        if closes.load(Ordering::SeqCst) == 0 {
-            notified.await;
+    let connection = slot.pop_idle().expect("first connection was pooled");
+    // A server-side close alone does not establish that the client's idle
+    // probe can observe EOF. Hold the pooled connection until it is readable.
+    close_first.send(()).expect("signal first connection close");
+    loop {
+        connection.stream.readable().await?;
+        match connection.stream.try_read(&mut [0_u8; 1]) {
+            Ok(0) => break,
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => continue,
+            Ok(read) => return Err(anyhow::anyhow!("expected EOF, read {read} byte")),
+            Err(error) => return Err(error.into()),
         }
     }
+    slot.recycle_idle(connection);
 
     let second = proxy_http_with_interim(
         &pools,
@@ -302,6 +338,7 @@ async fn proxy_plain_http_discards_closed_idle_connection_on_pop() -> Result<()>
     );
 
     assert_eq!(accepts.load(Ordering::SeqCst), 2);
+    server.await?;
     Ok(())
 }
 
