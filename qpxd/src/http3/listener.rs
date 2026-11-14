@@ -166,6 +166,10 @@ pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
     ) -> Result<()>;
 }
 
+fn grpc_deadline_error_send_timeout(streaming: ResolvedStreamingLimits) -> Duration {
+    Duration::from_millis(streaming.body_send_timeout_ms)
+}
+
 async fn handle_stream<H: H3RequestHandler>(
     req_head: ::http::Request<()>,
     mut req_stream: H3ServerRequestStream,
@@ -393,7 +397,7 @@ async fn handle_stream<H: H3RequestHandler>(
                                 &request_method,
                                 &mut send_stream,
                                 limits.streaming.max_response_body_bytes,
-                                Duration::from_secs(1),
+                                grpc_deadline_error_send_timeout(request_streaming),
                             )
                             .await
                             {

@@ -15,6 +15,20 @@ fn classify_h3_connect_kind_rejects_unknown_extended_connect_protocols() {
 }
 
 #[test]
+fn grpc_deadline_error_uses_resolved_body_send_timeout() {
+    let mut streaming = CountLimitSelections(Arc::new(std::sync::atomic::AtomicUsize::new(0)))
+        .limits()
+        .streaming;
+    streaming.body_read_timeout_ms = 1_234;
+    streaming.body_send_timeout_ms = 7_654;
+
+    assert_eq!(
+        grpc_deadline_error_send_timeout(streaming),
+        Duration::from_millis(7_654),
+    );
+}
+
+#[test]
 fn priority_scheduler_prioritizes_urgency_and_non_incremental_work() {
     let mut scheduler = PriorityScheduler::new();
     scheduler.enqueue(
