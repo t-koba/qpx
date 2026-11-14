@@ -15,7 +15,10 @@ use crate::http::protocol::common::blocked_response as blocked;
 #[cfg(feature = "auth-basic")]
 use crate::http::protocol::common::forbidden_response as forbidden;
 use crate::http3::listener::H3ConnInfo;
-use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
+use crate::http3::server::{
+    H3ServerRequestStream, h3_static_response_send_timeout, send_h3_response,
+    send_h3_static_response,
+};
 use crate::policy_context::{
     DecisionServiceInput, DecisionServiceMode, IdentityRequestContext,
     authentication_response_for_error, enforce_decision_service, resolve_identity_for_request,
@@ -35,6 +38,10 @@ pub(crate) async fn prepare_h3_connect_request(
     let state = handler.runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
     let max_h3_response_body_bytes = state.plan.limits.body.max_h3_response_body_bytes;
+    let response_send_timeout = h3_static_response_send_timeout(
+        std::time::Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms),
+        None,
+    );
     let protocol = req_head.extensions().get::<::h3::ext::Protocol>().copied();
     let is_connect_udp = protocol == Some(::h3::ext::Protocol::CONNECT_UDP);
     let is_extended_connect = protocol.is_some();
@@ -45,6 +52,7 @@ pub(crate) async fn prepare_h3_connect_request(
         connect_udp_cfg,
         proxy_name,
         max_h3_response_body_bytes,
+        response_send_timeout,
         is_connect_udp,
         is_extended_connect,
         connect_udp_disabled_message: state.messages.connect_udp_disabled.as_str(),
@@ -69,6 +77,7 @@ pub(crate) async fn prepare_h3_connect_request(
                 &http::Method::CONNECT,
                 proxy_name,
                 max_h3_response_body_bytes,
+                response_send_timeout,
             )
         };
     }
@@ -268,6 +277,7 @@ pub(crate) async fn prepare_h3_connect_request(
                 &http::Method::CONNECT,
                 proxy_name,
                 max_h3_response_body_bytes,
+                response_send_timeout,
             )
             .await?;
             return Ok(None);

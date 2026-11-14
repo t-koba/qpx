@@ -251,6 +251,10 @@ impl H3RequestHandler for ReverseH3Handler {
             &http::Method::CONNECT,
             proxy_name,
             state.plan.limits.body.max_h3_response_body_bytes,
+            crate::http3::server::h3_static_response_send_timeout(
+                Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms),
+                None,
+            ),
         )
         .await
         {

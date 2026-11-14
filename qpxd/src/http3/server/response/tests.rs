@@ -2,6 +2,29 @@ use super::*;
 use http::{HeaderMap, HeaderValue, Method, StatusCode, Version, header};
 
 #[test]
+fn static_response_send_timeout_uses_resolved_budget_or_configured_default() {
+    let configured_default = Duration::from_millis(4_321);
+    let resolved_body_send = Duration::from_millis(7_654);
+
+    assert_eq!(
+        h3_static_response_send_timeout(configured_default, None),
+        configured_default,
+    );
+    assert_eq!(
+        h3_static_response_send_timeout(configured_default, Some(resolved_body_send)),
+        resolved_body_send,
+    );
+    assert_eq!(
+        h3_static_response_send_timeout(Duration::ZERO, None),
+        Duration::from_millis(1),
+    );
+    assert_eq!(
+        h3_static_response_send_timeout(configured_default, Some(Duration::ZERO)),
+        Duration::ZERO,
+    );
+}
+
+#[test]
 fn owned_h3_head_matches_standard_preparation() {
     for method in [Method::GET, Method::HEAD, Method::CONNECT] {
         for status in [200, 204, 205, 304] {

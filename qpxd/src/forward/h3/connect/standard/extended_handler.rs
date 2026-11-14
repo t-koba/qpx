@@ -36,6 +36,10 @@ pub(crate) async fn handle_h3_extended_connect(
             &http::Method::CONNECT,
             state.plan.identity.proxy_name.as_ref(),
             state.plan.limits.body.max_h3_response_body_bytes,
+            crate::http3::server::h3_static_response_send_timeout(
+                Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms),
+                None,
+            ),
         )
         .await?;
         return Ok(());

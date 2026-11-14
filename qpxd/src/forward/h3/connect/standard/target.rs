@@ -21,6 +21,7 @@ pub(super) struct H3ConnectTargetInput<'a> {
     pub(super) connect_udp_cfg: Option<&'a ConnectUdpConfig>,
     pub(super) proxy_name: &'a str,
     pub(super) max_h3_response_body_bytes: usize,
+    pub(super) response_send_timeout: std::time::Duration,
     pub(super) is_connect_udp: bool,
     pub(super) is_extended_connect: bool,
     pub(super) connect_udp_disabled_message: &'a str,
@@ -35,6 +36,7 @@ pub(super) async fn prepare_h3_connect_target(
         connect_udp_cfg,
         proxy_name,
         max_h3_response_body_bytes,
+        response_send_timeout,
         is_connect_udp,
         is_extended_connect,
         connect_udp_disabled_message,
@@ -47,6 +49,7 @@ pub(super) async fn prepare_h3_connect_target(
             &http::Method::CONNECT,
             proxy_name,
             max_h3_response_body_bytes,
+            response_send_timeout,
         )
         .await?;
         return Ok(None);
@@ -65,6 +68,7 @@ pub(super) async fn prepare_h3_connect_target(
             &http::Method::CONNECT,
             proxy_name,
             max_h3_response_body_bytes,
+            response_send_timeout,
         )
         .await?;
         return Ok(None);
@@ -76,6 +80,7 @@ pub(super) async fn prepare_h3_connect_target(
             req_stream,
             proxy_name,
             max_h3_response_body_bytes,
+            response_send_timeout,
             connect_udp_cfg.and_then(|cfg| cfg.uri_template.as_deref()),
             req_authority,
         )
@@ -86,6 +91,7 @@ pub(super) async fn prepare_h3_connect_target(
             req_stream,
             proxy_name,
             max_h3_response_body_bytes,
+            response_send_timeout,
             is_extended_connect,
             req_authority,
         )
@@ -98,6 +104,7 @@ async fn prepare_connect_udp_target(
     req_stream: &mut H3ServerRequestStream,
     proxy_name: &str,
     max_h3_response_body_bytes: usize,
+    response_send_timeout: std::time::Duration,
     uri_template: Option<&str>,
     req_authority: String,
 ) -> Result<Option<PreparedH3ConnectTarget>> {
@@ -108,6 +115,7 @@ async fn prepare_connect_udp_target(
                 req_stream,
                 proxy_name,
                 max_h3_response_body_bytes,
+                response_send_timeout,
                 b"invalid CONNECT-UDP target",
             )
             .await?;
@@ -122,7 +130,14 @@ async fn prepare_connect_udp_target(
             } else {
                 b"missing CONNECT-UDP :scheme".as_slice()
             };
-            send_bad_request(req_stream, proxy_name, max_h3_response_body_bytes, message).await?;
+            send_bad_request(
+                req_stream,
+                proxy_name,
+                max_h3_response_body_bytes,
+                response_send_timeout,
+                message,
+            )
+            .await?;
             return Ok(None);
         }
     };
@@ -131,6 +146,7 @@ async fn prepare_connect_udp_target(
             req_stream,
             proxy_name,
             max_h3_response_body_bytes,
+            response_send_timeout,
             b"invalid CONNECT-UDP :scheme",
         )
         .await?;
@@ -145,6 +161,7 @@ async fn prepare_connect_udp_target(
                     req_stream,
                     proxy_name,
                     max_h3_response_body_bytes,
+                    response_send_timeout,
                     b"invalid CONNECT-UDP authority",
                 )
                 .await?;
@@ -156,6 +173,7 @@ async fn prepare_connect_udp_target(
             req_stream,
             proxy_name,
             max_h3_response_body_bytes,
+            response_send_timeout,
             b"missing CONNECT-UDP :path",
         )
         .await?;
@@ -177,6 +195,7 @@ async fn prepare_connect_target(
     req_stream: &mut H3ServerRequestStream,
     proxy_name: &str,
     max_h3_response_body_bytes: usize,
+    response_send_timeout: std::time::Duration,
     is_extended_connect: bool,
     req_authority: String,
 ) -> Result<Option<PreparedH3ConnectTarget>> {
@@ -190,6 +209,7 @@ async fn prepare_connect_target(
                 req_stream,
                 proxy_name,
                 max_h3_response_body_bytes,
+                response_send_timeout,
                 b"invalid CONNECT authority",
             )
             .await?;
@@ -221,6 +241,7 @@ async fn send_bad_request(
     req_stream: &mut H3ServerRequestStream,
     proxy_name: &str,
     max_h3_response_body_bytes: usize,
+    response_send_timeout: std::time::Duration,
     message: &[u8],
 ) -> Result<()> {
     send_h3_static_response(
@@ -230,6 +251,7 @@ async fn send_bad_request(
         &http::Method::CONNECT,
         proxy_name,
         max_h3_response_body_bytes,
+        response_send_timeout,
     )
     .await
 }

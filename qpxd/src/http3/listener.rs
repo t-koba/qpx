@@ -5,8 +5,8 @@ use crate::http3::datagram::{DatagramRegistration, H3DatagramDispatch, H3StreamD
 use crate::http3::response_options::H3ResponseSendOptions;
 use crate::http3::server::{
     H3IncomingBodyCompletion, H3IncomingBodyOptions, H3RequestBodyDrainControl,
-    H3ServerRequestStream, H3ServerSendStream, h3_incoming_body, send_h3_response,
-    send_h3_response_observed, send_h3_static_response,
+    H3ServerRequestStream, H3ServerSendStream, h3_incoming_body, h3_static_response_send_timeout,
+    send_h3_response, send_h3_response_observed, send_h3_static_response,
 };
 use crate::runtime::ResolvedStreamingLimits;
 use anyhow::Result;
@@ -266,6 +266,7 @@ async fn handle_stream<H: H3RequestHandler>(
                 &request_method,
                 limits.proxy_name.as_ref(),
                 limits.streaming.max_response_body_bytes,
+                h3_static_response_send_timeout(limits.read_timeout, None),
             )
             .await;
             return;
@@ -290,6 +291,12 @@ async fn handle_stream<H: H3RequestHandler>(
             &request_method,
             limits.proxy_name.as_ref(),
             limits.streaming.max_response_body_bytes,
+            h3_static_response_send_timeout(
+                limits.read_timeout,
+                Some(Duration::from_millis(
+                    request_streaming.body_send_timeout_ms,
+                )),
+            ),
         )
         .await
         {
@@ -509,6 +516,12 @@ async fn handle_stream<H: H3RequestHandler>(
                     &request_method,
                     limits.proxy_name.as_ref(),
                     limits.streaming.max_response_body_bytes,
+                    h3_static_response_send_timeout(
+                        limits.read_timeout,
+                        Some(Duration::from_millis(
+                            response_streaming.body_send_timeout_ms,
+                        )),
+                    ),
                 )
                 .await;
             }

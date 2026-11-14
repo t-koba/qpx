@@ -17,7 +17,8 @@ use tokio::time::{Duration, Instant, Sleep};
 mod response;
 
 pub(crate) use self::response::{
-    send_h3_response, send_h3_response_observed, send_h3_static_response,
+    h3_static_response_send_timeout, send_h3_response, send_h3_response_observed,
+    send_h3_static_response,
 };
 
 pub type H3ServerRequestStream = ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;

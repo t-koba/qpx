@@ -262,6 +262,13 @@ where
     .map_err(Into::into)
 }
 
+pub(crate) fn h3_static_response_send_timeout(
+    configured_default: Duration,
+    resolved_body_send_timeout: Option<Duration>,
+) -> Duration {
+    resolved_body_send_timeout.unwrap_or_else(|| configured_default.max(Duration::from_millis(1)))
+}
+
 fn finalized_h3_static_response(
     status: ::http::StatusCode,
     body: &[u8],
@@ -290,6 +297,7 @@ pub(crate) async fn send_h3_static_response<S>(
     request_method: &http::Method,
     proxy_name: &str,
     max_h3_response_body_bytes: usize,
+    send_timeout: Duration,
 ) -> Result<()>
 where
     S: ::h3::quic::SendStream<Bytes>,
@@ -300,7 +308,7 @@ where
         request_method,
         req_stream,
         max_h3_response_body_bytes,
-        Duration::from_secs(1),
+        send_timeout,
     )
     .await
 }
