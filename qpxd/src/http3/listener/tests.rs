@@ -14,18 +14,37 @@ fn classify_h3_connect_kind_rejects_unknown_extended_connect_protocols() {
     );
 }
 
-#[test]
-fn grpc_deadline_error_uses_resolved_body_send_timeout() {
+#[tokio::test]
+async fn grpc_deadline_error_response_passes_resolved_budget_to_send_adapter() -> Result<()> {
     let mut streaming = CountLimitSelections(Arc::new(std::sync::atomic::AtomicUsize::new(0)))
         .limits()
         .streaming;
     streaming.body_read_timeout_ms = 1_234;
     streaming.body_send_timeout_ms = 7_654;
 
+    let response = crate::http::rpc::build_grpc_deadline_exceeded_response("grpc", None)?;
+    let observed_timeout = Arc::new(std::sync::Mutex::new(None));
+    let recorded_timeout = observed_timeout.clone();
+    send_grpc_deadline_error_response(
+        response,
+        http::Method::POST,
+        1024,
+        streaming,
+        move |response, method, max_body_bytes, send_timeout| async move {
+            assert_eq!(response.status(), http::StatusCode::OK);
+            assert_eq!(method, http::Method::POST);
+            assert_eq!(max_body_bytes, 1024);
+            *recorded_timeout.lock().unwrap() = Some(send_timeout);
+            Ok(())
+        },
+    )
+    .await?;
+
     assert_eq!(
-        grpc_deadline_error_send_timeout(streaming),
-        Duration::from_millis(7_654),
+        *observed_timeout.lock().unwrap(),
+        Some(Duration::from_millis(7_654)),
     );
+    Ok(())
 }
 
 #[test]

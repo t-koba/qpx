@@ -166,8 +166,24 @@ pub(crate) trait H3RequestHandler: Clone + Send + Sync + 'static {
     ) -> Result<()>;
 }
 
-fn grpc_deadline_error_send_timeout(streaming: ResolvedStreamingLimits) -> Duration {
-    Duration::from_millis(streaming.body_send_timeout_ms)
+async fn send_grpc_deadline_error_response<R, F, Fut>(
+    response: R,
+    request_method: http::Method,
+    max_response_body_bytes: usize,
+    streaming: ResolvedStreamingLimits,
+    send: F,
+) -> Result<()>
+where
+    F: FnOnce(R, http::Method, usize, Duration) -> Fut,
+    Fut: std::future::Future<Output = Result<()>>,
+{
+    send(
+        response,
+        request_method,
+        max_response_body_bytes,
+        Duration::from_millis(streaming.body_send_timeout_ms),
+    )
+    .await
 }
 
 async fn handle_stream<H: H3RequestHandler>(
@@ -392,14 +408,27 @@ async fn handle_stream<H: H3RequestHandler>(
                         grpc_request_content_type.as_deref(),
                     ) {
                         Ok(response) => {
-                            if let Err(err) = send_h3_response(
-                                response,
-                                &request_method,
-                                &mut send_stream,
-                                limits.streaming.max_response_body_bytes,
-                                grpc_deadline_error_send_timeout(request_streaming),
-                            )
-                            .await
+                            if let Err(err) =
+                                send_grpc_deadline_error_response(
+                                    response,
+                                    request_method.clone(),
+                                    limits.streaming.max_response_body_bytes,
+                                    request_streaming,
+                                    move |response,
+                                          request_method,
+                                          max_body_bytes,
+                                          send_timeout| async move {
+                                        send_h3_response(
+                                            response,
+                                            &request_method,
+                                            &mut send_stream,
+                                            max_body_bytes,
+                                            send_timeout,
+                                        )
+                                        .await
+                                    },
+                                )
+                                .await
                             {
                                 warn!(error = ?err, "failed to send HTTP/3 gRPC deadline response");
                             }
