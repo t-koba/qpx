@@ -52,7 +52,7 @@ def build(proxy, mode, **overrides):
         "valid_samples": 3,
         "aggregation": "conservative_median_per_metric",
         "sampling_order": "round_robin_interleaved",
-        "benchmark_schema_version": 8,
+        "benchmark_schema_version": 9,
         "resource_measurement": "sampled_workload_peak_v1",
         "kernel_resource_metrics": True,
         "stream_bytes": STREAM_BYTES,
@@ -1045,7 +1045,7 @@ class StreamingGateTest(unittest.TestCase):
 
     def test_old_record_schema_is_rejected(self):
         fast = lane(FAST_LANE)
-        fast["qpxd"]["benchmark_schema_version"] = 7
+        fast["qpxd"]["benchmark_schema_version"] = 8
         result = self.run_gate(fast)
         self.assertEqual(result.returncode, 1)
         self.assertIn("unsupported benchmark schema", result.stderr)

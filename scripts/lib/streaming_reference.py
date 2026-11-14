@@ -32,6 +32,8 @@ METRICS = (
     "requests_per_cpu_second",
     "p99_chunk_gap_ms",
     "scheduler_queue_delay_us_per_transfer",
+    "proxy_scheduler_queue_delay_us_per_transfer",
+    "backend_scheduler_queue_delay_us_per_transfer",
 )
 
 

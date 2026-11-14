@@ -196,6 +196,27 @@ process_tree_scheduler_run_delay_ns() {
   echo "$total"
 }
 
+process_tree_scheduler_run_delay_components_ns() {
+  local proxy_before="$1" proxy_after="$2" backend_before="$3" backend_after="$4" same_tree="$5"
+  awk -v proxy_before="$proxy_before" -v proxy_after="$proxy_after" \
+    -v backend_before="$backend_before" -v backend_after="$backend_after" \
+    -v same_tree="$same_tree" 'BEGIN {
+      proxy = proxy_after - proxy_before
+      backend = backend_after - backend_before
+      if (same_tree == "true") {
+        proxy = 0
+        backend = proxy_after - proxy_before
+      }
+      total = proxy + backend
+      if (total < 0) total = 0
+      if (proxy < 0 || backend < 0) {
+        printf "null\tnull\t%.0f\tfalse", total
+      } else {
+        printf "%.0f\t%.0f\t%.0f\ttrue", proxy, backend, total
+      }
+    }'
+}
+
 monitor_process_tree_rss_peak() {
   local root="$1"
   local output="$2"

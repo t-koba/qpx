@@ -483,7 +483,9 @@ run_one() {
   local fd_baseline fd_peak fd_growth fd_peak_file fd_peak_monitor_pid
   local backend_fd_baseline backend_fd_peak backend_fd_growth backend_fd_peak_file backend_fd_peak_monitor_pid
   local total_fd_peak total_fd_growth
-  local scheduler_before_ns scheduler_after_ns backend_scheduler_before_ns backend_scheduler_after_ns total_scheduler_run_delay_ns scheduler_queue_delay_us_per_transfer kernel_resource_metrics
+  local scheduler_before_ns scheduler_after_ns backend_scheduler_before_ns backend_scheduler_after_ns
+  local proxy_scheduler_run_delay_ns backend_scheduler_run_delay_ns total_scheduler_run_delay_ns
+  local scheduler_delay_components_complete scheduler_queue_delay_us_per_transfer kernel_resource_metrics
   local requests_per_cpu_second requests_per_total_cpu_second
   local attempt valid samples_file valid_sample_count selected_sample
   if [ "$read_mode" = "slow" ]; then
@@ -632,7 +634,23 @@ run_one() {
       total_fd_peak="$fd_peak"
       total_fd_growth="$fd_growth"
     fi
-    total_scheduler_run_delay_ns="$(awk -v resource_before="$scheduler_before_ns" -v resource_after="$scheduler_after_ns" -v backend_before="$backend_scheduler_before_ns" -v backend_after="$backend_scheduler_after_ns" 'BEGIN { delta = (resource_after - resource_before) + (backend_after - backend_before); if (delta < 0) delta = 0; printf "%.0f", delta }')"
+    if [ "$resource_pid" = "$BACKEND_PID" ]; then
+      same_scheduler_tree=true
+    else
+      same_scheduler_tree=false
+    fi
+    if [ "$kernel_resource_metrics" = true ]; then
+      read -r proxy_scheduler_run_delay_ns backend_scheduler_run_delay_ns total_scheduler_run_delay_ns \
+        scheduler_delay_components_complete \
+        <<<"$(process_tree_scheduler_run_delay_components_ns \
+          "$scheduler_before_ns" "$scheduler_after_ns" \
+          "$backend_scheduler_before_ns" "$backend_scheduler_after_ns" "$same_scheduler_tree")"
+    else
+      proxy_scheduler_run_delay_ns=null
+      backend_scheduler_run_delay_ns=null
+      total_scheduler_run_delay_ns=0
+      scheduler_delay_components_complete=false
+    fi
     valid="$(python3 - "$metrics" <<'PY'
 import json
 import sys
@@ -672,13 +690,15 @@ PY
         "$total_rss_peak_kb" "$total_rss_growth_kb" \
         "$fd_baseline" "$fd_peak" "$fd_growth" \
         "$backend_fd_baseline" "$backend_fd_peak" "$backend_fd_growth" \
-        "$total_fd_peak" "$total_fd_growth" "$total_scheduler_run_delay_ns" \
-        "$scheduler_queue_delay_us_per_transfer" "$kernel_resource_metrics" "$requests_per_cpu_second" \
+        "$total_fd_peak" "$total_fd_growth" "$proxy_scheduler_run_delay_ns" \
+        "$backend_scheduler_run_delay_ns" "$total_scheduler_run_delay_ns" \
+        "$scheduler_delay_components_complete" "$scheduler_queue_delay_us_per_transfer" \
+        "$kernel_resource_metrics" "$requests_per_cpu_second" \
         "$requests_per_total_cpu_second" <<'PY'
 import json
 import sys
 
-path, metrics, cpu_ms, backend_cpu_ms, total_cpu_ms, rss_kb, rss_baseline_kb, rss_peak_kb, rss_growth_kb, backend_rss_baseline_kb, backend_rss_peak_kb, backend_rss_growth_kb, total_rss_peak_kb, total_rss_growth_kb, fd_baseline, fd_peak, fd_growth, backend_fd_baseline, backend_fd_peak, backend_fd_growth, total_fd_peak, total_fd_growth, total_scheduler_run_delay_ns, scheduler_queue_delay_us_per_transfer, kernel_resource_metrics, rpcpu, total_rpcpu = sys.argv[1:28]
+path, metrics, cpu_ms, backend_cpu_ms, total_cpu_ms, rss_kb, rss_baseline_kb, rss_peak_kb, rss_growth_kb, backend_rss_baseline_kb, backend_rss_peak_kb, backend_rss_growth_kb, total_rss_peak_kb, total_rss_growth_kb, fd_baseline, fd_peak, fd_growth, backend_fd_baseline, backend_fd_peak, backend_fd_growth, total_fd_peak, total_fd_growth, proxy_scheduler_run_delay_ns, backend_scheduler_run_delay_ns, total_scheduler_run_delay_ns, scheduler_delay_components_complete, scheduler_queue_delay_us_per_transfer, kernel_resource_metrics, rpcpu, total_rpcpu = sys.argv[1:31]
 record = json.loads(metrics)
 record["cpu_ms"] = int(cpu_ms)
 record["backend_cpu_ms"] = int(backend_cpu_ms)
@@ -700,7 +720,32 @@ record["backend_fd_peak"] = int(backend_fd_peak)
 record["backend_fd_growth"] = int(backend_fd_growth)
 record["total_fd_peak"] = int(total_fd_peak)
 record["total_fd_growth"] = int(total_fd_growth)
-record["total_scheduler_run_delay_ns"] = int(total_scheduler_run_delay_ns)
+total_delay_ns = int(total_scheduler_run_delay_ns)
+record["total_scheduler_run_delay_ns"] = total_delay_ns
+record["scheduler_delay_components_complete"] = scheduler_delay_components_complete == "true"
+transfers = record.get("transfers")
+if type(transfers) is not int or transfers <= 0:
+    raise SystemExit("streaming sample has no positive transfer count")
+if record["scheduler_delay_components_complete"]:
+    proxy_delay_ns = int(proxy_scheduler_run_delay_ns)
+    backend_delay_ns = int(backend_scheduler_run_delay_ns)
+    if proxy_delay_ns + backend_delay_ns != total_delay_ns:
+        raise SystemExit("proxy and backend scheduler-delay components do not sum to total")
+    record["proxy_scheduler_run_delay_ns"] = proxy_delay_ns
+    record["backend_scheduler_run_delay_ns"] = backend_delay_ns
+    record["proxy_scheduler_queue_delay_us_per_transfer"] = proxy_delay_ns / transfers / 1000.0
+    record["backend_scheduler_queue_delay_us_per_transfer"] = backend_delay_ns / transfers / 1000.0
+    if abs(record["proxy_scheduler_queue_delay_us_per_transfer"]
+           + record["backend_scheduler_queue_delay_us_per_transfer"]
+           - float(scheduler_queue_delay_us_per_transfer)) > 0.000001:
+        raise SystemExit("scheduler-delay components do not match the total per-transfer value")
+else:
+    if proxy_scheduler_run_delay_ns != "null" or backend_scheduler_run_delay_ns != "null":
+        raise SystemExit("incomplete scheduler-delay components must be null")
+    record["proxy_scheduler_run_delay_ns"] = None
+    record["backend_scheduler_run_delay_ns"] = None
+    record["proxy_scheduler_queue_delay_us_per_transfer"] = None
+    record["backend_scheduler_queue_delay_us_per_transfer"] = None
 record["scheduler_queue_delay_us_per_transfer"] = float(scheduler_queue_delay_us_per_transfer)
 record["kernel_resource_metrics"] = kernel_resource_metrics == "true"
 record["requests_per_cpu_second"] = None if rpcpu == "null" else float(rpcpu)
@@ -963,11 +1008,17 @@ for key in sorted(expected | reference_keys):
     record["requests_per_total_cpu_second"] = lower(
         records, "requests_per_total_cpu_second"
     )
+    delay_sample = max(records, key=lambda item: item["total_scheduler_run_delay_ns"])
     for field in (
+        "proxy_scheduler_run_delay_ns",
+        "backend_scheduler_run_delay_ns",
+        "scheduler_delay_components_complete",
         "total_scheduler_run_delay_ns",
+        "proxy_scheduler_queue_delay_us_per_transfer",
+        "backend_scheduler_queue_delay_us_per_transfer",
         "scheduler_queue_delay_us_per_transfer",
     ):
-        record[field] = maximum(records, field)
+        record[field] = delay_sample[field]
     # Resource triples must stay internally consistent (growth == peak -
     # baseline, totals == family sums), so copy them from the single sample
     # with the highest aggregate peak instead of maximizing each field.
@@ -1026,13 +1077,15 @@ for key in sorted(expected | reference_keys):
         "backend_fd_growth",
         "total_fd_peak",
         "total_fd_growth",
+        "proxy_scheduler_run_delay_ns",
+        "backend_scheduler_run_delay_ns",
         "total_scheduler_run_delay_ns",
     ):
         if record.get(field) is not None:
             record[field] = int(record[field])
     record.update({
         "aggregation": "conservative_median_per_metric",
-        "benchmark_schema_version": 8,
+        "benchmark_schema_version": 9,
         "sample_extremes": {
             "p99_chunk_gap_ms": extremes(records, "p99_chunk_gap_ms"),
             "requests_per_total_cpu_second": extremes(
@@ -1040,6 +1093,12 @@ for key in sorted(expected | reference_keys):
             ),
             "scheduler_queue_delay_us_per_transfer": extremes(
                 records, "scheduler_queue_delay_us_per_transfer"
+            ),
+            "proxy_scheduler_queue_delay_us_per_transfer": extremes(
+                records, "proxy_scheduler_queue_delay_us_per_transfer"
+            ),
+            "backend_scheduler_queue_delay_us_per_transfer": extremes(
+                records, "backend_scheduler_queue_delay_us_per_transfer"
             ),
         },
         "resource_measurement": "sampled_workload_peak_v1",

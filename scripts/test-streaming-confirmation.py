@@ -40,6 +40,16 @@ record = json.load(open(path))[mode]["qpxd" if proxy == "qpxd-previous" else pro
 record["proxy"] = proxy
 ratio = float(os.environ["CONFIRM_RATIO"] if confirmation else os.environ[mode.upper() + "_RATIO"])
 record["scheduler_queue_delay_us_per_transfer"] = 100 * (ratio if proxy == "qpxd" else 1)
+record["proxy_scheduler_run_delay_ns"] = int(
+    record["scheduler_queue_delay_us_per_transfer"] * record["transfers"] * 1000
+)
+record["backend_scheduler_run_delay_ns"] = 0
+record["total_scheduler_run_delay_ns"] = record["proxy_scheduler_run_delay_ns"]
+record["scheduler_delay_components_complete"] = True
+record["proxy_scheduler_queue_delay_us_per_transfer"] = (
+    record["scheduler_queue_delay_us_per_transfer"]
+)
+record["backend_scheduler_queue_delay_us_per_transfer"] = 0.0
 print(json.dumps(record))
 SAMPLE
 )"

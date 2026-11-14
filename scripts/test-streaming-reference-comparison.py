@@ -77,6 +77,49 @@ class PairedComparisonTest(unittest.TestCase):
         self.assertAlmostEqual(queue["min_current_over_reference"], 1.1)
         self.assertAlmostEqual(queue["max_current_over_reference"], 1.3)
 
+    def test_reports_proxy_and_backend_queue_delay_components(self):
+        records = [
+            record(
+                "qpxd", "fast", 1,
+                scheduler_queue_delay_us_per_transfer=25.0,
+                proxy_scheduler_queue_delay_us_per_transfer=20.0,
+                backend_scheduler_queue_delay_us_per_transfer=5.0,
+            ),
+            record(
+                "qpxd-previous", "fast", 1,
+                scheduler_queue_delay_us_per_transfer=15.0,
+                proxy_scheduler_queue_delay_us_per_transfer=10.0,
+                backend_scheduler_queue_delay_us_per_transfer=5.0,
+            ),
+            record(
+                "qpxd", "fast", 2,
+                scheduler_queue_delay_us_per_transfer=45.0,
+                proxy_scheduler_queue_delay_us_per_transfer=30.0,
+                backend_scheduler_queue_delay_us_per_transfer=15.0,
+            ),
+            record(
+                "qpxd-previous", "fast", 2,
+                scheduler_queue_delay_us_per_transfer=20.0,
+                proxy_scheduler_queue_delay_us_per_transfer=15.0,
+                backend_scheduler_queue_delay_us_per_transfer=5.0,
+            ),
+        ]
+        report = streaming_reference.compare(records)
+        fast = report["read_modes"]["fast"]
+        self.assertEqual(report["enforced_metric"], "scheduler_queue_delay_us_per_transfer")
+        self.assertAlmostEqual(
+            fast["metrics"]["proxy_scheduler_queue_delay_us_per_transfer"]
+            ["median_current_over_reference"], 2.0
+        )
+        self.assertAlmostEqual(
+            fast["metrics"]["backend_scheduler_queue_delay_us_per_transfer"]
+            ["median_current_over_reference"], 2.0
+        )
+        self.assertAlmostEqual(
+            fast["metrics"]["scheduler_queue_delay_us_per_transfer"]
+            ["median_current_over_reference"], (25.0 / 15.0 + 45.0 / 20.0) / 2.0
+        )
+
     def test_a_missing_reference_leaves_the_report_empty(self):
         records = [record("qpxd", "fast", 1)]
         report = streaming_reference.compare(records)

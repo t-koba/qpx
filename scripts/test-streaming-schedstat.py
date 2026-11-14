@@ -116,6 +116,80 @@ class WorkflowRegistrationTest(unittest.TestCase):
         self.assertIn('cp "$TMP_DIR/interleaved-raw.jsonl" "$LOG_ARTIFACT_DIR"/', harness)
 
 
+class ComponentAccountingTest(unittest.TestCase):
+    def test_process_tree_delay_components_and_direct_backend_mapping(self):
+        source = (ROOT / "scripts/lib/perf-process-metrics.sh").read_text()
+        start = source.index("process_tree_scheduler_run_delay_components_ns() {")
+        end = source.index("\n}\n", start) + 2
+        function = source[start:end]
+        script = function + '''
+process_tree_scheduler_run_delay_components_ns 100 150 200 230 false
+printf "\n"
+process_tree_scheduler_run_delay_components_ns 100 130 0 0 true
+printf "\n"
+process_tree_scheduler_run_delay_components_ns 150 140 200 230 false
+printf "\n"
+'''
+        result = subprocess.run(["bash", "-eu", "-c", script], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.splitlines(), ["50\t30\t80\ttrue", "0\t30\t30\ttrue", "null\tnull\t20\tfalse"])
+
+    def test_sample_writer_preserves_identity_and_component_units(self):
+        source = (ROOT / "scripts/perf-audit-streaming-compare.sh").read_text()
+        marker = source.index('python3 - "$samples_file" "$metrics"')
+        heredoc = source.index("<<'PY'\n", marker) + len("<<'PY'\n")
+        end = source.index("\nPY\n      attempt", heredoc)
+        writer = source[heredoc:end]
+        sample = {
+            "bench": "proxy_compare_http1_streaming_reverse",
+            "commit": "a" * 40,
+            "proxy": "qpxd",
+            "read_mode": "fast",
+            "sample_round": 2,
+            "aggregation": "single_sample",
+            "valid": True,
+            "transfers": 5,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "sample.jsonl"
+            args = [
+                str(output), json.dumps(sample),
+                "1", "2", "3", "10", "9", "12", "3", "20", "24", "4",
+                "36", "7", "1", "2", "1", "3", "4", "1", "6", "2",
+                "10000", "20000", "30000", "true", "6.000000", "true", "1.5", "0.8",
+            ]
+            result = subprocess.run(["python3", "-", *args], input=writer,
+                                   capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            record = json.loads(output.read_text().strip())
+            self.assertEqual(
+                (record["commit"], record["proxy"], record["read_mode"], record["sample_round"]),
+                ("a" * 40, "qpxd", "fast", 2),
+            )
+            self.assertEqual(record["proxy_scheduler_run_delay_ns"], 10000)
+            self.assertEqual(record["backend_scheduler_run_delay_ns"], 20000)
+            self.assertEqual(record["total_scheduler_run_delay_ns"], 30000)
+            self.assertEqual(record["proxy_scheduler_queue_delay_us_per_transfer"], 2.0)
+            self.assertEqual(record["backend_scheduler_queue_delay_us_per_transfer"], 4.0)
+            self.assertEqual(record["scheduler_queue_delay_us_per_transfer"], 6.0)
+            self.assertTrue(record["scheduler_delay_components_complete"])
+            args[24] = "30001"
+            result = subprocess.run(["python3", "-", *args], input=writer,
+                                    capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("do not sum to total", result.stderr)
+            args[22:27] = ["null", "null", "20000", "false", "0.004000"]
+            result = subprocess.run(["python3", "-", *args], input=writer,
+                                    capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            incomplete = json.loads(output.read_text().splitlines()[-1])
+            self.assertFalse(incomplete["scheduler_delay_components_complete"])
+            self.assertIsNone(incomplete["proxy_scheduler_run_delay_ns"])
+            self.assertIsNone(incomplete["backend_scheduler_run_delay_ns"])
+            self.assertEqual(incomplete["total_scheduler_run_delay_ns"], 20000)
+            self.assertEqual(incomplete["scheduler_queue_delay_us_per_transfer"], 0.004)
+
+
 class CollectorTest(unittest.TestCase):
     def test_tree_counts_deltas_churn_and_missing_reads(self):
         with tempfile.TemporaryDirectory() as tmp:
