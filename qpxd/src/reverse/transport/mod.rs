@@ -7,7 +7,9 @@ use crate::http::protocol::preflight::{
 use crate::runtime::Runtime;
 use crate::upstream::origin::PreparedPlainHttp1ConnectionAffinity;
 use anyhow::Result;
-use hyper::{Response, StatusCode};
+#[cfg(test)]
+use hyper::Response;
+use hyper::StatusCode;
 use qpx_core::http_message::{Headers, OrdinaryHeaderMut, Request, Response as OwnerResponse};
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
@@ -91,6 +93,7 @@ pub(super) trait ReverseTerminalResponse:
     fn terminal_headers_mut(&mut self) -> &mut Self::Headers;
 }
 
+#[cfg(test)]
 impl ReverseTerminalResponse for Response<Body> {
     type Headers = http::HeaderMap;
     fn from_finalized_owner(response: OwnerResponse<Body>) -> Self {

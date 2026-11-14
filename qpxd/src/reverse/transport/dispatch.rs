@@ -324,8 +324,9 @@ async fn execute_reverse_dispatch<R: ReverseTerminalResponse>(
             )
         }
     };
-    // Terminal helpers adopted after standard-only finalization, before capture.
-    // Raw-H1 still selects its standard carrier until its static-body decision.
+    // Apply terminal helpers after finalization, before capture.
+    // Raw-H1 retains the owner through dispatch and exports standard parts only
+    // for the in-memory serializer.
     let mut response = response;
     if let Some(metadata) = api_metadata {
         metadata.apply(response.terminal_headers_mut());
