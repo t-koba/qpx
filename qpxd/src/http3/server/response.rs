@@ -20,18 +20,55 @@ pub(crate) async fn send_h3_response<S>(
 where
     S: ::h3::quic::SendStream<Bytes>,
 {
-    send_h3_response_observed(
+    send_h3_response_with_options(
         response,
         request_method,
         req_stream,
         H3ResponseSendOptions::unobserved(max_h3_response_body_bytes, body_read_timeout),
     )
     .await
-    .map(|_summary| ())
-    .map_err(|err| {
-        emit_h3_response_send_error("h3", &err);
-        err.into_inner()
-    })
+}
+
+pub(crate) async fn send_h3_response_with_timeouts<S>(
+    response: OwnerResponse<Body>,
+    request_method: &http::Method,
+    req_stream: &mut ::h3::server::RequestStream<S, Bytes>,
+    max_h3_response_body_bytes: usize,
+    body_read_timeout: Duration,
+    body_send_timeout: Duration,
+) -> Result<()>
+where
+    S: ::h3::quic::SendStream<Bytes>,
+{
+    send_h3_response_with_options(
+        response,
+        request_method,
+        req_stream,
+        H3ResponseSendOptions::unobserved_with_timeouts(
+            max_h3_response_body_bytes,
+            body_read_timeout,
+            body_send_timeout,
+        ),
+    )
+    .await
+}
+
+async fn send_h3_response_with_options<S>(
+    response: OwnerResponse<Body>,
+    request_method: &http::Method,
+    req_stream: &mut ::h3::server::RequestStream<S, Bytes>,
+    options: H3ResponseSendOptions<'_>,
+) -> Result<()>
+where
+    S: ::h3::quic::SendStream<Bytes>,
+{
+    send_h3_response_observed(response, request_method, req_stream, options)
+        .await
+        .map(|_summary| ())
+        .map_err(|err| {
+            emit_h3_response_send_error("h3", &err);
+            err.into_inner()
+        })
 }
 
 pub(crate) async fn send_h3_response_observed<S>(

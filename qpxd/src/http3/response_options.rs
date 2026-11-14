@@ -14,11 +14,19 @@ pub(crate) struct H3ResponseSendOptions<'a> {
 }
 
 impl H3ResponseSendOptions<'_> {
-    pub(crate) fn unobserved(max_body_bytes: usize, body_read_timeout: Duration) -> Self {
+    pub(crate) fn unobserved(max_body_bytes: usize, body_timeout: Duration) -> Self {
+        Self::unobserved_with_timeouts(max_body_bytes, body_timeout, body_timeout)
+    }
+
+    pub(crate) fn unobserved_with_timeouts(
+        max_body_bytes: usize,
+        body_read_timeout: Duration,
+        body_send_timeout: Duration,
+    ) -> Self {
         Self {
             max_body_bytes,
             body_read_timeout,
-            body_send_timeout: body_read_timeout,
+            body_send_timeout,
             listener_name: None,
             fallback_grpc_protocol: None,
             max_grpc_message_bytes: None,
@@ -49,5 +57,16 @@ mod tests {
         assert!(options.grpc_stream_deadline.is_none());
         assert!(options.sse_policy.is_none());
         assert!(!options.observe_grpc_messages);
+    }
+
+    #[test]
+    fn unobserved_can_keep_read_and_send_budgets_distinct() {
+        let read_timeout = Duration::from_millis(321);
+        let send_timeout = Duration::from_millis(654);
+        let options =
+            H3ResponseSendOptions::unobserved_with_timeouts(12345, read_timeout, send_timeout);
+
+        assert_eq!(options.body_read_timeout, read_timeout);
+        assert_eq!(options.body_send_timeout, send_timeout);
     }
 }

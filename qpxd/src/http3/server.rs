@@ -18,7 +18,7 @@ mod response;
 
 pub(crate) use self::response::{
     h3_static_response_send_timeout, send_h3_response, send_h3_response_observed,
-    send_h3_static_response,
+    send_h3_response_with_timeouts, send_h3_static_response,
 };
 
 pub type H3ServerRequestStream = ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;

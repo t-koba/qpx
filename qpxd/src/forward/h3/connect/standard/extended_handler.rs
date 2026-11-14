@@ -12,7 +12,9 @@ use crate::http::dispatch::DispatchOutcome;
 use crate::http::protocol::common::blocked_response as blocked;
 use crate::http3::datagram::H3StreamDatagrams;
 use crate::http3::listener::H3ConnInfo;
-use crate::http3::server::{H3ServerRequestStream, send_h3_response, send_h3_static_response};
+use crate::http3::server::{
+    H3ServerRequestStream, send_h3_response_with_timeouts, send_h3_static_response,
+};
 use crate::rate_limit::TransportScope;
 use anyhow::{Result, anyhow};
 use qpx_core::config::ActionKind;
@@ -85,6 +87,10 @@ pub(crate) async fn handle_h3_extended_connect(
         rate_limit_profile.as_deref(),
         TransportScope::Connect,
     )?;
+    let body_send_timeout = crate::forward::h3::h3_response_send_timeout(
+        state.plan.limits.timeouts.h3_read_timeout_ms,
+        Some(selected_plan.streaming.body_send_timeout_ms),
+    );
     let upstream_timeout = timeout_override.unwrap_or_else(|| {
         Duration::from_millis(state.plan.limits.timeouts.upstream_http_timeout_ms)
     });
@@ -188,13 +194,14 @@ pub(crate) async fn handle_h3_extended_connect(
         proxy_name.as_str(),
         response_headers.as_deref(),
         tunnel_idle_timeout,
+        body_send_timeout,
     )
     .await
 }
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "extended CONNECT finish keeps stream, upstream, datagram, and policy facts explicit"
+    reason = "extended CONNECT finish keeps stream, upstream, datagram, policy, and timeout facts explicit"
 )]
 async fn finish_h3_extended_connect_stream(
     state: &crate::runtime::RuntimeState,
@@ -205,6 +212,7 @@ async fn finish_h3_extended_connect_stream(
     proxy_name: &str,
     response_headers: Option<&qpx_core::rules::CompiledHeaderControl>,
     tunnel_idle_timeout: Duration,
+    body_send_timeout: Duration,
 ) -> Result<()> {
     let UpstreamExtendedConnectStream {
         interim,
@@ -222,19 +230,22 @@ async fn finish_h3_extended_connect_stream(
             .map_err(|_| anyhow!("HTTP/3 extended CONNECT interim response send timed out"))??;
     }
     if !response.status().is_success() {
+        let body_read_timeout =
+            Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1));
         let response = upstream_extended_connect_error_response(
             response,
             upstream_stream,
             proxy_name,
             response_headers,
-            Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
+            body_read_timeout,
         )?;
-        send_h3_response(
+        send_h3_response_with_timeouts(
             response,
             &http::Method::CONNECT,
             &mut req_stream,
             state.plan.limits.body.max_h3_response_body_bytes,
-            Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
+            body_read_timeout,
+            body_send_timeout,
         )
         .await?;
         abort_h3_extended_driver(datagram_task, driver).await;
