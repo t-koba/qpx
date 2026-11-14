@@ -72,7 +72,10 @@ pub(super) async fn send_qpx_policy_response<R: crate::http::response_carrier::R
         response,
         &http::Method::CONNECT,
         ctx.state.plan.limits.body.max_h3_response_body_bytes,
-        Duration::from_millis(ctx.state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
+        crate::forward::h3::h3_response_send_timeout(
+            ctx.state.plan.limits.timeouts.h3_read_timeout_ms,
+            None,
+        ),
     )
     .await
 }
