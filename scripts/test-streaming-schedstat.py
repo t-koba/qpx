@@ -180,6 +180,25 @@ printf "%s\n" "$legacy_total"
         self.assertRegex(legacy, r"^[0-9]+$")
         self.assertNotIn("\t", legacy)
 
+        malformed_script = function + '''
+process_tree_pids() { echo "$$"; }
+awk() { printf "malformed"; }
+if output="$(process_tree_scheduler_run_delay_ns "$$" true)"; then
+  echo "malformed schedstat unexpectedly succeeded"
+  exit 1
+else
+  status=$?
+  printf "%s\t%s\n" "$status" "$output"
+fi
+'''
+        result = subprocess.run(["bash", "-eu", "-c", malformed_script],
+                                capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        status, output = result.stdout.rstrip("\n").split("\t", 1)
+        self.assertNotEqual(int(status), 0)
+        self.assertEqual(output, "")
+        self.assertIn("unbound variable", result.stderr)
+
     def test_sample_writer_preserves_identity_and_component_units(self):
         source = (ROOT / "scripts/perf-audit-streaming-compare.sh").read_text()
         marker = source.index('python3 - "$samples_file" "$metrics"')
