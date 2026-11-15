@@ -4,6 +4,7 @@ use crate::http::protocol::l7::finalize_response_for_request;
 #[cfg(test)]
 use crate::http3::codec::h1_headers_to_http;
 use crate::http3::codec::join_cookie_values;
+use crate::runtime::{ExecutionPlan, RuntimeState};
 use anyhow::Result;
 use bytes::Bytes;
 use hyper::StatusCode;
@@ -61,6 +62,49 @@ pub(super) async fn send_qpx_response_stream<R: crate::http::response_carrier::R
         request_method,
         max_body_bytes,
         body_read_timeout,
+    )
+    .await
+}
+
+pub(super) async fn send_qpx_response_stream_with_timeouts<
+    R: crate::http::response_carrier::ResponseCarrier,
+>(
+    req_stream: &mut qpx_h3::RequestStream,
+    response: R,
+    request_method: &http::Method,
+    max_body_bytes: usize,
+    body_read_timeout: Duration,
+    body_send_timeout: Duration,
+) -> Result<()> {
+    crate::http3::qpx_stream::send_qpx_response_stream_with_timeouts(
+        req_stream,
+        response,
+        request_method,
+        max_body_bytes,
+        body_read_timeout,
+        body_send_timeout,
+    )
+    .await
+}
+
+pub(super) async fn send_qpx_extended_connect_error_response(
+    req_stream: &mut qpx_h3::RequestStream,
+    response: OwnerResponse<Body>,
+    state: &RuntimeState,
+    selected_plan: &ExecutionPlan,
+    body_read_timeout: Duration,
+) -> Result<()> {
+    let h3_read_timeout_ms = state.plan.limits.timeouts.h3_read_timeout_ms;
+    send_qpx_response_stream_with_timeouts(
+        req_stream,
+        response,
+        &http::Method::CONNECT,
+        state.plan.limits.body.max_h3_response_body_bytes,
+        body_read_timeout,
+        crate::forward::h3::h3_response_send_timeout(
+            h3_read_timeout_ms,
+            Some(selected_plan.streaming.body_send_timeout_ms),
+        ),
     )
     .await
 }
@@ -168,7 +212,9 @@ mod tests {
     };
     use crate::forward::h3::qpx::response::*;
     use crate::http3::codec::http_headers_to_h1;
+    use http::{Method, Response};
     use qpx_core::config::HeaderControl;
+    use tokio::time::{Duration, Instant, timeout};
 
     #[test]
     fn finalize_qpx_connect_head_response_rejects_non_http_status_class() {
@@ -370,6 +416,105 @@ mod tests {
             assert_eq!(actual_body, expected_body);
             assert_eq!(actual_body.as_ref(), body);
         }
+    }
+
+    #[tokio::test]
+    async fn selected_plan_send_budget_bounds_qpx_connect_error_under_flow_control() -> Result<()> {
+        timeout(Duration::from_secs(5), async {
+            let config: qpx_core::config::Config = serde_yaml::from_str(
+                r#"runtime:
+  h3_read_timeout_ms: 2000
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:0
+  default_action: { type: direct }
+  http3: { enabled: true }
+  streaming:
+    body_read_timeout_ms: 2000
+    body_send_timeout_ms: 40
+  rules:
+  - name: selected
+    match:
+      host: [selected.example]
+    action: { type: direct }
+"#,
+            )?;
+            let runtime = crate::runtime::Runtime::new(config)?;
+            let state = runtime.state();
+            let selected_plan = state
+                .plan
+                .ingress_edge_execution_plan("forward", Some("selected"))
+                .expect("matched execution plan");
+            assert_eq!(selected_plan.streaming.body_read_timeout_ms, 2000);
+            assert_eq!(selected_plan.streaming.body_send_timeout_ms, 40);
+
+            let mut tasks = tokio::task::JoinSet::new();
+            let (_client, conn, mut streams) =
+                crate::http3::qpx_stream::test_support::qpx_loopback(&mut tasks, Some(1024))
+                    .await?;
+            let mut builder = ::h3::client::builder();
+            builder.enable_extended_connect(true).enable_datagram(true);
+            let (mut connection, mut sender) = builder
+                .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
+                .await?;
+            tasks.spawn(async move {
+                let _ = std::future::poll_fn(|cx| connection.poll_close(cx)).await;
+            });
+            let uri = http::Uri::builder()
+                .scheme("https")
+                .authority("localhost")
+                .path_and_query("/.well-known/masque/udp/127.0.0.1/443/")
+                .build()?;
+            let mut request = http::Request::builder()
+                .method(Method::CONNECT)
+                .uri(uri)
+                .body(())?;
+            request
+                .extensions_mut()
+                .insert(::h3::ext::Protocol::CONNECT_UDP);
+            let mut remote = sender.send_request(request).await?;
+            remote.finish().await?;
+            let mut local = timeout(Duration::from_secs(1), streams.recv())
+                .await?
+                .expect("captured extended-CONNECT stream");
+            let response = OwnerResponse::from_http(
+                Response::builder()
+                    .status(StatusCode::FORBIDDEN)
+                    .body(Body::from(Bytes::from(vec![b'x'; 1024 * 1024])))?,
+            );
+            let body_read_timeout =
+                Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1));
+            let send_started = Instant::now();
+            let (sent, received) = tokio::join!(
+                send_qpx_extended_connect_error_response(
+                    &mut local,
+                    response,
+                    &state,
+                    selected_plan,
+                    body_read_timeout,
+                ),
+                async {
+                    let response = remote.recv_response().await?;
+                    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                    Ok::<_, anyhow::Error>(())
+                }
+            );
+            received?;
+            assert!(
+                send_started.elapsed() < Duration::from_millis(500),
+                "matched send timeout must win over the 2s read timeout"
+            );
+            let error = sent.expect_err("flow control must block the large error body");
+            assert!(
+                error
+                    .to_string()
+                    .contains("qpx-h3 response body send timed out"),
+                "unexpected QPX send error: {error}"
+            );
+            Ok::<_, anyhow::Error>(())
+        })
+        .await?
     }
 
     #[tokio::test]

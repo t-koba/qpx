@@ -5,85 +5,16 @@ use http_body::Frame;
 use http_body_util::StreamBody;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
-use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
-use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
-use std::sync::Arc;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::oneshot;
 
-#[derive(Clone)]
-struct CaptureStream(mpsc::Sender<qpx_h3::RequestStream>);
-
-impl qpx_h3::RequestHandler for CaptureStream {
-    fn settings(&self) -> qpx_h3::Settings {
-        qpx_h3::Settings::default()
-    }
-
-    async fn handle_request(
-        &self,
-        _: qpx_h3::Request,
-        _: qpx_h3::ConnectionInfo,
-        stream: qpx_h3::RequestStream,
-    ) -> qpx_h3::H3Result<()> {
-        self.0
-            .send(stream)
-            .await
-            .map_err(|_| anyhow!("stream capture closed"))?;
-        Ok(())
-    }
-}
-
-// The caller owns the tasks so setup failures and test timeouts abort them too.
-async fn qpx_loopback(
-    tasks: &mut tokio::task::JoinSet<()>,
-) -> Result<(
-    quinn::Endpoint,
-    quinn::Connection,
-    mpsc::Receiver<qpx_h3::RequestStream>,
-)> {
-    let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()])?;
-    let der = cert.cert.der().clone();
-    let provider = quinn::rustls::crypto::ring::default_provider();
-    let mut tls = quinn::rustls::ServerConfig::builder_with_provider(provider.clone().into())
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])?
-        .with_no_client_auth()
-        .with_single_cert(
-            vec![der.clone()],
-            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(cert.signing_key.serialize_der())),
-        )?;
-    tls.alpn_protocols = vec![b"h3".to_vec()];
-    let endpoint = quinn::Endpoint::server(
-        quinn::ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(tls)?)),
-        "127.0.0.1:0".parse()?,
-    )?;
-    let addr = endpoint.local_addr()?;
-    let (tx, rx) = mpsc::channel(1);
-    tasks.spawn(async move {
-        let incoming = endpoint.accept().await.unwrap();
-        qpx_h3::serve_connection(incoming, addr.port(), CaptureStream(tx))
-            .await
-            .unwrap();
-    });
-    let mut roots = quinn::rustls::RootCertStore::empty();
-    roots.add(der)?;
-    let mut tls = quinn::rustls::ClientConfig::builder_with_provider(provider.into())
-        .with_protocol_versions(&[&quinn::rustls::version::TLS13])?
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![b"h3".to_vec()];
-    let mut client = quinn::Endpoint::client("127.0.0.1:0".parse()?)?;
-    client.set_default_client_config(quinn::ClientConfig::new(Arc::new(
-        QuicClientConfig::try_from(tls)?,
-    )));
-    let conn = client.connect(addr, "localhost")?.await?;
-    Ok((client, conn, rx))
-}
+use super::test_support::qpx_loopback;
 
 #[tokio::test]
 async fn qpx_content_length_mismatches_reset_response_stream_with_message_error() -> Result<()> {
     timeout(Duration::from_secs(5), async {
         // JoinSet aborts the background tasks on success, failure or timeout.
         let mut tasks = tokio::task::JoinSet::new();
-        let (_client, conn, mut rx) = qpx_loopback(&mut tasks).await?;
+        let (_client, conn, mut rx) = qpx_loopback(&mut tasks, None).await?;
         let (mut connection, mut sender) = ::h3::client::builder()
             .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
             .await?;
@@ -163,7 +94,7 @@ async fn qpx_request_content_length_mismatches_abort_body_relay() -> Result<()> 
     timeout(Duration::from_secs(5), async {
         // JoinSet aborts the background tasks on success, failure or timeout.
         let mut tasks = tokio::task::JoinSet::new();
-        let (_client, conn, mut rx) = qpx_loopback(&mut tasks).await?;
+        let (_client, conn, mut rx) = qpx_loopback(&mut tasks, None).await?;
         // Keep the control stream open with empty SETTINGS. Use raw Quinn for
         // the request: h3::client::RequestStream does not expose stopped(), and
         // a receive-half abort sends STOP_SENDING, not a response RESET_STREAM.

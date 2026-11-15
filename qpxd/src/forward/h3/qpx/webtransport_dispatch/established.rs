@@ -1,6 +1,6 @@
 use super::super::h3_body_read_timeout;
 use super::super::response::{
-    send_qpx_response_stream, upstream_qpx_extended_connect_error_response,
+    send_qpx_extended_connect_error_response, upstream_qpx_extended_connect_error_response,
 };
 use super::super::webtransport::{
     QpxWebTransportRelayContext, WebTransportFlowLimits, relay_qpx_webtransport_session,
@@ -21,6 +21,7 @@ use tracing::warn;
 pub(super) struct QpxWebTransportEstablishedContext<'a> {
     pub(super) handler: &'a ForwardQpxHandler,
     pub(super) state: &'a RuntimeState,
+    pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,
     pub(super) req_stream: qpx_h3::RequestStream,
     pub(super) conn: &'a qpx_h3::ConnectionInfo,
     pub(super) session: qpx_h3::WebTransportSession,
@@ -35,7 +36,6 @@ pub(super) struct QpxWebTransportEstablishedContext<'a> {
     pub(super) request_limits: AppliedRateLimits,
     pub(super) rate_limit_profile: Option<&'a str>,
     pub(super) proxy_name: &'a str,
-    pub(super) max_h3_response_body_bytes: usize,
     pub(super) tunnel_idle_timeout: Duration,
 }
 
@@ -45,6 +45,7 @@ pub(super) async fn relay_established_webtransport(
     let QpxWebTransportEstablishedContext {
         handler,
         state,
+        selected_plan,
         mut req_stream,
         conn,
         session,
@@ -59,7 +60,6 @@ pub(super) async fn relay_established_webtransport(
         request_limits,
         rate_limit_profile,
         proxy_name,
-        max_h3_response_body_bytes,
         tunnel_idle_timeout,
     } = ctx;
     let qpx_h3::WebTransportSession {
@@ -99,19 +99,20 @@ pub(super) async fn relay_established_webtransport(
         .map_err(|_| anyhow!("qpx-h3 interim response send timed out"))??;
     }
     if !response.status().is_success() {
+        let body_read_timeout = h3_body_read_timeout(&handler.runtime);
         let response = upstream_qpx_extended_connect_error_response(
             response,
             upstream_request,
             proxy_name,
             response_headers,
-            h3_body_read_timeout(&handler.runtime),
+            body_read_timeout,
         )?;
-        send_qpx_response_stream(
+        send_qpx_extended_connect_error_response(
             &mut req_stream,
             response,
-            &http::Method::CONNECT,
-            max_h3_response_body_bytes,
-            h3_body_read_timeout(&handler.runtime),
+            state,
+            selected_plan,
+            body_read_timeout,
         )
         .await?;
         super::super::abort_owned_h3_driver_tasks(datagram_task, driver).await;

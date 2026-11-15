@@ -466,6 +466,7 @@ pub(super) async fn handle_qpx_webtransport_connect(
     relay_established_webtransport(QpxWebTransportEstablishedContext {
         handler,
         state: &state,
+        selected_plan,
         req_stream,
         conn: &conn,
         session,
@@ -480,7 +481,6 @@ pub(super) async fn handle_qpx_webtransport_connect(
         request_limits,
         rate_limit_profile: rate_limit_profile.as_deref(),
         proxy_name: proxy_name.as_str(),
-        max_h3_response_body_bytes,
         tunnel_idle_timeout,
     })
     .await

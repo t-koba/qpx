@@ -88,11 +88,34 @@ pub(crate) async fn send_qpx_response_stream<R: ResponseCarrier>(
     max_body_bytes: usize,
     body_read_timeout: Duration,
 ) -> Result<()> {
+    send_qpx_response_stream_with_timeouts(
+        req_stream,
+        response,
+        request_method,
+        max_body_bytes,
+        body_read_timeout,
+        body_read_timeout,
+    )
+    .await
+}
+
+pub(crate) async fn send_qpx_response_stream_with_timeouts<R: ResponseCarrier>(
+    req_stream: &mut qpx_h3::RequestStream,
+    response: R,
+    request_method: &http::Method,
+    max_body_bytes: usize,
+    body_read_timeout: Duration,
+    body_send_timeout: Duration,
+) -> Result<()> {
     send_qpx_response_stream_observed(
         req_stream,
         response,
         request_method,
-        H3ResponseSendOptions::unobserved(max_body_bytes, body_read_timeout),
+        H3ResponseSendOptions::unobserved_with_timeouts(
+            max_body_bytes,
+            body_read_timeout,
+            body_send_timeout,
+        ),
     )
     .await
     .map(|_summary| ())
@@ -357,6 +380,9 @@ where
     .await?
     .map_err(Into::into)
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;
 
 #[cfg(test)]
 mod tests;

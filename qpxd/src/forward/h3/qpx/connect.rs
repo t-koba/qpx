@@ -8,7 +8,7 @@ use super::relay::{
     relay_qpx_extended_connect_stream,
 };
 use super::response::{
-    send_qpx_policy_response, send_qpx_response_stream, send_qpx_static_response,
+    send_qpx_extended_connect_error_response, send_qpx_policy_response, send_qpx_static_response,
     upstream_qpx_extended_connect_error_response,
 };
 use crate::forward::h3::connect::finalize_h3_connect_owner_response;
@@ -516,6 +516,7 @@ async fn handle_qpx_extended_connect_stream(
 
     finish_qpx_extended_connect_stream(FinishQpxExtendedConnectInput {
         state: &state,
+        selected_plan,
         handler,
         req_stream,
         conn: &conn,
@@ -537,6 +538,7 @@ async fn handle_qpx_extended_connect_stream(
 
 struct FinishQpxExtendedConnectInput<'a> {
     state: &'a crate::runtime::RuntimeState,
+    selected_plan: &'a crate::runtime::ExecutionPlan,
     handler: &'a ForwardQpxHandler,
     req_stream: qpx_h3::RequestStream,
     conn: &'a qpx_h3::ConnectionInfo,
@@ -565,6 +567,7 @@ async fn finish_qpx_extended_connect_stream(
 ) -> Result<()> {
     let FinishQpxExtendedConnectInput {
         state,
+        selected_plan,
         handler,
         mut req_stream,
         conn,
@@ -623,11 +626,11 @@ async fn finish_qpx_extended_connect_stream(
             response_headers,
             h3_timeout,
         )?;
-        send_qpx_response_stream(
+        send_qpx_extended_connect_error_response(
             &mut req_stream,
             response,
-            &http::Method::CONNECT,
-            state.plan.limits.body.max_h3_response_body_bytes,
+            state,
+            selected_plan,
             h3_timeout,
         )
         .await?;
