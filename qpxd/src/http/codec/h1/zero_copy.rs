@@ -16,7 +16,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
 #[cfg(target_os = "linux")]
-const SOCKET_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
+const SOCKET_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 // A single readiness event may move up to 1 MiB: sendfile returns partial
 // writes as soon as the socket buffer fills, so the bound only limits
 // syscall count, never worker occupancy.
