@@ -5,7 +5,7 @@ use crate::config::{
 use serde_json::json;
 
 pub fn canonical_schema_value() -> serde_json::Value {
-    json!({
+    let mut schema = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "qpxd canonical configuration",
         "type": "object",
@@ -363,5 +363,42 @@ pub fn canonical_schema_value() -> serde_json::Value {
                 }
             }
         }
-    })
+    });
+
+    let route_properties =
+        schema["properties"]["edges"]["items"]["oneOf"][1]["properties"]["routes"]["items"]["properties"]
+            .as_object_mut()
+            .expect("reverse route schema properties");
+    for field in [
+        "name",
+        "headers",
+        "timeout_ms",
+        "health_check",
+        "resilience",
+        "cache",
+        "capture",
+        "rate_limit",
+        "path_rewrite",
+        "upstream_trust_profile",
+        "upstream_trust",
+        "lifecycle",
+        "affinity",
+        "policy_context",
+        "destination_resolution",
+        "http_guard_profile",
+        "streaming",
+        "grpc",
+        "sse",
+        "streaming_requirement",
+    ] {
+        let field_schema = route_properties
+            .get_mut(field)
+            .expect("declared optional reverse route field");
+        let non_null_schema = std::mem::replace(field_schema, serde_json::Value::Null);
+        *field_schema = json!({
+            "anyOf": [non_null_schema, {"type": "null"}]
+        });
+    }
+
+    schema
 }

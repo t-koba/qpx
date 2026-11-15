@@ -183,6 +183,46 @@ fn canonical_schema_accepts_null_for_optional_reverse_edge_fields() {
 }
 
 #[test]
+fn canonical_schema_accepts_null_for_optional_reverse_route_fields() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [{
+            "kind": "reverse",
+            "name": "back",
+            "listen": "127.0.0.1:2",
+            "routes": [{
+                "match": {},
+                "target": {"type": "upstream", "upstreams": ["origin"]},
+                "name": null,
+                "headers": null,
+                "timeout_ms": null,
+                "health_check": null,
+                "resilience": null,
+                "cache": null,
+                "capture": null,
+                "rate_limit": null,
+                "path_rewrite": null,
+                "upstream_trust_profile": null,
+                "upstream_trust": null,
+                "lifecycle": null,
+                "affinity": null,
+                "policy_context": null,
+                "destination_resolution": null,
+                "http": null,
+                "http_guard_profile": null,
+                "streaming": null,
+                "grpc": null,
+                "sse": null,
+                "streaming_requirement": null
+            }]
+        }]
+    });
+    assert!(validator.is_valid(&config));
+    assert!(serde_json::from_value::<crate::config::Config>(config).is_ok());
+}
+
+#[test]
 fn canonical_schema_accepts_null_for_optional_ingress_edge_fields() {
     let validator =
         jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
