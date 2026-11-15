@@ -430,7 +430,19 @@ async fn run_dns_hook(command: &str, domain: &str, value: &str, deadline: Durati
         let mut tree = dns_hook_process::ProcessTree::new()?;
         let mut child = command.spawn().context("failed to spawn acme dns hook")?;
         #[cfg(unix)]
-        let mut tree = dns_hook_process::ProcessTree::new(&child);
+        let mut tree = match dns_hook_process::ProcessTree::new(child.id()) {
+            Ok(tree) => tree,
+            Err(error) => {
+                // Construction happens after spawn: reap even without a tree guard.
+                // Keep kill_on_drop armed if this cleanup is itself cancelled.
+                let _ = child.start_kill();
+                child
+                    .wait()
+                    .await
+                    .with_context(|| format!("{error}; failed to reap dns hook child"))?;
+                return Err(error);
+            }
+        };
 
         let outcome = tokio::time::timeout(deadline, async {
             #[cfg(windows)]
@@ -467,14 +479,15 @@ async fn run_dns_hook(command: &str, domain: &str, value: &str, deadline: Durati
 
 #[cfg(unix)]
 mod dns_hook_process {
+    use anyhow::{Context, Result};
+
     pub(super) struct ProcessTree(Option<libc::pid_t>);
 
     impl ProcessTree {
-        pub(super) fn new(child: &tokio::process::Child) -> Self {
-            // A freshly spawned, not-yet-polled child always has an id.
-            Self(Some(
-                child.id().expect("fresh dns hook child has a pid") as libc::pid_t
-            ))
+        pub(super) fn new(pid: Option<u32>) -> Result<Self> {
+            let pid = pid.context("dns hook process id missing")?;
+            let group = libc::pid_t::try_from(pid).context("dns hook process id out of range")?;
+            Ok(Self(Some(group)))
         }
 
         pub(super) fn disarm(&mut self) -> anyhow::Result<()> {
@@ -499,6 +512,22 @@ mod dns_hook_process {
     impl Drop for ProcessTree {
         fn drop(&mut self) {
             self.terminate();
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::ProcessTree;
+
+        #[test]
+        fn dns_hook_process_tree_rejects_missing_or_out_of_range_pid() {
+            for (pid, message) in [
+                (None, "dns hook process id missing"),
+                (Some(u32::MAX), "dns hook process id out of range"),
+            ] {
+                let error = ProcessTree::new(pid).err().expect("invalid pid must fail");
+                assert_eq!(error.to_string(), message);
+            }
         }
     }
 }
@@ -536,14 +565,19 @@ mod dns_hook_process {
             Ok(tree)
         }
 
+        fn job_handle(&self) -> Result<&OwnedHandle> {
+            self.0.as_ref().context("dns hook job handle missing")
+        }
+
         fn set_limits(&self, flags: u32) -> Result<()> {
+            let job = self.job_handle()?;
             let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
             limits.BasicLimitInformation.LimitFlags = flags;
             // SAFETY: the job handle is live and the pointer/size describe the
             // required initialized structure, which remains valid for this call.
             let ok = unsafe {
                 SetInformationJobObject(
-                    self.0.as_ref().expect("live dns hook job").as_raw_handle(),
+                    job.as_raw_handle(),
                     JobObjectExtendedLimitInformation,
                     (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                     std::mem::size_of_val(&limits) as u32,
@@ -557,18 +591,13 @@ mod dns_hook_process {
 
         pub(super) async fn assign_and_resume(&self, child: &tokio::process::Child) -> Result<()> {
             {
+                let job = self.job_handle()?;
                 let process = child
                     .raw_handle()
                     .context("dns hook process handle missing")?;
                 // SAFETY: both handles remain owned and live throughout the call.
                 // CREATE_SUSPENDED prevents the shell from running before assignment.
-                if unsafe {
-                    AssignProcessToJobObject(
-                        self.0.as_ref().expect("live dns hook job").as_raw_handle(),
-                        process,
-                    )
-                } == 0
-                {
+                if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process) } == 0 {
                     return Err(io::Error::last_os_error()).context("assign dns hook job");
                 }
             }
@@ -600,6 +629,33 @@ mod dns_hook_process {
 
         pub(super) fn terminate(&mut self) {
             drop(self.0.take());
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::ProcessTree;
+
+        #[tokio::test]
+        async fn dns_hook_process_tree_rejects_missing_job_handle() {
+            let tree = ProcessTree(None);
+            assert_eq!(
+                tree.set_limits(0).unwrap_err().to_string(),
+                "dns hook job handle missing"
+            );
+            let mut child = tokio::process::Command::new("cmd")
+                .args(["/C", "exit 0"])
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn hook child");
+            child.wait().await.expect("reap hook child");
+            assert_eq!(
+                tree.assign_and_resume(&child)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "dns hook job handle missing"
+            );
         }
     }
 
