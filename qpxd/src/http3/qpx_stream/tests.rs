@@ -55,7 +55,11 @@ async fn qpx_content_length_mismatches_reset_response_stream_with_message_error(
                     &mut local,
                     response,
                     &Method::GET,
-                    H3ResponseSendOptions::unobserved(1024, Duration::from_secs(1)),
+                    H3ResponseSendOptions::unobserved_with_timeouts(
+                        1024,
+                        Duration::from_secs(1),
+                        Duration::from_secs(1),
+                    ),
                 ),
                 async {
                     let response = remote.recv_response().await?;

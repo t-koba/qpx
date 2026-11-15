@@ -14,6 +14,7 @@ pub(crate) struct H3ResponseSendOptions<'a> {
 }
 
 impl H3ResponseSendOptions<'_> {
+    #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
     pub(crate) fn unobserved(max_body_bytes: usize, body_timeout: Duration) -> Self {
         Self::unobserved_with_timeouts(max_body_bytes, body_timeout, body_timeout)
     }
@@ -42,6 +43,7 @@ impl H3ResponseSendOptions<'_> {
 mod tests {
     use super::*;
 
+    #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
     #[test]
     fn unobserved_preserves_limits_and_disables_observation() {
         let body_read_timeout = Duration::from_millis(321);
