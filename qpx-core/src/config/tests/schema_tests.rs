@@ -160,6 +160,27 @@ fn canonical_schema_accepts_null_for_optional_http_policy_scalar_fields() {
 }
 
 #[test]
+fn canonical_schema_accepts_null_for_optional_http_module_metadata() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [{
+            "kind": "forward",
+            "name": "front",
+            "listen": "127.0.0.1:0",
+            "default_action": {},
+            "http_modules": [{
+                "type": "response_compression",
+                "id": null,
+                "order": null,
+                "settings": {}
+            }]
+        }]
+    });
+    assert!(validator.is_valid(&config));
+}
+
+#[test]
 fn canonical_schema_http_module_matches_serde_envelope() {
     let schema = canonical_schema_value();
     assert_eq!(

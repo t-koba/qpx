@@ -112,8 +112,8 @@ pub fn canonical_schema_value() -> serde_json::Value {
                 "additionalProperties": false,
                 "properties": {
                     "type": {"type": "string"},
-                    "id": {"type": "string"},
-                    "order": {"type": "integer"},
+                    "id": {"type": ["string", "null"]},
+                    "order": {"type": ["integer", "null"]},
                     "settings": true
                 }
             },
