@@ -13,12 +13,12 @@ fn sync_host_header_from_absolute_target_uses_owned_headers() {
     let absolute: http::Uri = "http://upstream.example:8080/path"
         .parse()
         .expect("absolute URI");
-    sync_host_header_from_absolute_target(&mut headers, &absolute);
+    assert!(sync_host_header_from_absolute_target(&mut headers, &absolute).is_ok());
     assert_eq!(headers.get(&host).unwrap(), "upstream.example:8080");
     assert_eq!(headers.get(&extra).unwrap(), "preserved");
 
     let relative: http::Uri = "/relative".parse().expect("relative URI");
-    sync_host_header_from_absolute_target(&mut headers, &relative);
+    assert!(sync_host_header_from_absolute_target(&mut headers, &relative).is_ok());
     assert_eq!(headers.get(&host).unwrap(), "upstream.example:8080");
 }
 

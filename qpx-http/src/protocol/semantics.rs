@@ -3,7 +3,8 @@ use crate::structured_fields::{BareItem, parse_item};
 use http::header::{CONNECTION, CONTENT_LENGTH, EXPECT, HOST, TRAILER, TRANSFER_ENCODING, VIA};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode, Version};
 use qpx_core::http_message::{
-    Headers, OrdinaryHeaderMut, OrdinaryHeaderName, Request as OwnerRequest,
+    Headers, InvalidOrdinaryHeaderName, OrdinaryHeaderMut, OrdinaryHeaderName,
+    Request as OwnerRequest,
 };
 use std::cell::RefCell;
 use std::fmt;
@@ -219,13 +220,17 @@ thread_local! {
     };
 }
 
-pub fn sync_host_header_from_absolute_target(headers: &mut Headers, target: &http::Uri) {
+pub fn sync_host_header_from_absolute_target(
+    headers: &mut Headers,
+    target: &http::Uri,
+) -> Result<(), InvalidOrdinaryHeaderName> {
     if let Some(authority) = target.authority()
         && let Ok(value) = HeaderValue::from_str(authority.as_str())
     {
-        let host = OrdinaryHeaderName::try_from(HOST.clone()).expect("Host is an ordinary field");
+        let host = OrdinaryHeaderName::try_from(HOST.clone())?;
         headers.insert(host, value);
     }
+    Ok(())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
