@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::header::{AGE, CACHE_CONTROL, ETAG, HOST, HeaderValue, VARY};
@@ -528,7 +528,8 @@ async fn wait_for_revalidated_outcome(
             {
                 return Ok::<_, anyhow::Error>(outcome);
             }
-            tokio::time::sleep(Duration::from_millis(1)).await;
+            // Avoid hammering persistent backends while asynchronous metadata publishes.
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
     })
     .await?
@@ -635,15 +636,21 @@ async fn foreground_304_replays_persisted_body() -> Result<()> {
             );
             // Metadata refresh must leave the complete representation available.
             let get = request(&path);
-            match wait_for_revalidated_outcome(
+            let outcome = wait_for_revalidated_outcome(
                 &get,
                 &key,
                 &case.policy,
                 &case.backends,
                 control != "no-store",
             )
-            .await?
-            {
+            .await
+            .with_context(|| {
+                format!(
+                    "waiting for revalidated lookup (backend={}, case={index}, method={method}, range={range:?}, control={control})",
+                    case.name
+                )
+            })?;
+            match outcome {
                 LookupOutcome::Hit(mut hit) if control != "no-store" => {
                     assert_eq!(hit.headers().declared_content_length()?, Some(11));
                     assert_eq!(collect_body(hit.body_mut()).await?.as_ref(), b"cached body");
