@@ -12,7 +12,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
         "required": ["edges"],
         "additionalProperties": false,
         "properties": {
-            "state_dir": {"type": "string"},
+            "state_dir": {"type": ["string", "null"]},
             "identity": {"type": "object"},
             "messages": {"type": "object"},
             "runtime": {"type": "object"},
@@ -302,7 +302,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
             }
         },
         "properties": {
-            "state_dir": {"type": "string"},
+            "state_dir": {"type": ["string", "null"]},
             "identity": {"type": "object"},
             "messages": {"type": "object"},
             "runtime": {"type": "object"},

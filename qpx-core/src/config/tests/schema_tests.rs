@@ -1,6 +1,15 @@
 use super::*;
 
 #[test]
+fn canonical_schema_accepts_null_for_optional_root_state_dir() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({"state_dir": null, "edges": []});
+    assert!(validator.is_valid(&config));
+    assert!(serde_json::from_value::<crate::config::Config>(config).is_ok());
+}
+
+#[test]
 fn canonical_schema_exposes_acme_dns_hook_deadline() {
     let schema = canonical_schema_value();
     assert_eq!(
