@@ -102,6 +102,12 @@ mod tests {
     }
 
     #[test]
+    fn file_level_cfg_test_is_test_only() {
+        let file = syn::parse_file("#![cfg(test)]\nfn f() {}").expect("test file parses");
+        assert!(has_cfg_test(&file.attrs));
+    }
+
+    #[test]
     fn cfg_test_is_test_only() {
         assert!(has_cfg_test(&attrs("#[cfg(test)] fn f() {}")));
         assert!(has_cfg_test(&attrs(

@@ -1,3 +1,5 @@
+#![cfg(test)]
+
 use anyhow::{Result, anyhow};
 use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};

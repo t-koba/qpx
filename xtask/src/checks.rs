@@ -1100,6 +1100,9 @@ fn visit_production_sources(
                 .with_context(|| format!("failed to read {}", path.display()))?;
             let syntax = syn::parse_file(&content)
                 .with_context(|| format!("failed to parse {}", path.display()))?;
+            if has_cfg_test(&syntax.attrs) {
+                continue;
+            }
             visit(rel_path(root, &path).to_string(), syntax)?;
         }
     }
