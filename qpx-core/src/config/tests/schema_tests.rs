@@ -17,11 +17,25 @@ fn canonical_schema_telemetry_matches_serde_contract() {
         "edges": [],
         "telemetry": {
             "system_log": {"format": "json"},
-            "access_log": {"path": null},
+            "access_log": {
+                "path": null,
+                "redact": {"headers": ["authorization"], "future_field": true}
+            },
             "audit_log": {"include": ["subject", "matched_route"]},
             "metrics": null,
-            "otel": {"endpoint": null, "service_name": null},
-            "exporter": null
+            "otel": {
+                "endpoint": null,
+                "service_name": null,
+                "redact": {"query_keys": ["token"]}
+            },
+            "exporter": {
+                "capture": {
+                    "plaintext": true,
+                    "max_chunk_bytes": 4096,
+                    "redact": {"json_paths": ["$.secret"]},
+                    "future_field": true
+                }
+            }
         }
     });
     assert!(validator.is_valid(&valid));
@@ -47,6 +61,25 @@ fn canonical_schema_telemetry_matches_serde_contract() {
     });
     assert!(!validator.is_valid(&missing_metrics_listener));
     assert!(serde_json::from_value::<crate::config::Config>(missing_metrics_listener).is_err());
+
+    let malformed_nested_values = [
+        serde_json::json!({
+            "edges": [],
+            "telemetry": {"access_log": {"redact": {"headers": false}}}
+        }),
+        serde_json::json!({
+            "edges": [],
+            "telemetry": {"otel": {"redact": {"headers": false}}}
+        }),
+        serde_json::json!({
+            "edges": [],
+            "telemetry": {"exporter": {"capture": {"plaintext": "yes"}}}
+        }),
+    ];
+    for malformed in malformed_nested_values {
+        assert!(!validator.is_valid(&malformed));
+        assert!(serde_json::from_value::<crate::config::Config>(malformed).is_err());
+    }
 }
 
 #[test]

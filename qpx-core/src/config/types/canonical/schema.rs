@@ -59,11 +59,19 @@ pub fn canonical_schema_value() -> serde_json::Value {
             },
             "captureRedaction": {
                 "type": "object",
-                "additionalProperties": false,
                 "properties": {
                     "headers": {"type": "array", "items": {"type": "string"}},
                     "query_keys": {"type": "array", "items": {"type": "string"}},
                     "json_paths": {"type": "array", "items": {"type": "string"}}
+                }
+            },
+            "exporterCapture": {
+                "type": "object",
+                "properties": {
+                    "plaintext": {"type": "boolean"},
+                    "encrypted": {"type": "boolean"},
+                    "max_chunk_bytes": {"type": "integer", "minimum": 0},
+                    "redact": {"$ref": "#/$defs/captureRedaction"}
                 }
             },
             "routeTarget": {
@@ -312,7 +320,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                             "rotation": {"type": "string"},
                             "rotation_count": {"type": "integer", "minimum": 0},
                             "exclude": {"type": "array", "items": {"type": "string"}},
-                            "redact": {"type": "object"}
+                            "redact": {"$ref": "#/$defs/captureRedaction"}
                         }
                     },
                     "audit_log": {
@@ -351,7 +359,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                             "sample_percent": {"type": "integer", "minimum": 0},
                             "headers": {"type": "object", "additionalProperties": {"type": "string"}},
                             "service_name": {"type": ["string", "null"]},
-                            "redact": {"type": "object"}
+                            "redact": {"$ref": "#/$defs/captureRedaction"}
                         }
                     },
                     "exporter": {
@@ -362,7 +370,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                             "shm_size_mb": {"type": "integer", "minimum": 0},
                             "lossy": {"type": "boolean"},
                             "max_queue_events": {"type": "integer", "minimum": 0},
-                            "capture": {"type": "object"}
+                            "capture": {"$ref": "#/$defs/exporterCapture"}
                         }
                     }
                 }
