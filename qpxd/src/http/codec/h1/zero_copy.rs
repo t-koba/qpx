@@ -16,9 +16,7 @@ use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
 #[cfg(target_os = "linux")]
-const LOW_CONTENTION_ZERO_COPY_QUANTUM: u64 = 8 * 1024 * 1024;
-#[cfg(target_os = "linux")]
-const BALANCED_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
+const SOCKET_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 // A single readiness event may move up to 1 MiB: sendfile returns partial
 // writes as soon as the socket buffer fills, so the bound only limits
 // syscall count, never worker occupancy.
@@ -78,9 +76,7 @@ fn zero_copy_scheduling_quantum_for(
 ) -> u64 {
     match transfer_kind {
         #[cfg(target_os = "linux")]
-        ZeroCopyTransferKind::Socket if active_transfers <= 1 => LOW_CONTENTION_ZERO_COPY_QUANTUM,
-        #[cfg(target_os = "linux")]
-        ZeroCopyTransferKind::Socket => BALANCED_ZERO_COPY_QUANTUM,
+        ZeroCopyTransferKind::Socket => SOCKET_ZERO_COPY_QUANTUM,
         ZeroCopyTransferKind::File if active_transfers > CONTENDED_FILE_TRANSFER_THRESHOLD => {
             CONTENDED_FILE_ZERO_COPY_QUANTUM
         }
@@ -465,17 +461,14 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
-    fn scheduling_quantum_adapts_to_active_transfer_pressure() {
+    fn scheduling_quantum_only_adapts_file_transfers_to_active_pressure() {
         #[cfg(target_os = "linux")]
-        assert_eq!(
-            zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::Socket),
-            LOW_CONTENTION_ZERO_COPY_QUANTUM
-        );
-        #[cfg(target_os = "linux")]
-        assert_eq!(
-            zero_copy_scheduling_quantum_for(2, ZeroCopyTransferKind::Socket),
-            BALANCED_ZERO_COPY_QUANTUM
-        );
+        for active_transfers in [1, 2, 32] {
+            assert_eq!(
+                zero_copy_scheduling_quantum_for(active_transfers, ZeroCopyTransferKind::Socket),
+                SOCKET_ZERO_COPY_QUANTUM
+            );
+        }
         assert_eq!(
             zero_copy_scheduling_quantum_for(1, ZeroCopyTransferKind::File),
             LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM
@@ -483,11 +476,6 @@ mod tests {
         assert_eq!(
             zero_copy_scheduling_quantum_for(256, ZeroCopyTransferKind::File),
             CONTENDED_FILE_ZERO_COPY_QUANTUM
-        );
-        #[cfg(target_os = "linux")]
-        assert_eq!(
-            zero_copy_scheduling_quantum_for(32, ZeroCopyTransferKind::Socket),
-            BALANCED_ZERO_COPY_QUANTUM
         );
     }
 
