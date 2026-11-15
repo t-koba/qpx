@@ -4,8 +4,45 @@ use crate::config::{
 };
 use serde_json::json;
 
+fn nullable_schema(schema: serde_json::Value) -> serde_json::Value {
+    json!({"anyOf": [schema, {"type": "null"}]})
+}
+
 pub fn canonical_schema_value() -> serde_json::Value {
-    let mut schema = json!({
+    let reverse_route_schema = json!({
+        "type": "object",
+        "required": ["match", "target"],
+        "additionalProperties": false,
+        "properties": {
+            "name": nullable_schema(json!({"type": "string"})),
+            "match": {"type": "object"},
+            "target": {"$ref": "#/$defs/routeTarget"},
+            "mirrors": {"type": "array", "items": {"type": "object"}},
+            "headers": nullable_schema(json!({"type": "object"})),
+            "timeout_ms": nullable_schema(json!({"type": "integer", "minimum": 1})),
+            "health_check": nullable_schema(json!({"type": "object"})),
+            "resilience": nullable_schema(json!({"type": "object"})),
+            "cache": nullable_schema(json!({"type": "object"})),
+            "capture": nullable_schema(json!({"$ref": "#/$defs/capturePolicy"})),
+            "rate_limit": nullable_schema(json!({"type": "object"})),
+            "path_rewrite": nullable_schema(json!({"type": "object"})),
+            "upstream_trust_profile": nullable_schema(json!({"type": "string"})),
+            "upstream_trust": nullable_schema(json!({"type": "object"})),
+            "lifecycle": nullable_schema(json!({"type": "object"})),
+            "affinity": nullable_schema(json!({"type": "object"})),
+            "policy_context": nullable_schema(json!({"type": "object"})),
+            "destination_resolution": nullable_schema(json!({"type": "object"})),
+            "http": {"$ref": "#/$defs/httpPolicy"},
+            "http_guard_profile": nullable_schema(json!({"type": "string"})),
+            "modules": {"type": "array", "items": {"type": "string"}},
+            "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}},
+            "streaming": nullable_schema(json!({"$ref": "#/$defs/streamingConfig"})),
+            "grpc": nullable_schema(json!({"$ref": "#/$defs/grpcConfig"})),
+            "sse": nullable_schema(json!({"$ref": "#/$defs/sseStreamingPolicy"})),
+            "streaming_requirement": nullable_schema(json!({"enum": ["preferred", "required"]}))
+        }
+    });
+    let schema = json!({
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "title": "qpxd canonical configuration",
         "type": "object",
@@ -491,7 +528,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                                 {"type": "object", "required": ["kind", "name", "listen", "default_action"], "additionalProperties": false, "properties": {"kind": {"const": "forward"}, "name": {"type": "string"}, "listen": {"type": "string"}, "default_action": {"type": "object"}, "upstream_proxy": {"type": ["string", "null"]}, "tls_inspection": {"type": ["object", "null"]}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "rules": {"type": "array", "items": {"type": "object"}}, "http3": {"type": ["object", "null"]}, "ftp": {"type": "object"}, "xdp": {"type": ["object", "null"]}, "cache": {"type": ["object", "null"]}, "capture": {"anyOf": [{"$ref": "#/$defs/capturePolicy"}, {"type": "null"}]}, "rate_limit": {"type": ["object", "null"]}, "policy_context": {"type": ["object", "null"]}, "destination_resolution": {"type": ["object", "null"]}, "http": {"$ref": "#/$defs/httpPolicy"}, "http_guard_profile": {"type": ["string", "null"]}, "modules": {"type": "array", "items": {"type": "string"}}, "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}, "streaming": {"anyOf": [{"$ref": "#/$defs/streamingConfig"}, {"type": "null"}]}, "grpc": {"anyOf": [{"$ref": "#/$defs/grpcConfig"}, {"type": "null"}]}, "sse": {"anyOf": [{"$ref": "#/$defs/sseStreamingPolicy"}, {"type": "null"}]}, "streaming_requirement": {"anyOf": [{"enum": ["preferred", "required"]}, {"type": "null"}]}}}
                             ]
                         },
-                        {"type": "object", "required": ["kind", "name", "listen"], "additionalProperties": false, "properties": {"kind": {"const": "reverse"}, "name": {"type": "string"}, "listen": {"type": "string"}, "tls": {"type": ["object", "null"]}, "http3": {"type": ["object", "null"]}, "xdp": {"type": ["object", "null"]}, "enforce_sni_host_match": {"type": "boolean"}, "sni_host_exceptions": {"type": "array", "items": {"type": "string"}}, "policy_context": {"type": ["object", "null"]}, "destination_resolution": {"type": ["object", "null"]}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "streaming": {"anyOf": [{"$ref": "#/$defs/streamingConfig"}, {"type": "null"}]}, "grpc": {"anyOf": [{"$ref": "#/$defs/grpcConfig"}, {"type": "null"}]}, "sse": {"anyOf": [{"$ref": "#/$defs/sseStreamingPolicy"}, {"type": "null"}]}, "routes": {"type": "array", "items": {"type": "object", "required": ["match", "target"], "additionalProperties": false, "properties": {"name": {"type": "string"}, "match": {"type": "object"}, "target": {"$ref": "#/$defs/routeTarget"}, "mirrors": {"type": "array", "items": {"type": "object"}}, "headers": {"type": "object"}, "timeout_ms": {"type": "integer", "minimum": 1}, "health_check": {"type": "object"}, "resilience": {"type": "object"}, "cache": {"type": "object"}, "capture": {"$ref": "#/$defs/capturePolicy"}, "rate_limit": {"type": "object"}, "path_rewrite": {"type": "object"}, "upstream_trust_profile": {"type": "string"}, "upstream_trust": {"type": "object"}, "lifecycle": {"type": "object"}, "affinity": {"type": "object"}, "policy_context": {"type": "object"}, "destination_resolution": {"type": "object"}, "http": {"$ref": "#/$defs/httpPolicy"}, "http_guard_profile": {"type": "string"}, "modules": {"type": "array", "items": {"type": "string"}}, "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}, "streaming": {"$ref": "#/$defs/streamingConfig"}, "grpc": {"$ref": "#/$defs/grpcConfig"}, "sse": {"$ref": "#/$defs/sseStreamingPolicy"}, "streaming_requirement": {"enum": ["preferred", "required"]}}}}, "tls_passthrough_routes": {"type": "array", "items": {"type": "object"}}}},
+                        {"type": "object", "required": ["kind", "name", "listen"], "additionalProperties": false, "properties": {"kind": {"const": "reverse"}, "name": {"type": "string"}, "listen": {"type": "string"}, "tls": {"type": ["object", "null"]}, "http3": {"type": ["object", "null"]}, "xdp": {"type": ["object", "null"]}, "enforce_sni_host_match": {"type": "boolean"}, "sni_host_exceptions": {"type": "array", "items": {"type": "string"}}, "policy_context": {"type": ["object", "null"]}, "destination_resolution": {"type": ["object", "null"]}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "streaming": {"anyOf": [{"$ref": "#/$defs/streamingConfig"}, {"type": "null"}]}, "grpc": {"anyOf": [{"$ref": "#/$defs/grpcConfig"}, {"type": "null"}]}, "sse": {"anyOf": [{"$ref": "#/$defs/sseStreamingPolicy"}, {"type": "null"}]}, "routes": {"type": "array", "items": reverse_route_schema}, "tls_passthrough_routes": {"type": "array", "items": {"type": "object"}}}},
                         {
                             "allOf": [
                                 {"$ref": "#/$defs/commonEdgeFields"},
@@ -503,41 +540,6 @@ pub fn canonical_schema_value() -> serde_json::Value {
             }
         }
     });
-
-    let route_properties =
-        schema["properties"]["edges"]["items"]["oneOf"][1]["properties"]["routes"]["items"]["properties"]
-            .as_object_mut()
-            .expect("reverse route schema properties");
-    for field in [
-        "name",
-        "headers",
-        "timeout_ms",
-        "health_check",
-        "resilience",
-        "cache",
-        "capture",
-        "rate_limit",
-        "path_rewrite",
-        "upstream_trust_profile",
-        "upstream_trust",
-        "lifecycle",
-        "affinity",
-        "policy_context",
-        "destination_resolution",
-        "http_guard_profile",
-        "streaming",
-        "grpc",
-        "sse",
-        "streaming_requirement",
-    ] {
-        let field_schema = route_properties
-            .get_mut(field)
-            .expect("declared optional reverse route field");
-        let non_null_schema = std::mem::replace(field_schema, serde_json::Value::Null);
-        *field_schema = json!({
-            "anyOf": [non_null_schema, {"type": "null"}]
-        });
-    }
 
     schema
 }
