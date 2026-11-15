@@ -11,21 +11,6 @@ pub fn canonical_schema_value() -> serde_json::Value {
         "type": "object",
         "required": ["edges"],
         "additionalProperties": false,
-        "properties": {
-            "state_dir": {"type": ["string", "null"]},
-            "identity": {"type": "object"},
-            "messages": {"type": "object"},
-            "runtime": {"type": "object"},
-            "telemetry": {"type": "object"},
-            "security": {"type": "object"},
-            "http": {"type": "object"},
-            "origins": {"type": "object"},
-            "traffic": {"type": "object"},
-            "upstreams": {"type": "array", "items": {"type": "object"}},
-            "caches": {"type": "array", "items": {"type": "object"}},
-            "acme": {"anyOf": [{"$ref": "#/$defs/acmeConfig"}, {"type": "null"}]},
-            "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}}
-        },
         "$defs": {
             "acmeConfig": {
                 "type": "object",
@@ -306,7 +291,82 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "identity": {"type": "object"},
             "messages": {"type": "object"},
             "runtime": {"type": "object"},
-            "telemetry": {"type": "object"},
+            "telemetry": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "system_log": {
+                        "type": "object",
+                        "properties": {
+                            "level": {"type": "string"},
+                            "format": {"type": "string"}
+                        }
+                    },
+                    "access_log": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                            "path": {"type": ["string", "null"]},
+                            "format": {"type": "string"},
+                            "rotation": {"type": "string"},
+                            "rotation_count": {"type": "integer", "minimum": 0},
+                            "exclude": {"type": "array", "items": {"type": "string"}},
+                            "redact": {"type": "object"}
+                        }
+                    },
+                    "audit_log": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                            "path": {"type": ["string", "null"]},
+                            "format": {"type": "string"},
+                            "rotation": {"type": "string"},
+                            "rotation_count": {"type": "integer", "minimum": 0},
+                            "include": {
+                                "type": "array",
+                                "items": {"enum": ["subject", "groups", "device_id", "posture", "tenant", "auth_strength", "idp", "identity_source", "policy_tags", "decision_service_policy_id", "matched_rule", "matched_route"]}
+                            }
+                        }
+                    },
+                    "metrics": {
+                        "type": ["object", "null"],
+                        "required": ["listen"],
+                        "properties": {
+                            "listen": {"type": "string"},
+                            "path": {"type": "string"},
+                            "allow": {"type": "array", "items": {"type": "string"}},
+                            "max_concurrent_connections": {"type": "integer", "minimum": 0}
+                        }
+                    },
+                    "otel": {
+                        "type": ["object", "null"],
+                        "additionalProperties": false,
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                            "endpoint": {"type": ["string", "null"]},
+                            "protocol": {"type": "string"},
+                            "level": {"type": "string"},
+                            "sample_percent": {"type": "integer", "minimum": 0},
+                            "headers": {"type": "object", "additionalProperties": {"type": "string"}},
+                            "service_name": {"type": ["string", "null"]},
+                            "redact": {"type": "object"}
+                        }
+                    },
+                    "exporter": {
+                        "type": ["object", "null"],
+                        "properties": {
+                            "enabled": {"type": "boolean"},
+                            "shm_path": {"type": "string"},
+                            "shm_size_mb": {"type": "integer", "minimum": 0},
+                            "lossy": {"type": "boolean"},
+                            "max_queue_events": {"type": "integer", "minimum": 0},
+                            "capture": {"type": "object"}
+                        }
+                    }
+                }
+            },
             "security": {"type": "object"},
             "http": {
                 "type": "object",

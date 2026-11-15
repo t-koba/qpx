@@ -10,6 +10,46 @@ fn canonical_schema_accepts_null_for_optional_root_state_dir() {
 }
 
 #[test]
+fn canonical_schema_telemetry_matches_serde_contract() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let valid = serde_json::json!({
+        "edges": [],
+        "telemetry": {
+            "system_log": {"format": "json"},
+            "access_log": {"path": null},
+            "audit_log": {"include": ["subject", "matched_route"]},
+            "metrics": null,
+            "otel": {"endpoint": null, "service_name": null},
+            "exporter": null
+        }
+    });
+    assert!(validator.is_valid(&valid));
+    assert!(serde_json::from_value::<crate::config::Config>(valid).is_ok());
+
+    let unknown_root_field = serde_json::json!({
+        "edges": [],
+        "telemetry": {"typo": true}
+    });
+    assert!(!validator.is_valid(&unknown_root_field));
+    assert!(serde_json::from_value::<crate::config::Config>(unknown_root_field).is_err());
+
+    let unknown_access_log_field = serde_json::json!({
+        "edges": [],
+        "telemetry": {"access_log": {"typo": true}}
+    });
+    assert!(!validator.is_valid(&unknown_access_log_field));
+    assert!(serde_json::from_value::<crate::config::Config>(unknown_access_log_field).is_err());
+
+    let missing_metrics_listener = serde_json::json!({
+        "edges": [],
+        "telemetry": {"metrics": {}}
+    });
+    assert!(!validator.is_valid(&missing_metrics_listener));
+    assert!(serde_json::from_value::<crate::config::Config>(missing_metrics_listener).is_err());
+}
+
+#[test]
 fn canonical_schema_exposes_acme_dns_hook_deadline() {
     let schema = canonical_schema_value();
     assert_eq!(
