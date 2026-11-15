@@ -5,7 +5,7 @@ fn canonical_schema_exposes_acme_dns_hook_deadline() {
     let schema = canonical_schema_value();
     assert_eq!(
         schema
-            .pointer("/properties/acme/$ref")
+            .pointer("/properties/acme/anyOf/0/$ref")
             .and_then(serde_json::Value::as_str),
         Some("#/$defs/acmeConfig")
     );
@@ -21,6 +21,24 @@ fn canonical_schema_exposes_acme_dns_hook_deadline() {
             .and_then(serde_json::Value::as_u64),
         Some(60)
     );
+}
+
+#[test]
+fn canonical_schema_accepts_null_for_optional_acme_fields() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [],
+        "acme": {
+            "enabled": false,
+            "directory_url": null,
+            "email": null,
+            "http01_listen": null,
+            "dns_hook": null
+        }
+    });
+    assert!(validator.is_valid(&config));
+    assert!(validator.is_valid(&serde_json::json!({"edges": [], "acme": null})));
 }
 
 #[test]

@@ -23,7 +23,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "traffic": {"type": "object"},
             "upstreams": {"type": "array", "items": {"type": "object"}},
             "caches": {"type": "array", "items": {"type": "object"}},
-            "acme": {"$ref": "#/$defs/acmeConfig"},
+            "acme": {"anyOf": [{"$ref": "#/$defs/acmeConfig"}, {"type": "null"}]},
             "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}}
         },
         "$defs": {
@@ -34,12 +34,12 @@ pub fn canonical_schema_value() -> serde_json::Value {
                     "enabled": {"type": "boolean", "default": false},
                     "challenge": {"enum": ["http-01", "tls-alpn-01", "dns-01"], "default": "http-01"},
                     "staging": {"type": "boolean", "default": false},
-                    "directory_url": {"type": "string"},
-                    "email": {"type": "string"},
+                    "directory_url": {"type": ["string", "null"]},
+                    "email": {"type": ["string", "null"]},
                     "terms_of_service_agreed": {"type": "boolean", "default": false},
-                    "http01_listen": {"type": "string"},
+                    "http01_listen": {"type": ["string", "null"]},
                     "dns_hook": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "additionalProperties": false,
                         "required": ["set_command", "clear_command"],
                         "properties": {
@@ -341,7 +341,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "traffic": {"type": "object"},
             "upstreams": {"type": "array"},
             "caches": {"type": "array"},
-            "acme": {"$ref": "#/$defs/acmeConfig"},
+            "acme": {"anyOf": [{"$ref": "#/$defs/acmeConfig"}, {"type": "null"}]},
             "edges": {
                 "type": "array",
                 "items": {

@@ -2728,6 +2728,7 @@ dependencies = [
  "dirs-next",
  "globset",
  "http",
+ "jsonschema",
  "libc",
  "lru",
  "memmap2",
