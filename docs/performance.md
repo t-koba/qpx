@@ -511,9 +511,9 @@ boundaries; operating-system `recv` segmentation therefore cannot favor a
 proxy that happens to emit smaller frames. The five implementations are
 interleaved across rounds. Each proxy requires a majority of valid samples and
 uses independent conservative medians for total time, latency, and CPU
-efficiency. Fast mode performs eight complete transfers per sample so subsecond
-timer quantization cannot dominate CPU accounting. CPU efficiency includes both
-the proxy and the shared backend. Stability is mandatory for qpx, the direct
+efficiency. Fast mode defaults to eight sequential complete transfers per sample
+with client reads capped at 64 KiB; repetitions limit timer quantization. CPU
+efficiency covers proxy and backend. Stability is mandatory for qpx, direct
 backend, the winning external proxy, and every external proxy within 25% of the
 leader. A distant unstable implementation remains visible in the artifact but
 cannot invalidate an otherwise stable competitive comparison.
