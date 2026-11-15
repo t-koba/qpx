@@ -123,6 +123,43 @@ fn canonical_schema_accepts_null_for_optional_http_policy_containers() {
 }
 
 #[test]
+fn canonical_schema_accepts_null_for_optional_http_policy_scalar_fields() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [{
+            "kind": "forward",
+            "name": "front",
+            "listen": "127.0.0.1:0",
+            "default_action": {},
+            "http": {
+                "cookies": {"same_site": null},
+                "browser_security": {
+                    "content_security_policy": null,
+                    "content_security_policy_report_only": null,
+                    "referrer_policy": null,
+                    "permissions_policy": null,
+                    "permissions_policy_report_only": null,
+                    "cross_origin_opener_policy": null,
+                    "cross_origin_opener_policy_report_only": null,
+                    "cross_origin_embedder_policy": null,
+                    "cross_origin_embedder_policy_report_only": null,
+                    "cross_origin_resource_policy": null,
+                    "x_content_type_options": null,
+                    "origin_agent_cluster": null,
+                    "clear_site_data": null,
+                    "reporting_endpoints": null,
+                    "timing_allow_origin": null,
+                    "accept_ch": null,
+                    "critical_ch": null
+                }
+            }
+        }]
+    });
+    assert!(validator.is_valid(&config));
+}
+
+#[test]
 fn canonical_schema_http_module_matches_serde_envelope() {
     let schema = canonical_schema_value();
     assert_eq!(

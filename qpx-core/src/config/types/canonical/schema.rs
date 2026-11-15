@@ -193,7 +193,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         "properties": {
                             "require_secure": {"type": "boolean"},
                             "require_http_only": {"type": "boolean"},
-                            "same_site": {"enum": ["strict", "lax", "none"]},
+                            "same_site": {"enum": ["strict", "lax", "none", null]},
                             "require_partitioned": {"type": "boolean"},
                             "max_field_bytes": {"type": "integer", "minimum": 1}
                         }
@@ -214,23 +214,23 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         "type": ["object", "null"],
                         "additionalProperties": false,
                         "properties": {
-                            "content_security_policy": {"type": "string", "minLength": 1},
-                            "content_security_policy_report_only": {"type": "string", "minLength": 1},
-                            "referrer_policy": {"type": "string", "minLength": 1},
-                            "permissions_policy": {"type": "string", "minLength": 1},
-                            "permissions_policy_report_only": {"type": "string", "minLength": 1},
-                            "cross_origin_opener_policy": {"type": "string", "minLength": 1},
-                            "cross_origin_opener_policy_report_only": {"type": "string", "minLength": 1},
-                            "cross_origin_embedder_policy": {"type": "string", "minLength": 1},
-                            "cross_origin_embedder_policy_report_only": {"type": "string", "minLength": 1},
-                            "cross_origin_resource_policy": {"type": "string", "minLength": 1},
-                            "x_content_type_options": {"type": "string", "minLength": 1},
-                            "origin_agent_cluster": {"type": "string", "minLength": 1},
-                            "clear_site_data": {"type": "string", "minLength": 1},
-                            "reporting_endpoints": {"type": "string", "minLength": 1},
-                            "timing_allow_origin": {"type": "string", "minLength": 1},
-                            "accept_ch": {"type": "string", "minLength": 1},
-                            "critical_ch": {"type": "string", "minLength": 1}
+                            "content_security_policy": {"type": ["string", "null"], "minLength": 1},
+                            "content_security_policy_report_only": {"type": ["string", "null"], "minLength": 1},
+                            "referrer_policy": {"type": ["string", "null"], "minLength": 1},
+                            "permissions_policy": {"type": ["string", "null"], "minLength": 1},
+                            "permissions_policy_report_only": {"type": ["string", "null"], "minLength": 1},
+                            "cross_origin_opener_policy": {"type": ["string", "null"], "minLength": 1},
+                            "cross_origin_opener_policy_report_only": {"type": ["string", "null"], "minLength": 1},
+                            "cross_origin_embedder_policy": {"type": ["string", "null"], "minLength": 1},
+                            "cross_origin_embedder_policy_report_only": {"type": ["string", "null"], "minLength": 1},
+                            "cross_origin_resource_policy": {"type": ["string", "null"], "minLength": 1},
+                            "x_content_type_options": {"type": ["string", "null"], "minLength": 1},
+                            "origin_agent_cluster": {"type": ["string", "null"], "minLength": 1},
+                            "clear_site_data": {"type": ["string", "null"], "minLength": 1},
+                            "reporting_endpoints": {"type": ["string", "null"], "minLength": 1},
+                            "timing_allow_origin": {"type": ["string", "null"], "minLength": 1},
+                            "accept_ch": {"type": ["string", "null"], "minLength": 1},
+                            "critical_ch": {"type": ["string", "null"], "minLength": 1}
                         }
                     },
                     "reporting_collector": {
