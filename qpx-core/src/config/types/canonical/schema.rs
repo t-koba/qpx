@@ -367,7 +367,18 @@ pub fn canonical_schema_value() -> serde_json::Value {
                     }
                 }
             },
-            "security": {"type": "object"},
+            "security": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "auth": {"type": "object"},
+                    "identity_sources": {"type": "array", "items": {"type": "object"}},
+                    "decisions": {"type": "object"},
+                    "destination": {"type": "object"},
+                    "named_sets": {"type": "array", "items": {"type": "object"}},
+                    "upstream_trust_profiles": {"type": "array", "items": {"type": "object"}}
+                }
+            },
             "http": {
                 "type": "object",
                 "additionalProperties": false,

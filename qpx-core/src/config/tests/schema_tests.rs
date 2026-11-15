@@ -50,6 +50,39 @@ fn canonical_schema_telemetry_matches_serde_contract() {
 }
 
 #[test]
+fn canonical_schema_security_matches_serde_root_contract() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let valid = serde_json::json!({
+        "edges": [],
+        "security": {
+            "auth": {},
+            "identity_sources": [],
+            "decisions": {},
+            "destination": {},
+            "named_sets": [],
+            "upstream_trust_profiles": []
+        }
+    });
+    assert!(validator.is_valid(&valid));
+    assert!(serde_json::from_value::<crate::config::Config>(valid).is_ok());
+
+    let unknown_root_field = serde_json::json!({
+        "edges": [],
+        "security": {"typo": true}
+    });
+    assert!(!validator.is_valid(&unknown_root_field));
+    assert!(serde_json::from_value::<crate::config::Config>(unknown_root_field).is_err());
+
+    let null_non_optional_field = serde_json::json!({
+        "edges": [],
+        "security": {"auth": null}
+    });
+    assert!(!validator.is_valid(&null_non_optional_field));
+    assert!(serde_json::from_value::<crate::config::Config>(null_non_optional_field).is_err());
+}
+
+#[test]
 fn canonical_schema_exposes_acme_dns_hook_deadline() {
     let schema = canonical_schema_value();
     assert_eq!(
