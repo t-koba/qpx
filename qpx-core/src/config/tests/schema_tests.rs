@@ -79,6 +79,50 @@ fn canonical_schema_accepts_null_for_optional_api_metadata_fields() {
 }
 
 #[test]
+fn canonical_schema_accepts_null_for_optional_http_policy_containers() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [
+            {
+                "kind": "forward",
+                "name": "front-null-http",
+                "listen": "127.0.0.1:0",
+                "default_action": {},
+                "http": null
+            },
+            {
+                "kind": "forward",
+                "name": "front-null-settings",
+                "listen": "127.0.0.1:1",
+                "default_action": {},
+                "http": {
+                    "forwarded": null,
+                    "hsts": null,
+                    "cors": null,
+                    "client_certificate": null,
+                    "cookies": null,
+                    "fetch_metadata": null,
+                    "browser_security": null,
+                    "reporting_collector": null
+                }
+            },
+            {
+                "kind": "reverse",
+                "name": "reverse-null-route-http",
+                "listen": "127.0.0.1:2",
+                "routes": [{
+                    "match": {},
+                    "target": {"type": "upstream", "upstreams": []},
+                    "http": null
+                }]
+            }
+        ]
+    });
+    assert!(validator.is_valid(&config));
+}
+
+#[test]
 fn canonical_schema_http_module_matches_serde_envelope() {
     let schema = canonical_schema_value();
     assert_eq!(

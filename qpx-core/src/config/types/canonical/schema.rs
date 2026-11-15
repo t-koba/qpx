@@ -118,14 +118,14 @@ pub fn canonical_schema_value() -> serde_json::Value {
                 }
             },
             "httpPolicy": {
-                "type": "object",
+                "type": ["object", "null"],
                 "additionalProperties": false,
                 "properties": {
                     "response_rules": {"type": "array", "items": {"type": "object"}},
                     "require_precondition": {"type": "boolean"},
                     "capport": {"type": "boolean"},
                     "forwarded": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "required": ["trusted_peers", "by"],
                         "additionalProperties": false,
                         "properties": {
@@ -153,7 +153,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "hsts": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "required": ["max_age_seconds"],
                         "additionalProperties": false,
                         "properties": {
@@ -162,7 +162,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "cors": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "required": ["allowed_origins", "allowed_methods"],
                         "additionalProperties": false,
                         "properties": {
@@ -176,7 +176,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "client_certificate": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "additionalProperties": false,
                         "properties": {
                             "include_chain": {"type": "boolean"},
@@ -188,7 +188,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "cookies": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "additionalProperties": false,
                         "properties": {
                             "require_secure": {"type": "boolean"},
@@ -199,7 +199,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "fetch_metadata": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "required": ["allowed_sites"],
                         "additionalProperties": false,
                         "properties": {
@@ -211,7 +211,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "browser_security": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "additionalProperties": false,
                         "properties": {
                             "content_security_policy": {"type": "string", "minLength": 1},
@@ -234,7 +234,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "reporting_collector": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "additionalProperties": false,
                         "properties": {
                             "max_body_bytes": {"type": "integer", "minimum": 1},
