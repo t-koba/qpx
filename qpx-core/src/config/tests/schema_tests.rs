@@ -160,6 +160,29 @@ fn canonical_schema_accepts_null_for_optional_http_policy_scalar_fields() {
 }
 
 #[test]
+fn canonical_schema_accepts_null_for_optional_reverse_edge_fields() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [{
+            "kind": "reverse",
+            "name": "back",
+            "listen": "127.0.0.1:2",
+            "tls": null,
+            "http3": null,
+            "xdp": null,
+            "policy_context": null,
+            "destination_resolution": null,
+            "streaming": null,
+            "grpc": null,
+            "sse": null
+        }]
+    });
+    assert!(validator.is_valid(&config));
+    assert!(serde_json::from_value::<crate::config::Config>(config).is_ok());
+}
+
+#[test]
 fn canonical_schema_accepts_null_for_optional_ingress_edge_fields() {
     let validator =
         jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
