@@ -10,6 +10,79 @@ fn canonical_schema_accepts_null_for_optional_root_state_dir() {
 }
 
 #[test]
+fn canonical_schema_runtime_accepts_serde_values_and_defaults() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    for runtime in [
+        serde_json::json!({}),
+        serde_json::json!({
+            "worker_threads": null,
+            "max_blocking_threads": null,
+            "acceptor_tasks_per_listener": null,
+            "max_concurrent_connections": 0,
+            "upstream_http_timeout_ms": 0,
+            "h2_server_max_concurrent_streams": u32::MAX,
+            "tcp_backlog": i32::MIN,
+            "h3_allow_connection_migration": true,
+            "trace_enabled": false,
+            "trace_reflect_all_headers": true,
+            "reuse_port": false,
+            "unknown_length_exact_size": "buffer",
+            "datagram_overflow_strategy": "drop_newest",
+            "h3_request_body_drain": {
+                "mode": "best_effort", "max_concurrent": 0, "timeout_ms": 0
+            },
+            "sse": {"flush_policy": "batched", "disable_compression": true},
+            "future_runtime_field": {"enabled": true}
+        }),
+        serde_json::json!({
+            "worker_threads": 0,
+            "max_blocking_threads": usize::MAX,
+            "acceptor_tasks_per_listener": 1,
+            "tcp_backlog": i32::MAX,
+            "unknown_length_exact_size": "reject",
+            "h3_request_body_drain": {"mode": "abort"},
+            "sse": {}
+        }),
+        serde_json::json!({"h3_request_body_drain": {"mode": "bounded"}}),
+    ] {
+        let config = serde_json::json!({"edges": [], "runtime": runtime});
+        assert!(validator.is_valid(&config), "schema rejected {config}");
+        assert!(serde_json::from_value::<crate::config::Config>(config).is_ok());
+    }
+}
+
+#[test]
+fn canonical_schema_runtime_rejects_malformed_known_fields() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    for runtime in [
+        serde_json::json!({"worker_threads": "auto"}),
+        serde_json::json!({"max_concurrent_connections": null}),
+        serde_json::json!({"max_concurrent_connections": -1}),
+        serde_json::json!({"upstream_http_timeout_ms": 1.5}),
+        serde_json::json!({"h2_server_max_concurrent_streams": u64::from(u32::MAX) + 1}),
+        serde_json::json!({"tcp_backlog": i64::from(i32::MIN) - 1}),
+        serde_json::json!({"tcp_backlog": i64::from(i32::MAX) + 1}),
+        serde_json::json!({"trace_enabled": "yes"}),
+        serde_json::json!({"unknown_length_exact_size": "ignore"}),
+        serde_json::json!({"datagram_overflow_strategy": "drop_oldest"}),
+        serde_json::json!({"h3_request_body_drain": null}),
+        serde_json::json!({"h3_request_body_drain": {"mode": "unbounded"}}),
+        serde_json::json!({"h3_request_body_drain": {"max_concurrent": -1}}),
+        serde_json::json!({"h3_request_body_drain": {"timeout_ms": "fast"}}),
+        serde_json::json!({"h3_request_body_drain": {"future_field": true}}),
+        serde_json::json!({"sse": null}),
+        serde_json::json!({"sse": {"flush_policy": "immediate"}}),
+        serde_json::json!({"sse": {"future_field": true}}),
+    ] {
+        let config = serde_json::json!({"edges": [], "runtime": runtime});
+        assert!(!validator.is_valid(&config), "schema accepted {config}");
+        assert!(serde_json::from_value::<crate::config::Config>(config).is_err());
+    }
+}
+
+#[test]
 fn canonical_schema_telemetry_matches_serde_contract() {
     let validator =
         jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
