@@ -512,11 +512,13 @@ proxy that happens to emit smaller frames. The five implementations are
 interleaved across rounds. Each proxy requires a majority of valid samples and
 uses independent conservative medians for total time, latency, and CPU
 efficiency. Fast mode defaults to eight sequential complete transfers per sample
-with client reads capped at 64 KiB; repetitions limit timer quantization. CPU
-efficiency covers proxy and backend. Stability is mandatory for qpx, direct
-backend, the winning external proxy, and every external proxy within 25% of the
-leader. A distant unstable implementation remains visible in the artifact but
-cannot invalidate an otherwise stable competitive comparison.
+with client reads capped at 64 KiB; repetitions limit timer quantization. Slow
+mode defaults to one complete transfer per sample, applying the configured
+inter-read delay (`QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS`, default 1 ms) at
+each 64 KiB observation. CPU efficiency covers proxy and backend. Stability is
+mandatory for qpx, direct backend, the winning external proxy, and every external
+proxy within 25% of the leader. A distant unstable implementation remains visible
+in the artifact but cannot invalidate an otherwise stable competitive comparison.
 
 The p99 gap, scheduler queue-delay and CPU-rate spreads are judged against the
 observed range the lane publishes for them beside their spread: the
