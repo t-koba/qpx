@@ -88,7 +88,7 @@ impl CachedBody {
             // Cache envelopes do not persist trailers, so memory bodies are safe to
             // replay without wrapping them in a trailer-sanitizing stream.
             Self::Memory(bytes) => Body::from(bytes.clone()).mark_trailers_sanitized(),
-            Self::File(file) => file.body(None, None),
+            Self::File(file) => file.body(None),
         }
     }
 
@@ -99,7 +99,7 @@ impl CachedBody {
                 let end = end_inclusive as usize;
                 Body::from(bytes.slice(start..end + 1)).mark_trailers_sanitized()
             }
-            Self::File(file) => file.body(Some((start, end_inclusive)), None),
+            Self::File(file) => file.body(Some((start, end_inclusive))),
         }
     }
 
@@ -154,11 +154,7 @@ impl CachedBody {
 }
 
 impl CachedBodyFile {
-    fn body(
-        self: &Arc<Self>,
-        range: Option<(u64, u64)>,
-        trailers: Option<http::HeaderMap>,
-    ) -> Body {
+    fn body(self: &Arc<Self>, range: Option<(u64, u64)>) -> Body {
         let (mut sender, body) = Body::channel_with_capacity(16);
         let file_ref = self.clone();
         tokio::spawn(async move {
@@ -185,9 +181,6 @@ impl CachedBodyFile {
                     if sender.send_data(buf.split().freeze()).await.is_err() {
                         return Ok::<_, anyhow::Error>(());
                     }
-                }
-                if let Some(trailers) = trailers {
-                    sender.send_trailers(trailers).await?;
                 }
                 Ok(())
             }
