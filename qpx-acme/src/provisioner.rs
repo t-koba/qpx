@@ -632,33 +632,6 @@ mod dns_hook_process {
         }
     }
 
-    #[cfg(test)]
-    mod tests {
-        use super::ProcessTree;
-
-        #[tokio::test]
-        async fn dns_hook_process_tree_rejects_missing_job_handle() {
-            let tree = ProcessTree(None);
-            assert_eq!(
-                tree.set_limits(0).unwrap_err().to_string(),
-                "dns hook job handle missing"
-            );
-            let mut child = tokio::process::Command::new("cmd")
-                .args(["/C", "exit 0"])
-                .kill_on_drop(true)
-                .spawn()
-                .expect("spawn hook child");
-            child.wait().await.expect("reap hook child");
-            assert_eq!(
-                tree.assign_and_resume(&child)
-                    .await
-                    .unwrap_err()
-                    .to_string(),
-                "dns hook job handle missing"
-            );
-        }
-    }
-
     fn suspended_thread(pid: u32) -> Result<OwnedHandle> {
         // SAFETY: TH32CS_SNAPTHREAD takes a system-wide snapshot (pid ignored).
         let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
@@ -695,6 +668,33 @@ mod dns_hook_process {
             return Err(error).context("enumerate dns hook threads");
         }
         Err(anyhow!("dns hook primary thread not found"))
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::ProcessTree;
+
+        #[tokio::test]
+        async fn dns_hook_process_tree_rejects_missing_job_handle() {
+            let tree = ProcessTree(None);
+            assert_eq!(
+                tree.set_limits(0).unwrap_err().to_string(),
+                "dns hook job handle missing"
+            );
+            let mut child = tokio::process::Command::new("cmd")
+                .args(["/C", "exit 0"])
+                .kill_on_drop(true)
+                .spawn()
+                .expect("spawn hook child");
+            child.wait().await.expect("reap hook child");
+            assert_eq!(
+                tree.assign_and_resume(&child)
+                    .await
+                    .unwrap_err()
+                    .to_string(),
+                "dns hook job handle missing"
+            );
+        }
     }
 }
 
