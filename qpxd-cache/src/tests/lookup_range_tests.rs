@@ -213,6 +213,85 @@ async fn lookup_if_match_takes_precedence_over_if_unmodified_since() {
 }
 
 #[tokio::test]
+async fn lookup_parses_comma_containing_entity_tag_lists() {
+    let req = make_get_request("/etag-comma");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "public, max-age=60", "hello");
+    response
+        .headers_mut()
+        .insert(ETAG, http::HeaderValue::from_static("\"a,b\""));
+    let backends = backend_map();
+    let _ = store_and_drain(
+        &req,
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    for (name, value, expected_status) in [
+        ("if-match", "\"a,b\"", StatusCode::OK),
+        ("if-match", "\"missing,tag\", \"a,b\"", StatusCode::OK),
+        ("if-match", "W/\"a,b\"", StatusCode::PRECONDITION_FAILED),
+        ("if-match", "*", StatusCode::OK),
+        ("if-none-match", "\"a,b\"", StatusCode::NOT_MODIFIED),
+        ("if-none-match", "W/\"a,b\"", StatusCode::NOT_MODIFIED),
+        (
+            "if-none-match",
+            "\"missing,tag\", W/\"a,b\"",
+            StatusCode::NOT_MODIFIED,
+        ),
+        ("if-none-match", "*", StatusCode::NOT_MODIFIED),
+    ] {
+        let mut conditional = make_get_request("/etag-comma");
+        conditional
+            .headers_mut()
+            .insert(ord(name), http::HeaderValue::from_static(value));
+        let out = lookup(
+            &conditional,
+            &key,
+            &policy(),
+            &backends,
+            &test_revalidations(),
+        )
+        .await
+        .expect("lookup");
+        let response = match out {
+            LookupOutcome::Hit(response) => response,
+            _ => panic!("expected cache hit"),
+        };
+        assert_eq!(response.status(), expected_status, "{name}: {value}");
+    }
+
+    let mut repeated = make_get_request("/etag-comma");
+    repeated.headers_mut().append(
+        ord("if-none-match"),
+        http::HeaderValue::from_static("W/\"missing,tag\""),
+    );
+    repeated.headers_mut().append(
+        ord("if-none-match"),
+        http::HeaderValue::from_static("W/\"a,b\""),
+    );
+    let out = lookup(&repeated, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
+    let response = match out {
+        LookupOutcome::Hit(response) => response,
+        _ => panic!("expected cache hit"),
+    };
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+}
+
+#[tokio::test]
 async fn lookup_returns_416_for_unsatisfiable_range() {
     let req = make_get_request("/range-miss");
     let key = CacheRequestKey::for_lookup(&req, "http")

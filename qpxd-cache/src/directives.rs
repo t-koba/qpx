@@ -1,4 +1,4 @@
-use super::freshness::{parse_http_date_secs, parse_if_none_match};
+use super::freshness::{parse_entity_tag_list, parse_http_date_secs, parse_if_none_match};
 use super::types::{ByteRangeSpec, IfRangeCondition, RequestDirectives, ResponseDirectives};
 use http::HeaderName;
 use http::header::CACHE_CONTROL;
@@ -101,19 +101,7 @@ pub fn parse_request_directives(headers: &OwnedHeaders) -> RequestDirectives {
 }
 
 pub fn parse_if_match(headers: &OwnedHeaders) -> Vec<String> {
-    let mut out = Vec::new();
-    for value in headers.get_all(&ord("if-match")) {
-        let Ok(raw) = value.to_str() else {
-            continue;
-        };
-        for token in raw.split(',') {
-            let trimmed = token.trim();
-            if !trimmed.is_empty() {
-                out.push(trimmed.to_string());
-            }
-        }
-    }
-    out
+    parse_entity_tag_list(headers, "if-match")
 }
 
 pub fn parse_response_directives(headers: &OwnedHeaders) -> ResponseDirectives {

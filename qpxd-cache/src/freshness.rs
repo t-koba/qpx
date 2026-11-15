@@ -137,16 +137,33 @@ pub fn active_range<'a>(
 }
 
 pub fn parse_if_none_match(headers: &OwnedHeaders) -> Vec<String> {
+    parse_entity_tag_list(headers, "if-none-match")
+}
+
+pub fn parse_entity_tag_list(headers: &OwnedHeaders, name: &str) -> Vec<String> {
     let mut out = Vec::new();
-    for value in headers.get_all(&ord("if-none-match")) {
+    for value in headers.get_all(&ord(name)) {
         let Ok(raw) = value.to_str() else {
             continue;
         };
-        for token in raw.split(',') {
-            let trimmed = token.trim();
-            if !trimmed.is_empty() {
-                out.push(trimmed.to_string());
+        let mut start = 0;
+        let mut quoted = false;
+        for (index, character) in raw.char_indices() {
+            match character {
+                '"' => quoted = !quoted,
+                ',' if !quoted => {
+                    let token = raw[start..index].trim();
+                    if !token.is_empty() {
+                        out.push(token.to_string());
+                    }
+                    start = index + 1;
+                }
+                _ => {}
             }
+        }
+        let token = raw[start..].trim();
+        if !token.is_empty() {
+            out.push(token.to_string());
         }
     }
     out
