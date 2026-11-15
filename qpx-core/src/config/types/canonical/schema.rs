@@ -23,10 +23,35 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "traffic": {"type": "object"},
             "upstreams": {"type": "array", "items": {"type": "object"}},
             "caches": {"type": "array", "items": {"type": "object"}},
-            "acme": {"type": "object"},
+            "acme": {"$ref": "#/$defs/acmeConfig"},
             "edges": {"type": "array", "items": {"$ref": "#/$defs/edge"}}
         },
         "$defs": {
+            "acmeConfig": {
+                "type": "object",
+                "additionalProperties": false,
+                "properties": {
+                    "enabled": {"type": "boolean", "default": false},
+                    "challenge": {"enum": ["http-01", "tls-alpn-01", "dns-01"], "default": "http-01"},
+                    "staging": {"type": "boolean", "default": false},
+                    "directory_url": {"type": "string"},
+                    "email": {"type": "string"},
+                    "terms_of_service_agreed": {"type": "boolean", "default": false},
+                    "http01_listen": {"type": "string"},
+                    "dns_hook": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": ["set_command", "clear_command"],
+                        "properties": {
+                            "set_command": {"type": "string"},
+                            "clear_command": {"type": "string"},
+                            "propagation_wait_secs": {"type": "integer", "minimum": 0, "default": 0},
+                            "timeout_secs": {"type": "integer", "minimum": 1, "default": 60}
+                        }
+                    },
+                    "renew_before_days": {"type": "integer", "minimum": 1, "default": 30}
+                }
+            },
             "capturePolicy": {
                 "type": "object",
                 "additionalProperties": false,
@@ -316,7 +341,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "traffic": {"type": "object"},
             "upstreams": {"type": "array"},
             "caches": {"type": "array"},
-            "acme": {"type": "object"},
+            "acme": {"$ref": "#/$defs/acmeConfig"},
             "edges": {
                 "type": "array",
                 "items": {

@@ -30,6 +30,10 @@ pub(super) fn default_acme_renew_before_days() -> u64 {
     30
 }
 
+pub(super) fn default_acme_dns_hook_timeout_secs() -> u64 {
+    60
+}
+
 pub(super) fn default_acme_challenge() -> String {
     "http-01".to_string()
 }

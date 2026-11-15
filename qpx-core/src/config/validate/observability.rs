@@ -247,6 +247,13 @@ pub(super) fn validate_acme_config(config: &Config, acme: &AcmeConfig) -> Result
             .parse()
             .map_err(|e| anyhow!("acme.http01_listen is invalid: {}", e))?;
     }
+    if acme
+        .dns_hook
+        .as_ref()
+        .is_some_and(|hook| hook.timeout_secs == 0)
+    {
+        return Err(anyhow!("acme.dns_hook.timeout_secs must be >= 1"));
+    }
     if challenge == "dns-01" {
         let Some(hook) = acme.dns_hook.as_ref() else {
             return Err(anyhow!(

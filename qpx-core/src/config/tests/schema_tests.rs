@@ -1,6 +1,29 @@
 use super::*;
 
 #[test]
+fn canonical_schema_exposes_acme_dns_hook_deadline() {
+    let schema = canonical_schema_value();
+    assert_eq!(
+        schema
+            .pointer("/properties/acme/$ref")
+            .and_then(serde_json::Value::as_str),
+        Some("#/$defs/acmeConfig")
+    );
+    assert_eq!(
+        schema
+            .pointer("/$defs/acmeConfig/properties/dns_hook/properties/timeout_secs/minimum")
+            .and_then(serde_json::Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        schema
+            .pointer("/$defs/acmeConfig/properties/dns_hook/properties/timeout_secs/default")
+            .and_then(serde_json::Value::as_u64),
+        Some(60)
+    );
+}
+
+#[test]
 fn canonical_schema_http_module_matches_serde_envelope() {
     let schema = canonical_schema_value();
     assert_eq!(

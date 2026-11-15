@@ -124,6 +124,8 @@ pub struct AcmeDnsHookConfig {
     pub clear_command: String,
     #[serde(default)]
     pub propagation_wait_secs: u64,
+    #[serde(default = "default_acme_dns_hook_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]

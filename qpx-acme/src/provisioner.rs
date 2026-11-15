@@ -236,7 +236,10 @@ async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -
                 configured_challenge_name(state)
             )
         })?;
-        prepare_challenge(state, &challenge, &mut cleanups).await?;
+        if let Err(err) = prepare_challenge(state, &challenge, &mut cleanups).await {
+            cleanup_challenges(state, cleanups).await;
+            return Err(err);
+        }
         if let Err(err) = challenge
             .set_ready()
             .await
@@ -319,11 +322,17 @@ async fn prepare_challenge(
                 .ok_or_else(|| anyhow!("acme.dns_hook missing for dns-01"))?;
             let domain = challenge.identifier().to_string();
             let value = challenge.key_authorization().dns_value();
-            run_dns_hook(hook.set_command.as_str(), &domain, &value).await?;
             cleanups.push(ChallengeCleanup::Dns01Record {
-                domain,
+                domain: domain.clone(),
                 value: value.clone(),
             });
+            run_dns_hook(
+                hook.set_command.as_str(),
+                &domain,
+                &value,
+                Duration::from_secs(hook.timeout_secs),
+            )
+            .await?;
             if hook.propagation_wait_secs > 0 {
                 sleep(Duration::from_secs(hook.propagation_wait_secs)).await;
             }
@@ -349,8 +358,13 @@ async fn cleanup_challenges(state: &AcmeRuntime, cleanups: Vec<ChallengeCleanup>
             }
             ChallengeCleanup::Dns01Record { domain, value } => {
                 if let Some(hook) = state.dns_hook.as_ref()
-                    && let Err(err) =
-                        run_dns_hook(hook.clear_command.as_str(), &domain, &value).await
+                    && let Err(err) = run_dns_hook(
+                        hook.clear_command.as_str(),
+                        &domain,
+                        &value,
+                        Duration::from_secs(hook.timeout_secs),
+                    )
+                    .await
                 {
                     warn!(domain = %domain, error = ?err, "acme dns-01 cleanup hook failed");
                 }
@@ -376,38 +390,256 @@ fn tls_alpn01_challenge_cert(sni: &str, digest: &[u8]) -> Result<CertifiedKey> {
     Ok(CertifiedKey::new(vec![cert.der().clone()], signing_key))
 }
 
-async fn run_dns_hook(command: &str, domain: &str, value: &str) -> Result<()> {
+async fn run_dns_hook(command: &str, domain: &str, value: &str, deadline: Duration) -> Result<()> {
     let trimmed = command.trim();
     if trimmed.is_empty() {
         return Err(anyhow!("acme dns hook command must not be empty"));
     }
-    #[cfg(unix)]
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(trimmed)
-        .env("QPX_ACME_DOMAIN", domain)
-        .env("QPX_ACME_TXT_VALUE", value)
-        .status()
-        .await?;
-    #[cfg(windows)]
-    let status = Command::new("cmd")
-        .arg("/C")
-        .arg(trimmed)
-        .env("QPX_ACME_DOMAIN", domain)
-        .env("QPX_ACME_TXT_VALUE", value)
-        .status()
-        .await?;
     #[cfg(not(any(unix, windows)))]
-    let status = {
-        let _ = (trimmed, domain, value);
-        return Err(anyhow!(
+    {
+        let _ = (trimmed, domain, value, deadline);
+        Err(anyhow!(
             "acme dns hook commands are not supported on this platform"
-        ));
-    };
-    if !status.success() {
-        return Err(anyhow!("acme dns hook command failed with status {status}"));
+        ))
     }
-    Ok(())
+    #[cfg(any(unix, windows))]
+    {
+        #[cfg(unix)]
+        let mut command = {
+            let mut command = Command::new("sh");
+            // setpgid runs in the child before exec, so even the shell's first
+            // descendant belongs to the group supervised below.
+            command.arg("-c").arg(trimmed).process_group(0);
+            command
+        };
+        #[cfg(windows)]
+        let mut command = {
+            let mut command = Command::new("cmd");
+            command
+                .arg("/C")
+                .arg(trimmed)
+                .creation_flags(windows_sys::Win32::System::Threading::CREATE_SUSPENDED);
+            command
+        };
+        command
+            .env("QPX_ACME_DOMAIN", domain)
+            .env("QPX_ACME_TXT_VALUE", value)
+            .kill_on_drop(true);
+
+        #[cfg(windows)]
+        let mut tree = dns_hook_process::ProcessTree::new()?;
+        let mut child = command.spawn().context("failed to spawn acme dns hook")?;
+        #[cfg(unix)]
+        let mut tree = dns_hook_process::ProcessTree::new(&child);
+
+        let outcome = tokio::time::timeout(deadline, async {
+            #[cfg(windows)]
+            tree.assign_and_resume(&child).await?;
+            child
+                .wait()
+                .await
+                .context("failed to wait for acme dns hook")
+        })
+        .await;
+        let error = match outcome {
+            Ok(Ok(status)) => {
+                // Normal shell completion preserves detached descendants, as before.
+                tree.disarm()?;
+                if status.success() {
+                    return Ok(());
+                }
+                anyhow!("acme dns hook command failed with status {status}")
+            }
+            Ok(Err(error)) => error,
+            Err(_) => anyhow!("acme dns hook command timed out after {deadline:?}"),
+        };
+        tree.terminate();
+        // Always reap explicitly on timeout/setup failure. kill_on_drop remains
+        // enabled if this wait itself is cancelled; it supplies Tokio's reaper.
+        let _ = child.start_kill();
+        child
+            .wait()
+            .await
+            .with_context(|| format!("{error}; failed to reap dns hook child"))?;
+        Err(error)
+    }
+}
+
+#[cfg(unix)]
+mod dns_hook_process {
+    pub(super) struct ProcessTree(Option<libc::pid_t>);
+
+    impl ProcessTree {
+        pub(super) fn new(child: &tokio::process::Child) -> Self {
+            // A freshly spawned, not-yet-polled child always has an id.
+            Self(Some(
+                child.id().expect("fresh dns hook child has a pid") as libc::pid_t
+            ))
+        }
+
+        pub(super) fn disarm(&mut self) -> anyhow::Result<()> {
+            self.0 = None;
+            Ok(())
+        }
+
+        pub(super) fn terminate(&mut self) {
+            if let Some(group) = self.0.take() {
+                // SAFETY: the positive pid identifies the private process group
+                // established before exec. A negative pid targets that whole group.
+                if unsafe { libc::kill(-group, libc::SIGKILL) } != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ESRCH) {
+                        tracing::warn!(%error, "failed to kill acme dns hook process group");
+                    }
+                }
+            }
+        }
+    }
+
+    impl Drop for ProcessTree {
+        fn drop(&mut self) {
+            self.terminate();
+        }
+    }
+}
+
+#[cfg(windows)]
+mod dns_hook_process {
+    use anyhow::{Context, Result, anyhow};
+    use std::io;
+    use std::os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle};
+    use windows_sys::Win32::Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE};
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, TH32CS_SNAPTHREAD, THREADENTRY32, Thread32First, Thread32Next,
+    };
+    use windows_sys::Win32::System::JobObjects::{
+        AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION, JobObjectExtendedLimitInformation,
+        SetInformationJobObject,
+    };
+    use windows_sys::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+    // OwnedHandle is Send; closing the last job handle kills all assigned
+    // processes synchronously even when the supervising future is cancelled.
+    pub(super) struct ProcessTree(Option<OwnedHandle>);
+
+    impl ProcessTree {
+        pub(super) fn new() -> Result<Self> {
+            // SAFETY: null attributes/name create an unnamed, non-inheritable job.
+            let handle = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
+            if handle.is_null() {
+                return Err(io::Error::last_os_error()).context("create dns hook job");
+            }
+            // SAFETY: CreateJobObjectW returned a valid handle, now uniquely owned.
+            let tree = Self(Some(unsafe { OwnedHandle::from_raw_handle(handle) }));
+            tree.set_limits(JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE)?;
+            Ok(tree)
+        }
+
+        fn set_limits(&self, flags: u32) -> Result<()> {
+            let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+            limits.BasicLimitInformation.LimitFlags = flags;
+            // SAFETY: the job handle is live and the pointer/size describe the
+            // required initialized structure, which remains valid for this call.
+            let ok = unsafe {
+                SetInformationJobObject(
+                    self.0.as_ref().expect("live dns hook job").as_raw_handle(),
+                    JobObjectExtendedLimitInformation,
+                    (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                    std::mem::size_of_val(&limits) as u32,
+                )
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error()).context("set dns hook job limits");
+            }
+            Ok(())
+        }
+
+        pub(super) async fn assign_and_resume(&self, child: &tokio::process::Child) -> Result<()> {
+            {
+                let process = child
+                    .raw_handle()
+                    .context("dns hook process handle missing")?;
+                // SAFETY: both handles remain owned and live throughout the call.
+                // CREATE_SUSPENDED prevents the shell from running before assignment.
+                if unsafe {
+                    AssignProcessToJobObject(
+                        self.0.as_ref().expect("live dns hook job").as_raw_handle(),
+                        process,
+                    )
+                } == 0
+                {
+                    return Err(io::Error::last_os_error()).context("assign dns hook job");
+                }
+            }
+            let pid = child.id().context("dns hook process id missing")?;
+            // std/Tokio closes the initial thread handle. Enumerate on the shared
+            // blocking pool, not the async executor. This task only opens a handle:
+            // cancellation cannot cause a later, unsupervised ResumeThread.
+            let thread = tokio::task::spawn_blocking(move || suspended_thread(pid))
+                .await
+                .context("find dns hook primary thread task")??;
+            // SAFETY: the handle owns the suspended shell's primary thread. The
+            // child/job are still alive, and assignment succeeded before this call.
+            let previous = unsafe { ResumeThread(thread.as_raw_handle()) };
+            if previous != 1 {
+                if previous == u32::MAX {
+                    return Err(io::Error::last_os_error()).context("resume dns hook thread");
+                }
+                return Err(anyhow!(
+                    "unexpected dns hook thread suspend count {previous}"
+                ));
+            }
+            Ok(())
+        }
+
+        pub(super) fn disarm(&mut self) -> Result<()> {
+            // If this fails the guard stays armed: never leak unsupervised work.
+            self.set_limits(0)
+        }
+
+        pub(super) fn terminate(&mut self) {
+            drop(self.0.take());
+        }
+    }
+
+    fn suspended_thread(pid: u32) -> Result<OwnedHandle> {
+        // SAFETY: TH32CS_SNAPTHREAD takes a system-wide snapshot (pid ignored).
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) };
+        if snapshot == INVALID_HANDLE_VALUE {
+            return Err(io::Error::last_os_error()).context("snapshot dns hook threads");
+        }
+        // SAFETY: snapshot is a valid, uniquely owned Toolhelp handle.
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(snapshot) };
+        let mut entry = THREADENTRY32 {
+            dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+            ..Default::default()
+        };
+        // SAFETY: snapshot is live and entry has the required initialized size.
+        let mut found = unsafe { Thread32First(snapshot.as_raw_handle(), &mut entry) };
+        while found != 0 {
+            if entry.th32OwnerProcessID == pid {
+                // A CREATE_SUSPENDED process has only its initial thread: no
+                // application code has run yet to create any others.
+                // SAFETY: OpenThread validates the snapshot's thread id; request
+                // only resume access and a non-inheritable handle.
+                let thread = unsafe { OpenThread(THREAD_SUSPEND_RESUME, 0, entry.th32ThreadID) };
+                if thread.is_null() {
+                    return Err(io::Error::last_os_error()).context("open dns hook primary thread");
+                }
+                // SAFETY: OpenThread returned a valid, uniquely owned handle.
+                return Ok(unsafe { OwnedHandle::from_raw_handle(thread) });
+            }
+            entry.dwSize = std::mem::size_of::<THREADENTRY32>() as u32;
+            // SAFETY: snapshot and writable, sized entry remain valid.
+            found = unsafe { Thread32Next(snapshot.as_raw_handle(), &mut entry) };
+        }
+        let error = io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+            return Err(error).context("enumerate dns hook threads");
+        }
+        Err(anyhow!("dns hook primary thread not found"))
+    }
 }
 
 fn should_renew(not_after: SystemTime, renew_before_days: u64) -> Result<bool> {
@@ -904,6 +1136,232 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn dns_hook_rejects_empty_and_unsuccessful_commands() {
+        let deadline = Duration::from_secs(5);
+        assert!(
+            run_dns_hook("  ", "example.com", "value", deadline)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("must not be empty")
+        );
+        assert!(
+            run_dns_hook("exit 7", "example.com", "value", deadline)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("failed with status")
+        );
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dns_hook_windows_timeout_supervises_cmd() {
+        let error = run_dns_hook(
+            "ping -n 30 127.0.0.1 >NUL",
+            "example.com",
+            "value",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("hook must time out");
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn dns_hook_windows_cancellation_supervises_cmd() {
+        let task = tokio::spawn(async {
+            run_dns_hook(
+                "ping -n 30 127.0.0.1 >NUL",
+                "example.com",
+                "value",
+                Duration::from_secs(30),
+            )
+            .await
+        });
+        sleep(Duration::from_millis(250)).await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+    }
+
+    #[cfg(unix)]
+    struct HookTreeFixture {
+        path: PathBuf,
+        pids: Vec<libc::pid_t>,
+    }
+
+    #[cfg(unix)]
+    impl HookTreeFixture {
+        fn new() -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+            Self {
+                path: std::env::temp_dir().join(format!(
+                    "qpx-acme-hook-tree-{}-{}",
+                    std::process::id(),
+                    NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                )),
+                pids: Vec::new(),
+            }
+        }
+
+        fn command(&self, detached: bool) -> String {
+            format!(
+                "sleep 30 & descendant=$!; printf '%s %s\\n' \"$$\" \"$descendant\" > '{}'; {}",
+                self.path.display(),
+                if detached { "exit 0" } else { "wait" },
+            )
+        }
+
+        async fn ready(&mut self) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = fs::read_to_string(&self.path)
+                        && text.ends_with('\n')
+                    {
+                        let pids = text
+                            .split_whitespace()
+                            .map(str::parse::<libc::pid_t>)
+                            .collect::<std::result::Result<Vec<_>, _>>()
+                            .expect("numeric hook pids");
+                        if pids.len() == 2 {
+                            self.pids = pids;
+                            break;
+                        }
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("hook reported shell and descendant pids");
+        }
+
+        async fn assert_stopped(&self) {
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    // The direct child must be fully reaped, not merely a zombie.
+                    // SAFETY: signal 0 only queries existence of a recorded pid.
+                    let shell_gone = unsafe { libc::kill(self.pids[0], 0) } == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+                    if shell_gone && !Self::running(self.pids[1]) {
+                        break;
+                    }
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("hook shell reaped and descendant stopped");
+        }
+
+        fn running(pid: libc::pid_t) -> bool {
+            // SAFETY: signal 0 does not alter the process.
+            if unsafe { libc::kill(pid, 0) } == -1 {
+                return false;
+            }
+            // Container PID 1 may not promptly reap orphaned grandchildren.
+            // A zombie has exited and cannot run any hook work.
+            #[cfg(target_os = "linux")]
+            if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+                return !stat
+                    .rsplit_once(") ")
+                    .is_some_and(|(_, tail)| tail.starts_with('Z'));
+            }
+            true
+        }
+    }
+
+    #[cfg(unix)]
+    impl Drop for HookTreeFixture {
+        fn drop(&mut self) {
+            if self.pids.is_empty()
+                && let Ok(text) = fs::read_to_string(&self.path)
+            {
+                self.pids = text
+                    .split_whitespace()
+                    .filter_map(|s| s.parse().ok())
+                    .collect();
+            }
+            for &pid in &self.pids {
+                if Self::running(pid) {
+                    // SAFETY: these are processes created by this fixture; kill
+                    // survivors on assertion failure and the successful-run test.
+                    unsafe { libc::kill(pid, libc::SIGKILL) };
+                }
+            }
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dns_hook_timeout_kills_tree_and_reaps_shell() {
+        let mut fixture = HookTreeFixture::new();
+        let error = run_dns_hook(
+            &fixture.command(false),
+            "example.com",
+            "value",
+            Duration::from_secs(1),
+        )
+        .await
+        .expect_err("hook must time out");
+        assert!(error.to_string().contains("timed out"), "{error:#}");
+        fixture.ready().await;
+        fixture.assert_stopped().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dns_hook_cancellation_kills_tree_and_reaps_shell() {
+        let mut fixture = HookTreeFixture::new();
+        let command = fixture.command(false);
+        let task = tokio::spawn(async move {
+            run_dns_hook(&command, "example.com", "value", Duration::from_secs(30)).await
+        });
+        fixture.ready().await;
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        fixture.assert_stopped().await;
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dns_hook_success_preserves_detached_descendant() {
+        let mut fixture = HookTreeFixture::new();
+        run_dns_hook(
+            &fixture.command(true),
+            "example.com",
+            "value",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("successful hook");
+        fixture.ready().await;
+        assert!(HookTreeFixture::running(fixture.pids[1]));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn dns_hook_clear_uses_configured_timeout() {
+        let mut fixture = CertFixture::new();
+        fixture.0.dns_hook = Some(qpx_core::config::AcmeDnsHookConfig {
+            set_command: "true".to_string(),
+            clear_command: "sleep 30".to_string(),
+            propagation_wait_secs: 0,
+            timeout_secs: 1,
+        });
+        let started = std::time::Instant::now();
+        cleanup_challenges(
+            &fixture.0,
+            vec![ChallengeCleanup::Dns01Record {
+                domain: "example.com".to_string(),
+                value: "txt-value".to_string(),
+            }],
+        )
+        .await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn dns_hook_receives_domain_and_txt_value_env() {
@@ -919,7 +1377,7 @@ mod tests {
             "printf '%s|%s' \"$QPX_ACME_DOMAIN\" \"$QPX_ACME_TXT_VALUE\" > {}",
             path.display()
         );
-        run_dns_hook(&command, "example.com", "txt-value")
+        run_dns_hook(&command, "example.com", "txt-value", Duration::from_secs(5))
             .await
             .expect("hook");
         let text = std::fs::read_to_string(&path).expect("read hook output");

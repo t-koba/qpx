@@ -231,7 +231,52 @@ edges:
     .expect("write");
     let loaded = load_config(&cfg).expect("load config");
     fs::remove_dir_all(&dir).ok();
-    assert_eq!(loaded.acme.as_ref().unwrap().challenge, "dns-01");
+    let acme = loaded.acme.as_ref().unwrap();
+    assert_eq!(acme.challenge, "dns-01");
+    assert_eq!(acme.dns_hook.as_ref().unwrap().timeout_secs, 60);
+}
+
+#[cfg(feature = "tls-rustls")]
+#[test]
+fn load_config_rejects_zero_dns_hook_timeout() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("dns-hook-zero-timeout.yaml");
+    write_config(
+        &cfg,
+        r#"state_dir: /tmp/qpx-acme-test
+acme:
+  enabled: true
+  challenge: dns-01
+  terms_of_service_agreed: true
+  dns_hook:
+    set_command: "true"
+    clear_command: "true"
+    timeout_secs: 0
+edges:
+- kind: reverse
+  name: reverse
+  listen: 127.0.0.1:18443
+  tls:
+    certificates:
+    - sni: "*.example.com"
+  routes:
+  - match:
+      host:
+      - api.example.com
+    target:
+      type: upstream
+      upstreams:
+      - http://127.0.0.1:18080"#,
+    )
+    .expect("write");
+    let err = load_config(&cfg).expect_err("must reject zero timeout");
+    fs::remove_dir_all(&dir).ok();
+    assert!(
+        err.to_string()
+            .contains("acme.dns_hook.timeout_secs must be >= 1"),
+        "unexpected error: {err}"
+    );
 }
 
 #[cfg(feature = "tls-rustls")]

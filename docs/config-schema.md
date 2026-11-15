@@ -76,7 +76,15 @@ ACME supports `challenge: http-01`, `tls-alpn-01`, or `dns-01`. HTTP-01 uses
 `http01_listen`; TLS-ALPN-01 uses an ACME-managed reverse TLS certificate and
 serves a temporary `acme-tls/1` challenge certificate; DNS-01 uses
 `dns_hook.set_command` and `dns_hook.clear_command` with `QPX_ACME_DOMAIN` and
-`QPX_ACME_TXT_VALUE` in the hook environment.
+`QPX_ACME_TXT_VALUE` in the hook environment. Each hook invocation is bounded by
+`dns_hook.timeout_secs` (default 60, minimum 1); this deadline is separate from
+`propagation_wait_secs`. A timed-out set hook triggers the configured clear hook
+before renewal moves on. On Unix, timeout/cancellation kills the hook's process
+group; on Windows, the shell is assigned to a Job Object before it is resumed,
+so descendants are covered as well. Windows hook startup fails closed if the
+host's job policy refuses assignment. A hook that deliberately daemonizes outside
+its Unix process group can still outlive the timeout; normal shell exit preserves
+existing detached-child behavior.
 
 ## Validation Workflow
 
