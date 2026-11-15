@@ -135,11 +135,11 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         }
                     },
                     "api_metadata": {
-                        "type": "object",
+                        "type": ["object", "null"],
                         "additionalProperties": false,
                         "properties": {
-                            "deprecation_unix_seconds": {"type": "integer"},
-                            "sunset_unix_seconds": {"type": "integer"},
+                            "deprecation_unix_seconds": {"type": ["integer", "null"]},
+                            "sunset_unix_seconds": {"type": ["integer", "null"]},
                             "links": {"type": "array", "items": {
                                 "type": "object",
                                 "required": ["target", "relation"],
@@ -147,7 +147,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                                 "properties": {
                                     "target": {"type": "string", "minLength": 1},
                                     "relation": {"type": "string", "minLength": 1},
-                                    "media_type": {"type": "string", "minLength": 1}
+                                    "media_type": {"type": ["string", "null"], "minLength": 1}
                                 }
                             }}
                         }
