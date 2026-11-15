@@ -58,7 +58,8 @@ check_crate() {
 # projection is public. Revalidation merging stays within the owner.
 # CacheBackendConfig exposes `writer_mode` (default `single_instance`; `shared` is
 # limited to Unix disk) and `commit_lock_stripes` (default 64) for shared disk-cache writers.
-check_crate qpx-core 48fdfa262434f2044ca77e587691531b3fdf82be217b09f4b737bef734c443e0
+# AcmeDnsHookConfig exposes `timeout_secs` (default 60) to bound DNS challenge hooks.
+check_crate qpx-core 963a23be165a379ecbbd7a3f07bed06d08770bdf6b425cde0d7d350c92810f14
 check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
 check_crate qpx-h3 24b3e088e981e7d045d04b3a6fa8461fda1f78d10443de0796ac7ac3adc23b8b
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
