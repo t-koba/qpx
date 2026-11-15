@@ -107,8 +107,9 @@ pub fn conditional_not_modified(
 }
 
 pub fn precondition_failed(req: &RequestDirectives, envelope: &CachedResponseEnvelope) -> bool {
-    if !req.if_match.is_empty() && !if_match_succeeds(req, envelope) {
-        return true;
+    // RFC 9110 §13.1.4: If-Match takes precedence over If-Unmodified-Since.
+    if !req.if_match.is_empty() {
+        return !if_match_succeeds(req, envelope);
     }
 
     if let (Some(if_unmodified_since), Some(last_modified)) = (

@@ -150,6 +150,69 @@ async fn lookup_returns_412_for_if_match_miss() {
 }
 
 #[tokio::test]
+async fn lookup_if_match_takes_precedence_over_if_unmodified_since() {
+    let req = make_get_request("/if-match-precedence");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let mut response = make_response(StatusCode::OK, "public, max-age=60", "hello");
+    response
+        .headers_mut()
+        .insert(ETAG, http::HeaderValue::from_static("\"v1\""));
+    response.headers_mut().insert(
+        LAST_MODIFIED,
+        http::HeaderValue::from_static("Tue, 02 Jan 2024 00:00:00 GMT"),
+    );
+    let backends = backend_map();
+    let _ = store_and_drain(
+        &req,
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    for (if_match, expected_status) in [
+        (Some("\"v1\""), StatusCode::OK),
+        (Some("*"), StatusCode::OK),
+        (Some("\"v2\""), StatusCode::PRECONDITION_FAILED),
+        (None, StatusCode::PRECONDITION_FAILED),
+    ] {
+        let mut conditional = make_get_request("/if-match-precedence");
+        if let Some(if_match) = if_match {
+            conditional
+                .headers_mut()
+                .insert(ord("if-match"), http::HeaderValue::from_static(if_match));
+        }
+        conditional.headers_mut().insert(
+            ord("if-unmodified-since"),
+            http::HeaderValue::from_static("Mon, 01 Jan 2024 00:00:00 GMT"),
+        );
+        let out = lookup(
+            &conditional,
+            &key,
+            &policy(),
+            &backends,
+            &test_revalidations(),
+        )
+        .await
+        .expect("lookup");
+        let response = match out {
+            LookupOutcome::Hit(response) => response,
+            _ => panic!("expected cache hit"),
+        };
+        assert_eq!(response.status(), expected_status, "If-Match: {if_match:?}");
+    }
+}
+
+#[tokio::test]
 async fn lookup_returns_416_for_unsatisfiable_range() {
     let req = make_get_request("/range-miss");
     let key = CacheRequestKey::for_lookup(&req, "http")
