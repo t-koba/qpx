@@ -5,10 +5,76 @@ use http_body::Frame;
 use hyper::header::{CONNECTION, CONTENT_LENGTH, HeaderValue, TRAILER, TRANSFER_ENCODING};
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_observability::RequestHandler;
+use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use tokio::net::{TcpListener, TcpStream};
+
+struct StalledContinueWriter {
+    stall_write: bool,
+}
+
+impl tokio::io::AsyncWrite for StalledContinueWriter {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<io::Result<usize>> {
+        if self.stall_write {
+            Poll::Pending
+        } else {
+            Poll::Ready(Ok(buf.len()))
+        }
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Pending
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn h1_continue_head_keeps_exact_wire_bytes() {
+    let (mut reader, mut writer) = tokio::io::duplex(64);
+    response::send_continue_head(&mut writer)
+        .await
+        .expect("send continue head");
+    drop(writer);
+
+    let mut wire = Vec::new();
+    reader
+        .read_to_end(&mut wire)
+        .await
+        .expect("read continue head");
+    assert_eq!(wire, b"HTTP/1.1 100 Continue\r\n\r\n");
+}
+
+#[tokio::test(start_paused = true)]
+async fn h1_continue_write_and_flush_use_response_write_timeout() {
+    let mut writer = StalledContinueWriter { stall_write: true };
+    let error = response::send_continue_head(&mut writer)
+        .await
+        .expect_err("stalled interim write must time out");
+    assert!(
+        error
+            .to_string()
+            .contains("HTTP/1 response write timed out")
+    );
+
+    let mut writer = StalledContinueWriter { stall_write: false };
+    let error = response::send_continue_head(&mut writer)
+        .await
+        .expect_err("stalled interim flush must time out");
+    assert!(
+        error
+            .to_string()
+            .contains("HTTP/1 response flush timed out")
+    );
+}
 
 fn request_head_with_total_bytes(total_bytes: usize) -> Vec<u8> {
     let prefix = b"GET / HTTP/1.1\r\nHost: example.test\r\nX-Large: ";

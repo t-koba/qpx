@@ -1015,6 +1015,14 @@ where
     write_vectored_all_with_timeout(writer, &[head, &chunk]).await
 }
 
+pub(super) async fn send_continue_head<W>(writer: &mut W) -> Result<()>
+where
+    W: AsyncWrite + Unpin,
+{
+    write_all_with_timeout(writer, b"HTTP/1.1 100 Continue\r\n\r\n").await?;
+    flush_with_timeout(writer).await
+}
+
 async fn write_all_with_timeout<W>(writer: &mut W, bytes: &[u8]) -> Result<()>
 where
     W: AsyncWrite + Unpin,

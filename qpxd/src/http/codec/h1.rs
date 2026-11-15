@@ -303,10 +303,7 @@ where
 
         let body_prefix = read_buf.split();
         if parsed.send_continue {
-            write_half
-                .write_all(b"HTTP/1.1 100 Continue\r\n\r\n")
-                .await?;
-            write_half.flush().await?;
+            response::send_continue_head(&mut write_half).await?;
         }
 
         let (body, body_read) = prepare_request_body(
