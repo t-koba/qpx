@@ -280,24 +280,24 @@ pub fn canonical_schema_value() -> serde_json::Value {
             "commonEdgeFields": {
                 "type": "object",
                 "properties": {
-                    "tls_inspection": {"type": "object"},
+                    "tls_inspection": {"type": ["object", "null"]},
                     "connection_filter": {"type": "array", "items": {"type": "object"}},
                     "rules": {"type": "array", "items": {"type": "object"}},
-                    "http3": {"type": "object"},
+                    "http3": {"type": ["object", "null"]},
                     "ftp": {"type": "object"},
-                    "xdp": {"type": "object"},
-                    "cache": {"type": "object"},
-                    "capture": {"$ref": "#/$defs/capturePolicy"},
-                    "rate_limit": {"type": "object"},
-                    "policy_context": {"type": "object"},
-                    "destination_resolution": {"type": "object"},
+                    "xdp": {"type": ["object", "null"]},
+                    "cache": {"type": ["object", "null"]},
+                    "capture": {"anyOf": [{"$ref": "#/$defs/capturePolicy"}, {"type": "null"}]},
+                    "rate_limit": {"type": ["object", "null"]},
+                    "policy_context": {"type": ["object", "null"]},
+                    "destination_resolution": {"type": ["object", "null"]},
                     "http": {"$ref": "#/$defs/httpPolicy"},
-                    "http_guard_profile": {"type": "string"},
+                    "http_guard_profile": {"type": ["string", "null"]},
                     "modules": {"type": "array", "items": {"type": "string"}},
                     "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}},
-                    "streaming": {"$ref": "#/$defs/streamingConfig"},
-                    "grpc": {"$ref": "#/$defs/grpcConfig"},
-                    "sse": {"$ref": "#/$defs/sseStreamingPolicy"}
+                    "streaming": {"anyOf": [{"$ref": "#/$defs/streamingConfig"}, {"type": "null"}]},
+                    "grpc": {"anyOf": [{"$ref": "#/$defs/grpcConfig"}, {"type": "null"}]},
+                    "sse": {"anyOf": [{"$ref": "#/$defs/sseStreamingPolicy"}, {"type": "null"}]}
                 }
             }
         },
@@ -349,14 +349,14 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         {
                             "allOf": [
                                 {"$ref": "#/$defs/commonEdgeFields"},
-                                {"type": "object", "required": ["kind", "name", "listen", "default_action"], "additionalProperties": false, "properties": {"kind": {"const": "forward"}, "name": {"type": "string"}, "listen": {"type": "string"}, "default_action": {"type": "object"}, "upstream_proxy": {"type": "string"}, "tls_inspection": {"type": "object"}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "rules": {"type": "array", "items": {"type": "object"}}, "http3": {"type": "object"}, "ftp": {"type": "object"}, "xdp": {"type": "object"}, "cache": {"type": "object"}, "capture": {"$ref": "#/$defs/capturePolicy"}, "rate_limit": {"type": "object"}, "policy_context": {"type": "object"}, "destination_resolution": {"type": "object"}, "http": {"$ref": "#/$defs/httpPolicy"}, "http_guard_profile": {"type": "string"}, "modules": {"type": "array", "items": {"type": "string"}}, "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}, "streaming": {"$ref": "#/$defs/streamingConfig"}, "grpc": {"$ref": "#/$defs/grpcConfig"}, "sse": {"$ref": "#/$defs/sseStreamingPolicy"}, "streaming_requirement": {"enum": ["preferred", "required"]}}}
+                                {"type": "object", "required": ["kind", "name", "listen", "default_action"], "additionalProperties": false, "properties": {"kind": {"const": "forward"}, "name": {"type": "string"}, "listen": {"type": "string"}, "default_action": {"type": "object"}, "upstream_proxy": {"type": ["string", "null"]}, "tls_inspection": {"type": ["object", "null"]}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "rules": {"type": "array", "items": {"type": "object"}}, "http3": {"type": ["object", "null"]}, "ftp": {"type": "object"}, "xdp": {"type": ["object", "null"]}, "cache": {"type": ["object", "null"]}, "capture": {"anyOf": [{"$ref": "#/$defs/capturePolicy"}, {"type": "null"}]}, "rate_limit": {"type": ["object", "null"]}, "policy_context": {"type": ["object", "null"]}, "destination_resolution": {"type": ["object", "null"]}, "http": {"$ref": "#/$defs/httpPolicy"}, "http_guard_profile": {"type": ["string", "null"]}, "modules": {"type": "array", "items": {"type": "string"}}, "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}, "streaming": {"anyOf": [{"$ref": "#/$defs/streamingConfig"}, {"type": "null"}]}, "grpc": {"anyOf": [{"$ref": "#/$defs/grpcConfig"}, {"type": "null"}]}, "sse": {"anyOf": [{"$ref": "#/$defs/sseStreamingPolicy"}, {"type": "null"}]}, "streaming_requirement": {"anyOf": [{"enum": ["preferred", "required"]}, {"type": "null"}]}}}
                             ]
                         },
                         {"type": "object", "required": ["kind", "name", "listen"], "additionalProperties": false, "properties": {"kind": {"const": "reverse"}, "name": {"type": "string"}, "listen": {"type": "string"}, "tls": {"type": "object"}, "http3": {"type": "object"}, "xdp": {"type": "object"}, "enforce_sni_host_match": {"type": "boolean"}, "sni_host_exceptions": {"type": "array", "items": {"type": "string"}}, "policy_context": {"type": "object"}, "destination_resolution": {"type": "object"}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "streaming": {"$ref": "#/$defs/streamingConfig"}, "grpc": {"$ref": "#/$defs/grpcConfig"}, "sse": {"$ref": "#/$defs/sseStreamingPolicy"}, "routes": {"type": "array", "items": {"type": "object", "required": ["match", "target"], "additionalProperties": false, "properties": {"name": {"type": "string"}, "match": {"type": "object"}, "target": {"$ref": "#/$defs/routeTarget"}, "mirrors": {"type": "array", "items": {"type": "object"}}, "headers": {"type": "object"}, "timeout_ms": {"type": "integer", "minimum": 1}, "health_check": {"type": "object"}, "resilience": {"type": "object"}, "cache": {"type": "object"}, "capture": {"$ref": "#/$defs/capturePolicy"}, "rate_limit": {"type": "object"}, "path_rewrite": {"type": "object"}, "upstream_trust_profile": {"type": "string"}, "upstream_trust": {"type": "object"}, "lifecycle": {"type": "object"}, "affinity": {"type": "object"}, "policy_context": {"type": "object"}, "destination_resolution": {"type": "object"}, "http": {"$ref": "#/$defs/httpPolicy"}, "http_guard_profile": {"type": "string"}, "modules": {"type": "array", "items": {"type": "string"}}, "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}, "streaming": {"$ref": "#/$defs/streamingConfig"}, "grpc": {"$ref": "#/$defs/grpcConfig"}, "sse": {"$ref": "#/$defs/sseStreamingPolicy"}, "streaming_requirement": {"enum": ["preferred", "required"]}}}}, "tls_passthrough_routes": {"type": "array", "items": {"type": "object"}}}},
                         {
                             "allOf": [
                                 {"$ref": "#/$defs/commonEdgeFields"},
-                                {"type": "object", "required": ["kind", "name", "listen", "default_action"], "additionalProperties": false, "properties": {"kind": {"const": "transparent"}, "name": {"type": "string"}, "listen": {"type": "string"}, "default_action": {"type": "object"}, "original_dst": {"$ref": "#/$defs/originalDst"}, "tls_inspection": {"type": "object"}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "rules": {"type": "array", "items": {"type": "object"}}, "http3": {"type": "object"}, "ftp": {"type": "object"}, "xdp": {"type": "object"}, "cache": {"type": "object"}, "capture": {"$ref": "#/$defs/capturePolicy"}, "rate_limit": {"type": "object"}, "policy_context": {"type": "object"}, "destination_resolution": {"type": "object"}, "http": {"$ref": "#/$defs/httpPolicy"}, "http_guard_profile": {"type": "string"}, "modules": {"type": "array", "items": {"type": "string"}}, "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}, "streaming": {"$ref": "#/$defs/streamingConfig"}, "grpc": {"$ref": "#/$defs/grpcConfig"}, "sse": {"$ref": "#/$defs/sseStreamingPolicy"}, "streaming_requirement": {"enum": ["preferred", "required"]}}}
+                                {"type": "object", "required": ["kind", "name", "listen", "default_action"], "additionalProperties": false, "properties": {"kind": {"const": "transparent"}, "name": {"type": "string"}, "listen": {"type": "string"}, "default_action": {"type": "object"}, "original_dst": {"anyOf": [{"$ref": "#/$defs/originalDst"}, {"type": "null"}]}, "tls_inspection": {"type": ["object", "null"]}, "connection_filter": {"type": "array", "items": {"type": "object"}}, "rules": {"type": "array", "items": {"type": "object"}}, "http3": {"type": ["object", "null"]}, "ftp": {"type": "object"}, "xdp": {"type": ["object", "null"]}, "cache": {"type": ["object", "null"]}, "capture": {"anyOf": [{"$ref": "#/$defs/capturePolicy"}, {"type": "null"}]}, "rate_limit": {"type": ["object", "null"]}, "policy_context": {"type": ["object", "null"]}, "destination_resolution": {"type": ["object", "null"]}, "http": {"$ref": "#/$defs/httpPolicy"}, "http_guard_profile": {"type": ["string", "null"]}, "modules": {"type": "array", "items": {"type": "string"}}, "http_modules": {"type": "array", "items": {"$ref": "#/$defs/httpModule"}}, "streaming": {"anyOf": [{"$ref": "#/$defs/streamingConfig"}, {"type": "null"}]}, "grpc": {"anyOf": [{"$ref": "#/$defs/grpcConfig"}, {"type": "null"}]}, "sse": {"anyOf": [{"$ref": "#/$defs/sseStreamingPolicy"}, {"type": "null"}]}, "streaming_requirement": {"anyOf": [{"enum": ["preferred", "required"]}, {"type": "null"}]}}}
                             ]
                         }
                     ]

@@ -160,6 +160,59 @@ fn canonical_schema_accepts_null_for_optional_http_policy_scalar_fields() {
 }
 
 #[test]
+fn canonical_schema_accepts_null_for_optional_ingress_edge_fields() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [
+            {
+                "kind": "forward",
+                "name": "front",
+                "listen": "127.0.0.1:0",
+                "default_action": {"type": "inspect"},
+                "upstream_proxy": null,
+                "tls_inspection": null,
+                "http3": null,
+                "xdp": null,
+                "cache": null,
+                "capture": null,
+                "rate_limit": null,
+                "policy_context": null,
+                "destination_resolution": null,
+                "http_guard_profile": null,
+                "streaming": null,
+                "grpc": null,
+                "sse": null,
+                "streaming_requirement": null
+            },
+            {
+                "kind": "transparent",
+                "name": "intercept",
+                "listen": "127.0.0.1:1",
+                "default_action": {"type": "inspect"},
+                "original_dst": null,
+                "tls_inspection": null,
+                "http3": null,
+                "xdp": null,
+                "cache": null,
+                "capture": null,
+                "rate_limit": null,
+                "policy_context": null,
+                "destination_resolution": null,
+                "http_guard_profile": null,
+                "streaming": null,
+                "grpc": null,
+                "sse": null,
+                "streaming_requirement": null
+            }
+        ]
+    });
+    assert!(validator.is_valid(&config));
+    let parsed = serde_json::from_value::<crate::config::Config>(config.clone());
+    assert!(parsed.is_ok(), "serde rejected explicit nulls: {parsed:?}");
+}
+
+#[test]
 fn canonical_schema_accepts_null_for_optional_http_module_metadata() {
     let validator =
         jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
