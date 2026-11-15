@@ -299,7 +299,8 @@ async fn abort_h3_extended_driver(
     let _ = driver.await;
 }
 
-#[cfg(test)]
+// This integration harness relies on Runtime's generated forward-H3 test certificate.
+#[cfg(all(test, feature = "mitm"))]
 mod tests {
     use super::send_h3_extended_connect_error_response;
     use bytes::Bytes;

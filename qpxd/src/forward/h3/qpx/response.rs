@@ -212,8 +212,10 @@ mod tests {
     };
     use crate::forward::h3::qpx::response::*;
     use crate::http3::codec::http_headers_to_h1;
+    #[cfg(feature = "mitm")]
     use http::{Method, Response};
     use qpx_core::config::HeaderControl;
+    #[cfg(feature = "mitm")]
     use tokio::time::{Duration, Instant, timeout};
 
     #[test]
@@ -418,6 +420,8 @@ mod tests {
         }
     }
 
+    // This runtime harness relies on generated forward-H3 test certificates.
+    #[cfg(feature = "mitm")]
     #[tokio::test]
     async fn selected_plan_send_budget_bounds_qpx_connect_error_under_flow_control() -> Result<()> {
         timeout(Duration::from_secs(5), async {
