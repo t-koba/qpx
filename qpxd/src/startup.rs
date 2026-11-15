@@ -10,13 +10,8 @@ use tokio::runtime::Runtime;
 use tracing::{info, warn};
 
 fn build_runtime(worker_threads: usize, max_blocking_threads: usize) -> Result<Runtime> {
-    let mut builder = if worker_threads == 1 {
-        tokio::runtime::Builder::new_current_thread()
-    } else {
-        let mut builder = tokio::runtime::Builder::new_multi_thread();
-        builder.worker_threads(worker_threads);
-        builder
-    };
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    builder.worker_threads(worker_threads);
     builder
         .max_blocking_threads(max_blocking_threads)
         .enable_all();
@@ -551,12 +546,12 @@ mod runtime_builder_tests {
     use tokio::runtime::RuntimeFlavor;
 
     #[test]
-    fn single_worker_uses_current_thread_scheduler() {
+    fn single_worker_uses_multi_thread_scheduler() {
         let runtime = build_runtime(1, 4).expect("build single-worker runtime");
 
         assert_eq!(
             runtime.handle().runtime_flavor(),
-            RuntimeFlavor::CurrentThread
+            RuntimeFlavor::MultiThread
         );
     }
 
