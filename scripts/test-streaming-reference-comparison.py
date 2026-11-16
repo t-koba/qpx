@@ -106,7 +106,7 @@ class PairedComparisonTest(unittest.TestCase):
         ]
         report = streaming_reference.compare(records)
         fast = report["read_modes"]["fast"]
-        self.assertEqual(report["enforced_metric"], "scheduler_queue_delay_us_per_transfer")
+        self.assertEqual(report["enforced_metrics"], ["total_ms", "requests_per_cpu_second"])
         self.assertAlmostEqual(
             fast["metrics"]["proxy_scheduler_queue_delay_us_per_transfer"]
             ["median_current_over_reference"], 2.0
@@ -126,7 +126,7 @@ class PairedComparisonTest(unittest.TestCase):
         self.assertEqual(report["read_modes"]["fast"]["paired_rounds"], 0)
         self.assertNotIn("total_ms", report["read_modes"]["fast"]["metrics"])
         self.assertEqual(
-            report["enforced_metric"], "scheduler_queue_delay_us_per_transfer"
+            report["enforced_metrics"], ["total_ms", "requests_per_cpu_second"]
         )
         self.assertNotIn("gate", report)
 
@@ -196,7 +196,8 @@ class PairedComparisonTest(unittest.TestCase):
             streaming_reference.compare(records)
         )
         self.assertIn("qpxd-previous", summary)
-        self.assertIn("paired scheduler queue-delay verdict enforced", summary)
+        self.assertIn("paired end-to-end latency and throughput verdict enforced", summary)
+        self.assertIn("queue delay and tail report-only diagnostics", summary)
         self.assertNotIn("not a gate", summary)
         self.assertIn("1 paired rounds", summary)
 

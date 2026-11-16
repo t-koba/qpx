@@ -7,11 +7,9 @@ collected in different runs; the paired per-round difference is the
 measurement that answers whether the reverse HTTP/1 path changed between the
 two builds.
 
-The comparison remains a report, but the streaming checker enforces the
-paired queue-delay median as the tail verdict. It names the build each number
-belongs to, states how many rounds were paired, and the scheduler
-queue-delay median is the enforced paired tail objective while the remaining
-values stay visible for trend review.
+The streaming checker enforces paired end-to-end latency and throughput.
+Each number names its build and paired-round count; scheduler queue delay,
+its proxy/backend components and tail gaps remain report-only diagnostics.
 """
 
 from __future__ import annotations
@@ -74,7 +72,8 @@ def compare(records, current_proxy=CURRENT_PROXY, reference_proxy=REFERENCE_PROX
     """Builds the paired per-round comparison for both read modes."""
     report = {
         "comparison": "current_build_versus_pinned_previous_release",
-        "enforced_metric": "scheduler_queue_delay_us_per_transfer",
+        "enforced_metrics": ["total_ms", "requests_per_cpu_second"],
+        "diagnostic_metrics": list(METRICS[2:]),
         "current_proxy": current_proxy,
         "reference_proxy": reference_proxy,
         "read_modes": {},
@@ -115,8 +114,8 @@ def compare(records, current_proxy=CURRENT_PROXY, reference_proxy=REFERENCE_PROX
 def format_summary(report):
     """One line that states the comparison, its direction and its status."""
     parts = [
-        "streaming reference (paired scheduler queue-delay verdict enforced; "
-        f"other metrics report-only): current vs {report['reference_proxy']};"
+        "streaming reference (paired end-to-end latency and throughput verdict enforced; "
+        f"queue delay and tail report-only diagnostics): current vs {report['reference_proxy']};"
         " a total_ms ratio above 1 means the current build was slower"
     ]
     for read_mode in READ_MODES:

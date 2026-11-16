@@ -1,4 +1,4 @@
-"""Option-A confirmation for the streaming paired queue-delay objective.
+"""Option-A confirmation for the streaming paired latency and throughput objectives.
 
 The first report is immutable. Only a complete, same-mode sample of the same
 builds and workload may clear its miss; every other outcome retains it.
@@ -12,7 +12,11 @@ import sys
 
 import streaming_reference
 
-METRIC = "scheduler_queue_delay_us_per_transfer"
+ENFORCED_METRICS = {
+    "total_ms": ("max", "max_total_time_ratio"),
+    "requests_per_cpu_second": ("min", "min_throughput_ratio"),
+}
+DIAGNOSTIC_METRICS = streaming_reference.METRICS[2:]
 
 
 def validate_identity(report, current_sha):
@@ -32,10 +36,10 @@ def validate_identity(report, current_sha):
         raise ValueError("paired lane identity mismatch")
 
 
-def queue_metric(report, mode):
+def paired_metric(report, mode, metric):
     if report.get("comparison") != "current_build_versus_pinned_previous_release":
         raise ValueError("unexpected comparison")
-    metric = report["read_modes"][mode]["metrics"][METRIC]
+    metric = report["read_modes"][mode]["metrics"][metric]
     rounds = metric["paired_rounds"]
     median = metric["median_current_over_reference"]
     if type(rounds) is not int or rounds <= 0:
@@ -46,54 +50,66 @@ def queue_metric(report, mode):
     return metric
 
 
-def resolve(first, confirmation, mode, cap, current_sha):
-    initial = queue_metric(first, mode)
-    result = {"status": "REGRESSED", "mode": mode, "first": initial,
+def violates(metric, direction, cap):
+    median = metric["median_current_over_reference"]
+    if direction == "max":
+        return median > cap + 1e-12
+    if direction == "min":
+        return median < cap - 1e-12
+    raise ValueError("invalid paired objective direction")
+
+
+def complete_metrics(report, mode):
+    attempts = report.get("sample_attempts")
+    if type(attempts) is not int or attempts <= 0:
+        raise ValueError("missing sample attempts")
+    metrics = {name: paired_metric(report, mode, name) for name in ENFORCED_METRICS}
+    if (report.get("complete_modes", {}).get(mode) is not True
+            or any(metric["paired_rounds"] != attempts for metric in metrics.values())):
+        raise ValueError("inconclusive or invalid paired sample")
+    return metrics
+
+
+def resolve(first, confirmation, mode, caps, current_sha):
+    result = {"status": "REGRESSED", "mode": mode, "first": {}, "confirmation": {},
               "source_sha": first.get("source_sha"),
               "reference_source_sha": first.get("reference_source_sha")}
     try:
         validate_identity(first, current_sha)
+        initial = result["first"] = complete_metrics(first, mode)
         validate_identity(confirmation, current_sha)
         for field in ("source_sha", "reference_source_sha"):
             if confirmation.get(field) != first.get(field):
                 raise ValueError(f"{field} identity mismatch")
-        attempts = first.get("sample_attempts")
-        if type(attempts) is not int or attempts <= 0:
-            raise ValueError("missing sample attempts")
-        if confirmation.get("sample_attempts") != attempts:
+        if confirmation.get("sample_attempts") != first.get("sample_attempts"):
             raise ValueError("sample attempts mismatch")
         if not first.get("workload") or confirmation.get("workload") != first["workload"]:
             raise ValueError("workload mismatch")
-        confirmed = queue_metric(confirmation, mode)
-        # Incomplete pairs and malformed raw measurements cannot turn a miss
-        # into a pass, even if their surviving median happens to be low.
-        for report in (first, confirmation):
-            if (queue_metric(report, mode)["paired_rounds"] != attempts
-                    or report.get("complete_modes", {}).get(mode) is not True):
-                raise ValueError("inconclusive or invalid paired sample")
-        result["confirmation"] = confirmed
-        if confirmed["median_current_over_reference"] <= cap + 1e-12:
-            result.update(status="PASSED", unconfirmed_misses=[initial])
+        # Both metrics need every configured pair, even when only one missed.
+        confirmed = result["confirmation"] = complete_metrics(confirmation, mode)
+        misses = [name for name in ENFORCED_METRICS
+                  if violates(confirmed[name], *caps[name])]
+        if misses:
+            raise ValueError("paired objectives still missed: " + ", ".join(misses))
+        result.update(status="PASSED", unconfirmed_misses=[
+            initial[name] for name in ENFORCED_METRICS
+            if violates(initial[name], *caps[name])
+        ])
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         result["reason"] = f"confirmation did not clear first miss: {exc}"
     return result
 
 
-def missed_modes(report, cap):
-    """Return only complete first-pass modes that exceed the fixed objective."""
-    attempts = report.get("sample_attempts")
-    complete = report.get("complete_modes")
-    if type(attempts) is not int or attempts <= 0 or not isinstance(complete, dict):
-        return []
+def missed_modes(report, caps):
+    """Return complete first-pass modes missing either paired objective."""
     missed = []
     for mode in streaming_reference.READ_MODES:
         try:
-            metric = queue_metric(report, mode)
+            metrics = complete_metrics(report, mode)
+            if any(violates(metrics[name], *caps[name]) for name in ENFORCED_METRICS):
+                missed.append(mode)
         except (KeyError, TypeError, ValueError, AttributeError):
             continue
-        if complete.get(mode) is True and metric["paired_rounds"] == attempts:
-            if metric["median_current_over_reference"] > cap + 1e-12:
-                missed.append(mode)
     return missed
 
 
@@ -115,8 +131,9 @@ def write_report(raw, output, source_sha, reference_sha, attempts, workload):
                     and r.get("aggregation") == "single_sample"
                     and r.get("commit") == source_sha
                     and r.get("kernel_resource_metrics") is True
-                    and type(r.get(METRIC)) in (int, float)
-                    and math.isfinite(r[METRIC]) and r[METRIC] > 0
+                    and all(type(r.get(metric)) in (int, float)
+                            and math.isfinite(r[metric]) and r[metric] > 0
+                            for metric in ENFORCED_METRICS)
                     and r.get("bytes") == r.get("stream_bytes", 0) * r.get("transfers", 0)
                     and r.get("stream_bytes") == workload["stream_bytes"]
                     and r.get("chunk_bytes") == workload["chunk_bytes"]
@@ -136,6 +153,8 @@ if __name__ == "__main__":
         })
     elif sys.argv[1] == "misses":
         first = json.loads(Path(sys.argv[2]).read_text())
-        cap = json.loads(Path(sys.argv[3]).read_text())["paired"]["max_scheduler_queue_delay_ratio"]
-        for mode in missed_modes(first, cap):
+        paired = json.loads(Path(sys.argv[3]).read_text())["paired"]
+        caps = {name: (direction, paired[key])
+                for name, (direction, key) in ENFORCED_METRICS.items()}
+        for mode in missed_modes(first, caps):
             print(mode)

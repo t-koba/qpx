@@ -371,19 +371,21 @@ def lane(base, **overrides):
 
 
 def reference_report(fast_median=1.0, slow_median=1.0, fast_rounds=3, slow_rounds=3):
-    """A sibling streaming-compare-reference.json with a paired queue median."""
+    """A sibling streaming-compare-reference.json with paired enforced metrics and queue diagnostics."""
 
     def mode(median, rounds):
         return {
             "paired_rounds": rounds,
             "metrics": {
-                "scheduler_queue_delay_us_per_transfer": {
+                metric: {
                     "paired_rounds": rounds,
                     "median_current_over_reference": median,
                     "min_current_over_reference": median,
                     "max_current_over_reference": median,
                     "median_difference": 0.0,
-                },
+                }
+                for metric in ("total_ms", "requests_per_cpu_second",
+                               "scheduler_queue_delay_us_per_transfer")
             },
         }
 
@@ -619,7 +621,7 @@ class StreamingGateTest(unittest.TestCase):
             )
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertIn("queue=", result.stdout)
+        self.assertIn("scheduler-queue-diagnostic=", result.stdout)
         self.assertNotIn("paired scheduler queue-delay ratio", result.stderr)
 
     def test_slow_external_queue_ratio_is_visible_while_the_paired_verdict_passes(self):
@@ -634,20 +636,52 @@ class StreamingGateTest(unittest.TestCase):
         self.assertIn("max_scheduler_queue_delay_ratio=", result.stdout)
         self.assertNotIn("paired scheduler queue-delay ratio", result.stderr)
 
-    def test_paired_fast_queue_ratio_above_cap_fails(self):
-        """A paired fast queue median of 1.5 exceeds the fixed 1.25 tolerance."""
+    def test_paired_fast_total_time_ratio_above_cap_fails(self):
+        """A paired fast total-time median of 1.5 exceeds the fixed 1.25 tolerance."""
         result = self.run_gate(reference=reference_report(fast_median=1.5))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("paired scheduler queue-delay ratio", result.stderr)
+        self.assertIn("paired total_ms ratio", result.stderr)
         self.assertIn("1.500000 > objective 1.250000", result.stderr)
         self.assertIn("paired current-vs-pinned median", result.stderr)
 
-    def test_paired_slow_queue_ratio_above_cap_fails(self):
-        """A paired slow queue median of 1.5 exceeds the fixed 1.25 tolerance."""
+    def test_paired_slow_total_time_ratio_above_cap_fails(self):
+        """A paired slow total-time median of 1.5 exceeds the fixed 1.25 tolerance."""
         result = self.run_gate(reference=reference_report(slow_median=1.5))
         self.assertEqual(result.returncode, 1)
-        self.assertIn("paired scheduler queue-delay ratio", result.stderr)
+        self.assertIn("paired total_ms ratio", result.stderr)
         self.assertIn("1.500000 > objective 1.250000", result.stderr)
+
+    def test_throughput_floor_requires_confirmation_to_restore_both_metrics(self):
+        for mode in ("fast", "slow"):
+            first = reference_report()
+            first["read_modes"][mode]["metrics"]["requests_per_cpu_second"][
+                "median_current_over_reference"] = 0.7
+            confirmations = [None, copy.deepcopy(first), reference_report(), reference_report()]
+            # Fixing throughput cannot clear a new latency miss in confirmation.
+            confirmations[-1]["read_modes"][mode]["metrics"]["total_ms"][
+                "median_current_over_reference"] = 1.5
+            for confirmation, expected in zip(confirmations, (1, 1, 0, 1)):
+                with self.subTest(mode=mode, confirmation=confirmation):
+                    result = self.run_gate(reference=first, confirmations={mode: confirmation})
+                    self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                    if expected:
+                        self.assertIn("paired requests_per_cpu_second ratio", result.stderr)
+                        self.assertIn("0.700000 < objective 0.800000", result.stderr)
+                    else:
+                        self.assertEqual(result.confirmation[mode]["status"], "PASSED")
+
+    def test_paired_queue_delay_is_optional_report_only_diagnostic(self):
+        for queue in (None, 100.0):
+            report = reference_report()
+            for mode in ("fast", "slow"):
+                metrics = report["read_modes"][mode]["metrics"]
+                if queue is None:
+                    del metrics["scheduler_queue_delay_us_per_transfer"]
+                else:
+                    metrics["scheduler_queue_delay_us_per_transfer"][
+                        "median_current_over_reference"] = queue
+            result = self.run_gate(reference=report)
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_missing_reference_report_fails(self):
         """Without the reference report the paired verdict fails, never passes."""
@@ -656,23 +690,21 @@ class StreamingGateTest(unittest.TestCase):
         self.assertIn("reference report is missing", result.stderr)
         self.assertIn("requires the reference report", result.stderr)
 
-    def test_missing_paired_queue_metric_fails(self):
-        """A reference without the queue metric fails instead of passing silently."""
+    def test_missing_paired_total_time_metric_fails(self):
+        """A reference without the total-time metric fails instead of passing silently."""
         report = reference_report()
-        del report["read_modes"]["fast"]["metrics"][
-            "scheduler_queue_delay_us_per_transfer"
-        ]
+        del report["read_modes"]["fast"]["metrics"]["total_ms"]
         result = self.run_gate(reference=report)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("is missing fast scheduler_queue_delay_us_per_transfer", result.stderr)
+        self.assertIn("is missing fast total_ms", result.stderr)
 
-    def test_paired_queue_without_rounds_fails(self):
+    def test_paired_metrics_without_rounds_fails(self):
         """paired_rounds == 0 fails instead of passing with no evidence."""
         result = self.run_gate(reference=reference_report(fast_rounds=0))
         self.assertEqual(result.returncode, 1)
         self.assertIn("no paired rounds", result.stderr)
 
-    def test_paired_queue_rounds_must_be_an_integer(self):
+    def test_paired_metric_rounds_must_be_an_integer(self):
         """A JSON bool is not a round count, even though True == 1."""
         result = self.run_gate(reference=reference_report(fast_rounds=True))
         self.assertEqual(result.returncode, 1)
@@ -696,7 +728,7 @@ class StreamingGateTest(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("fast streaming p99 gap ratio marginal", result.stdout)
-        self.assertIn("queue=", result.stdout)
+        self.assertIn("scheduler-queue-diagnostic=", result.stdout)
         self.assertNotIn("scheduler queue-delay ratio", result.stdout)
 
     def test_tail_noise_band_is_bounded_by_the_policy_multiplier(self):

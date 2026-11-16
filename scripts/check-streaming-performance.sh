@@ -675,16 +675,14 @@ for field, current in slow_ratios.items():
                 f"{noise:.6f}; not a regression signal"
             )
 
-# Paired current-vs-pinned scheduler queue-delay verdict. The reference
-# report is required: it is written next to the final streaming JSONL by
-# scripts/perf-audit-streaming-compare.sh, and the gate judges the paired
-# current-over-reference median of scheduler_queue_delay_us_per_transfer in
-# each read mode against paired.max_scheduler_queue_delay_ratio. Missing or
-# mismatched source identities, incomplete configured rounds, or an unusable
-# confirmation retain failure; a lost reference can never hide a queue-delay
-# regression behind the visible-only external ratio.
+# Paired current-vs-pinned end-to-end latency and throughput verdict.
+# Both metrics must pass in each mode. Exact sources, complete configured
+# rounds and same-mode confirmation are required; queue delay is diagnostic.
 paired_objectives = objectives.get("paired", {})
-paired_queue_cap = ratio_limit(paired_objectives, "max_scheduler_queue_delay_ratio")
+paired_caps = {
+    name: (direction, ratio_limit(paired_objectives, key))
+    for name, (direction, key) in streaming_confirmation.ENFORCED_METRICS.items()
+}
 reference_path = os.path.join(
     os.path.dirname(os.path.abspath(JSONL_PATH)),
     "streaming-compare-reference.json",
@@ -695,7 +693,7 @@ try:
 except (OSError, ValueError) as exc:
     fail(
         "streaming reference report is missing or unreadable at "
-        f"{reference_path}: {exc}; the paired queue-delay verdict requires "
+        f"{reference_path}: {exc}; the paired latency and throughput verdict requires "
         "the reference report"
     )
 if not isinstance(reference_report, dict) or (
@@ -703,7 +701,7 @@ if not isinstance(reference_report, dict) or (
 ):
     fail(
         "streaming reference report has an unexpected comparison: the paired "
-        "queue-delay verdict requires "
+        "latency and throughput verdict requires "
         "comparison == \"current_build_versus_pinned_previous_release\""
     )
 try:
@@ -719,51 +717,34 @@ if type(reference_attempts) is not int or reference_attempts <= 0:
 complete_modes = reference_report.get("complete_modes")
 if not isinstance(complete_modes, dict):
     fail("streaming reference report has no completeness evidence")
-paired_queue_medians = {}
+paired_medians = {}
 paired_resolutions = {}
 for paired_mode in ("fast", "slow"):
     mode_report = (reference_report.get("read_modes") or {}).get(paired_mode)
     if not isinstance(mode_report, dict):
-        fail(
-            f"streaming reference report is missing {paired_mode} mode: the "
-            "paired queue-delay verdict requires both read modes"
-        )
-    paired_metric = ((mode_report.get("metrics") or {}).get(
-        "scheduler_queue_delay_us_per_transfer"
-    ))
-    if not isinstance(paired_metric, dict):
-        fail(
-            f"streaming reference report is missing {paired_mode} "
-            "scheduler_queue_delay_us_per_transfer: the paired queue-delay "
-            "verdict requires that metric"
-        )
-    paired_rounds = paired_metric.get("paired_rounds")
-    if type(paired_rounds) is not int or paired_rounds <= 0:
-        fail(
-            f"streaming reference report has no paired rounds for {paired_mode} "
-            "scheduler_queue_delay_us_per_transfer: the paired queue-delay "
-            "verdict requires paired_rounds > 0"
-        )
-    if paired_rounds != reference_attempts or complete_modes.get(paired_mode) is not True:
-        fail(
-            f"streaming reference report has an incomplete {paired_mode} paired "
-            f"sample: {paired_rounds}/{reference_attempts} rounds and "
-            f"complete_modes={complete_modes.get(paired_mode)!r}"
-        )
-    paired_median = paired_metric.get("median_current_over_reference")
-    if (
-        not isinstance(paired_median, (int, float))
-        or isinstance(paired_median, bool)
-        or not math.isfinite(paired_median)
-        or paired_median <= 0
-    ):
-        fail(
-            f"streaming reference report has an invalid {paired_mode} paired "
-            "scheduler queue-delay median: the paired queue-delay verdict "
-            "requires a positive finite median_current_over_reference"
-        )
-    paired_queue_medians[paired_mode] = (float(paired_median), paired_rounds)
-    if float(paired_median) > paired_queue_cap + 1e-12:
+        fail(f"streaming reference report is missing {paired_mode} mode: "
+             "the paired verdict requires both read modes")
+    metrics = mode_report.get("metrics") or {}
+    mode_misses = []
+    for name, (direction, cap) in paired_caps.items():
+        if not isinstance(metrics.get(name), dict):
+            fail(f"streaming reference report is missing {paired_mode} {name}: "
+                 "the paired verdict requires that metric")
+        try:
+            metric = streaming_confirmation.paired_metric(reference_report, paired_mode, name)
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            fail(f"streaming reference report has invalid {paired_mode} {name}: {exc}")
+        paired_rounds = metric["paired_rounds"]
+        if paired_rounds != reference_attempts or complete_modes.get(paired_mode) is not True:
+            fail(
+                f"streaming reference report has an incomplete {paired_mode} paired "
+                f"sample for {name}: {paired_rounds}/{reference_attempts} rounds and "
+                f"complete_modes={complete_modes.get(paired_mode)!r}"
+            )
+        paired_medians[(paired_mode, name)] = metric["median_current_over_reference"]
+        if streaming_confirmation.violates(metric, direction, cap):
+            mode_misses.append(name)
+    if mode_misses:
         confirmation_path = os.path.join(
             os.path.dirname(reference_path), "paired-confirmation", paired_mode,
             "streaming-compare-reference.json",
@@ -774,19 +755,23 @@ for paired_mode in ("fast", "slow"):
         except (OSError, ValueError):
             confirmation = {}
         resolution = streaming_confirmation.resolve(
-            reference_report, confirmation, paired_mode, paired_queue_cap,
+            reference_report, confirmation, paired_mode, paired_caps,
             records[(paired_mode, "qpxd")].get("commit"),
         )
         paired_resolutions[paired_mode] = resolution
         print("streaming paired confirmation: " + json.dumps(resolution, sort_keys=True))
         if resolution["status"] == "PASSED":
             continue
-        failures.append(
-            f"{paired_mode} streaming paired scheduler queue-delay ratio "
-            f"{float(paired_median):.6f} > objective {paired_queue_cap:.6f} "
-            f"(decisive: paired current-vs-pinned median over {paired_rounds} "
-            "paired rounds)"
-        )
+        for name in mode_misses:
+            direction, cap = paired_caps[name]
+            median = paired_medians[(paired_mode, name)]
+            relation = ">" if direction == "max" else "<"
+            failures.append(
+                f"{paired_mode} streaming paired {name} ratio {median:.6f} "
+                f"{relation} objective {cap:.6f} (direction={direction}; decisive: "
+                f"paired current-vs-pinned median over {metrics[name]['paired_rounds']} "
+                f"paired rounds; {resolution.get('reason', 'confirmation did not clear miss')})"
+            )
 
 with open(os.path.join(os.path.dirname(reference_path),
                        "streaming-compare-confirmation.json"), "w", encoding="utf-8") as handle:
@@ -801,11 +786,14 @@ print(
     f"max-gap={max_gap_ratio:.3f}, dominance={dominance_score:.3f}"
     f", RSS={total_rss_peak_ratio:.3f}, "
     f"FD={total_fd_peak_ratio:.3f}, "
-    f"queue={scheduler_queue_delay_ratio:.3f}"
-    f", paired-queue-fast={paired_queue_medians['fast'][0]:.3f} "
-    f"over {paired_queue_medians['fast'][1]} rounds, "
-    f"paired-queue-slow={paired_queue_medians['slow'][0]:.3f} "
-    f"over {paired_queue_medians['slow'][1]} rounds"
+    f"scheduler-queue-diagnostic={scheduler_queue_delay_ratio:.3f}, "
+    + ", ".join(
+        f"paired-{name}-{mode}={paired_medians[(mode, name)]:.3f} "
+        f"({'<=' if direction == 'max' else '>='} {cap:.3f}; "
+        f"{reference_attempts} rounds)"
+        for mode in ("fast", "slow")
+        for name, (direction, cap) in paired_caps.items()
+    )
 )
 print(
     "streaming backpressure: "

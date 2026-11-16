@@ -18,6 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts/lib"))
 import streaming_confirmation
 
+CAPS = {"total_ms": ("max", 1.25), "requests_per_cpu_second": ("min", 0.8)}
+
 FIXTURES = runpy.run_path(str(ROOT / "scripts/test-streaming-performance.py"))
 
 # Only process startup, command discovery and the transfer are stubbed. The
@@ -39,6 +41,8 @@ path, proxy, mode, confirmation = sys.argv[1:]
 record = json.load(open(path))[mode]["qpxd" if proxy == "qpxd-previous" else proxy]
 record["proxy"] = proxy
 ratio = float(os.environ["CONFIRM_RATIO"] if confirmation else os.environ[mode.upper() + "_RATIO"])
+record["total_ms"] = 100 * (ratio if proxy == "qpxd" else 1)
+record["requests_per_cpu_second"] = 10 * (ratio if proxy == "qpxd" else 1)
 record["scheduler_queue_delay_us_per_transfer"] = 100 * (ratio if proxy == "qpxd" else 1)
 record["proxy_scheduler_run_delay_ns"] = int(
     record["scheduler_queue_delay_us_per_transfer"] * record["transfers"] * 1000
@@ -140,11 +144,15 @@ class ComparatorConfirmationTest(unittest.TestCase):
         self.assertTrue(all(r["read_mode"] == "fast" for r in raw))
 
     def test_both_first_mode_misses_get_separate_reports(self):
-        result, out, trace = self.run_comparator(slow="2")
-        self.assertEqual(result.returncode, 0, result.stderr)
-        for mode in ("fast", "slow"):
-            self.assertTrue((out / "paired-confirmation" / mode / "streaming-compare-raw.jsonl").exists())
-        self.assertEqual(sum(line.startswith("sample") for line in trace), 16)
+        # Latency above the cap and throughput below the floor both schedule
+        # independent same-mode confirmations via the real misses CLI.
+        for ratio in ("2", "0.7"):
+            with self.subTest(ratio=ratio):
+                result, out, trace = self.run_comparator(fast=ratio, slow=ratio)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                for mode in ("fast", "slow"):
+                    self.assertTrue((out / "paired-confirmation" / mode / "streaming-compare-raw.jsonl").exists())
+                self.assertEqual(sum(line.startswith("sample") for line in trace), 16)
 
     def test_pair_only_needs_no_external_proxy_commands_or_measurements(self):
         for mode in ("fast", "slow"):
@@ -173,20 +181,23 @@ class ComparatorConfirmationTest(unittest.TestCase):
 class ConfirmationEvidenceTest(unittest.TestCase):
     def test_only_complete_first_misses_are_scheduled_for_confirmation(self):
         first = FIXTURES["reference_report"](fast_median=2)
-        self.assertEqual(streaming_confirmation.missed_modes(first, 1.25), ["fast"])
+        self.assertEqual(streaming_confirmation.missed_modes(first, CAPS), ["fast"])
         self.assertEqual(
             streaming_confirmation.missed_modes(
-                FIXTURES["reference_report"](fast_median=1), 1.25
+                FIXTURES["reference_report"](fast_median=1), CAPS
             ),
             [],
         )
         first["complete_modes"]["fast"] = False
-        self.assertEqual(streaming_confirmation.missed_modes(first, 1.25), [])
+        self.assertEqual(streaming_confirmation.missed_modes(first, CAPS), [])
         first["complete_modes"]["fast"] = True
-        first["read_modes"]["fast"]["metrics"][
-            streaming_confirmation.METRIC
-        ]["paired_rounds"] = 2
-        self.assertEqual(streaming_confirmation.missed_modes(first, 1.25), [])
+        for name in streaming_confirmation.ENFORCED_METRICS:
+            metric = first["read_modes"]["fast"]["metrics"][name]
+            metric["paired_rounds"] = 2
+            self.assertEqual(streaming_confirmation.missed_modes(first, CAPS), [])
+            metric["paired_rounds"] = 3
+        first = FIXTURES["reference_report"](fast_median=0.7)
+        self.assertEqual(streaming_confirmation.missed_modes(first, CAPS), ["fast"])
 
     def test_expected_source_and_pin_must_match_even_if_reports_agree(self):
         first = FIXTURES["reference_report"](fast_median=2)
@@ -195,7 +206,7 @@ class ConfirmationEvidenceTest(unittest.TestCase):
             expected = {"GITHUB_SHA": "a" * 40, "QPX_PREVIOUS_SOURCE_SHA": "b" * 40}
             expected[variable] = "c" * 40
             with self.subTest(variable=variable), patch.dict(os.environ, expected):
-                result = streaming_confirmation.resolve(first, confirmation, "fast", 1.25, "a" * 40)
+                result = streaming_confirmation.resolve(first, confirmation, "fast", CAPS, "a" * 40)
                 self.assertEqual(result["status"], "REGRESSED")
                 self.assertIn("identity mismatch", result["reason"])
 
@@ -211,7 +222,7 @@ class ConfirmationEvidenceTest(unittest.TestCase):
                 records.append(record)
         invalids = [records[:-1], records + [records[0]]]
         for field, value in (("valid", False), ("kernel_resource_metrics", False),
-                             ("scheduler_queue_delay_us_per_transfer", 0),
+                             ("total_ms", 0), ("requests_per_cpu_second", 0),
                              ("bytes", 1), ("commit", "c" * 40), ("valid_samples", 0)):
             invalid = copy.deepcopy(records)
             invalid[0][field] = value
@@ -225,7 +236,7 @@ class ConfirmationEvidenceTest(unittest.TestCase):
                                                         3, first["workload"])
                 confirmation = json.loads(report.read_text())
                 self.assertFalse(confirmation["complete_modes"]["fast"])
-                result = streaming_confirmation.resolve(first, confirmation, "fast", 1.25, "a" * 40)
+                result = streaming_confirmation.resolve(first, confirmation, "fast", CAPS, "a" * 40)
                 self.assertEqual(result["status"], "REGRESSED")
 
 

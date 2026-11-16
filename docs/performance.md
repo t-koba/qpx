@@ -567,9 +567,12 @@ stays visible for trend review; a miss beyond it is a decisive failure.
 Reference spreads never widen the band, because competitor instability must not
 excuse a qpx miss. The qpx-vs-external scheduler queue-delay ratio is not an
 objective: it stays visible for trend review and never fails the gate. The
-enforced queue-delay verdict is the paired current-vs-pinned median, judged
-against the fixed `paired.max_scheduler_queue_delay_ratio` tolerance of 1.25
-with no measurement band.
+paired current-vs-pinned verdict enforces end-to-end latency and throughput
+in both fast and slow modes: the median `total_ms` current/reference ratio
+must be at most `paired.max_total_time_ratio` (1.25), and the median
+`requests_per_cpu_second` ratio must be at least `paired.min_throughput_ratio`
+(0.8), with no measurement band. Scheduler queue delay, its proxy/backend
+components and paired p99 chunk gap remain report-only diagnostics.
 
 Every band is bounded by a named policy multiplier, so an objective's
 effective limit stays within a bounded factor of its documented cap: the
@@ -615,9 +618,10 @@ previous release this way, so the lane now performs the paired measurement
 the matched-source section describes, against the pinned release rather than
 against an arbitrary earlier commit.
 
-The paired queue-delay median is an enforced tail verdict, not an advisory report.
-`scripts/check-streaming-performance.sh` requires every configured paired round in both fast and slow modes.
-It verifies the current and pinned source SHAs and judges each median of `scheduler_queue_delay_us_per_transfer` against the unchanged `paired.max_scheduler_queue_delay_ratio` objective (1.25).
+The paired end-to-end latency and throughput verdict is enforced, not advisory.
+`scripts/check-streaming-performance.sh` requires all three paired rounds in both fast and slow modes.
+It verifies the exact current and pinned source SHAs and requires each mode's median `total_ms` current/reference ratio to be at most `paired.max_total_time_ratio` (1.25) and its median `requests_per_cpu_second` ratio to be at least `paired.min_throughput_ratio` (0.8).
+Either metric can cause a miss; scheduler queue delay and its proxy/backend components are diagnostics only.
 A missing reference, incomplete sample, malformed comparison or source mismatch fails closed.
 
 On a complete first miss, the comparator takes one fresh confirmation sample for that mode only.
@@ -625,7 +629,7 @@ It restarts the current and pinned builds against the same streaming origin.
 It repeats the configured paired-round count and counterbalanced order.
 It does not rerun external proxy lanes.
 A decisive miss in the same mode remains a failure.
-A complete confirmation with matching source identities and workload clears the first miss only when its median meets the unchanged objective.
+A complete confirmation with matching source identities, workload and round count clears the first miss only when both enforced medians meet their objectives, even if only one metric missed initially.
 The first miss is retained as `unconfirmed_misses` in `streaming-compare-confirmation.json` and reported in CI.
 This does not clear unrelated streaming objective failures.
 A missing, incomplete, invalid or mismatched confirmation never clears the first miss; an incomplete first sample is not confirmable.
@@ -633,9 +637,27 @@ A missing, incomplete, invalid or mismatched confirmation never clears the first
 The initial report is written to `target/perf/streaming-compare-reference.json` beside the streaming JSONL.
 Confirmation raw samples and reports live under `target/perf/paired-confirmation/` and are retained in the existing uploaded streaming evidence.
 Both reports carry the current and pinned source SHAs and workload.
-Per-mode reports include round counts and median, minimum and maximum current/reference ratios, plus median differences for total time, CPU rate, p99 chunk gap and queue delay. Each retained sample also records `proxy_scheduler_run_delay_ns` and `backend_scheduler_run_delay_ns` from the corresponding process-tree `/proc/<pid>/task/<tid>/schedstat` deltas; their sum is the existing `total_scheduler_run_delay_ns` when both counters are monotonic. If kernel counters or any task schedstat read are unavailable, malformed, or a process-tree counter decreases between reads, component values are null and marked incomplete while the existing total metric keeps its previous calculation. The per-transfer component fields are in microseconds and raw records retain the sample's proxy, source SHA, read mode and round. For `direct-backend`, the proxy component is zero and the backend component owns the measured process tree. These fields aid attribution only; the enforced objective remains the total paired queue-delay metric.
+Per-mode reports include round counts and median, minimum and maximum current/reference ratios, plus median differences for total time, CPU rate, p99 chunk gap and queue delay. Each retained sample also records `proxy_scheduler_run_delay_ns` and `backend_scheduler_run_delay_ns` from the corresponding process-tree `/proc/<pid>/task/<tid>/schedstat` deltas; their sum is the existing `total_scheduler_run_delay_ns` when both counters are monotonic. If kernel counters or any task schedstat read are unavailable, malformed, or a process-tree counter decreases between reads, component values are null and marked incomplete while the existing total metric keeps its previous calculation. The per-transfer component fields are in microseconds and raw records retain the sample's proxy, source SHA, read mode and round. For `direct-backend`, the proxy component is zero and the backend component owns the measured process tree. The total and component queue-delay fields aid attribution only; none affects the paired verdict.
 A `total_ms` ratio above 1 means the current build was slower; a `requests_per_cpu_second` ratio below 1 means it was less efficient.
 The qpx-vs-external queue-delay ratio remains trend-only and never affects failure or judgeability.
+
+### Evidence for the paired verdict change
+
+Exact-source paired runs on publication `c76f6161`, run `43836556957`
+(three paired rounds plus same-mode confirmation; fast artifact
+`vcs-read/c0da2846c1ee468ca8c60cb73ba37a90`, slow artifact
+`vcs-read/db000356d64a4182b502132034349780`) measured current/reference
+fast total time at 0.4595x, p99 gap at 0.1867x and requests per CPU second at
+3.94x. Slow-mode ratios were 1.005x, 0.981x and 3.0x respectively. Yet the
+fast scheduler queue-delay proxy at 1.416x exceeded its former 1.25 objective
+and blocked the aggregate gate despite the decisive product outcome.
+Operator answer
+`operator/qpx/a-q7d13719fd54b3d92f1c0cbd3dba5ba2f31cd67ea-1794822640`
+identified that proxy verdict as the defect: judge end-to-end latency and
+throughput per mode, retaining scheduler delay as diagnostics. This measures
+the product promise rather than lowering a bar; the workload, competitive
+objectives, lanes, three paired rounds and exact-source confirmation remain
+unchanged.
 
 `scripts/test-streaming-reference-comparison.py` exercises the pairing, the
 missing-reference case and the report against synthetic per-round records.
