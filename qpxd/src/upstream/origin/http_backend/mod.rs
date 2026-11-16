@@ -566,7 +566,11 @@ pub(crate) async fn proxy_prepared_plain_http1_head_raw_response_with_interim(
     request_head: &[u8],
     request_version: http::Version,
     proxy_name: &str,
+    interim_sender: Option<
+        tokio::sync::mpsc::Sender<crate::upstream::raw_http1::InterimResponseHead>,
+    >,
 ) -> Result<RawHttp1ResponseRelay<TcpStream>> {
+    let mut interim_sink = interim_sender.map(crate::upstream::raw_http1::InterimResponseSink::new);
     session.prepare_for(origin).await?;
     let (connection, reused) = match session.take_connection().or_else(|| origin.slot.pop_idle()) {
         Some(connection) => (connection, true),
@@ -583,6 +587,7 @@ pub(crate) async fn proxy_prepared_plain_http1_head_raw_response_with_interim(
             request_head,
             RawHttp1ResponseContext::new(request_method, request_version, proxy_name),
             None,
+            interim_sink.as_mut(),
         )
         .await;
     let first_error = match response {
@@ -593,6 +598,9 @@ pub(crate) async fn proxy_prepared_plain_http1_head_raw_response_with_interim(
         return Err(first_error);
     }
 
+    if let Some(sink) = &mut interim_sink {
+        sink.retry();
+    }
     let connection = open_plain_http_origin_stream(origin.connect_authority.as_ref()).await?;
     send_prepared_http1_head_with_interim_reusable_raw_response_under_external_deadline(
         connection.stream,
@@ -601,6 +609,7 @@ pub(crate) async fn proxy_prepared_plain_http1_head_raw_response_with_interim(
         request_head,
         RawHttp1ResponseContext::new(request_method, request_version, proxy_name),
         None,
+        interim_sink.as_mut(),
     )
     .await
 }

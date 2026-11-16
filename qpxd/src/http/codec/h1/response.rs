@@ -212,25 +212,7 @@ where
 {
     if request_version == Version::HTTP_11 {
         for head in interim {
-            if !head.status.is_informational() {
-                return Err(anyhow!(
-                    "non-informational interim status for HTTP/1: {}",
-                    head.status
-                ));
-            }
-            if head.status == StatusCode::SWITCHING_PROTOCOLS {
-                return Err(anyhow!("HTTP/1 interim responses must not use 101"));
-            }
-            let headers = head.headers_for_egress();
-            write_status_and_headers(
-                writer,
-                head_buf,
-                Version::HTTP_11,
-                head.status,
-                &headers,
-                ConnectionHeaderMode::Omit,
-            )
-            .await?;
+            send_http1_interim_response(writer, head, head_buf).await?;
         }
     }
 
@@ -489,6 +471,34 @@ where
     Ok(keep_alive)
 }
 
+/// Serialize one informational head at the egress boundary. TcpStream writes
+/// go directly to the kernel; no separate flush is needed for incremental relay.
+pub(crate) async fn send_http1_interim_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    head: &InterimResponseHead,
+    head_buf: &mut BytesMut,
+) -> Result<()> {
+    if !head.status.is_informational() {
+        return Err(anyhow!(
+            "non-informational interim status for HTTP/1: {}",
+            head.status
+        ));
+    }
+    if head.status == StatusCode::SWITCHING_PROTOCOLS {
+        return Err(anyhow!("HTTP/1 interim responses must not use 101"));
+    }
+    let headers = head.headers_for_egress();
+    write_status_and_headers(
+        writer,
+        head_buf,
+        Version::HTTP_11,
+        head.status,
+        &headers,
+        ConnectionHeaderMode::Omit,
+    )
+    .await
+}
+
 pub(crate) async fn send_raw_http1_response_relay_with_interim(
     writer: &mut TcpStream,
     request_version: Version,
@@ -499,25 +509,7 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
 ) -> Result<(bool, Option<ReusableRawHttp1Connection<TcpStream>>)> {
     if request_version == Version::HTTP_11 {
         for head in &response.interim {
-            if !head.status.is_informational() {
-                return Err(anyhow!(
-                    "non-informational interim status for HTTP/1: {}",
-                    head.status
-                ));
-            }
-            if head.status == StatusCode::SWITCHING_PROTOCOLS {
-                return Err(anyhow!("HTTP/1 interim responses must not use 101"));
-            }
-            let headers = head.headers_for_egress();
-            write_status_and_headers(
-                writer,
-                head_buf,
-                Version::HTTP_11,
-                head.status,
-                &headers,
-                ConnectionHeaderMode::Omit,
-            )
-            .await?;
+            send_http1_interim_response(writer, head, head_buf).await?;
         }
     }
 

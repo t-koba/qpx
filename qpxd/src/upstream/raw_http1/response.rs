@@ -123,6 +123,7 @@ pub(super) async fn read_finalized_raw_response_head_with_interim(
     request_version: Version,
     proxy_name: &str,
     deadline: RawResponseHeadDeadline,
+    mut interim_sink: Option<&mut super::InterimResponseSink>,
 ) -> Result<(
     Vec<InterimResponseHead>,
     Arc<RawHttp1ResponseHead>,
@@ -167,7 +168,12 @@ pub(super) async fn read_finalized_raw_response_head_with_interim(
         if status.is_informational() && status != StatusCode::SWITCHING_PROTOCOLS {
             let headers = headers
                 .ok_or_else(|| anyhow!("informational raw response is missing parsed headers"))?;
-            interim.push(InterimResponseHead::new(status, headers));
+            let head = InterimResponseHead::new(status, headers);
+            if let Some(sink) = interim_sink.as_deref_mut() {
+                sink.send(head).await?;
+            } else {
+                interim.push(head);
+            }
             continue;
         }
         let mut raw =

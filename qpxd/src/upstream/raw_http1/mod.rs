@@ -17,6 +17,7 @@ use tokio::sync::OwnedSemaphorePermit;
 
 mod body;
 mod interim;
+mod interim_sink;
 mod io;
 mod raw_head;
 mod request;
@@ -50,6 +51,7 @@ impl std::error::Error for UpstreamConnectionClosed {}
 pub(crate) use raw_head::{RawHttp1BodyFraming, RawHttp1ResponseHead};
 
 pub(crate) use interim::InterimResponseHead;
+pub(crate) use interim_sink::InterimResponseSink;
 
 pub(crate) struct Http1ResponseWithInterim {
     pub(crate) interim: Vec<InterimResponseHead>,
@@ -311,6 +313,7 @@ pub(crate) async fn send_prepared_http1_head_with_interim_reusable_raw_response_
     request_head: &[u8],
     response_context: RawHttp1ResponseContext<'_>,
     recycler: Option<Http1ConnectionRecycler<S>>,
+    interim_sink: Option<&mut InterimResponseSink>,
 ) -> Result<RawHttp1ResponseRelay<S>>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -326,6 +329,7 @@ where
             response_context.request_version,
             response_context.proxy_name,
             response::RawResponseHeadDeadline::CallerManaged,
+            interim_sink,
         )
         .await?;
     Ok(RawHttp1ResponseRelay {
@@ -366,6 +370,7 @@ where
         request_version,
         proxy_name,
         response::RawResponseHeadDeadline::CallerManaged,
+        None,
     )
     .await;
     let (interim, final_head, buffered_body) = match result {
@@ -431,6 +436,7 @@ where
             request_version,
             proxy_name,
             response::RawResponseHeadDeadline::PerReadIdleTimeout,
+            None,
         )
         .await?;
     let response =

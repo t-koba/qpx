@@ -1,7 +1,8 @@
 use super::{ReverseInterimService, reverse_body_channel_capacity};
 use crate::http::codec::h1::{
-    send_http1_response_with_interim_tcp, send_raw_http1_response_relay_with_interim,
-    send_static_http1_response, serve_http1_tcp_with_interim_and_capacity,
+    send_http1_interim_response, send_http1_response_with_interim_tcp,
+    send_raw_http1_response_relay_with_interim, send_static_http1_response,
+    serve_http1_tcp_with_interim_and_capacity,
 };
 use crate::http::codec::h1_common::MAX_HEADER_BYTES;
 use crate::http::codec::lazy_timeout::ReusablePendingTimeout;
@@ -30,6 +31,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 use tracing::warn;
+
+#[cfg(test)]
+mod interim_tests;
 
 const COMMON_HTTP1_REQUEST_HEADERS: usize = 32;
 const MAX_HTTP1_REQUEST_HEADERS: usize = 128;
@@ -146,14 +150,30 @@ pub(super) async fn serve_raw_or_fallback(
                         .unwrap_or_default();
                     Ok(PreparedRawHttp1Response::Generic(interim, response))
                 } else {
-                    dispatch_prepared_raw_http1_request(
+                    // A single writer owns the downstream. Drive both halves together
+                    // so the route deadline is polled even during a blocked write.
+                    // Keep upstream errors as values until all queued interim heads
+                    // have drained; only a downstream write error cancels the exchange.
+                    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+                    let exchange = dispatch_prepared_raw_http1_request(
                         request,
                         &reverse,
                         &conn,
                         &mut origin_session,
                         &mut pending_timeout,
-                    )
-                    .await
+                        Some(tx),
+                    );
+                    let (dispatched, ()) = tokio::try_join!(
+                        async { Ok::<_, anyhow::Error>(exchange.await) },
+                        async {
+                            while let Some(head) = rx.recv().await {
+                                send_http1_interim_response(&mut stream, &head, &mut response_head)
+                                    .await?;
+                            }
+                            Ok(())
+                        }
+                    )?;
+                    dispatched
                 };
                 let response = match dispatched {
                     Ok(response) => response,

@@ -507,6 +507,9 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     conn: &ReverseConnInfo,
     session: &mut PreparedPlainHttp1Session,
     pending_timeout: &mut ReusablePendingTimeout<'_>,
+    interim_sender: Option<
+        tokio::sync::mpsc::Sender<crate::upstream::raw_http1::InterimResponseHead>,
+    >,
 ) -> Result<PreparedRawHttp1Response> {
     if let Some(request) = prepared.generic_request() {
         session.release();
@@ -590,6 +593,7 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
                 request_head.as_ref(),
                 Version::HTTP_11,
                 prepared.state.plan.identity.proxy_name.as_ref(),
+                interim_sender,
             ),
         )
         .await;
@@ -1434,7 +1438,7 @@ mod tests {
         session: &mut crate::upstream::origin::PreparedPlainHttp1Session,
         pending_timeout: &mut ReusablePendingTimeout<'_>,
     ) -> PreparedRawHttp1Response {
-        dispatch_prepared_raw_http1_request(prepared, reverse, conn, session, pending_timeout)
+        dispatch_prepared_raw_http1_request(prepared, reverse, conn, session, pending_timeout, None)
             .await
             .expect("dispatch")
     }

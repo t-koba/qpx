@@ -136,6 +136,7 @@ async fn raw_response_with_chunked_and_zero_length_relays_chunk_payload() {
         Version::HTTP_11,
         "qpx",
         RawResponseHeadDeadline::CallerManaged,
+        None,
     )
     .await
     .expect("parse raw response head");
@@ -176,6 +177,7 @@ async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
         Version::HTTP_11,
         "segmented-timed-test",
         RawResponseHeadDeadline::PerReadIdleTimeout,
+        None,
     )
     .await
     .expect("read fragmented raw response head");
@@ -210,6 +212,7 @@ async fn partial_upstream_response_heads_progress_and_stay_within_the_limit() {
         Version::HTTP_11,
         "partial-at-limit-test",
         RawResponseHeadDeadline::PerReadIdleTimeout,
+        None,
     )
     .await
     {
@@ -259,6 +262,7 @@ async fn raw_upstream_response_head_yields_on_stall_and_fails_closed() {
         Version::HTTP_11,
         "spin-raw-eof-test",
         RawResponseHeadDeadline::PerReadIdleTimeout,
+        None,
     )
     .await
     {
@@ -278,6 +282,7 @@ async fn raw_upstream_response_head_yields_on_stall_and_fails_closed() {
             Version::HTTP_11,
             "spin-raw-stall-test",
             RawResponseHeadDeadline::PerReadIdleTimeout,
+            None,
         ),
     )
     .await;
@@ -301,6 +306,7 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
         Version::HTTP_11,
         "spin-ext-segmented-test",
         RawResponseHeadDeadline::CallerManaged,
+        None,
     )
     .await
     .expect("read fragmented raw response head under external deadline");
@@ -320,6 +326,7 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
             Version::HTTP_11,
             "spin-ext-stall-test",
             RawResponseHeadDeadline::CallerManaged,
+            None,
         ),
     )
     .await;
@@ -340,6 +347,7 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
         Version::HTTP_11,
         "spin-ext-cap-test",
         RawResponseHeadDeadline::CallerManaged,
+        None,
     )
     .await
     {
@@ -361,6 +369,7 @@ async fn external_deadline_raw_response_head_progresses_and_stays_bounded() {
         Version::HTTP_11,
         "spin-ext-eof-test",
         RawResponseHeadDeadline::CallerManaged,
+        None,
     )
     .await
     {
@@ -1144,7 +1153,8 @@ async fn finalized_raw_head_cache_preserves_upstream_via_protocol() {
                 downstream_version,
                 "via-cache-test",
                 RawResponseHeadDeadline::PerReadIdleTimeout,
-            )
+            None,
+)
             .await
             .expect("read finalized upstream head");
             assert!(interim.is_empty());
@@ -1169,7 +1179,8 @@ async fn finalized_raw_head_cache_preserves_upstream_via_protocol() {
                     downstream_version,
                     "via-cache-test",
                     RawResponseHeadDeadline::CallerManaged,
-                )
+                None,
+)
                 .await
                 .expect("read cached upstream head");
             assert!(Arc::ptr_eq(&parsed, &cached), "finalized cache hit");
@@ -1234,6 +1245,7 @@ async fn finalized_raw_head_cache_key_coheres_across_versions() {
             downstream,
             "via-coherence",
             RawResponseHeadDeadline::PerReadIdleTimeout,
+            None,
         )
         .await
         .expect("read finalized head");
