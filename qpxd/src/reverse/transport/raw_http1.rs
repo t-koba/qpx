@@ -400,26 +400,21 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
 /// Conditional, negotiated, or directive-bearing requests must go through the
 /// full lookup chain; the fast path only serves plain unconditional GETs.
 fn raw_cache_hit_headers_eligible(headers: &[httparse::Header<'_>]) -> bool {
+    const GENERIC_CHAIN_HEADERS: [&str; 8] = [
+        "If-Match",
+        "If-None-Match",
+        "If-Modified-Since",
+        "If-Unmodified-Since",
+        "If-Range",
+        "Range",
+        "Cache-Control",
+        "Pragma",
+    ];
+
     headers.iter().all(|header| {
-        !matches!(
-            header.name,
-            "if-match"
-                | "If-Match"
-                | "if-none-match"
-                | "If-None-Match"
-                | "if-modified-since"
-                | "If-Modified-Since"
-                | "if-unmodified-since"
-                | "If-Unmodified-Since"
-                | "if-range"
-                | "If-Range"
-                | "range"
-                | "Range"
-                | "cache-control"
-                | "Cache-Control"
-                | "pragma"
-                | "Pragma"
-        )
+        !GENERIC_CHAIN_HEADERS
+            .iter()
+            .any(|name| header.name.eq_ignore_ascii_case(name))
     })
 }
 
@@ -1166,12 +1161,18 @@ mod tests {
         for name in [
             "If-None-Match",
             "if-match",
-            "Range",
-            "Cache-Control",
-            "pragma",
-            "if-modified-since",
-            "if-unmodified-since",
+            "IF-MATCH",
+            "iF-nOnE-mAtCh",
+            "IF-MODIFIED-SINCE",
+            "iF-uNmOdIfIeD-sInCe",
             "If-Range",
+            "iF-rAnGe",
+            "Range",
+            "rAnGe",
+            "Cache-Control",
+            "cAcHe-CoNtRoL",
+            "pragma",
+            "PRAGMA",
         ] {
             let headers = [
                 httparse::Header {
@@ -1349,7 +1350,7 @@ mod tests {
                 ("Cache-Control", "max-age=600".to_string()),
             ],
             BODY.to_string(),
-            2,
+            4,
         )
         .await;
         let cache_dir = tempfile::tempdir().expect("cache dir");
@@ -1508,6 +1509,93 @@ mod tests {
         );
         assert!(hit_headers.contains_key(http::header::AGE));
         assert_eq!(hit_body.as_ref(), BODY.as_bytes());
+
+        // A warm cache entry still has to apply the generic chain's request
+        // preconditions and cache directives regardless of field-name casing.
+        for (header_name, header_value, expected_status, expected_body) in [
+            (
+                "IF-NONE-MATCH",
+                "\"v1\"",
+                StatusCode::NOT_MODIFIED,
+                Some(&b""[..]),
+            ),
+            (
+                "iF-mAtCh",
+                "\"missing\"",
+                StatusCode::PRECONDITION_FAILED,
+                None,
+            ),
+            (
+                "cAcHe-CoNtRoL",
+                "no-cache",
+                StatusCode::OK,
+                Some(BODY.as_bytes()),
+            ),
+        ] {
+            let raw_head = format!(
+                "GET /bench-1 HTTP/1.1\r\nHost: bench.local\r\n{header_name}: {header_value}\r\n\r\n"
+            );
+            let headers = [
+                httparse::Header {
+                    name: "Host",
+                    value: b"bench.local",
+                },
+                httparse::Header {
+                    name: header_name,
+                    value: header_value.as_bytes(),
+                },
+            ];
+            let view = RawHttp1RequestView {
+                raw_head: raw_head.as_bytes(),
+                method: "GET",
+                target: "/bench-1",
+                version: 1,
+                headers: &headers,
+            };
+            let mut connection_cache = RawHttp1ConnectionCache::default();
+            let prepared = prepare_raw_http1_request(&reverse, &conn, view, &mut connection_cache)
+                .expect("prepared warm-cache request");
+            assert!(
+                prepared.cache_hit.is_none(),
+                "{header_name} must use the generic lookup chain"
+            );
+            let mut conditional_session =
+                crate::upstream::origin::PreparedPlainHttp1Session::default();
+            let response = dispatch_prepared(
+                prepared,
+                &reverse,
+                &conn,
+                &mut conditional_session,
+                &mut pending_timeout,
+            )
+            .await;
+            let (status, body) = match response {
+                PreparedRawHttp1Response::Generic(_, response) => {
+                    let status = response.status();
+                    let (_, body) = response.into_head_and_body();
+                    (
+                        status,
+                        qpx_http::body::to_bytes(body)
+                            .await
+                            .expect("generic response body"),
+                    )
+                }
+                PreparedRawHttp1Response::InMemory { .. } => {
+                    panic!("{header_name} must not use the raw cache-hit fast path")
+                }
+                PreparedRawHttp1Response::Direct(_) => {
+                    panic!("cache request must not use the direct relay path")
+                }
+            };
+            assert_eq!(status, expected_status, "{header_name}: {header_value}");
+            if let Some(expected_body) = expected_body {
+                assert_eq!(
+                    body.as_ref(),
+                    expected_body,
+                    "{header_name}: {header_value}"
+                );
+            }
+        }
     }
 
     /// Conditional and HEAD requests must keep using the generic chain.
