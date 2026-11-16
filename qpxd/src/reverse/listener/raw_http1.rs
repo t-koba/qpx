@@ -80,10 +80,11 @@ pub(super) async fn serve_raw_or_fallback(
             // the next keep-alive request is already queued. Release only before actually
             // waiting on an idle downstream connection so admission capacity is never held
             // by an inactive client.
+            let mut limited_reader = (&mut stream).take(MAX_HEADER_BYTES as u64);
             let read = pending_timeout
                 .timeout_after_pending_with(
                     header_read_timeout,
-                    stream.read_buf(&mut read_buf),
+                    limited_reader.read_buf(&mut read_buf),
                     || origin_session.release(),
                 )
                 .await
@@ -257,8 +258,13 @@ pub(super) async fn serve_raw_or_fallback(
                 }
             }
             FastParse::Partial if read_buf.len() < MAX_HEADER_BYTES => {
+                let remaining = MAX_HEADER_BYTES - read_buf.len();
+                let mut limited_reader = (&mut stream).take(remaining as u64);
                 let read = pending_timeout
-                    .timeout_after_pending(header_read_timeout, stream.read_buf(&mut read_buf))
+                    .timeout_after_pending(
+                        header_read_timeout,
+                        limited_reader.read_buf(&mut read_buf),
+                    )
                     .await
                     .map_err(|_| anyhow!("HTTP/1 request header read timed out"))??;
                 if read == 0 {
@@ -313,6 +319,9 @@ fn try_prepare_request<'a>(
     cache: &'a mut RawHttp1ConnectionCache,
 ) -> FastParse<'a> {
     if let Some(consumed) = cache.cached_prefix_len(reverse, bytes) {
+        if consumed > MAX_HEADER_BYTES {
+            return FastParse::Fallback;
+        }
         let Some(request) = cache.prepared_request_ref_unchecked() else {
             return FastParse::Fallback;
         };
@@ -358,6 +367,11 @@ fn prepare_complete_request<'a>(
     conn: &ReverseConnInfo,
     cache: &'a mut RawHttp1ConnectionCache,
 ) -> FastParse<'a> {
+    // Limit the parsed head, not any body or pipelined bytes already buffered.
+    // The generic codec owns the canonical oversized-head error response.
+    if consumed > MAX_HEADER_BYTES {
+        return FastParse::Fallback;
+    }
     let (Some(method), Some(target), Some(version)) = (parsed.method, parsed.path, parsed.version)
     else {
         return FastParse::Fallback;
@@ -453,6 +467,110 @@ fn declared_response_bytes(response: &OwnerResponse<Body>) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn padded_request_head(len: usize, extra_headers: usize) -> Vec<u8> {
+        let mut head = b"GET / HTTP/1.1\r\nHost: example.test\r\n".to_vec();
+        for _ in 0..extra_headers {
+            head.extend_from_slice(b"X-Extra: a\r\n");
+        }
+        head.extend_from_slice(b"X-Padding: ");
+        head.resize(len - 4, b'a');
+        head.extend_from_slice(b"\r\n\r\n");
+        head
+    }
+
+    #[tokio::test]
+    async fn request_head_limit_applies_to_complete_and_fragmented_buffers() {
+        let reverse = super::super::tests::build_reloadable_reverse(([127, 0, 0, 1], 8080).into());
+        let conn = ReverseConnInfo::plain(([127, 0, 0, 1], 12345).into(), 80);
+        // Exercise both the common-header parser and its larger-header retry.
+        for extra_headers in [0, COMMON_HTTP1_REQUEST_HEADERS] {
+            for len in [MAX_HEADER_BYTES, MAX_HEADER_BYTES + 1] {
+                let head = padded_request_head(len, extra_headers);
+                let mut cache = RawHttp1ConnectionCache::default();
+                for fragmented in [false, true] {
+                    let mut buffered = BytesMut::new();
+                    if fragmented {
+                        buffered.extend_from_slice(&head[..MAX_HEADER_BYTES - 2]);
+                        assert!(matches!(
+                            try_prepare_request(&buffered, &reverse, &conn, &mut cache),
+                            FastParse::Partial
+                        ));
+                        // One additional buffer append crosses the limit and completes the head.
+                        buffered.extend_from_slice(&head[MAX_HEADER_BYTES - 2..]);
+                    } else {
+                        buffered.extend_from_slice(&head);
+                    }
+                    let parsed = try_prepare_request(&buffered, &reverse, &conn, &mut cache);
+                    if len == MAX_HEADER_BYTES {
+                        assert!(
+                            matches!(parsed, FastParse::Prepared { consumed, .. } if consumed == len)
+                        );
+                    } else {
+                        assert!(matches!(parsed, FastParse::Fallback));
+                    }
+                    assert_eq!(buffered.as_ref(), head);
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_cached_request_head_falls_back() {
+        let reverse = super::super::tests::build_reloadable_reverse(([127, 0, 0, 1], 8080).into());
+        let conn = ReverseConnInfo::plain(([127, 0, 0, 1], 12345).into(), 80);
+        let head = padded_request_head(MAX_HEADER_BYTES + 1, 0);
+        let mut headers = [httparse::EMPTY_HEADER; COMMON_HTTP1_REQUEST_HEADERS];
+        let mut parsed = httparse::Request::new(&mut headers);
+        assert_eq!(
+            parsed.parse(&head).unwrap(),
+            httparse::Status::Complete(head.len())
+        );
+        let mut cache = RawHttp1ConnectionCache::default();
+        // Seed transport state directly to exercise the defense-in-depth reuse guard.
+        assert!(
+            prepare_raw_http1_request(
+                &reverse,
+                &conn,
+                RawHttp1RequestView {
+                    raw_head: &head,
+                    method: parsed.method.unwrap(),
+                    target: parsed.path.unwrap(),
+                    version: parsed.version.unwrap(),
+                    headers: parsed.headers,
+                },
+                &mut cache,
+            )
+            .is_some()
+        );
+        assert_eq!(cache.cached_prefix_len(&reverse, &head), Some(head.len()));
+        assert!(matches!(
+            try_prepare_request(&head, &reverse, &conn, &mut cache),
+            FastParse::Fallback
+        ));
+    }
+
+    #[tokio::test]
+    async fn legal_request_head_preserves_large_trailing_buffer() {
+        let reverse = super::super::tests::build_reloadable_reverse(([127, 0, 0, 1], 8080).into());
+        let conn = ReverseConnInfo::plain(([127, 0, 0, 1], 12345).into(), 80);
+        let head = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let trailing = head.repeat(MAX_HEADER_BYTES / head.len() + 1);
+        let mut cache = RawHttp1ConnectionCache::default();
+        // Repeat to cover both freshly parsed and cached-prefix preparations.
+        for _ in 0..2 {
+            let mut buffered = BytesMut::from(head.as_slice());
+            buffered.extend_from_slice(&trailing);
+            let FastParse::Prepared { consumed, .. } =
+                try_prepare_request(&buffered, &reverse, &conn, &mut cache)
+            else {
+                panic!("legal head with trailing pipeline must be prepared");
+            };
+            assert_eq!(consumed, head.len());
+            buffered.advance(consumed);
+            assert_eq!(buffered.as_ref(), trailing);
+        }
+    }
 
     async fn socket_pair() -> (tokio::net::TcpStream, tokio::net::TcpStream) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

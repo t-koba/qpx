@@ -16,7 +16,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::watch;
 use tokio::time::Duration;
 
-fn build_reloadable_reverse(upstream_addr: SocketAddr) -> ReloadableReverse {
+pub(super) fn build_reloadable_reverse(upstream_addr: SocketAddr) -> ReloadableReverse {
     build_reloadable_reverse_with_filter(upstream_addr, Vec::new())
 }
 
