@@ -720,6 +720,31 @@ fn common_h2_retrieval_predicate_defers_validation_sensitive_fields() {
 }
 
 #[test]
+fn parse_host_authority_matches_shared_host_validation() {
+    for host in [
+        "example.test:65536",
+        "example.test:",
+        "example.test:abc",
+        "user@example.test",
+        "",
+        "   ",
+    ] {
+        assert!(parse_host_authority(host).is_none(), "{host}");
+    }
+    for (host, port) in [
+        ("example.test", None),
+        ("example.test:80", Some(80)),
+        ("[::1]", None),
+        ("[::1]:80", Some(80)),
+    ] {
+        let authority = parse_host_authority(host).expect("valid Host");
+        assert_eq!(authority.as_str(), host);
+        assert_eq!(authority.port_u16(), port);
+        assert_eq!(parse_host_authority(&format!(" {host} ")), Some(authority));
+    }
+}
+
+#[test]
 fn validate_rejects_explicit_invalid_host_ports() {
     for host in ["example.test:65536", "example.test:", "example.test:abc"] {
         let mut req = http::Request::builder()

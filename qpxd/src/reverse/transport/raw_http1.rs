@@ -146,6 +146,8 @@ impl RawHttp1ConnectionCache {
     ) -> Option<usize> {
         let cached = self.serialized.as_ref()?;
         let consumed = cached.downstream_head.len();
+        // Only heads whose Host passed shared validation are stored. Exact head
+        // equality therefore also proves Host validity on this parser-free path.
         if bytes.len() < consumed || &bytes[..consumed] != cached.downstream_head.as_ref() {
             return None;
         }
@@ -213,7 +215,7 @@ impl RawHttp1ConnectionCache {
         {
             return Some(());
         }
-        let authority = raw.parse::<Authority>().ok()?;
+        let authority = qpx_http::protocol::semantics::parse_host_authority(raw)?;
         let normalized_host = authority.host().to_ascii_lowercase();
         self.authority = Some(CachedAuthority {
             raw: raw.to_owned(),
@@ -260,6 +262,7 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
     if qpx_observability::metrics_enabled() || qpx_observability::request_spans_enabled() {
         return None;
     }
+    // Reuse only an identical head: its Host was validated before storage below.
     if cache
         .serialized
         .as_ref()
@@ -1027,6 +1030,106 @@ mod tests {
         let text = std::str::from_utf8(serialized.as_ref()).expect("UTF-8 request");
 
         assert!(content_length_lines(text).is_empty());
+    }
+
+    fn prepare_test_head<'a>(
+        reverse: &ReloadableReverse,
+        conn: &ReverseConnInfo,
+        raw_head: &[u8],
+        cache: &'a mut RawHttp1ConnectionCache,
+    ) -> Option<&'a PreparedRawHttp1Request> {
+        let mut headers = [httparse::EMPTY_HEADER; 4];
+        let mut parsed = httparse::Request::new(&mut headers);
+        assert!(parsed.parse(raw_head).expect("parse head").is_complete());
+        prepare_raw_http1_request(
+            reverse,
+            conn,
+            RawHttp1RequestView {
+                raw_head,
+                method: parsed.method.expect("method"),
+                target: parsed.path.expect("target"),
+                version: parsed.version.expect("version"),
+                headers: parsed.headers,
+            },
+            cache,
+        )
+    }
+
+    #[tokio::test]
+    async fn raw_routes_validate_host_before_selection_and_cache_reuse() {
+        for target in [
+            "{type: upstream, upstreams: [origin]}",
+            "{type: local_response, response: {status: 200, body: ok}}",
+        ] {
+            let config: qpx_core::config::Config = serde_yaml::from_str(&format!(
+                "upstreams:\n- name: origin\n  url: http://127.0.0.1:1\nedges:\n- kind: reverse\n  name: test\n  listen: 127.0.0.1:0\n  routes:\n  - match: {{}}\n    target: {target}\n"
+            ))
+            .expect("config");
+            let edge = config.reverse_edges().next().expect("edge").clone();
+            let runtime = crate::runtime::Runtime::new(config).expect("runtime");
+            let reverse =
+                ReloadableReverse::new(edge, runtime, Arc::from("test")).expect("reverse");
+            let conn = ReverseConnInfo::plain(([127, 0, 0, 1], 4242).into(), 18080);
+            for method in ["GET", "HEAD"] {
+                let mut cache = RawHttp1ConnectionCache::default();
+                let head =
+                    |host| format!("{method} /bench HTTP/1.1\r\nHost: {host}\r\n\r\n").into_bytes();
+                let invalid = [
+                    "example.test:65536",
+                    "example.test:",
+                    "example.test:abc",
+                    "user@example.test",
+                ];
+                // Rejected heads never populate either authority or prepared state.
+                for host in invalid {
+                    let raw = head(host);
+                    for _ in 0..2 {
+                        assert!(prepare_test_head(&reverse, &conn, &raw, &mut cache).is_none());
+                        assert!(cache.cached_prefix_len(&reverse, &raw).is_none());
+                        assert!(cache.authority.is_none());
+                        assert!(cache.serialized.is_none());
+                    }
+                }
+                for host in ["example.test", "example.test:80", "[::1]", "[::1]:80"] {
+                    let raw = head(host);
+                    let prepared = prepare_test_head(&reverse, &conn, &raw, &mut cache)
+                        .expect("valid Host must prepare");
+                    if target.contains("local_response") {
+                        assert!(matches!(
+                            prepared.target,
+                            PreparedRawHttp1Target::LocalResponse
+                        ));
+                    } else {
+                        assert!(matches!(
+                            prepared.target,
+                            PreparedRawHttp1Target::Origin { .. }
+                        ));
+                    }
+                    let first = std::ptr::from_ref(prepared);
+                    assert_eq!(cache.cached_prefix_len(&reverse, &raw), Some(raw.len()));
+                    let reused = prepare_test_head(&reverse, &conn, &raw, &mut cache)
+                        .expect("reuse validated head");
+                    assert_eq!(first, std::ptr::from_ref(reused));
+                    // A changed Host cannot inherit the validated prefix or replace it.
+                    for invalid_host in invalid {
+                        let bad = head(invalid_host);
+                        for _ in 0..2 {
+                            assert!(cache.cached_prefix_len(&reverse, &bad).is_none());
+                            assert!(prepare_test_head(&reverse, &conn, &bad, &mut cache).is_none());
+                        }
+                        assert_eq!(cache.authority.as_ref().expect("valid authority").raw, host);
+                        assert_eq!(cache.cached_prefix_len(&reverse, &raw), Some(raw.len()));
+                        assert_eq!(
+                            first,
+                            std::ptr::from_ref(
+                                prepare_test_head(&reverse, &conn, &raw, &mut cache)
+                                    .expect("valid cache survives rejected Host")
+                            )
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -379,6 +379,12 @@ pub fn resolve_request_authority(
     Ok(resolved)
 }
 
+/// Parse a single Host authority using the same validation as incoming requests.
+/// Surrounding whitespace is trimmed; empty or invalid authorities are rejected.
+pub fn parse_host_authority(input: &str) -> Option<http::uri::Authority> {
+    parse_authority_parts(input).map(|parts| parts.authority)
+}
+
 fn parse_host_header(headers: &Headers) -> Result<Option<AuthorityParts>, RequestValidationError> {
     let host_name = OrdinaryHeaderName::try_from(HOST).expect("Host is ordinary");
     let mut host_values = headers.get_all(&host_name);
