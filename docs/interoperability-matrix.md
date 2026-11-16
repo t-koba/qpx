@@ -20,7 +20,7 @@ HTTP substrate:
 - QPACK per RFC 9204
 - HTTP Datagrams / Capsules per RFC 9297
 - CONNECT-UDP per RFC 9298
-- WebTransport using the legacy `draft-ietf-webtrans-http3-04`/`05` settings codepoints (current drafts are not yet implemented)
+- WebTransport: `qpx-h3` sends and parses the legacy draft-05 `ENABLE_WEBTRANSPORT` (`0x2b603742`) and `WEBTRANSPORT_MAX_SESSIONS` (`0x2b603743`) SETTINGS identifiers. This records those identifiers only: current-draft negotiation is not implemented, and repository e2e coverage is not browser-interoperability evidence.
 
 QPX product lanes:
 
