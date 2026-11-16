@@ -336,6 +336,108 @@ requests: { quota: { interval_secs: 60, amount: 1 } }",
     }
 }
 
+#[cfg(all(test, any(feature = "http3-backend-h3", feature = "http3-backend-qpx")))]
+mod head_response_tests {
+    use super::{finalize_h3_connect_head_response, finalize_h3_connect_response};
+    use crate::http3::codec::{h1_headers_to_http, http_headers_to_h1};
+    use http::{HeaderValue, Response, StatusCode, header::CONTENT_LENGTH};
+    use qpx_core::{config::HeaderControl, rules::CompiledHeaderControl};
+    use qpx_http::body::Body;
+
+    #[test]
+    fn upstream_extended_connect_head_matches_standard_for_content_length_states() {
+        let control = CompiledHeaderControl::compile(&HeaderControl {
+            response_set: [("x-finalized".into(), "configured".into())].into(),
+            ..Default::default()
+        })
+        .expect("header control");
+        let cases: [Vec<&[u8]>; 4] = [vec![], vec![b"0"], vec![b"invalid"], vec![b"4", b"5"]];
+
+        for content_lengths in cases {
+            let mut upstream = Response::builder()
+                .status(StatusCode::OK)
+                .body(())
+                .expect("upstream CONNECT response");
+            upstream
+                .headers_mut()
+                .append("x-repeat", HeaderValue::from_static("first"));
+            upstream
+                .headers_mut()
+                .append("x-repeat", HeaderValue::from_static("second"));
+            upstream
+                .headers_mut()
+                .append("cookie", HeaderValue::from_static("a=1"));
+            let mut cookie = HeaderValue::from_static("b=2");
+            cookie.set_sensitive(true);
+            upstream.headers_mut().append("cookie", cookie);
+            upstream
+                .headers_mut()
+                .append("set-cookie", HeaderValue::from_static("first=1"));
+            upstream
+                .headers_mut()
+                .append("set-cookie", HeaderValue::from_static("second=2"));
+            upstream
+                .headers_mut()
+                .append("trailer", HeaderValue::from_static("x-end"));
+            upstream
+                .headers_mut()
+                .append("x-upstream", HeaderValue::from_static("preserved"));
+            upstream.headers_mut().append(
+                "x-opaque",
+                HeaderValue::from_bytes(&[0x80, b'x']).expect("opaque header bytes"),
+            );
+            for value in &content_lengths {
+                upstream.headers_mut().append(
+                    CONTENT_LENGTH,
+                    HeaderValue::from_bytes(value).expect("header value"),
+                );
+            }
+
+            let mut standard = Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::empty())
+                .expect("standard response");
+            *standard.headers_mut() =
+                h1_headers_to_http(upstream.headers()).expect("convert upstream H3 headers");
+            let expected = finalize_h3_connect_response("qpx-test", standard, Some(&control));
+            let expected_status = expected.status();
+            let expected_headers =
+                http_headers_to_h1(expected.headers()).expect("convert finalized headers for H3");
+
+            let actual = finalize_h3_connect_head_response(
+                upstream,
+                "qpx-test",
+                Some(&control),
+                "HTTP/3 extended CONNECT response",
+            )
+            .expect("normalize successful CONNECT head");
+
+            assert_eq!(actual.status(), expected_status);
+            assert_eq!(actual.headers(), &expected_headers);
+            assert_eq!(actual.headers().get("x-finalized").unwrap(), "configured");
+            assert_eq!(actual.headers().get("x-upstream").unwrap(), "preserved");
+            assert!(!actual.headers().contains_key(CONTENT_LENGTH));
+            assert!(!actual.headers().contains_key("transfer-encoding"));
+            assert!(!actual.headers().contains_key("trailer"));
+            let repeated: Vec<_> = actual.headers().get_all("x-repeat").iter().collect();
+            assert_eq!(repeated.len(), 2);
+            assert_eq!(repeated[0].as_bytes(), b"first");
+            assert_eq!(repeated[1].as_bytes(), b"second");
+            let cookie = actual.headers().get("cookie").unwrap();
+            assert_eq!(cookie.as_bytes(), b"a=1; b=2");
+            assert!(cookie.is_sensitive());
+            let set_cookie: Vec<_> = actual.headers().get_all("set-cookie").iter().collect();
+            assert_eq!(set_cookie.len(), 2);
+            assert_eq!(set_cookie[0].as_bytes(), b"first=1");
+            assert_eq!(set_cookie[1].as_bytes(), b"second=2");
+            assert_eq!(
+                actual.headers().get("x-opaque").unwrap().as_bytes(),
+                &[0x80, b'x']
+            );
+        }
+    }
+}
+
 #[cfg(all(
     test,
     feature = "auth-basic",
