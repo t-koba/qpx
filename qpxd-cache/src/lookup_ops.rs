@@ -28,6 +28,27 @@ fn ord(name: &str) -> OrdinaryHeaderName {
     OrdinaryHeaderName::try_from(name).expect("ordinary header name")
 }
 
+fn request_matches_vary(
+    request_headers: &OwnedHeaders,
+    content_digest: Option<&str>,
+    envelope: &CachedResponseEnvelope,
+    policy: &CachePolicyConfig,
+) -> bool {
+    // A Vary-less public response cached before credentials were supplied must
+    // not become the default representation for an authenticated request.
+    // The explicit policy opt-out retains the existing shared-cache behavior.
+    if request_headers.contains_key(&ord("authorization"))
+        && !policy.allow_authorization_without_vary_store
+        && !envelope
+            .vary_headers
+            .iter()
+            .any(|name| name.eq_ignore_ascii_case("authorization"))
+    {
+        return false;
+    }
+    matches_vary(request_headers.view(), content_digest, envelope)
+}
+
 pub async fn lookup(
     request: &OwnerRequest<()>,
     key: &CacheRequestKey,
@@ -49,7 +70,6 @@ pub async fn lookup(
         return Ok(LookupOutcome::Miss);
     };
 
-    let vary_headers = request_headers.view();
     let namespace = cache_namespace(policy, "default");
     if can_use_hot_response_candidate(request_method, &req) {
         let storage_key = key.primary_index_storage_key_arc();
@@ -59,10 +79,11 @@ pub async fn lookup(
             storage_key.as_ref(),
             key.primary_default_variant_storage_key().as_ref(),
             now,
-        )? && matches_vary(
-            vary_headers,
+        )? && request_matches_vary(
+            request_headers,
             key.content_digest.as_deref(),
             candidate.envelope.as_ref(),
+            policy,
         ) && matches!(
             classify_for_request(&req, candidate.envelope.as_ref(), now),
             CacheEntryDisposition::ServeFresh | CacheEntryDisposition::ServeStale
@@ -102,7 +123,12 @@ pub async fn lookup(
         let Some(envelope) = envelope else {
             continue;
         };
-        if !matches_vary(vary_headers, key.content_digest.as_deref(), &envelope) {
+        if !request_matches_vary(
+            request_headers,
+            key.content_digest.as_deref(),
+            &envelope,
+            policy,
+        ) {
             continue;
         }
         let disposition = classify_for_request(&req, &envelope, now);

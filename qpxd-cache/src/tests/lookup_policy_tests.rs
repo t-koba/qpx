@@ -488,6 +488,49 @@ async fn authorization_public_without_vary_is_not_shared_across_credentials() {
 }
 
 #[tokio::test]
+async fn unauthenticated_default_variant_is_not_served_to_authorized_request() {
+    let req_public = make_get_request("/public-before-auth");
+    let key = CacheRequestKey::for_lookup(&req_public, "http")
+        .expect("key")
+        .expect("some key");
+    let response = make_response(StatusCode::OK, "public, max-age=60", "public-body");
+    let backends = backend_map();
+    let _ = store_and_drain(
+        &req_public,
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let mut req_authorized = make_get_request("/public-before-auth");
+    req_authorized.headers_mut().insert(
+        ord("authorization"),
+        http::HeaderValue::from_static("Bearer user-a"),
+    );
+    let outcome = lookup(
+        &req_authorized,
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(
+        !matches!(outcome, LookupOutcome::Hit(_)),
+        "a response cached without Authorization Vary must not satisfy an authenticated request"
+    );
+}
+
+#[tokio::test]
 async fn authorization_public_with_vary_authorization_is_partitioned() {
     let mut req_a = make_get_request("/auth-vary");
     req_a.headers_mut().insert(
