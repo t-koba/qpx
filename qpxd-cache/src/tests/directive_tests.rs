@@ -42,6 +42,27 @@ fn parse_request_directives_supports_single_byte_range() {
 }
 
 #[test]
+fn parse_request_directives_range_unit_is_case_insensitive() {
+    let mut headers = qpx_core::http_message::Headers::new();
+    let range = qpx_core::http_message::OrdinaryHeaderName::try_from("range").expect("ordinary");
+    headers.insert(range.clone(), http::HeaderValue::from_static("bytes=3-7"));
+    let lowercase = parse_request_directives(&headers).range;
+
+    for value in ["Bytes=3-7", "BYTES=3-7"] {
+        headers.insert(range.clone(), http::HeaderValue::from_static(value));
+        let parsed = parse_request_directives(&headers);
+        assert!(parsed.range.is_some());
+        assert_eq!(parsed.range, lowercase);
+        assert!(!parsed.has_unsupported_conditionals);
+    }
+
+    headers.insert(range, http::HeaderValue::from_static("items=3-7"));
+    let parsed = parse_request_directives(&headers);
+    assert!(parsed.range.is_none());
+    assert!(parsed.has_unsupported_conditionals);
+}
+
+#[test]
 fn parse_request_directives_no_cache_with_field_names() {
     let mut headers = qpx_core::http_message::Headers::new();
     headers.insert(

@@ -381,7 +381,10 @@ fn parse_single_range_header(headers: &OwnedHeaders) -> Option<ByteRangeSpec> {
 
 fn parse_range_header(raw: &str) -> Option<ByteRangeSpec> {
     let value = raw.trim();
-    let ranges = value.strip_prefix("bytes=")?;
+    let ranges = value
+        .get(..6)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("bytes="))
+        .map(|_| &value[6..])?;
     if ranges.contains(',') {
         return None;
     }
