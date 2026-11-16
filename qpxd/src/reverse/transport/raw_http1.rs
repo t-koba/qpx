@@ -402,8 +402,11 @@ pub(in crate::reverse) fn prepare_raw_http1_request<'a>(
 
 /// Conditional, negotiated, or directive-bearing requests must go through the
 /// full lookup chain; the fast path only serves plain unconditional GETs.
+/// Credential-bearing requests must also use the full lookup chain so the
+/// Authorization/Vary gate applies.
 fn raw_cache_hit_headers_eligible(headers: &[httparse::Header<'_>]) -> bool {
-    const GENERIC_CHAIN_HEADERS: [&str; 8] = [
+    const GENERIC_CHAIN_HEADERS: [&str; 9] = [
+        "Authorization",
         "If-Match",
         "If-None-Match",
         "If-Modified-Since",
@@ -769,6 +772,28 @@ fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn raw_cache_hit_headers_reject_authorization_case_insensitively() {
+        let host = httparse::Header {
+            name: "Host",
+            value: b"bench.local",
+        };
+        assert!(raw_cache_hit_headers_eligible(&[host]));
+        for name in ["Authorization", "authorization"] {
+            let headers = [
+                host,
+                httparse::Header {
+                    name,
+                    value: b"Bearer x",
+                },
+            ];
+            assert!(
+                !raw_cache_hit_headers_eligible(&headers),
+                "{name} must use the generic lookup chain"
+            );
+        }
+    }
 
     #[test]
     fn raw_request_reads_the_declared_content_length_through_the_owner() {
@@ -1703,6 +1728,32 @@ mod tests {
                 );
             }
         }
+
+        // Credentials must use the full lookup chain even for a warm Vary-less entry.
+        let headers = [
+            httparse::Header {
+                name: "Host",
+                value: b"bench.local",
+            },
+            httparse::Header {
+                name: "Authorization",
+                value: b"Bearer x",
+            },
+        ];
+        let view = RawHttp1RequestView {
+            raw_head:
+                b"GET /bench-1 HTTP/1.1\r\nHost: bench.local\r\nAuthorization: Bearer x\r\n\r\n",
+            method: "GET",
+            target: "/bench-1",
+            version: 1,
+            headers: &headers,
+        };
+        let prepared = prepare_raw_http1_request(&reverse, &conn, view, &mut connection_cache)
+            .expect("prepared authenticated request");
+        assert!(
+            prepared.cache_hit.is_none(),
+            "Authorization must use the generic lookup chain"
+        );
     }
 
     /// Conditional and HEAD requests must keep using the generic chain.
