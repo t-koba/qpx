@@ -14,13 +14,50 @@ pub fn current_age_secs(envelope: &CachedResponseEnvelope, now_ms: u64) -> u64 {
     envelope.initial_age_secs.saturating_add(resident_ms / 1000)
 }
 
-fn parse_delta_seconds(value: &str) -> u64 {
+/// A delta-seconds token classified per RFC 9111 §1.2.2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeltaSeconds {
+    /// A well-formed decimal that fits in `u64`.
+    Value(u64),
+    /// Well-formed decimal digits too large for `u64`; must saturate.
+    Overflow,
+    /// Not a delta-seconds value; each caller keeps its own absence policy.
+    Malformed,
+}
+
+/// Shared owner for delta-seconds parsing, used by both `Age` and the
+/// `Cache-Control` numeric directives. A well-formed decimal that overflows is
+/// distinct from a malformed token so callers can saturate overflow instead of
+/// dropping the directive: RFC 9111 §1.2.2 requires overflowing delta-seconds
+/// to become a very large value, never absence or youth. A leading `+` is not
+/// all digits but is accepted by the numeric parser; keep that historical
+/// acceptance here so only overflow changes behavior.
+pub fn parse_delta_seconds(value: &str) -> DeltaSeconds {
     let value = value.trim();
-    // RFC 9111 §1.2.2: overflow or invalid delta-seconds must not imply youth.
+    if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return match value.parse::<u64>() {
+            Ok(seconds) => DeltaSeconds::Value(seconds),
+            Err(_) => DeltaSeconds::Overflow,
+        };
+    }
+    match value.parse::<u64>() {
+        Ok(seconds) => DeltaSeconds::Value(seconds),
+        Err(_) => DeltaSeconds::Malformed,
+    }
+}
+
+/// `Age` policy: any invalid or overflowing delta-seconds must not imply youth,
+/// so both saturate to `u64::MAX`. The all-digits guard preserves the stricter
+/// historical `Age` behavior that rejects a leading `+`.
+fn parse_age_delta_seconds(value: &str) -> u64 {
+    let value = value.trim();
     if !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return u64::MAX;
     }
-    value.parse().unwrap_or(u64::MAX)
+    match parse_delta_seconds(value) {
+        DeltaSeconds::Value(seconds) => seconds,
+        DeltaSeconds::Overflow | DeltaSeconds::Malformed => u64::MAX,
+    }
 }
 
 pub fn initial_age_secs(
@@ -30,7 +67,7 @@ pub fn initial_age_secs(
 ) -> u64 {
     let age_value = headers
         .get(&ord(AGE.as_str()))
-        .map(|v| v.to_str().map(parse_delta_seconds).unwrap_or(u64::MAX))
+        .map(|v| v.to_str().map(parse_age_delta_seconds).unwrap_or(u64::MAX))
         .unwrap_or(0);
     let apparent_age = headers
         .get(&ord(DATE.as_str()))

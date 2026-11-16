@@ -63,6 +63,95 @@ async fn age_header_controls_stored_response_freshness() {
 }
 
 #[tokio::test]
+async fn min_fresh_overflow_does_not_authorize_a_fresh_hit() {
+    // A well-formed but overflowing `min-fresh` is a very large freshness
+    // requirement (RFC 9111 §1.2.2), never an absent one. Dropping it let an
+    // age-10/lifetime-60 entry be served fresh against an effectively infinite
+    // remaining-freshness requirement.
+    let cases: &[(&str, bool)] = &[
+        ("18446744073709551615", false), // u64::MAX in range: still unsatisfiable
+        ("18446744073709551616", false), // first overflow: saturates to MAX
+        ("999999999999999999999999999999", false), // larger overflow
+        ("10", true),                    // ordinary, satisfiable with lifetime 60
+        ("100", false),                  // ordinary, unsatisfiable
+        ("invalid", true),               // malformed stays absent (existing semantics)
+    ];
+    for &(min_fresh, fresh) in cases {
+        let key_req = make_get_request("/min-fresh-overflow");
+        let key = CacheRequestKey::for_lookup(&key_req, "http")
+            .expect("key")
+            .expect("some key");
+        let mut response = make_response(StatusCode::OK, "public, max-age=60", "body");
+        let now = std::time::UNIX_EPOCH + Duration::from_millis(crate::util::now_millis());
+        response.headers_mut().insert(
+            DATE,
+            http::HeaderValue::from_str(&httpdate::fmt_http_date(now)).expect("date"),
+        );
+        let backends = backend_map();
+        let _ = store_and_drain(
+            &key_req,
+            &key,
+            &policy(),
+            response,
+            CacheStoreTiming {
+                response_delay_secs: 0,
+                body_read_timeout: Duration::from_secs(1),
+                request_collapse_guard: None,
+            },
+            &backends,
+        )
+        .await
+        .expect("store");
+
+        let mut req = make_get_request("/min-fresh-overflow");
+        req.headers_mut().insert(
+            ord("cache-control"),
+            http::HeaderValue::from_str(&format!("min-fresh={min_fresh}"))
+                .expect("min-fresh header"),
+        );
+        let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+            .await
+            .expect("lookup");
+        if fresh {
+            assert!(
+                matches!(out, LookupOutcome::Hit(_)),
+                "min-fresh {min_fresh}: {out:?}"
+            );
+        } else {
+            assert!(
+                matches!(out, LookupOutcome::Miss | LookupOutcome::Revalidate(_)),
+                "overflowing min-fresh {min_fresh} must not be served fresh: {out:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn overflowing_cache_control_directives_saturate_across_callers() {
+    let mut response_headers = http::HeaderMap::new();
+    response_headers.insert(
+        CACHE_CONTROL,
+        http::HeaderValue::from_static(
+            "max-age=18446744073709551616, s-maxage=18446744073709551616, \
+             stale-while-revalidate=18446744073709551616, stale-if-error=18446744073709551616",
+        ),
+    );
+    let parsed = parse_response_directives(&crate::tests::owned_headers(&response_headers));
+    assert!(!parsed.invalid_freshness, "overflow is not malformed");
+    assert_eq!(parsed.max_age, Some(u64::MAX));
+    assert_eq!(parsed.s_maxage, Some(u64::MAX));
+    assert_eq!(parsed.stale_while_revalidate, Some(u64::MAX));
+    assert_eq!(parsed.stale_if_error, Some(u64::MAX));
+
+    // Malformed values still fail closed / stay absent.
+    let mut bad_headers = http::HeaderMap::new();
+    bad_headers.insert(CACHE_CONTROL, http::HeaderValue::from_static("max-age=abc"));
+    let bad = parse_response_directives(&crate::tests::owned_headers(&bad_headers));
+    assert!(bad.invalid_freshness);
+    assert_eq!(bad.max_age, None);
+}
+
+#[tokio::test]
 async fn only_if_cached_does_not_trigger_revalidation() {
     let req = make_get_request("/revalidate-only-if-cached");
     let key = CacheRequestKey::for_lookup(&req, "http")

@@ -1,4 +1,7 @@
-use super::freshness::{parse_entity_tag_list, parse_http_date_secs, parse_if_none_match};
+use super::freshness::{
+    DeltaSeconds, parse_delta_seconds, parse_entity_tag_list, parse_http_date_secs,
+    parse_if_none_match,
+};
 use super::types::{ByteRangeSpec, IfRangeCondition, RequestDirectives, ResponseDirectives};
 use http::HeaderName;
 use http::header::CACHE_CONTROL;
@@ -351,8 +354,16 @@ fn parse_cache_control_directive(token: &str) -> Option<(String, Option<String>)
     Some((name.to_ascii_lowercase(), value))
 }
 
+/// Maps a `Cache-Control` numeric directive through the shared delta-seconds
+/// owner: a well-formed overflowing value saturates to `u64::MAX`, while a
+/// malformed value stays absent so each caller keeps its existing
+/// invalid/absence policy (RFC 9111 §1.2.2).
 fn parse_u64_directive(value: &str) -> Option<u64> {
-    value.trim().trim_matches('"').parse::<u64>().ok()
+    match parse_delta_seconds(value.trim().trim_matches('"')) {
+        DeltaSeconds::Value(seconds) => Some(seconds),
+        DeltaSeconds::Overflow => Some(u64::MAX),
+        DeltaSeconds::Malformed => None,
+    }
 }
 
 fn parse_cache_field_name_list(value: &str) -> Vec<String> {
