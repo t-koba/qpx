@@ -351,7 +351,13 @@ mod head_response_tests {
             ..Default::default()
         })
         .expect("header control");
-        let cases: [Vec<&[u8]>; 4] = [vec![], vec![b"0"], vec![b"invalid"], vec![b"4", b"5"]];
+        let cases: [Vec<&[u8]>; 5] = [
+            vec![],
+            vec![b"0"],
+            vec![b"17"],
+            vec![b"invalid"],
+            vec![b"4", b"5"],
+        ];
 
         for content_lengths in cases {
             let mut upstream = Response::builder()
