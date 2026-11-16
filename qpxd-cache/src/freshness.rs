@@ -14,6 +14,15 @@ pub fn current_age_secs(envelope: &CachedResponseEnvelope, now_ms: u64) -> u64 {
     envelope.initial_age_secs.saturating_add(resident_ms / 1000)
 }
 
+fn parse_delta_seconds(value: &str) -> u64 {
+    let value = value.trim();
+    // RFC 9111 §1.2.2: overflow or invalid delta-seconds must not imply youth.
+    if !value.bytes().all(|byte| byte.is_ascii_digit()) {
+        return u64::MAX;
+    }
+    value.parse().unwrap_or(u64::MAX)
+}
+
 pub fn initial_age_secs(
     headers: &OwnedHeaders,
     response_time_ms: u64,
@@ -21,8 +30,7 @@ pub fn initial_age_secs(
 ) -> u64 {
     let age_value = headers
         .get(&ord(AGE.as_str()))
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(|v| v.to_str().map(parse_delta_seconds).unwrap_or(u64::MAX))
         .unwrap_or(0);
     let apparent_age = headers
         .get(&ord(DATE.as_str()))

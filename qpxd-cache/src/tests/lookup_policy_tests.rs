@@ -1,6 +1,68 @@
 use super::*;
 
 #[tokio::test]
+async fn age_header_controls_stored_response_freshness() {
+    let cases: &[(Option<&[u8]>, bool)] = &[
+        (Some(b"18446744073709551616"), false), // u64 overflow
+        (Some(b"18446744073709551615"), false), // u64::MAX
+        (Some(b"10"), true),
+        (Some(b" 10 "), true),
+        (Some(b"0"), true),
+        (None, true),
+        (Some(b"invalid"), false),
+        (Some(b""), false),
+        (Some(b"-1"), false),
+        (Some(b"+1"), false),
+        (Some(b"\xff"), false), // not representable by HeaderValue::to_str
+    ];
+    for &(age, fresh) in cases {
+        let req = make_get_request("/age-freshness");
+        let key = CacheRequestKey::for_lookup(&req, "http")
+            .expect("key")
+            .expect("some key");
+        let mut response = make_response(StatusCode::OK, "public, max-age=60", "body");
+        let now = std::time::UNIX_EPOCH + Duration::from_millis(crate::util::now_millis());
+        response.headers_mut().insert(
+            DATE,
+            http::HeaderValue::from_str(&httpdate::fmt_http_date(now)).expect("date"),
+        );
+        if let Some(age) = age {
+            response.headers_mut().insert(
+                http::header::AGE,
+                http::HeaderValue::from_bytes(age).expect("age header"),
+            );
+        }
+        let backends = backend_map();
+        let _ = store_and_drain(
+            &req,
+            &key,
+            &policy(),
+            response,
+            CacheStoreTiming {
+                response_delay_secs: 0,
+                body_read_timeout: Duration::from_secs(1),
+                request_collapse_guard: None,
+            },
+            &backends,
+        )
+        .await
+        .expect("store");
+
+        let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+            .await
+            .expect("lookup");
+        if fresh {
+            assert!(matches!(out, LookupOutcome::Hit(_)), "Age {age:?}: {out:?}");
+        } else {
+            assert!(
+                matches!(out, LookupOutcome::Miss | LookupOutcome::Revalidate(_)),
+                "Age {age:?} must not be served fresh: {out:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn only_if_cached_does_not_trigger_revalidation() {
     let req = make_get_request("/revalidate-only-if-cached");
     let key = CacheRequestKey::for_lookup(&req, "http")
