@@ -1691,6 +1691,12 @@ fn validate_header_constraints(
         .keys()
         .chain(headers.request_add.keys())
         .chain(headers.request_remove.iter())
+        .chain(
+            headers
+                .request_regex_replace
+                .iter()
+                .map(|item| &item.header),
+        )
     {
         if !allowed_request.contains(&name.to_ascii_lowercase()) {
             return Err(anyhow!(
@@ -1703,6 +1709,12 @@ fn validate_header_constraints(
         .keys()
         .chain(headers.response_add.keys())
         .chain(headers.response_remove.iter())
+        .chain(
+            headers
+                .response_regex_replace
+                .iter()
+                .map(|item| &item.header),
+        )
     {
         if !allowed_response.contains(&name.to_ascii_lowercase()) {
             return Err(anyhow!(

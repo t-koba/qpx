@@ -654,3 +654,64 @@ async fn oauth_token_request_sends_form_encoded_client_secret_basic() {
     );
     assert!(!pairs.contains_key("client_secret"));
 }
+
+#[test]
+fn header_constraint_rejects_regex_replace_outside_capability() {
+    use qpx_core::config::RegexReplace;
+
+    let mut cfg = test_cfg();
+    cfg.constraints.allowed_request_headers_to_add = vec!["x-safe".to_string()];
+    cfg.constraints.allowed_response_headers_to_add = vec!["x-safe-response".to_string()];
+
+    let request_control = HeaderControl {
+        request_regex_replace: vec![RegexReplace {
+            header: "x-danger".to_string(),
+            pattern: "secret".to_string(),
+            replace: "public".to_string(),
+        }],
+        ..Default::default()
+    };
+    assert!(
+        validate_header_constraints(&request_control, &cfg).is_err(),
+        "request regex_replace on a header outside the allow-list must be rejected"
+    );
+
+    let safe_request_control = HeaderControl {
+        request_regex_replace: vec![RegexReplace {
+            header: "x-safe".to_string(),
+            pattern: "a".to_string(),
+            replace: "b".to_string(),
+        }],
+        ..Default::default()
+    };
+    assert!(
+        validate_header_constraints(&safe_request_control, &cfg).is_ok(),
+        "request regex_replace on an allowed header must be accepted"
+    );
+
+    let response_control = HeaderControl {
+        response_regex_replace: vec![RegexReplace {
+            header: "x-danger-response".to_string(),
+            pattern: "secret".to_string(),
+            replace: "public".to_string(),
+        }],
+        ..Default::default()
+    };
+    assert!(
+        validate_header_constraints(&response_control, &cfg).is_err(),
+        "response regex_replace on a header outside the allow-list must be rejected"
+    );
+
+    let safe_response_control = HeaderControl {
+        response_regex_replace: vec![RegexReplace {
+            header: "x-safe-response".to_string(),
+            pattern: "a".to_string(),
+            replace: "b".to_string(),
+        }],
+        ..Default::default()
+    };
+    assert!(
+        validate_header_constraints(&safe_response_control, &cfg).is_ok(),
+        "response regex_replace on an allowed header must be accepted"
+    );
+}
