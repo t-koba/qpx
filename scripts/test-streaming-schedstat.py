@@ -55,28 +55,33 @@ class WorkflowRegistrationTest(unittest.TestCase):
                                                  QPX_STREAMING_SCHEDSTAT_DIR=tracing))
                 self.assertEqual(result.returncode, expected, result.stderr)
 
-    def test_same_source_ab_workflow_patch_and_harness_identities(self):
+    def test_exact_source_pair_workflow_and_harness_identities(self):
         workflow = (ROOT / ".github/workflows/streaming-scheduler-trace.yml").read_text()
         self.assertIn("CURRENT_SHA: ${{ github.sha }}", workflow)
-        self.assertIn("ref: ${{ github.sha }}", workflow)
-        self.assertIn('test "$CURRENT_SHA" = "$GITHUB_SHA"', workflow)
-        self.assertNotIn("SOURCE_COMMIT", workflow)
-        self.assertNotIn("ef8541cc4f9b89e3a89feda8ef4da4c15938cb69", workflow)
-        self.assertNotIn("bead51d033f8dac90a8d3b335565eb1ee4e4dd39", workflow)
-        self.assertEqual(workflow.count("runs-on:"), 1)
-        self.assertIn("runs-on: ubuntu-24.04", workflow)
-        self.assertEqual(workflow.count("cargo +1.99.1 build"), 2)
-        self.assertEqual(workflow.count('RUSTFLAGS="-D warnings" cargo'), 2)
+        self.assertIn('ref: ${{ github.sha }}', workflow)
+        self.assertIn('ref: ${{ steps.reference.outputs.sha }}', workflow)
+        self.assertIn('["ci_policy"]["previous_release"]["sha"]', workflow)
+        self.assertIn('REFERENCE_SHA="${{ steps.reference.outputs.sha }}"', workflow)
+        self.assertIn('test "$(git -C .trace-current rev-parse HEAD)" = "$CURRENT_SHA"', workflow)
+        self.assertIn('test "$(git -C .trace-previous rev-parse HEAD)" = "$REFERENCE_SHA"', workflow)
+        self.assertIn('test "$REFERENCE_SHA" = "$POLICY_SHA"', workflow)
+        previous_sha = json.loads(
+            (ROOT / "perf/proxy-performance-objectives.json").read_text()
+        )["ci_policy"]["previous_release"]["sha"]
+        self.assertRegex(previous_sha, r"^[0-9a-f]{40}$")
+        build = "cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx"
+        self.assertEqual(workflow.count(build), 2)
+        self.assertIn('CARGO_TARGET_DIR="$RUNNER_TEMP/trace-current"', workflow)
+        self.assertIn('CARGO_TARGET_DIR="$RUNNER_TEMP/trace-previous"', workflow)
+        self.assertNotIn("EXPERIMENT_DIR", workflow)
+        self.assertNotIn("experiment.patch", workflow)
+        self.assertNotIn("trace-experiment", workflow)
         for contract in (
-            'worktree add --detach "$EXPERIMENT_DIR" "$CURRENT_SHA"',
-            'test "$(git -C .trace-current rev-parse HEAD)" = "$CURRENT_SHA"',
-            'test "$(git -C "$EXPERIMENT_DIR" rev-parse HEAD^)" = "$CURRENT_SHA"',
-            'diff --name-only)" = qpxd/src/startup.rs',
-            'diff > target/scheduler-trace/experiment.patch',
-            'dispatch_sha=%s', 'baseline_sha=%s', 'rustc +1.99.1 -Vv', 'cargo +1.99.1 -V',
-            '/proc/sys/kernel/random/boot_id', 'sha256sum',
+            "runs-on: ubuntu-24.04",
+            'RUSTUP_TOOLCHAIN: "1.99.1"',
+            'echo "REFERENCE_SHA=$REFERENCE_SHA" >> "$GITHUB_ENV"',
             'export QPXD_BIN="$RUNNER_TEMP/trace-current/release/qpxd"',
-            'export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-experiment/release/qpxd"',
+            'export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-previous/release/qpxd"',
             'export QPX_PREVIOUS_SOURCE_SHA="$REFERENCE_SHA"',
             'export GITHUB_SHA="$CURRENT_SHA"',
             'for mode in fast slow; do',
@@ -85,35 +90,22 @@ class WorkflowRegistrationTest(unittest.TestCase):
             'QPX_STREAMING_COMPARE_BYTES: "104857600"',
             'QPX_STREAMING_COMPARE_CHUNK_BYTES: "65536"',
             'QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS: "3"',
+            'QPX_STREAMING_COMPARE_MIN_VALID_SAMPLES: "2"',
             'QPX_STREAMING_COMPARE_FAST_TRANSFERS: "8"',
             'QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS: "1"',
-            'if: always()', 'path: target/scheduler-trace/',
+            'sysctl -n kernel.sched_schedstats > target/scheduler-trace/schedstats-before.txt',
+            'sudo sysctl -w kernel.sched_schedstats="$SCHED_SCHEDSTATS"',
+            'sudo sysctl -w kernel.sched_schedstats="$(cat target/scheduler-trace/schedstats-before.txt)"',
+            'if: always()',
+            'path: target/scheduler-trace/',
         ):
             self.assertIn(contract, workflow)
-        self.assertEqual(workflow.count("bash scripts/perf-audit-streaming-compare.sh"), 1)
-        self.assertNotIn("check-streaming", workflow)
-        self.assertNotIn("performance-objectives", workflow)
-        # Execute the exact embedded patch against a disposable startup copy.
-        patch = textwrap.dedent(workflow.split("python3 - <<'PY'\n", 1)[1].split("          PY\n", 1)[0])
-        original = (ROOT / "qpxd/src/startup.rs").read_text()
-        with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "qpxd/src/startup.rs"
-            path.parent.mkdir(parents=True)
-            path.write_text(original)
-            env = dict(os.environ, EXPERIMENT_DIR=tmp)
-            result = subprocess.run(["python3", "-c", patch], env=env, capture_output=True)
-            self.assertEqual(result.returncode, 0, result.stderr)
-            start = original.index("    let mut builder = if worker_threads == 1 {")
-            end = original.index("        .max_blocking_threads", start)
-            self.assertEqual(path.read_text(), original[:start] +
-                             "    let mut builder = tokio::runtime::Builder::new_multi_thread();\n"
-                             "    builder\n        .worker_threads(worker_threads)\n" + original[end:])
-            # A different runtime builder must fail closed, not silently build a third variant.
-            result = subprocess.run(["python3", "-c", patch], env=env, capture_output=True)
-            self.assertNotEqual(result.returncode, 0)
         harness = (ROOT / "scripts/perf-audit-streaming-compare.sh").read_text()
         self.assertIn("runtime:\n  worker_threads: 1\n", harness)
         self.assertIn('cp "$TMP_DIR/interleaved-raw.jsonl" "$LOG_ARTIFACT_DIR"/', harness)
+        self.assertIn('protocol_version = "HTTP/1.1"', harness)
+        # The manual workflow retains the raw diagnostic and invokes no gate.
+        self.assertNotIn("scripts/check-streaming-performance.sh", workflow)
 
 
 class ComponentAccountingTest(unittest.TestCase):

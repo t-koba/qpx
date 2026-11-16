@@ -1,9 +1,9 @@
 name: streaming scheduler trace
 
 # Diagnostic only; the path-scoped push is registration-only and skips the job.
-# Manual dispatch runs one same-source runtime-flavor A/B, not an objective gate.
-# Sampling adds overhead and misses tasks that live entirely between polls or
-# exit tails. Raw task counts/read errors expose partial coverage, not causality.
+# Manual dispatch compares the exact current source with the pinned release; it is
+# diagnostic only, not an objective gate. Sampling adds overhead and can miss
+# tasks that live entirely between polls or exit tails; counts/errors expose gaps.
 on:
   workflow_dispatch:
     inputs:
@@ -52,67 +52,50 @@ jobs:
       - uses: actions/checkout@v5
       - name: test scheduler trace tooling and registration contract
         run: python3 scripts/test-streaming-schedstat.py
+      - name: read pinned previous release from performance policy
+        id: reference
+        shell: bash
+        run: |
+          set -euo pipefail
+          pin="$(python3 -c 'import json; print(json.load(open("perf/proxy-performance-objectives.json"))["ci_policy"]["previous_release"]["sha"])')"
+          echo "sha=$pin" >> "$GITHUB_OUTPUT"
       - uses: actions/checkout@v5
         with:
           ref: ${{ github.sha }}
           path: .trace-current
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ steps.reference.outputs.sha }}
+          path: .trace-previous
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.99.1"
-      - name: capture identity and build same-source runtime variants
+      - name: build exact current and pinned qpxd
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p target/scheduler-trace
           exec > >(tee target/scheduler-trace/build.log) 2>&1
+          REFERENCE_SHA="${{ steps.reference.outputs.sha }}"
           test "$CURRENT_SHA" = "$GITHUB_SHA"
-          {
-            printf 'dispatch_sha=%s\nbaseline_sha=%s\n' "$GITHUB_SHA" "$CURRENT_SHA"
-            printf 'run=%s attempt=%s runner=%s image=%s version=%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME" "$ImageOS" "$ImageVersion"
-            rustc +1.99.1 -Vv
-            cargo +1.99.1 -V
-            uname -a
-            cat /proc/sys/kernel/random/boot_id
-          } > target/scheduler-trace/identity.txt
           test "$(git -C .trace-current rev-parse HEAD)" = "$CURRENT_SHA"
-          export EXPERIMENT_DIR="$RUNNER_TEMP/trace-experiment-source"
-          git -C .trace-current worktree add --detach "$EXPERIMENT_DIR" "$CURRENT_SHA"
-          python3 - <<'PY'
-          import os
-          from pathlib import Path
-
-          path = Path(os.environ["EXPERIMENT_DIR"]) / "qpxd/src/startup.rs"
-          source = path.read_text()
-          baseline = """    let mut builder = if worker_threads == 1 {
-                  tokio::runtime::Builder::new_current_thread()
-              } else {
-                  let mut builder = tokio::runtime::Builder::new_multi_thread();
-                  builder.worker_threads(worker_threads);
-                  builder
-              };
-              builder
-                  .max_blocking_threads(max_blocking_threads)"""
-          experiment = """    let mut builder = tokio::runtime::Builder::new_multi_thread();
-              builder
-                  .worker_threads(worker_threads)
-                  .max_blocking_threads(max_blocking_threads)"""
-          if source.count(baseline) != 1:
-              raise SystemExit("baseline runtime builder differs; refusing experimental patch")
-          path.write_text(source.replace(baseline, experiment, 1))
-          PY
-          test "$(git -C "$EXPERIMENT_DIR" diff --name-only)" = qpxd/src/startup.rs
-          git -C "$EXPERIMENT_DIR" diff --check
-          git -C "$EXPERIMENT_DIR" diff > target/scheduler-trace/experiment.patch
-          git -C "$EXPERIMENT_DIR" add qpxd/src/startup.rs
-          git -C "$EXPERIMENT_DIR" -c user.name='Scheduler diagnostic' -c user.email='diagnostic@example.invalid' commit -m 'test: isolate forced multi-thread runtime experiment'
-          REFERENCE_SHA="$(git -C "$EXPERIMENT_DIR" rev-parse HEAD)"
-          test "$(git -C "$EXPERIMENT_DIR" rev-parse HEAD^)" = "$CURRENT_SHA"
-          printf 'experiment=%s\nbaseline_runtime=CurrentThread\nexperiment_runtime=MultiThread\nworker_threads=1\n' "$REFERENCE_SHA" >> target/scheduler-trace/identity.txt
-          printf 'REFERENCE_SHA=%s\n' "$REFERENCE_SHA" >> "$GITHUB_ENV"
+          test "$(git -C .trace-previous rev-parse HEAD)" = "$REFERENCE_SHA"
+          POLICY_SHA="$(python3 -c 'import json; print(json.load(open(".trace-current/perf/proxy-performance-objectives.json"))["ci_policy"]["previous_release"]["sha"])')"
+          test "$REFERENCE_SHA" = "$POLICY_SHA"
+          echo "current_sha=$CURRENT_SHA" > target/scheduler-trace/identity.txt
+          echo "reference_sha=$REFERENCE_SHA" >> target/scheduler-trace/identity.txt
+          echo "run=$GITHUB_RUN_ID attempt=$GITHUB_RUN_ATTEMPT runner=$RUNNER_NAME image=$ImageOS version=$ImageVersion" >> target/scheduler-trace/identity.txt
+          rustc +1.99.1 -Vv >> target/scheduler-trace/identity.txt
+          cargo +1.99.1 -V >> target/scheduler-trace/identity.txt
+          uname -a >> target/scheduler-trace/identity.txt
+          cat /proc/sys/kernel/random/boot_id >> target/scheduler-trace/identity.txt
           (cd .trace-current && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-current" RUSTFLAGS="-D warnings" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
           sha256sum "$RUNNER_TEMP/trace-current/release/qpxd" >> target/scheduler-trace/identity.txt
-          (cd "$EXPERIMENT_DIR" && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-experiment" RUSTFLAGS="-D warnings" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
-          sha256sum "$RUNNER_TEMP/trace-experiment/release/qpxd" >> target/scheduler-trace/identity.txt
+          # Match the CI reference build policy: same toolchain, but do not make
+          # current-toolchain warnings in the pinned release a trace prerequisite.
+          (cd .trace-previous && CARGO_TARGET_DIR="$RUNNER_TEMP/trace-previous" RUSTFLAGS="" cargo +1.99.1 build -p qpxd --release --locked --features http3-backend-qpx)
+          sha256sum "$RUNNER_TEMP/trace-previous/release/qpxd" >> target/scheduler-trace/identity.txt
+          echo "REFERENCE_SHA=$REFERENCE_SHA" >> "$GITHUB_ENV"
       - name: trace one fast and one slow paired workload
         timeout-minutes: ${{ fromJSON(inputs.workload_timeout_minutes) }}
         env:
@@ -129,7 +112,7 @@ jobs:
           sysctl -n kernel.sched_schedstats > target/scheduler-trace/schedstats-before.txt
           sudo sysctl -w kernel.sched_schedstats="$SCHED_SCHEDSTATS" | tee target/scheduler-trace/schedstats-enabled.txt
           export QPXD_BIN="$RUNNER_TEMP/trace-current/release/qpxd"
-          export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-experiment/release/qpxd"
+          export QPX_PREVIOUS_BIN="$RUNNER_TEMP/trace-previous/release/qpxd"
           export QPX_PREVIOUS_SOURCE_SHA="$REFERENCE_SHA"
           export GITHUB_SHA="$CURRENT_SHA"
           env | LC_ALL=C sort | grep -E '^(QPX_STREAMING_|QPXD_BIN=|QPX_PREVIOUS_|GITHUB_SHA=)' > target/scheduler-trace/workload-parameters.txt
@@ -153,13 +136,6 @@ jobs:
         run: |
           if [ -f target/scheduler-trace/schedstats-before.txt ]; then
             sudo sysctl -w kernel.sched_schedstats="$(cat target/scheduler-trace/schedstats-before.txt)" > target/scheduler-trace/schedstats-restored.txt
-          fi
-      - name: remove temporary experimental source
-        if: always()
-        shell: bash
-        run: |
-          if [ -d "$RUNNER_TEMP/trace-experiment-source" ]; then
-            git -C .trace-current worktree remove --force "$RUNNER_TEMP/trace-experiment-source"
           fi
       - name: upload raw scheduler diagnostic even on failure
         if: always()
