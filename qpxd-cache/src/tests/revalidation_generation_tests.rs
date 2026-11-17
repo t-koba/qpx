@@ -1771,3 +1771,184 @@ async fn shared_disk_warm_readers_observe_independent_publication_and_invalidati
     .await
     .expect("bounded shared-reader regression");
 }
+
+// A cache-owned 304 must not create a second generation when the replayed
+// response is written back again. If that second store is delayed while a newer
+// representation is published, its commit can replace the newer generation and
+// resurrect stale content. This reproduction pins the failure at the cache
+// primitives; it is expected to fail until the duplicate store is removed.
+#[tokio::test]
+#[ignore = "duplicate 304 replay store is tracked by evidence-blocked publication work; remove ignore when the second store is eliminated"]
+async fn delayed_304_replay_second_store_must_not_replace_newer_generation() {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-second-store-{}", uuid::Uuid::new_v4()));
+        let inner = legacy_test_backend(false, &root);
+        let (mutations, mut completed) = mpsc::unbounded_channel();
+        let backend = Arc::new(ObservedBackend {
+            inner,
+            mutations,
+            fail_retirement: std::sync::atomic::AtomicBool::new(false),
+            staged_gate: Mutex::new(None),
+            index_gate: Mutex::new(None),
+        });
+        let backends = HashMap::from([("b".into(), backend.clone() as Arc<dyn CacheBackend>)]);
+        let request = make_get_request("/second-store");
+        let key = CacheRequestKey::for_lookup(&request, "http")
+            .unwrap()
+            .unwrap();
+        publish(
+            &request,
+            &key,
+            &backends,
+            "public, no-cache, max-age=300",
+            "old",
+            "old",
+            false,
+        )
+        .await;
+        let LookupOutcome::Revalidate(state) =
+            lookup(&request, &key, &policy(), &backends, &test_revalidations())
+                .await
+                .unwrap()
+        else {
+            panic!("stale representation must require revalidation")
+        };
+        let old_key = state.variant_key.clone();
+        let refreshed = revalidate_not_modified(
+            &request,
+            &policy(),
+            qpx_core::http_message::Response::from_http(
+                Response::builder()
+                    .status(304)
+                    .header(CACHE_CONTROL, "public, max-age=300")
+                    .header("x-version", "refreshed")
+                    .body(Body::empty())
+                    .unwrap(),
+            ),
+            state.clone(),
+            0,
+            Duration::from_secs(1),
+            &backends,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            qpx_http::body::to_bytes(refreshed.into_head_and_body().1)
+                .await
+                .unwrap(),
+            "old"
+        );
+        let index_key = index_storage_key(&key.primary_hash());
+        // A generation-backed entry is revalidated in place; the metadata
+        // finalizer refreshes the same variant key rather than minting one.
+        let first_generation = old_key.clone();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let LookupOutcome::Hit(response) =
+                    lookup(&request, &key, &policy(), &backends, &test_revalidations())
+                        .await
+                        .unwrap()
+                    && response
+                        .headers()
+                        .get(&ord("x-version"))
+                        .and_then(|v| v.to_str().ok())
+                        == Some("refreshed")
+                {
+                    let _ = qpx_http::body::to_bytes(response.into_head_and_body().1).await;
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("revalidated metadata must be published");
+
+        let (staged_tx, mut staged_rx) = mpsc::unbounded_channel();
+        let release = Arc::new(tokio::sync::Notify::new());
+        *backend.staged_gate.lock().unwrap() = Some((staged_tx, release.clone()));
+
+        let request2 = request.clone();
+        let key2 = key.clone();
+        let policy2 = policy();
+        let backends2 = backends.clone();
+        let store_task = tokio::spawn(async move {
+            let collapse = test_request_collapse();
+            let RequestCollapseJoin::Leader(leader) = collapse.begin(&key2) else {
+                panic!("leader")
+            };
+            let mut response = make_response(StatusCode::OK, "public, max-age=300", "old");
+            response
+                .headers_mut()
+                .insert("x-version", "refreshed".parse().unwrap());
+            let admission = test_writeback_admission();
+            let response = maybe_store(
+                &request2,
+                &key2,
+                &policy2,
+                qpx_core::http_message::Response::from_http(response),
+                CacheStoreContext {
+                    timing: CacheStoreTiming {
+                        response_delay_secs: 0,
+                        body_read_timeout: Duration::from_secs(1),
+                        request_collapse_guard: Some(leader),
+                    },
+                    writeback_admission: &admission,
+                    backends: &backends2,
+                },
+            )
+            .await
+            .unwrap();
+            let _ = qpx_http::body::to_bytes(response.into_head_and_body().1)
+                .await
+                .unwrap();
+        });
+        let staged_key = tokio::time::timeout(Duration::from_secs(5), staged_rx.recv())
+            .await
+            .expect("second store must reach its staged publication")
+            .unwrap();
+        assert!(staged_key.starts_with("obj:"), "unexpected staged key");
+
+        publish(
+            &request,
+            &key,
+            &backends,
+            "public, max-age=300",
+            "new",
+            "new",
+            false,
+        )
+        .await;
+        let newer_index: VariantIndex =
+            serde_json::from_slice(&backend.get("ns", &index_key).await.unwrap().unwrap()).unwrap();
+        assert_eq!(newer_index.variants.len(), 1);
+        assert_ne!(newer_index.variants[0], first_generation);
+        let newer_key = newer_index.variants[0].clone();
+
+        while completed.try_recv().is_ok() {}
+        release.notify_one();
+        store_task.await.unwrap();
+        let _committed = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let event = completed.recv().await.unwrap();
+                if event.starts_with("idx:") {
+                    break event;
+                }
+            }
+        })
+        .await
+        .expect("second store must commit its index update");
+        let final_index: VariantIndex =
+            serde_json::from_slice(&backend.get("ns", &index_key).await.unwrap().unwrap()).unwrap();
+        assert_eq!(
+            final_index.variants,
+            vec![newer_key.clone()],
+            "delayed second store from a replayed 304 must not replace a newer generation"
+        );
+        drop(backends);
+        drop(backend);
+        let _ = std::fs::remove_dir_all(root);
+    })
+    .await
+    .expect("bounded delayed-304 second-store regression");
+}
