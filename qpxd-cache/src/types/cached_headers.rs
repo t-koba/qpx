@@ -109,8 +109,10 @@ impl CachedHeaders {
             request_headers,
             request_method,
             None,
-            status,
-            self.map(),
+            &crate::store::ResponseHead {
+                status,
+                headers: self.map(),
+            },
             policy,
             Some(freshness),
             directives,
