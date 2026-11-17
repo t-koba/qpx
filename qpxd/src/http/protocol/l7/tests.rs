@@ -92,6 +92,42 @@ async fn finalize_response_sanitizes_h2_trailers_for_h1_downstream() {
 }
 
 #[tokio::test]
+async fn prepare_request_rejects_forbidden_declared_h1_trailers() {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert(
+        http::header::CONTENT_LENGTH,
+        http::HeaderValue::from_static("2"),
+    );
+    let mut request = Request::from_http(
+        http::Request::builder()
+            .method(Method::POST)
+            .uri("https://example.com/upload")
+            .version(http::Version::HTTP_11)
+            .header(http::header::TRAILER, "content-length")
+            .body(Body::replay(Bytes::from_static(b"ok"), Some(trailers)))
+            .expect("request"),
+    );
+
+    prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
+
+    assert_eq!(
+        request
+            .body_mut()
+            .data()
+            .await
+            .expect("body frame")
+            .expect("body chunk"),
+        Bytes::from_static(b"ok")
+    );
+    let err = request
+        .body_mut()
+        .trailers()
+        .await
+        .expect_err("forbidden HTTP/1 request trailers must fail");
+    assert_eq!(err.to_string(), "body aborted");
+}
+
+#[tokio::test]
 async fn prepare_request_rejects_forbidden_h2_trailers() {
     let mut trailers = http::HeaderMap::new();
     trailers.insert(
