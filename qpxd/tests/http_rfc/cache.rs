@@ -78,5 +78,31 @@ caches:
         ));
     }
 
+    // A client-supplied condition stays end-to-end. An origin 304 for that
+    // condition must not be converted into a stale cached representation with
+    // the origin's new metadata.
+    let conditional_uri = format!("http://{origin_addr}/cacheable-etag");
+    let prime_req = format!("GET {conditional_uri} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+    let (prime_status, _, prime_body) =
+        send_http1_and_read_response(proxy_addr, prime_req.as_bytes()).await?;
+    if prime_status != hyper::StatusCode::OK || prime_body != b"STALE-A" {
+        return Err(anyhow!(
+            "expected stale ETag representation to be cached, got {prime_status:?} {prime_body:?}"
+        ));
+    }
+    wait_for_cache_store_entries(cache_store.clone(), 4).await?;
+
+    let client_condition_req = format!(
+        "GET {conditional_uri} HTTP/1.1\r\nHost: {origin_addr}\r\nIf-None-Match: \"v2\"\r\n\r\n"
+    );
+    let (status, _, body) =
+        send_http1_and_read_response(proxy_addr, client_condition_req.as_bytes()).await?;
+    if status != hyper::StatusCode::NOT_MODIFIED || !body.is_empty() {
+        return Err(anyhow!(
+            "client condition must receive an empty 304, got {status:?} body={:?}",
+            String::from_utf8_lossy(&body)
+        ));
+    }
+
     Ok(())
 }

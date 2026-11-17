@@ -539,6 +539,28 @@ async fn handle_origin(
             .header("set-cookie", "sid=abc; Path=/; HttpOnly")
             .body(full_body("COOKIE"))
             .unwrap(),
+        "/cacheable-etag" => {
+            let condition = req
+                .headers()
+                .get("if-none-match")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if condition.contains("\"v2\"") {
+                Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header("cache-control", "public, max-age=0")
+                    .header("etag", "\"v2\"")
+                    .body(full_body(""))
+                    .unwrap()
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("cache-control", "public, max-age=0")
+                    .header("etag", "\"v1\"")
+                    .body(full_body("STALE-A"))
+                    .unwrap()
+            }
+        }
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(full_body("not found"))

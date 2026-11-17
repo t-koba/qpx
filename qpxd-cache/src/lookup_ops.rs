@@ -401,11 +401,16 @@ async fn load_cached_response(
     )?))
 }
 
+/// Attach cached validators unless the client supplied its own condition.
+///
+/// Returns whether the cache owns revalidation for this request. A client
+/// condition is end-to-end and must not be replaced or consumed by the cache;
+/// a stored entry without validators still leaves the cache owning a plain
+/// revalidation request.
 pub fn attach_revalidation_headers(
     request_headers: &mut OwnedHeaders,
     state: &RevalidationState,
 ) -> bool {
-    // Do not override client-supplied conditions; they are end-to-end semantics.
     if request_headers.contains_key(&ord("if-none-match"))
         || request_headers.contains_key(&ord("if-modified-since"))
     {
@@ -414,21 +419,18 @@ pub fn attach_revalidation_headers(
 
     let etag = state.envelope.etag();
     let last_modified = state.envelope.last_modified();
-    let mut attached = false;
 
     if let Some(v) = etag
         && let Ok(hv) = http::HeaderValue::from_str(v)
     {
         request_headers.insert(ord("if-none-match"), hv);
-        attached = true;
     }
     if let Some(v) = last_modified
         && let Ok(hv) = http::HeaderValue::from_str(v)
     {
         request_headers.insert(ord("if-modified-since"), hv);
-        attached = true;
     }
-    attached
+    true
 }
 
 pub fn build_only_if_cached_miss_response(message: &str) -> Response<Body> {
