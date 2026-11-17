@@ -27,7 +27,9 @@ pub(crate) fn prepare_background_revalidation_request(
         "if-range",
         "range",
     ] {
-        let name = OrdinaryHeaderName::try_from(name).expect("ordinary revalidation condition");
+        let Ok(name) = OrdinaryHeaderName::try_from(name) else {
+            continue;
+        };
         req.headers_mut().remove(&name);
     }
     let _cache_owned = cache::attach_revalidation_headers(req.headers_mut(), state);
