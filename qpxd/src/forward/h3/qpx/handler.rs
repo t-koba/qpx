@@ -725,4 +725,56 @@ edges:
             Some(0)
         );
     }
+
+    #[tokio::test]
+    async fn qpx_http_request_with_many_tiny_fields_is_refused_at_count_ceiling() -> Result<()> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            // A real qpx-h3 request stream is used so this drives the production
+            // handler boundary, not just the shared count constant.
+            let mut tasks = tokio::task::JoinSet::new();
+            let (_client, conn, mut rx) =
+                crate::http3::qpx_stream::test_support::qpx_loopback(&mut tasks, None).await?;
+            let (mut h3_conn, mut sender) = ::h3::client::builder()
+                .build::<_, _, bytes::Bytes>(h3_quinn::Connection::new(conn))
+                .await?;
+            tasks.spawn(async move {
+                let _ = std::future::poll_fn(|cx| h3_conn.poll_close(cx)).await;
+            });
+            let mut remote = sender
+                .send_request(
+                    http::Request::get("https://localhost/many-tiny")
+                        .body(())
+                        .expect("request"),
+                )
+                .await?;
+            remote.finish().await?;
+            let stream = rx.recv().await.expect("captured qpx request stream");
+
+            let mut builder = http::Request::builder()
+                .version(http::Version::HTTP_3)
+                .method(http::Method::GET)
+                .uri("https://authority.test/many-tiny")
+                .header("host", "authority.test");
+            for i in 0..200 {
+                builder = builder.header(format!("x-tiny-{i:04}"), "b");
+            }
+            let head = Request::from_http(builder.body(()).expect("head"));
+            assert!(
+                head.headers().field_count() > crate::http3::codec::H3_MAX_HEADER_COUNT,
+                "test head must exceed the field-count ceiling"
+            );
+            let err = handler()
+                .handle_http_request(head, "127.0.0.1:12345".parse().expect("remote"), stream)
+                .await
+                .expect_err("many-tiny-field request must be refused");
+            assert!(
+                err.to_string()
+                    .contains("HTTP/3 request header fields exceeded configured limits"),
+                "unexpected error: {err}"
+            );
+            Ok::<(), anyhow::Error>(())
+        })
+        .await??;
+        Ok(())
+    }
 }
