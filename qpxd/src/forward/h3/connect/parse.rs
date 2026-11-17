@@ -48,6 +48,11 @@ pub(in crate::forward) fn validate_h3_connect_pseudo_headers(
     authority_port: u16,
     protocol: H3ConnectProtocol,
 ) -> Result<()> {
+    if headers.field_count() > crate::http3::codec::H3_MAX_HEADER_COUNT {
+        return Err(anyhow!(
+            "HTTP/3 request header fields exceeded configured limits"
+        ));
+    }
     if req_head.method() != ::http::Method::CONNECT {
         return Err(anyhow!("CONNECT method required"));
     }
@@ -470,6 +475,30 @@ mod tests {
                 H3ConnectProtocol::ConnectUdp,
             )
             .is_err()
+        );
+    }
+
+    #[cfg(feature = "http3")]
+    #[test]
+    fn connect_udp_with_many_tiny_headers_is_refused_at_count_ceiling() {
+        let mut builder = ::http::Request::builder()
+            .method(::http::Method::CONNECT)
+            .uri("https://proxy.example/.well-known/masque/udp/example.com/443/")
+            .header("capsule-protocol", "?1");
+        for i in 0..200 {
+            builder = builder.header(format!("x-tiny-{i:04}"), "b");
+        }
+        let req = qpx_core::http_message::Request::from_http(builder.body(()).expect("request"));
+        assert!(
+            validate_h3_connect_pseudo_headers(
+                &req,
+                req.headers(),
+                "proxy.example",
+                443,
+                H3ConnectProtocol::ConnectUdp,
+            )
+            .is_err(),
+            "many-tiny-header CONNECT-UDP must be refused at the count ceiling",
         );
     }
 

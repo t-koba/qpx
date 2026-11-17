@@ -88,7 +88,7 @@ struct H3HeaderCountTooLarge;
 
 #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 pub(crate) fn h3_request_to_owned<B>(mut req: Http1Request<B>) -> Result<Request<B>> {
-    if req.method() != http::Method::CONNECT && req.headers().len() > H3_MAX_HEADER_COUNT {
+    if req.headers().len() > H3_MAX_HEADER_COUNT {
         return Err(H3HeaderCountTooLarge.into());
     }
     *req.version_mut() = http::Version::HTTP_3;
@@ -537,6 +537,22 @@ mod tests {
         assert!(
             result.is_err(),
             "many-tiny-header H3 request must be refused at the count ceiling",
+        );
+    }
+
+    #[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
+    #[test]
+    fn h3_connect_with_many_tiny_headers_is_refused_at_count_ceiling() {
+        let mut builder = ::http::Request::builder()
+            .method(::http::Method::CONNECT)
+            .uri("proxy.example:443");
+        for i in 0..200 {
+            builder = builder.header(format!("x-tiny-{i:04}"), "b");
+        }
+        let request = builder.body(()).expect("request");
+        assert!(
+            h3_request_to_owned(request).is_err(),
+            "many-tiny-header H3 CONNECT must be refused at the count ceiling",
         );
     }
 
