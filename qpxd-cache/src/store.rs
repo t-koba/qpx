@@ -26,6 +26,7 @@ use qpx_core::http_message::{
     Headers as OwnedHeaders, OrdinaryHeaderName, Request as OwnerRequest,
 };
 use qpx_http::body::Body;
+use qpx_http::protocol::semantics::sanitize_hop_by_hop_headers;
 
 fn ord(name: &str) -> OrdinaryHeaderName {
     OrdinaryHeaderName::try_from(name).expect("ordinary header name")
@@ -77,14 +78,21 @@ pub async fn maybe_store(
         return Ok(response);
     };
 
+    // RFC 9110 §7.6.1: hop-by-hop fields, including fields nominated by
+    // Connection, do not participate in cache decisions or stored metadata.
+    // The live response stays untouched for framing and downstream egress.
+    let mut cache_headers = response.headers().clone();
+    sanitize_hop_by_hop_headers(&mut cache_headers, false);
+
     let now = now_millis();
-    let resp_directives = parse_response_directives(response.headers());
-    let freshness = freshness_lifetime_secs(response.headers(), policy, now, &resp_directives);
+    let resp_directives = parse_response_directives(&cache_headers);
+    let freshness = freshness_lifetime_secs(&cache_headers, policy, now, &resp_directives);
     let is_storable = is_response_storable(
         request_headers,
         request_method,
         Some(key),
-        &response,
+        response.status(),
+        &cache_headers,
         policy,
         freshness,
         &resp_directives,
@@ -109,7 +117,7 @@ pub async fn maybe_store(
                 return Ok(response);
             }
         };
-    let vary = parse_vary(response.headers());
+    let vary = parse_vary(&cache_headers);
     let vary = match vary {
         VarySpec::Any => {
             response
@@ -135,11 +143,11 @@ pub async fn maybe_store(
         return Ok(response);
     };
 
-    let storage_key = response_storage_key(request_method, response.headers(), key)
-        .unwrap_or_else(|| key.clone());
+    let storage_key =
+        response_storage_key(request_method, &cache_headers, key).unwrap_or_else(|| key.clone());
     let storage_primary = storage_key.primary_hash_arc();
     let initial_age_secs =
-        initial_age_secs(response.headers(), now, context.timing.response_delay_secs);
+        initial_age_secs(&cache_headers, now, context.timing.response_delay_secs);
     let Some(vary_values) = cache_vary_values(
         request_headers.view(),
         &vary,
@@ -164,7 +172,7 @@ pub async fn maybe_store(
         storage_primary,
         variant_key,
         status: response.status().as_u16(),
-        headers: CachedHeaders::from_live(response.headers(), &resp_directives),
+        headers: CachedHeaders::from_live(&cache_headers, &resp_directives),
         stored_at_ms: now,
         initial_age_secs,
         response_delay_secs: context.timing.response_delay_secs,
@@ -739,7 +747,8 @@ pub(super) fn is_response_storable(
     request_headers: &OwnedHeaders,
     request_method: &Method,
     key: Option<&CacheRequestKey>,
-    response: &Response<Body>,
+    response_status: StatusCode,
+    response_headers: &OwnedHeaders,
     policy: &CachePolicyConfig,
     freshness_lifetime: Option<u64>,
     directives: &ResponseDirectives,
@@ -748,7 +757,7 @@ pub(super) fn is_response_storable(
         return false;
     };
     let understands_status_requirements =
-        cache_understands_status_storage_requirements(response.status());
+        cache_understands_status_storage_requirements(response_status);
     if directives.must_understand && !understands_status_requirements {
         return false;
     }
@@ -757,14 +766,14 @@ pub(super) fn is_response_storable(
     {
         return false;
     }
-    if response.headers().contains_key(&ord(SET_COOKIE.as_str())) {
+    if response_headers.contains_key(&ord(SET_COOKIE.as_str())) {
         if !policy.allow_set_cookie_store {
             return false;
         }
         if !directives.public {
             return false;
         }
-        match parse_vary(response.headers()) {
+        match parse_vary(response_headers) {
             VarySpec::Fields(fields) if fields.iter().any(|name| name == "cookie") => {}
             _ => return false,
         }
@@ -786,23 +795,23 @@ pub(super) fn is_response_storable(
     if request_headers.contains_key(&ord("authorization"))
         && !policy.allow_authorization_without_vary_store
     {
-        match parse_vary(response.headers()) {
+        match parse_vary(response_headers) {
             VarySpec::Fields(fields) if fields.iter().any(|name| name == "authorization") => {}
             _ => return false,
         }
     }
-    if response.status().is_informational() {
+    if response_status.is_informational() {
         return false;
     }
-    if response.status() == StatusCode::PARTIAL_CONTENT {
+    if response_status == StatusCode::PARTIAL_CONTENT {
         return false;
     }
     match *request_method {
         Method::GET | Method::HEAD | Method::QUERY => true,
         Method::POST | Method::PATCH => {
-            has_explicit_freshness(response.headers(), directives)
+            has_explicit_freshness(response_headers, directives)
                 && key
-                    .map(|key| content_location_matches_target(response.headers(), key))
+                    .map(|key| content_location_matches_target(response_headers, key))
                     .unwrap_or(false)
         }
         _ => false,

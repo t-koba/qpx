@@ -1,6 +1,54 @@
 use super::*;
 
 #[tokio::test]
+async fn connection_nominated_cache_control_does_not_filter_stored_fields() {
+    // RFC 9110 §7.6.1: fields nominated by Connection are hop-by-hop and must
+    // not change how a cache processes the message. A qualified no-cache list
+    // carried only as a hop-by-hop field must not strip that field from a hit.
+    let req = make_get_request("/hop-cache-control");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let backends = backend_map();
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "max-age=60, no-cache=\"X-Visible\"")
+        .header(http::header::CONNECTION, "Cache-Control")
+        .header("x-visible", "origin")
+        .header(CONTENT_LENGTH, "4")
+        .body(Body::from("body"))
+        .expect("response");
+    store_and_drain(
+        &req,
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let outcome = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
+    let hit = match outcome {
+        LookupOutcome::Hit(hit) => hit,
+        other => panic!("expected fresh hit, got {other:?}"),
+    };
+    let headers = crate::tests::wire_headers(hit.headers());
+    assert_eq!(
+        headers.get("x-visible").and_then(|v| v.to_str().ok()),
+        Some("origin"),
+        "hop-by-hop Cache-Control must not filter the stored field"
+    );
+}
+
+#[tokio::test]
 async fn stale_revalidation_lookup_defers_body_fetch_until_stale_fallback() {
     let req = make_get_request("/revalidate-body-lazy");
     let key = CacheRequestKey::for_lookup(&req, "http")

@@ -105,16 +105,12 @@ impl CachedHeaders {
         directives: &ResponseDirectives,
     ) -> bool {
         // Storability inspects policy fields, never the stored framing text.
-        let mut response = Response::new(Body::empty());
-        *response.status_mut() = status;
-        *response.headers_mut() = self.map().clone();
-        response.headers_mut().remove_content_length();
-        response.headers_mut().set_content_length(0);
         crate::store::is_response_storable(
             request_headers,
             request_method,
             None,
-            &response,
+            status,
+            self.map(),
             policy,
             Some(freshness),
             directives,
