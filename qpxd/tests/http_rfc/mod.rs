@@ -561,6 +561,42 @@ async fn handle_origin(
                     .unwrap()
             }
         }
+        "/swr-etag" => {
+            let condition = req
+                .headers()
+                .get("if-none-match")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            if condition.contains("\"v2\"") {
+                // A client condition that matches the origin's current
+                // representation. A cache-owned background revalidation must
+                // never be confused by this response.
+                Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header("cache-control", "public, max-age=60")
+                    .header("etag", "\"v2\"")
+                    .body(full_body(""))
+                    .unwrap()
+            } else if condition.contains("\"v1\"") {
+                // The cached validator: the origin's real current body.
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("cache-control", "public, max-age=60")
+                    .header("etag", "\"v2\"")
+                    .body(full_body("FRESH-B"))
+                    .unwrap()
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header(
+                        "cache-control",
+                        "public, max-age=0, stale-while-revalidate=60",
+                    )
+                    .header("etag", "\"v1\"")
+                    .body(full_body("STALE-A"))
+                    .unwrap()
+            }
+        }
         _ => Response::builder()
             .status(StatusCode::NOT_FOUND)
             .body(full_body("not found"))

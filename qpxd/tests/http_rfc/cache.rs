@@ -104,5 +104,76 @@ caches:
         ));
     }
 
+    // A stale-while-revalidate cache refresh must be cache-owned even when the
+    // triggering client sent its own condition. Otherwise an origin 304 for
+    // the client's condition can refresh the stale cached representation as
+    // though it were the origin's current one.
+    let swr_uri = format!("http://{origin_addr}/swr-etag");
+    let prime_req = format!("GET {swr_uri} HTTP/1.1\r\nHost: {origin_addr}\r\n\r\n");
+    let (status, _, body) = send_http1_and_read_response(proxy_addr, prime_req.as_bytes()).await?;
+    if status != hyper::StatusCode::OK || body != b"STALE-A" {
+        return Err(anyhow!(
+            "expected stale SWR representation to be cached, got {status:?} {body:?}"
+        ));
+    }
+    wait_for_cache_store_entries(cache_store.clone(), 6).await?;
+
+    let swr_req =
+        format!("GET {swr_uri} HTTP/1.1\r\nHost: {origin_addr}\r\nIf-None-Match: \"v2\"\r\n\r\n");
+
+    // Retry a collapsed dispatch that did not start the background refresh.
+    let mut refreshed = false;
+    for _ in 0..3 {
+        let (status, _, body) =
+            send_http1_and_read_response(proxy_addr, swr_req.as_bytes()).await?;
+        let accepted = (status == hyper::StatusCode::OK
+            && (body == b"STALE-A" || body == b"FRESH-B"))
+            || (status == hyper::StatusCode::NOT_MODIFIED && body.is_empty());
+        if !accepted {
+            return Err(anyhow!(
+                "SWR client condition must not bypass the cached representation, got {status:?} {body:?}"
+            ));
+        }
+        let deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            refreshed = cache_store
+                .lock()
+                .await
+                .values()
+                .any(|value| value.windows(7).any(|window| window == b"FRESH-B"));
+            if refreshed {
+                break;
+            }
+            if Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        if refreshed {
+            break;
+        }
+    }
+    if !refreshed {
+        return Err(anyhow!(
+            "background revalidation did not publish the origin's current body"
+        ));
+    }
+
+    let deadline = Instant::now() + Duration::from_secs(3);
+    loop {
+        let (status, _, body) =
+            send_http1_and_read_response(proxy_addr, prime_req.as_bytes()).await?;
+        if status == hyper::StatusCode::OK && body == b"FRESH-B" {
+            break;
+        }
+        if Instant::now() >= deadline {
+            return Err(anyhow!(
+                "cache must serve the refreshed origin body, got {status:?} body={:?}",
+                String::from_utf8_lossy(&body)
+            ));
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
     Ok(())
 }

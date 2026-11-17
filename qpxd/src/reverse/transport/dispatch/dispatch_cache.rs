@@ -1,7 +1,8 @@
 use super::{ReverseCacheInput, ReverseCacheOutcome, ReverseCacheState};
 use crate::http::capture::cache_flow::{
     CacheLookupDecision, CacheWritebackContext, clone_request_head_for_revalidation,
-    lookup_with_deferred_snapshot, lookup_with_revalidation, process_upstream_response_for_cache,
+    lookup_with_deferred_snapshot, lookup_with_revalidation,
+    prepare_background_revalidation_request, process_upstream_response_for_cache,
 };
 use crate::http::dispatch::{
     DispatchAuditContext, DispatchCacheCollapseOutcome, DispatchCacheDecisionInput,
@@ -339,7 +340,9 @@ fn maybe_spawn_reverse_revalidation(req: &OwnerRequest<Body>, input: ReverseReva
     let lookup_key = lookup_key.clone();
     let target_key = target_key.clone();
     let upstream_trust = route.upstream_trust.clone();
-    let bg_req = clone_request_head_for_revalidation(req).map_body(|()| Body::empty());
+    let mut bg_req = clone_request_head_for_revalidation(req);
+    prepare_background_revalidation_request(&mut bg_req, &state);
+    let bg_req = bg_req.map_body(|()| Body::empty());
     let pools = runtime_state.pools.clone();
     tokio::spawn(async move {
         let _guard = guard;
@@ -359,7 +362,7 @@ fn maybe_spawn_reverse_revalidation(req: &OwnerRequest<Body>, input: ReverseReva
             return;
         };
         let response_delay_secs = started.elapsed().as_secs();
-        let _ = process_upstream_response_for_cache(
+        let refreshed = process_upstream_response_for_cache(
             resp,
             CacheWritebackContext {
                 request_snapshot: &snapshot,
@@ -379,6 +382,11 @@ fn maybe_spawn_reverse_revalidation(req: &OwnerRequest<Body>, input: ReverseReva
             },
         )
         .await;
+        // Dropping the primary response body aborts the cache writeback
+        // mirror; drain it so the refreshed representation is published.
+        if let Ok(response) = refreshed {
+            let _ = qpx_http::body::to_bytes(response.into_head_and_body().1).await;
+        }
     });
 }
 

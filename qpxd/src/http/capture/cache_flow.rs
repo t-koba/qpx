@@ -1,13 +1,37 @@
 use anyhow::Result;
 use hyper::StatusCode;
 use qpx_core::config::CachePolicyConfig;
-use qpx_core::http_message::Request as OwnerRequest;
 use qpx_core::http_message::Response;
+use qpx_core::http_message::{OrdinaryHeaderName, Request as OwnerRequest};
 use qpx_http::body::Body;
 use qpxd_cache::{self as cache, CacheBackend, CacheRequestKey, LookupOutcome, RevalidationState};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// Build a cache-owned revalidation request from a client request head.
+///
+/// Client preconditions and ranges are end-to-end for the client's own
+/// response. A background refresh must not inherit them: an origin 304 for a
+/// client condition would then be mistaken for a 304 to the cache's validators
+/// and used to refresh a different cached representation.
+pub(crate) fn prepare_background_revalidation_request(
+    req: &mut OwnerRequest<()>,
+    state: &cache::RevalidationState,
+) {
+    for name in [
+        "if-match",
+        "if-none-match",
+        "if-modified-since",
+        "if-unmodified-since",
+        "if-range",
+        "range",
+    ] {
+        let name = OrdinaryHeaderName::try_from(name).expect("ordinary revalidation condition");
+        req.headers_mut().remove(&name);
+    }
+    let _cache_owned = cache::attach_revalidation_headers(req.headers_mut(), state);
+}
 
 pub(crate) fn clone_request_head_for_revalidation<B>(req: &OwnerRequest<B>) -> OwnerRequest<()> {
     let mut out = OwnerRequest::new(());
@@ -70,13 +94,10 @@ pub(crate) async fn lookup_with_revalidation(
     .await?
     {
         LookupOutcome::Hit(hit) => Ok((CacheLookupDecision::Hit(hit), None)),
-        LookupOutcome::StaleWhileRevalidate(hit, state) => {
-            cache::attach_revalidation_headers(req.headers_mut(), &state);
-            Ok((
-                CacheLookupDecision::StaleWhileRevalidate(hit, Box::new(state)),
-                None,
-            ))
-        }
+        LookupOutcome::StaleWhileRevalidate(hit, state) => Ok((
+            CacheLookupDecision::StaleWhileRevalidate(hit, Box::new(state)),
+            None,
+        )),
         LookupOutcome::Revalidate(state) => {
             let cache_owned = cache::attach_revalidation_headers(req.headers_mut(), &state);
             Ok((CacheLookupDecision::Miss, cache_owned.then_some(state)))
@@ -126,7 +147,6 @@ pub(crate) async fn lookup_with_deferred_snapshot(
         },
         LookupOutcome::StaleWhileRevalidate(hit, state) => {
             let request_head_snapshot = clone_request_head_for_revalidation(req);
-            cache::attach_revalidation_headers(req.headers_mut(), &state);
             DeferredSnapshotCacheLookup {
                 decision: CacheLookupDecision::StaleWhileRevalidate(hit, Box::new(state)),
                 revalidation_state: None,
