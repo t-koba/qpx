@@ -91,6 +91,37 @@ async fn finalize_response_sanitizes_h2_trailers_for_h1_downstream() {
     );
 }
 
+#[test]
+fn prepare_request_strips_connection_nominated_fields_on_h2_and_h3() {
+    for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+        let mut request = Request::from_http(
+            http::Request::builder()
+                .method(Method::GET)
+                .uri("https://example.com/resource")
+                .version(version)
+                .header("connection", "x-private")
+                .header("x-private", "secret")
+                .body(Body::empty())
+                .expect("request"),
+        );
+
+        prepare_request_with_headers_in_place(&mut request, "qpx", None, false);
+
+        assert!(
+            !request
+                .headers()
+                .contains_key(&OrdinaryHeaderName::try_from("connection").unwrap()),
+            "connection must be stripped for {version:?}"
+        );
+        assert!(
+            !request
+                .headers()
+                .contains_key(&OrdinaryHeaderName::try_from("x-private").unwrap()),
+            "nominated extension field must be stripped for {version:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn prepare_request_rejects_forbidden_declared_h1_trailers() {
     let mut trailers = http::HeaderMap::new();
