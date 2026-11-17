@@ -236,11 +236,10 @@ async fn reverse_client_condition_does_not_replay_stale_cached_response() -> Res
     let cache_addr = start_http_cache_backend(cache_state.clone(), cache_ops.clone()).await?;
     let (origin_addr, origin_hits) = start_conditional_etag_backend().await?;
 
-    let (port, _qpxd) =
-        spawn_qpxd_on_random_port(&cfg, dir.join("reverse-conditional-cache.log"), |port| {
-            let state_dir_yaml = yaml_quote_path(&state_dir);
-            format!(
-                r#"upstreams:
+    let (port, _qpxd) = spawn_qpxd_on_random_port(&cfg, dir.join("reverse-cache.log"), |port| {
+        let state_dir_yaml = yaml_quote_path(&state_dir);
+        format!(
+            r#"upstreams:
 - name: origin
   url: http://{origin_addr}
 state_dir: {state_dir_yaml}
@@ -274,9 +273,9 @@ edges:
       type: upstream
       upstreams:
       - origin"#,
-                state_dir_yaml = state_dir_yaml
-            )
-        })?;
+            state_dir_yaml = state_dir_yaml
+        )
+    })?;
 
     let client = test_client();
     let uri: hyper::Uri = format!("http://127.0.0.1:{port}/cache").parse()?;
