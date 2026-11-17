@@ -994,6 +994,47 @@ async fn send_http1_head_preserves_content_length_and_removes_trailer() {
 }
 
 #[tokio::test]
+async fn send_http1_response_sanitizes_forbidden_trailer_declarations() {
+    let mut trailers = http::HeaderMap::new();
+    trailers.insert(CONTENT_LENGTH, HeaderValue::from_static("99"));
+    trailers.insert("authorization", HeaderValue::from_static("Bearer secret"));
+    trailers.insert("set-cookie", HeaderValue::from_static("sid=1"));
+    trailers.insert("x-checksum", HeaderValue::from_static("abc"));
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .body(Body::replay(Bytes::new(), Some(trailers)))
+        .expect("response");
+
+    let (mut client, server) = tokio::io::duplex(4096);
+    let (read_half, mut write_half) = tokio::io::split(server);
+    let mut head_buf = BytesMut::new();
+    send_http1_response_with_interim(
+        &mut write_half,
+        Version::HTTP_11,
+        &Method::GET,
+        OwnerResponse::from_http(response),
+        &[],
+        false,
+        Duration::from_secs(30),
+        &mut head_buf,
+    )
+    .await
+    .expect("send response");
+    drop(write_half);
+    drop(read_half);
+
+    let mut raw = Vec::new();
+    client.read_to_end(&mut raw).await.expect("read response");
+    let text = String::from_utf8(raw).expect("utf8");
+    let lower = text.to_ascii_lowercase();
+    assert!(lower.contains("trailer: x-checksum"));
+    assert!(lower.contains("x-checksum: abc"));
+    for forbidden in ["content-length: 99", "authorization", "set-cookie"] {
+        assert!(!lower.contains(forbidden), "leaked {forbidden}: {text}");
+    }
+}
+
+#[tokio::test]
 async fn finalized_head_204_owner_response_omits_content_length_at_http1_egress() {
     let response = finalized_head_response(StatusCode::NO_CONTENT);
     let (mut client, server) = tokio::io::duplex(4096);
