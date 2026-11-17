@@ -6,6 +6,44 @@ fn qpxd_log_tail(dir: &std::path::Path) -> String {
     lines.into_iter().rev().collect::<Vec<_>>().join("\n")
 }
 
+async fn start_conditional_etag_backend() -> Result<(SocketAddr, Arc<AtomicUsize>)> {
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = StdTcpListener::bind(("127.0.0.1", 0))?;
+    listener.set_nonblocking(true)?;
+    let addr = listener.local_addr()?;
+    let service_hits = hits.clone();
+    let service = service_fn(move |req: Request<hyper::body::Incoming>| {
+        let hits = service_hits.clone();
+        async move {
+            hits.fetch_add(1, Ordering::Relaxed);
+            let condition = req
+                .headers()
+                .get("if-none-match")
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or("");
+            let date = httpdate::fmt_http_date(SystemTime::now());
+            let response = if condition.contains("\"v2\"") {
+                Response::builder()
+                    .status(StatusCode::NOT_MODIFIED)
+                    .header("cache-control", "public, max-age=0")
+                    .header("date", date)
+                    .header("etag", "\"v2\"")
+                    .body(empty_body())
+            } else {
+                Response::builder()
+                    .status(StatusCode::OK)
+                    .header("cache-control", "public, max-age=0")
+                    .header("date", date)
+                    .header("etag", "\"v1\"")
+                    .body(full_body("STALE-A"))
+            };
+            Ok::<_, Infallible>(response.unwrap())
+        }
+    });
+    spawn_http1_service(listener, service).await;
+    Ok((addr, hits))
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_cache_uses_http_backend_store() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-cache-e2e")?;
@@ -184,5 +222,110 @@ edges:
             .contains("link: </style.css>; rel=preload; as=style"),
         "missing Link header:\n{raw}"
     );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reverse_client_condition_does_not_replay_stale_cached_response() -> Result<()> {
+    let dir = temp_dir("qpxd-reverse-conditional-cache")?;
+    let cfg = dir.join("reverse-conditional-cache.yaml");
+    let state_dir = dir.join("state");
+    fs::create_dir_all(&state_dir)?;
+    let cache_state = Arc::new(Mutex::new(HashMap::<String, Vec<u8>>::new()));
+    let cache_ops = Arc::new(AtomicUsize::new(0));
+    let cache_addr = start_http_cache_backend(cache_state.clone(), cache_ops.clone()).await?;
+    let (origin_addr, origin_hits) = start_conditional_etag_backend().await?;
+
+    let (port, _qpxd) =
+        spawn_qpxd_on_random_port(&cfg, dir.join("reverse-conditional-cache.log"), |port| {
+            let state_dir_yaml = yaml_quote_path(&state_dir);
+            format!(
+                r#"upstreams:
+- name: origin
+  url: http://{origin_addr}
+state_dir: {state_dir_yaml}
+runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false
+caches:
+- name: http-cache
+  kind: http
+  endpoint: http://{cache_addr}
+  timeout_ms: 10000
+  max_object_bytes: 1048576
+edges:
+- kind: reverse
+  name: reverse
+  listen: 127.0.0.1:{port}
+  routes:
+  - name: cache
+    match:
+      host:
+      - cache.local
+      path:
+      - /cache
+    cache:
+      enabled: true
+      backend: http-cache
+      namespace: reverse-cache
+      default_ttl_secs: 60
+      max_object_bytes: 1048576
+    target:
+      type: upstream
+      upstreams:
+      - origin"#,
+                state_dir_yaml = state_dir_yaml
+            )
+        })?;
+
+    let client = test_client();
+    let uri: hyper::Uri = format!("http://127.0.0.1:{port}/cache").parse()?;
+    let prime = client
+        .request(
+            Request::builder()
+                .method("GET")
+                .uri(uri.clone())
+                .header("host", "cache.local")
+                .body(empty_body())?,
+        )
+        .await?;
+    assert_eq!(prime.status(), StatusCode::OK);
+    assert_eq!(&collect_body(prime.into_body()).await?[..], b"STALE-A");
+    let stored = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if cache_state.lock().await.len() >= 3 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    if stored.is_err() {
+        panic!(
+            "stale cached representation was not stored (qpxd log: {})",
+            qpxd_log_tail(&dir)
+        );
+    }
+
+    let conditional = client
+        .request(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header("host", "cache.local")
+                .header("if-none-match", "\"v2\"")
+                .body(empty_body())?,
+        )
+        .await?;
+    let status = conditional.status();
+    let body = collect_body(conditional.into_body()).await?;
+    if status != StatusCode::NOT_MODIFIED || !body.is_empty() {
+        panic!(
+            "client condition must receive an empty 304, got {status} body={:?} (qpxd log: {})",
+            String::from_utf8_lossy(&body),
+            qpxd_log_tail(&dir)
+        );
+    }
+    assert!(origin_hits.load(Ordering::Relaxed) >= 2);
     Ok(())
 }
