@@ -176,6 +176,24 @@ async fn replay_preserves_duplicates_and_uses_typed_head_body_and_range_lengths(
 }
 
 #[test]
+fn decoded_304_uses_representation_length_when_body_is_absent() {
+    // Metadata decoded from a backend carries body_len but no inline body.
+    // A 304 must describe the selected representation, not the empty decode.
+    let envelope = old_envelope();
+    assert_eq!(envelope.body.len(), 0);
+    assert_eq!(envelope.body_len, 9);
+
+    let nm = not_modified_from_envelope(&Method::GET, &envelope, 2000, "HIT")
+        .expect("304 from decoded metadata");
+    assert_eq!(nm.status(), StatusCode::NOT_MODIFIED);
+    assert_eq!(
+        crate::tests::wire_headers(nm.headers())[CONTENT_LENGTH],
+        "9"
+    );
+    assert_eq!(crate::tests::wire_headers(nm.headers())[ETAG], "\"v1\"");
+}
+
+#[test]
 fn head_falls_back_to_stored_body_length_for_absent_invalid_or_conflicting_declarations() {
     for values in [
         vec![],

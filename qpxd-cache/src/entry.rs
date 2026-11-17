@@ -15,23 +15,6 @@ pub fn primary_from_variant_key(variant_key: &str) -> Option<&str> {
     rest.split(':').next()
 }
 
-pub fn response_from_envelope(
-    envelope: &CachedResponseEnvelope,
-    now_ms: u64,
-    cache_state: &'static str,
-) -> Result<Response<Body>> {
-    build_response(BuildResponseParams {
-        envelope,
-        now_ms,
-        cache_state,
-        body: envelope.body.to_body(),
-        body_len: envelope.body.len(),
-        status_override: None,
-        content_length_override: None,
-        content_range: None,
-    })
-}
-
 pub fn response_from_envelope_for_request(
     request_method: &Method,
     req: &RequestDirectives,
@@ -147,8 +130,19 @@ pub fn not_modified_from_envelope(
     now_ms: u64,
     cache_state: &'static str,
 ) -> Result<Response<Body>> {
-    let mut response = response_from_envelope(envelope, now_ms, cache_state)?;
-    *response.status_mut() = StatusCode::NOT_MODIFIED;
+    // A backend-decoded envelope has no inline body, so the replay body length
+    // is not the representation length. A 304 describes the selected
+    // representation even though this message itself carries no body.
+    let mut response = build_response(BuildResponseParams {
+        envelope,
+        now_ms,
+        cache_state,
+        body: Body::empty(),
+        body_len: envelope.body_len,
+        status_override: Some(StatusCode::NOT_MODIFIED),
+        content_length_override: Some(envelope.body_len),
+        content_range: None,
+    })?;
     qpx_http::protocol::semantics::normalize_response_for_request(request_method, &mut response);
     Ok(response)
 }
