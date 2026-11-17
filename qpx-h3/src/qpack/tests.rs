@@ -689,6 +689,51 @@ fn decoded_request_preserves_field_occurrences_and_length_states() {
 }
 
 #[test]
+fn request_sink_rejects_pseudo_ordering_duplicates_and_authority_mismatch() {
+    use super::fields::{DecodedField, FieldSink, RequestHeadSink};
+
+    let cases: &[(&[(&str, &str)], &str)] = &[
+        (&[(":method", "GET")], "duplicate :method"),
+        (&[(":authority", "example.test")], "duplicate :authority"),
+        (
+            &[("x-test", "value"), (":path", "/")],
+            "pseudo header :path appeared after a regular header",
+        ),
+        (&[(":status", "200")], "unsupported pseudo header :status"),
+        (
+            &[("host", "example.test"), ("host", "example.test")],
+            "multiple Host headers",
+        ),
+        (
+            &[("host", "other.test")],
+            "Host header does not match request authority",
+        ),
+    ];
+    for (fields, expected) in cases {
+        let result = (|| {
+            let mut sink = RequestHeadSink::default();
+            for (name, value) in [
+                (":method", "GET"),
+                (":scheme", "https"),
+                (":authority", "example.test"),
+                (":path", "/"),
+            ]
+            .into_iter()
+            .chain(fields.iter().copied())
+            {
+                sink.push(DecodedField::owned(
+                    name.to_string(),
+                    bytes::Bytes::from_static(value.as_bytes()),
+                ))?;
+            }
+            sink.finish()
+        })();
+        let err = result.expect_err(expected);
+        assert!(err.to_string().contains(expected), "{expected}: {err}");
+    }
+}
+
+#[test]
 fn request_sink_preserves_per_occurrence_sensitivity() {
     use super::fields::{DecodedField, FieldSink, RequestHeadSink};
     let mut sink = RequestHeadSink::default();
