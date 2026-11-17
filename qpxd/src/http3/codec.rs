@@ -25,10 +25,13 @@ pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::Header
         }
         headers.append(name, value);
     }
-    if !cookies.is_empty()
-        && let Some(merged) = crate::http::codec::h2::join_duplicate_cookie_values(cookies.iter())?
-    {
-        headers.insert(COOKIE, merged);
+    if cookies.len() > 1 {
+        if let Some(merged) = crate::http::codec::h2::join_duplicate_cookie_values(cookies.iter())?
+        {
+            headers.insert(COOKIE, merged);
+        }
+    } else if let Some(value) = cookies.pop() {
+        headers.insert(COOKIE, value);
     }
     Ok(headers)
 }
@@ -250,7 +253,7 @@ mod tests {
 
     #[test]
     fn h3_header_import_joins_empty_cookie_fields_like_h2() {
-        for values in [vec!["", ""], vec!["", "a=1"]] {
+        for values in [vec![""], vec!["", ""], vec!["", "a=1"], vec!["a=1"]] {
             let mut source = ::http::HeaderMap::new();
             for value in values {
                 source.append("cookie", ::http::HeaderValue::from_static(value));
