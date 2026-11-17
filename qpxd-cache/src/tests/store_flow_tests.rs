@@ -153,6 +153,51 @@ async fn unsafe_method_invalidates_cached_target() {
 }
 
 #[tokio::test]
+async fn connection_nominated_vary_cannot_authorize_credentialed_store() {
+    // A hop-by-hop Vary cannot satisfy the shared-storage Vary gate for an
+    // Authorization-bearing request; the credentialed representation must miss.
+    let mut req = make_get_request("/hop-authorization");
+    req.headers_mut().insert(
+        ord("authorization"),
+        http::HeaderValue::from_static("Bearer secret"),
+    );
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let response = Response::builder()
+        .status(StatusCode::OK)
+        .header(CACHE_CONTROL, "public, max-age=60")
+        .header(http::header::CONNECTION, "Vary")
+        .header(VARY, "Authorization")
+        .header(CONTENT_LENGTH, "4")
+        .body(Body::from("body"))
+        .expect("response");
+    let backends = backend_map();
+    store_and_drain(
+        &req,
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
+    assert!(
+        matches!(out, LookupOutcome::Miss),
+        "hop-by-hop Vary must not authorize credentialed storage"
+    );
+}
+
+#[tokio::test]
 async fn connection_nominated_content_location_does_not_invalidate_other_targets() {
     // RFC 9110 §7.6.1: Connection-nominated fields are hop-by-hop and must not
     // be interpreted as end-to-end invalidation targets.
