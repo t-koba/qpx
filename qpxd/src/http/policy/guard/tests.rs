@@ -247,6 +247,28 @@ fn guard_allows_single_chunked_on_http11_and_trailers_on_h2() {
     );
 }
 
+#[test]
+fn guard_rejects_split_te_headers_on_h2_and_h3() {
+    let profile = strict_profile();
+    for version in [http::Version::HTTP_2, http::Version::HTTP_3] {
+        let mut req = head_request(version);
+        req.headers_mut().append(
+            OrdinaryHeaderName::try_from(http::header::TE).unwrap(),
+            http::HeaderValue::from_static("trailers"),
+        );
+        req.headers_mut().append(
+            OrdinaryHeaderName::try_from(http::header::TE).unwrap(),
+            http::HeaderValue::from_static("gzip"),
+        );
+        let reject = profile.evaluate_request(&req).expect("guard");
+        assert_eq!(
+            reject.expect("split TE headers rejected on H2/H3").body,
+            "HTTP/2 and HTTP/3 TE must be trailers",
+            "version {version:?}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn guard_streams_observed_json_without_full_bytes_materialization() {
     let profile = CompiledHttpGuardProfile {

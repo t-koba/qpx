@@ -357,10 +357,11 @@ fn validate_invalid_framing(req: &Request<Body>) -> Option<HttpGuardReject> {
                 "Connection header is not valid on HTTP/2 or HTTP/3 requests",
             ));
         }
-        if let Some(value) = req
-            .headers()
-            .get(&OrdinaryHeaderName::try_from(http::header::TE).expect("TE is ordinary"))
-        {
+        let te = OrdinaryHeaderName::try_from(http::header::TE).expect("TE is ordinary");
+        // Check every field value: multiple `TE` field lines are equivalent to
+        // one comma-joined value, so inspecting only the first would let a
+        // `TE: trailers` + `TE: gzip` pair bypass the trailers-only rule.
+        for value in req.headers().get_all(&te) {
             let Ok(value) = value.to_str() else {
                 return Some(bad_request("invalid TE header"));
             };
