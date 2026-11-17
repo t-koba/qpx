@@ -8,6 +8,7 @@ use http::header::{CONTENT_LOCATION, LOCATION};
 use hyper::{Method, StatusCode};
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_message::{Headers as OwnedHeaders, OrdinaryHeaderName};
+use qpx_http::protocol::semantics::sanitize_hop_by_hop_headers;
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use url::Url;
@@ -33,9 +34,14 @@ pub async fn maybe_invalidate(
         return Ok(());
     };
 
+    // RFC 9110 §7.6.1: a Connection-nominated Location/Content-Location is
+    // hop-by-hop and must not purge another primary.
+    let mut invalidation_headers = response_headers.clone();
+    sanitize_hop_by_hop_headers(&mut invalidation_headers, false);
+
     let namespace = cache_namespace(policy, "default");
     let mut keys = invalidation_keys_for_target(key);
-    keys.extend(collect_invalidation_targets(key, response_headers));
+    keys.extend(collect_invalidation_targets(key, &invalidation_headers));
     let mut seen = HashSet::new();
     for k in keys {
         let primary = k.primary_hash_arc();

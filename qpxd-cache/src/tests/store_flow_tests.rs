@@ -153,6 +153,69 @@ async fn unsafe_method_invalidates_cached_target() {
 }
 
 #[tokio::test]
+async fn connection_nominated_content_location_does_not_invalidate_other_targets() {
+    // RFC 9110 §7.6.1: Connection-nominated fields are hop-by-hop and must not
+    // be interpreted as end-to-end invalidation targets.
+    let cached_req = make_get_request("/hop-invalidation-target");
+    let key = CacheRequestKey::for_lookup(&cached_req, "http")
+        .expect("key")
+        .expect("some key");
+    let backends = backend_map();
+    store_and_drain(
+        &cached_req,
+        &key,
+        &policy(),
+        make_response(StatusCode::OK, "max-age=60", "body-a"),
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let mutation_req = make_get_request("/hop-invalidation-mutation");
+    let target_key = CacheRequestKey::for_target(&mutation_req, "http")
+        .expect("key")
+        .expect("some key");
+    let mut mutation_headers = http::HeaderMap::new();
+    mutation_headers.insert(
+        http::header::CONNECTION,
+        http::HeaderValue::from_static("Content-Location"),
+    );
+    mutation_headers.insert(
+        CONTENT_LOCATION,
+        http::HeaderValue::from_static("/hop-invalidation-target"),
+    );
+    maybe_invalidate(
+        &Method::POST,
+        StatusCode::OK,
+        &crate::tests::owned_headers(&mutation_headers),
+        Some(&target_key),
+        &policy(),
+        &backends,
+    )
+    .await
+    .expect("invalidate");
+
+    let out = lookup(
+        &cached_req,
+        &key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("lookup");
+    assert!(
+        matches!(out, LookupOutcome::Hit(_)),
+        "hop-by-hop Content-Location must not invalidate another primary"
+    );
+}
+
+#[tokio::test]
 async fn ipv6_content_location_invalidates_only_same_authority_targets() {
     let backends = backend_map();
     let mut cached_request = qpx_core::http_message::Request::from_http(
