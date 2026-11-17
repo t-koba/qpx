@@ -17,7 +17,7 @@
 - `qpxf`: IPC/CGI/FastCGI/SCGI/WASM backend executor.
 - `qpxr`: capture stream receiver.
 - `qpxc`: capture/control CLI.
-- `xtask`: repository structure and budget gates.
+- `xtask`: repository structure gates and advisory size reporting.
 
 ## Owned HTTP Message Boundary
 
@@ -89,6 +89,9 @@ The repository gate is not a checklist in prose. It is enforced through:
 - `cargo test --workspace --locked`
 - `cargo doc --workspace --locked --no-deps --document-private-items` with `RUSTDOCFLAGS=-D warnings`
 - `cargo xtask structure`
-- `cargo xtask budget`
 - CI e2e, perf smoke, fuzz smoke, sanitizer, and release preflight jobs
+
+`cargo xtask budget` reports whole-workspace LOC baselines as advisory trend
+signals; it is not a pass/fail gate. New large modules must be visible in review,
+but code is not split solely to satisfy a line count.
 
