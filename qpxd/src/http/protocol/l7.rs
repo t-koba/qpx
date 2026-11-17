@@ -11,8 +11,8 @@ use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpx_http::protocol::finalization::FinalizeResponse;
 use qpx_http::protocol::semantics::{
-    append_via_for_version, normalize_response_for_request_with_options,
-    sanitize_hop_by_hop_headers,
+    append_via_for_version, connection_nominated_header_names,
+    normalize_response_for_request_with_options, sanitize_hop_by_hop_headers,
 };
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -77,16 +77,19 @@ fn finalize_response_headers_common<R: FinalizeResponse<Body = Body>>(
     preserve_upgrade: bool,
 ) {
     let preserve_proxy_auth = response.status() == StatusCode::PROXY_AUTHENTICATION_REQUIRED;
-    let proxy_authenticate = if preserve_proxy_auth {
-        collect_header_values(response.headers(), "proxy-authenticate")
-    } else {
-        Vec::new()
+    // RFC 9110 §7.6.1: a forwarded 407 cannot restore fields nominated
+    // by its upstream Connection header, even when proxy auth is preserved.
+    let proxy_auth_values = |name: &str| {
+        if preserve_proxy_auth
+            && !connection_nominated_header_names(response.headers()).any(|field| field == name)
+        {
+            collect_header_values(response.headers(), name)
+        } else {
+            Vec::new()
+        }
     };
-    let proxy_auth_info = if preserve_proxy_auth {
-        collect_header_values(response.headers(), "proxy-authentication-info")
-    } else {
-        Vec::new()
-    };
+    let proxy_authenticate = proxy_auth_values("proxy-authenticate");
+    let proxy_auth_info = proxy_auth_values("proxy-authentication-info");
 
     sanitize_hop_by_hop_headers(response.headers_mut(), preserve_upgrade);
     if preserve_proxy_auth {

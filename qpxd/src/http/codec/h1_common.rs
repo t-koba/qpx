@@ -40,7 +40,8 @@ pub(crate) fn raw_has_connection_token(headers: &[httparse::Header<'_>], expecte
 ///
 /// When `preserve_proxy_auth` is set for a 407 response, this retains
 /// `Proxy-Authenticate` and `Proxy-Authentication-Info`; it always removes
-/// `Proxy-Authorization`.
+/// `Proxy-Authorization`. Callers must still remove Connection-nominated fields,
+/// including these proxy-auth fields on 407 responses.
 pub(crate) fn is_sanitized_hop_header(name: &[u8], preserve_proxy_auth: bool) -> bool {
     name.eq_ignore_ascii_case(b"connection")
         || name.eq_ignore_ascii_case(b"keep-alive")

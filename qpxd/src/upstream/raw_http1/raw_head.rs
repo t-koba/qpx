@@ -516,34 +516,86 @@ mod tests {
     }
 
     #[test]
-    fn raw_head_preserves_proxy_authentication_only_for_407() {
-        let headers = [
-            httparse::Header {
-                name: "Proxy-Authenticate",
-                value: b"Basic realm=\"upstream\"",
-            },
-            httparse::Header {
-                name: "Proxy-Authentication-Info",
-                value: b"nextnonce=\"nonce\"",
-            },
-            httparse::Header {
-                name: "Proxy-Authorization",
-                value: b"Basic dXNlcjpwYXNz",
-            },
-        ];
-
-        for (status, preserve) in [
-            (StatusCode::OK, false),
-            (StatusCode::PROXY_AUTHENTICATION_REQUIRED, true),
-        ] {
-            let mut raw =
-                RawHttp1ResponseHead::from_parsed(&headers, &Method::GET, status, Version::HTTP_11)
-                    .expect("raw head");
-            raw.finalize("qpx");
-            let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
-            assert_eq!(encoded.contains("Proxy-Authenticate:"), preserve);
-            assert_eq!(encoded.contains("Proxy-Authentication-Info:"), preserve);
-            assert!(!encoded.contains("Proxy-Authorization:"));
+    fn raw_head_preserves_only_unnominated_407_proxy_authentication() {
+        for status in [StatusCode::OK, StatusCode::PROXY_AUTHENTICATION_REQUIRED] {
+            for nominated in [
+                b"x-drop".as_slice(),
+                b"PrOxY-AuThEnTiCaTe",
+                b"PrOxY-AuThEnTiCaTiOn-InFo",
+                b"PrOxY-AuThEnTiCaTe, PrOxY-AuThEnTiCaTiOn-InFo",
+            ] {
+                let headers = [
+                    httparse::Header {
+                        name: "Connection",
+                        value: b"x-drop",
+                    },
+                    httparse::Header {
+                        name: "cOnNeCtIoN",
+                        value: nominated,
+                    },
+                    httparse::Header {
+                        name: "x-drop",
+                        value: b"drop",
+                    },
+                    httparse::Header {
+                        name: "Proxy-Authenticate",
+                        value: b"Basic realm=\"upstream\"",
+                    },
+                    httparse::Header {
+                        name: "Proxy-Authentication-Info",
+                        value: b"nextnonce=\"nonce\"",
+                    },
+                    httparse::Header {
+                        name: "Proxy-Authenticate",
+                        value: b"second",
+                    },
+                    httparse::Header {
+                        name: "Proxy-Authentication-Info",
+                        value: b"second-info",
+                    },
+                    httparse::Header {
+                        name: "Proxy-Authorization",
+                        value: b"Basic dXNlcjpwYXNz",
+                    },
+                ];
+                let mut raw = RawHttp1ResponseHead::from_parsed(
+                    &headers,
+                    &Method::GET,
+                    status,
+                    Version::HTTP_11,
+                )
+                .expect("raw head");
+                raw.finalize("qpx");
+                let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+                let actual: Vec<_> = encoded
+                    .lines()
+                    .filter(|line| line.starts_with("Proxy-Auth"))
+                    .collect();
+                let expected: Vec<_> = headers
+                    .iter()
+                    .filter(|header| {
+                        status == StatusCode::PROXY_AUTHENTICATION_REQUIRED
+                            && header.name.starts_with("Proxy-Auth")
+                            && header.name != "Proxy-Authorization"
+                            && !nominated.split(|byte| *byte == b',').any(|name| {
+                                std::str::from_utf8(name)
+                                    .unwrap()
+                                    .trim()
+                                    .eq_ignore_ascii_case(header.name)
+                            })
+                    })
+                    .map(|header| {
+                        format!(
+                            "{}: {}",
+                            header.name,
+                            std::str::from_utf8(header.value).unwrap()
+                        )
+                    })
+                    .collect();
+                assert_eq!(actual, expected, "{status} {nominated:?}");
+                assert!(!encoded.contains("Connection:"));
+                assert!(!encoded.contains("x-drop:"));
+            }
         }
     }
 

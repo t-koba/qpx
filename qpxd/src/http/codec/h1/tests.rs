@@ -2141,6 +2141,108 @@ async fn assert_owner_raw_head_wire(placeholder_lengths: &[&'static str]) {
 }
 
 #[tokio::test]
+async fn raw_http1_407_forwards_only_unnominated_proxy_auth() {
+    for nominated in [
+        "x-drop",
+        "PrOxY-AuThEnTiCaTe",
+        "PrOxY-AuThEnTiCaTiOn-InFo",
+        "PrOxY-AuThEnTiCaTe, PrOxY-AuThEnTiCaTiOn-InFo",
+    ] {
+        let (mut client, server) = tokio::io::duplex(4096);
+        let (read_half, mut write_half) = tokio::io::split(server);
+        let parsed = [
+            httparse::Header {
+                name: "Connection",
+                value: b"x-drop",
+            },
+            httparse::Header {
+                name: "Connection",
+                value: nominated.as_bytes(),
+            },
+            httparse::Header {
+                name: "x-drop",
+                value: b"drop",
+            },
+            httparse::Header {
+                name: "Proxy-Authenticate",
+                value: b"Basic realm=\"upstream\"",
+            },
+            httparse::Header {
+                name: "Proxy-Authentication-Info",
+                value: b"nextnonce=\"nonce\"",
+            },
+            httparse::Header {
+                name: "Proxy-Authenticate",
+                value: b"second",
+            },
+            httparse::Header {
+                name: "Proxy-Authentication-Info",
+                value: b"second-info",
+            },
+            httparse::Header {
+                name: "Content-Length",
+                value: b"0",
+            },
+        ];
+        let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+            &parsed,
+            &Method::GET,
+            StatusCode::PROXY_AUTHENTICATION_REQUIRED,
+            Version::HTTP_11,
+        )
+        .expect("raw response head");
+        raw_head.finalize("qpx");
+        let mut response = Response::new(Body::empty());
+        *response.status_mut() = StatusCode::PROXY_AUTHENTICATION_REQUIRED;
+        response.extensions_mut().insert(Arc::new(raw_head));
+        send_http1_response_with_interim(
+            &mut write_half,
+            Version::HTTP_11,
+            &Method::GET,
+            OwnerResponse::from_http(response),
+            &[],
+            true,
+            Duration::from_secs(30),
+            &mut BytesMut::new(),
+        )
+        .await
+        .expect("send response");
+        drop(write_half);
+        drop(read_half);
+        let mut encoded = Vec::new();
+        client
+            .read_to_end(&mut encoded)
+            .await
+            .expect("read response");
+        let text = String::from_utf8(encoded).expect("UTF-8 response");
+        assert!(text.starts_with("HTTP/1.1 407"));
+        let actual: Vec<_> = text
+            .lines()
+            .filter(|line| line.starts_with("Proxy-Auth"))
+            .collect();
+        let expected: Vec<_> = parsed
+            .iter()
+            .filter(|header| {
+                header.name.starts_with("Proxy-Auth")
+                    && !nominated
+                        .split(", ")
+                        .any(|name| name.eq_ignore_ascii_case(header.name))
+            })
+            .map(|header| {
+                format!(
+                    "{}: {}",
+                    header.name,
+                    std::str::from_utf8(header.value).unwrap()
+                )
+            })
+            .collect();
+        assert_eq!(actual, expected, "{nominated}");
+        assert!(!text.contains("Connection:"));
+        assert!(!text.contains("x-drop:"));
+    }
+}
+
+#[tokio::test]
 async fn raw_http1_connection_nominated_content_length_closes_downstream() {
     for (method, status, length, body, expected_keep_alive) in [
         (Method::GET, StatusCode::OK, "4", "body", false),

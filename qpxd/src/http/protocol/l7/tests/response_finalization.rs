@@ -131,6 +131,64 @@ response_remove:
 }
 
 #[test]
+fn paired_407_finalization_respects_connection_nominated_proxy_auth() {
+    for nominated in [
+        "x-drop",
+        "PrOxY-AuThEnTiCaTe",
+        "PrOxY-AuThEnTiCaTiOn-InFo",
+        "PrOxY-AuThEnTiCaTe, PrOxY-AuThEnTiCaTiOn-InFo",
+    ] {
+        let make_response = || {
+            let mut response = response(407, Body::empty());
+            // Nominations can occur on any Connection field line.
+            response
+                .headers_mut()
+                .append("connection", HeaderValue::from_static(nominated));
+            response
+        };
+        let standard = finalize_response_for_request(
+            &Method::GET,
+            http::Version::HTTP_11,
+            "qpx",
+            make_response(),
+            false,
+        );
+        let owner = finalize_response_for_request(
+            &Method::GET,
+            http::Version::HTTP_11,
+            "qpx",
+            OwnerResponse::from_http(make_response()),
+            false,
+        );
+        assert_heads_equal(&standard, &owner);
+        assert!(!standard.headers().contains_key("connection"));
+        assert!(!standard.headers().contains_key("x-drop"));
+        for field in ["proxy-authenticate", "proxy-authentication-info"] {
+            let values: Vec<_> = owner
+                .headers()
+                .get_all(&OrdinaryHeaderName::try_from(field).unwrap())
+                .map(|value| (value.as_bytes(), value.is_sensitive()))
+                .collect();
+            if nominated
+                .to_ascii_lowercase()
+                .split(", ")
+                .any(|n| n == field)
+            {
+                assert!(values.is_empty(), "{field} nominated by {nominated}");
+            } else {
+                assert_eq!(
+                    values,
+                    [
+                        (b"Basic realm=\"one\"".as_slice(), true),
+                        (b"second", false)
+                    ]
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn paired_finalization_length_policy_precedes_hop_and_normalization() {
     // Literal invalid/conflicting lengths must not fail adoption; nominations
     // are consumed after controls, before HEAD/no-body normalization.
