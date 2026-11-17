@@ -11,6 +11,7 @@ use qpx_http::protocol::semantics::{
 
 pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::HeaderMap> {
     let mut headers = http::HeaderMap::new();
+    let mut cookies = Vec::new();
     for (name, value) in src {
         let name = http::header::HeaderName::from_bytes(name.as_str().as_bytes())
             .map_err(|e| anyhow!("invalid header name from HTTP/3 message: {e}"))?;
@@ -18,28 +19,18 @@ pub(crate) fn h1_headers_to_http(src: &::http::HeaderMap) -> Result<http::Header
         let mut value = http::HeaderValue::from_bytes(value.as_bytes())
             .map_err(|e| anyhow!("invalid header value from HTTP/3 message: {e}"))?;
         value.set_sensitive(sensitive);
-        if name == COOKIE
-            && let Some(existing) = headers.get(COOKIE).cloned()
-        {
-            headers.insert(COOKIE, join_cookie_values(&existing, &value)?);
+        if name == COOKIE {
+            cookies.push(value);
             continue;
         }
         headers.append(name, value);
     }
+    if !cookies.is_empty()
+        && let Some(merged) = crate::http::codec::h2::join_duplicate_cookie_values(cookies.iter())?
+    {
+        headers.insert(COOKIE, merged);
+    }
     Ok(headers)
-}
-
-pub(crate) fn join_cookie_values(
-    existing: &http::HeaderValue,
-    value: &http::HeaderValue,
-) -> Result<http::HeaderValue> {
-    let mut merged = Vec::with_capacity(existing.as_bytes().len() + 2 + value.as_bytes().len());
-    merged.extend_from_slice(existing.as_bytes());
-    merged.extend_from_slice(b"; ");
-    merged.extend_from_slice(value.as_bytes());
-    let mut merged = http::HeaderValue::from_bytes(&merged)?;
-    merged.set_sensitive(existing.is_sensitive() || value.is_sensitive());
-    Ok(merged)
 }
 
 pub(crate) fn http_headers_to_h1(src: &http::HeaderMap) -> Result<::http::HeaderMap> {
@@ -255,6 +246,28 @@ mod tests {
         let cookie = converted.get("cookie").expect("joined cookie");
         assert_eq!(cookie.as_bytes(), b"a=1; b=2");
         assert!(cookie.is_sensitive());
+    }
+
+    #[test]
+    fn h3_header_import_joins_empty_cookie_fields_like_h2() {
+        for values in [vec!["", ""], vec!["", "a=1"]] {
+            let mut source = ::http::HeaderMap::new();
+            for value in values {
+                source.append("cookie", ::http::HeaderValue::from_static(value));
+            }
+            let h2 = crate::http::codec::h2::h1_headers_to_http(&source).expect("H2 conversion");
+            let h3 = super::h1_headers_to_http(&source).expect("H3 conversion");
+            assert_eq!(
+                h2.get_all("cookie")
+                    .iter()
+                    .map(|value| value.as_bytes())
+                    .collect::<Vec<_>>(),
+                h3.get_all("cookie")
+                    .iter()
+                    .map(|value| value.as_bytes())
+                    .collect::<Vec<_>>(),
+            );
+        }
     }
 
     #[test]

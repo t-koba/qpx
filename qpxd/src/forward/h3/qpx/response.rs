@@ -1,9 +1,9 @@
 use crate::forward::h3::connect::finalize_h3_connect_owner_response;
 use crate::forward::h3::connect_response_body::define_upstream_error_response_body;
+use crate::http::codec::h2::join_duplicate_cookie_values;
 use crate::http::protocol::l7::finalize_response_for_request;
 #[cfg(test)]
 use crate::http3::codec::h1_headers_to_http;
-use crate::http3::codec::join_cookie_values;
 use crate::runtime::{ExecutionPlan, RuntimeState};
 use anyhow::Result;
 use bytes::Bytes;
@@ -162,19 +162,15 @@ fn owner_qpx_connect_error_response(response: http::Response<()>) -> Result<Owne
 
 fn join_qpx_h3_cookie_fields(headers: &mut OwnerHeaders) -> Result<()> {
     let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE)?;
-    let mut values = headers.get_all(&cookie);
-    let Some(first) = values.next() else {
+    let values: Vec<_> = headers.get_all(&cookie).collect();
+    if values.len() <= 1 {
         return Ok(());
-    };
-    let Some(second) = values.next() else {
-        return Ok(());
-    };
-
-    let mut merged = join_cookie_values(first, second)?;
-    for value in values {
-        merged = join_cookie_values(&merged, value)?;
     }
-    headers.insert(cookie, merged);
+    let merged = join_duplicate_cookie_values(values.into_iter())?;
+    headers.remove(&cookie);
+    if let Some(value) = merged {
+        headers.insert(cookie, value);
+    }
     Ok(())
 }
 
@@ -217,6 +213,20 @@ mod tests {
     use qpx_core::config::HeaderControl;
     #[cfg(feature = "mitm")]
     use tokio::time::{Duration, Instant, timeout};
+
+    #[test]
+    fn join_qpx_h3_cookie_fields_matches_h2_for_empty_duplicates() {
+        let mut headers = OwnerHeaders::new();
+        let cookie = OrdinaryHeaderName::try_from(http::header::COOKIE).unwrap();
+        headers.append(cookie.clone(), http::HeaderValue::from_static(""));
+        headers.append(cookie.clone(), http::HeaderValue::from_static("a=1"));
+
+        join_qpx_h3_cookie_fields(&mut headers).expect("join cookie fields");
+
+        let values: Vec<_> = headers.get_all(&cookie).collect();
+        assert_eq!(values.len(), 1);
+        assert_eq!(values[0].as_bytes(), b"a=1");
+    }
 
     #[test]
     fn finalize_qpx_connect_head_response_rejects_non_http_status_class() {
