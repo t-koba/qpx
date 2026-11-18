@@ -6,6 +6,7 @@ use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
+use syn::ext::IdentExt;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{GenericArgument, PathArguments, ReturnType, Type, Visibility};
@@ -1575,7 +1576,8 @@ fn check_http_token_vocabulary_single_owner(root: &Path) -> Result<()> {
 
 /// Parsing and canonicalization live here; opaque `Headers` enforce ownership
 /// in-domain. This is only a syntactic backstop at raw codec/library boundaries:
-/// no aliases, helper-name inventory, macro expansion or dataflow inference.
+/// it collects direct aliases file-wide without resolving scope, following helpers,
+/// expanding macros or inferring dataflow.
 const CONTENT_LENGTH_OWNER: &str = "qpx-core/src/http_content_length.rs";
 
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
@@ -1613,21 +1615,49 @@ fn content_length_direct_read_violations(path: &str, content: &str) -> Result<Ve
     if has_cfg_test(&syntax.attrs) {
         return Ok(Vec::new());
     }
-    let mut visitor = ContentLengthDirectReads::default();
-    visitor.visit_file(&syntax);
-    Ok(visitor
-        .lines
+    let mut aliases = BTreeSet::new();
+    ContentLengthScan::Collect(&mut aliases).visit_file(&syntax);
+    let mut lines = Vec::new();
+    ContentLengthScan::Reads {
+        aliases: &aliases,
+        lines: &mut lines,
+    }
+    .visit_file(&syntax);
+    Ok(lines
         .into_iter()
         .map(|line| format!("{path}:{line}: direct Content-Length value read"))
         .collect())
 }
 
-#[derive(Default)]
-struct ContentLengthDirectReads {
-    lines: Vec<usize>,
+enum ContentLengthScan<'a> {
+    Collect(&'a mut BTreeSet<String>),
+    Reads {
+        aliases: &'a BTreeSet<String>,
+        lines: &'a mut Vec<usize>,
+    },
 }
 
-impl Visit<'_> for ContentLengthDirectReads {
+impl ContentLengthScan<'_> {
+    fn collect_alias(&mut self, name: &syn::Ident, initializer: &syn::Expr) {
+        if let Self::Collect(aliases) = self
+            && is_explicit_content_length(initializer, |_| false)
+        {
+            aliases.insert(name.unraw().to_string());
+        }
+    }
+
+    fn record_read(&mut self, key: &syn::Expr, read: &impl Spanned) {
+        if let Self::Reads { aliases, lines } = self
+            && is_explicit_content_length(key, |name| {
+                !aliases.is_empty() && aliases.contains(&name.to_string())
+            })
+        {
+            lines.push(read.span().start().line);
+        }
+    }
+}
+
+impl Visit<'_> for ContentLengthScan<'_> {
     fn visit_item(&mut self, node: &syn::Item) {
         let attrs = match node {
             syn::Item::Fn(item) => &item.attrs,
@@ -1636,10 +1666,40 @@ impl Visit<'_> for ContentLengthDirectReads {
             syn::Item::Trait(item) => &item.attrs,
             syn::Item::Const(item) => &item.attrs,
             syn::Item::Static(item) => &item.attrs,
+            syn::Item::Use(item) => &item.attrs,
             _ => return syn::visit::visit_item(self, node),
         };
         if !has_cfg_test(attrs) && !attrs.iter().any(|attr| attr.path().is_ident("test")) {
+            match node {
+                syn::Item::Const(item) => self.collect_alias(&item.ident, &item.expr),
+                syn::Item::Static(item) => self.collect_alias(&item.ident, &item.expr),
+                _ => {}
+            }
             syn::visit::visit_item(self, node);
+        }
+    }
+
+    fn visit_local(&mut self, node: &syn::Local) {
+        if matches!(self, Self::Collect(_)) {
+            if has_cfg_test(&node.attrs) {
+                return;
+            }
+            let pattern = match &node.pat {
+                syn::Pat::Type(typed) => &*typed.pat,
+                pattern => pattern,
+            };
+            if let (syn::Pat::Ident(binding), Some(init)) = (pattern, &node.init) {
+                self.collect_alias(&binding.ident, &init.expr);
+            }
+        }
+        syn::visit::visit_local(self, node);
+    }
+
+    fn visit_use_rename(&mut self, node: &syn::UseRename) {
+        if let Self::Collect(aliases) = self
+            && node.ident.unraw() == "CONTENT_LENGTH"
+        {
+            aliases.insert(node.rename.unraw().to_string());
         }
     }
 
@@ -1669,32 +1729,29 @@ impl Visit<'_> for ContentLengthDirectReads {
 
     fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
         if (node.method == "get" || node.method == "get_all")
-            && node.args.first().is_some_and(is_explicit_content_length)
+            && let Some(key) = node.args.first()
         {
-            self.lines.push(node.span().start().line);
+            self.record_read(key, node);
         }
         syn::visit::visit_expr_method_call(self, node);
     }
 
     fn visit_expr_index(&mut self, node: &syn::ExprIndex) {
-        if is_explicit_content_length(&node.index) {
-            self.lines.push(node.span().start().line);
-        }
+        self.record_read(&node.index, node);
         syn::visit::visit_expr_index(self, node);
     }
 }
 
-fn is_explicit_content_length(expr: &syn::Expr) -> bool {
+fn is_explicit_content_length(expr: &syn::Expr, is_alias: impl Fn(&syn::Ident) -> bool) -> bool {
     match expr {
-        syn::Expr::Path(path) => path
-            .path
-            .segments
-            .last()
-            .is_some_and(|segment| segment.ident == "CONTENT_LENGTH"),
+        syn::Expr::Path(path) => path.path.segments.last().is_some_and(|segment| {
+            let name = segment.ident.unraw();
+            name == "CONTENT_LENGTH" || is_alias(&name)
+        }),
         syn::Expr::Lit(literal) => is_content_length_literal(&literal.lit),
-        syn::Expr::Reference(reference) => is_explicit_content_length(&reference.expr),
-        syn::Expr::Paren(paren) => is_explicit_content_length(&paren.expr),
-        syn::Expr::Group(group) => is_explicit_content_length(&group.expr),
+        syn::Expr::Reference(reference) => is_explicit_content_length(&reference.expr, is_alias),
+        syn::Expr::Paren(paren) => is_explicit_content_length(&paren.expr, is_alias),
+        syn::Expr::Group(group) => is_explicit_content_length(&group.expr, is_alias),
         syn::Expr::Call(call) => {
             let field_name_constructor = match &*call.func {
                 syn::Expr::Path(path) => path.path.segments.last().is_some_and(|segment| {
@@ -4621,6 +4678,57 @@ mod tests {
     }
 
     #[test]
+    fn content_length_backstop_follows_local_binding() {
+        for binding in ["n = CONTENT_LENGTH", "n: &str = (\"Content-Length\")"] {
+            let source = format!("fn reader() {{ let {binding}; let _ = h.get(n); }}");
+            assert_eq!(
+                content_length_direct_read_violations("qpx-http/src/codec.rs", &source)
+                    .unwrap()
+                    .len(),
+                1,
+                "{binding}"
+            );
+            assert!(
+                content_length_direct_read_violations(CONTENT_LENGTH_OWNER, &source)
+                    .unwrap()
+                    .is_empty()
+            );
+        }
+    }
+
+    #[test]
+    fn content_length_backstop_follows_const_and_static() {
+        let source = r#"
+            fn reader() {
+                let _ = h.get_all(crate::LEN_CONST);
+                let _ = h.get_all(&LEN_STATIC);
+            }
+            const LEN_CONST: HeaderName = CONTENT_LENGTH;
+            static LEN_STATIC: HeaderName = HeaderName::from_static("content-length");
+        "#;
+        assert_eq!(
+            content_length_direct_read_violations("qpx-http/src/codec.rs", source)
+                .unwrap()
+                .len(),
+            2
+        );
+    }
+
+    #[test]
+    fn content_length_backstop_follows_renamed_import() {
+        let source = r#"
+            use http::header::CONTENT_LENGTH as CL;
+            fn reader() { let _ = h[CL]; }
+        "#;
+        assert_eq!(
+            content_length_direct_read_violations("qpx-http/src/codec.rs", source)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
     fn content_length_backstop_preserves_generic_boundaries_and_non_value_operations() {
         let source = r#"
             fn boundary() {
@@ -4631,6 +4739,10 @@ mod tests {
                 let _ = h.iter();
                 let _ = h.get("content-type");
                 let _ = h.get_all(CONTENT_TYPE);
+                let ct = CONTENT_TYPE;
+                let _ = h.get(ct);
+                let other = "content-type";
+                let _ = h.get(other);
                 let _ = h["x-content-length"];
                 let _ = declared_content_length(h);
                 let _ = owned.declared_content_length();
@@ -4647,7 +4759,12 @@ mod tests {
     #[test]
     fn content_length_backstop_uses_shared_test_predicate_not_module_spelling() {
         let source = r#"
-            #[cfg(test)] mod arbitrary { fn helper() { h.get(CONTENT_LENGTH); } }
+            #[cfg(test)] mod arbitrary {
+                fn helper() { let test_key = CONTENT_LENGTH; h.get(test_key); h.get(CONTENT_LENGTH); }
+            }
+            #[cfg(test)] use http::header::CONTENT_LENGTH as TEST_CL;
+            #[cfg(not(test))] use http::header::CONTENT_TYPE as TEST_CL;
+            fn unrelated() { let test_key = CONTENT_TYPE; h.get(test_key); h.get(TEST_CL); }
             #[cfg(all(test, feature = "http3"))]
             fn helper() { h.get_all("CONTENT-LENGTH"); }
             #[test] fn assertion() { h[CONTENT_LENGTH]; }

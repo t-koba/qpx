@@ -14,9 +14,11 @@ crate list from the root `Cargo.toml`, so a new or split-out member is covered
 without editing a second list. Members must be literal directories at the
 workspace root; a pattern member or a member without a directory fails the
 gates closed instead of being skipped. `Headers` enforces ownership only on adopted paths; raw-map
-paths remain under the structural migration. The syntax backstop catches only explicit production
-`.get`/`.get_all`/index reads keyed by `CONTENT_LENGTH`, case-insensitive literals, or literal
-`from_static`/`from_bytes` calls outside the owner; it excludes test-only cfg, expands no macros, infers no aliases/dataflow, and is not a workspace-wide proof.
+paths remain under the structural migration. The syntax backstop catches explicit production
+`.get`/`.get_all`/index reads keyed by `CONTENT_LENGTH`, a direct alias bound to it (local binding,
+constant or renamed import), case-insensitive literals, or literal `from_static`/`from_bytes` calls
+outside the owner; it excludes test-only cfg, expands no macros, follows no helper calls or alias
+chains, infers no dataflow, and is not a workspace-wide proof.
 
 ## Architecture overview
 
