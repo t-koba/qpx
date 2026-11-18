@@ -58,6 +58,10 @@ pub(super) async fn serve_raw_or_fallback(
         .try_into_mut()
         .unwrap_or_else(|prefix| BytesMut::from(prefix.as_ref()));
     let mut response_head = BytesMut::with_capacity(512);
+    // Owned by the connection, not by each request: allocating a bounded
+    // channel per keep-alive request dominates this fast path's allocation
+    // budget. The receiver is drained completely before the next request.
+    let (interim_tx, mut interim_rx) = tokio::sync::mpsc::channel(1);
     let mut request_cache = RawHttp1ConnectionCache::default();
     let mut origin_session = PreparedPlainHttp1Session::default();
     let pending_timer = tokio::time::sleep(Duration::ZERO);
@@ -154,19 +158,40 @@ pub(super) async fn serve_raw_or_fallback(
                     // so the route deadline is polled even during a blocked write.
                     // Keep upstream errors as values until all queued interim heads
                     // have drained; only a downstream write error cancels the exchange.
-                    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-                    let exchange = dispatch_prepared_raw_http1_request(
-                        request,
-                        &reverse,
-                        &conn,
-                        &mut origin_session,
-                        &mut pending_timeout,
-                        Some(tx),
-                    );
+                    let (done_tx, mut done_rx) = tokio::sync::oneshot::channel::<()>();
+                    let exchange = async {
+                        let result = dispatch_prepared_raw_http1_request(
+                            request,
+                            &reverse,
+                            &conn,
+                            &mut origin_session,
+                            &mut pending_timeout,
+                            Some(interim_tx.clone()),
+                        )
+                        .await;
+                        let _ = done_tx.send(());
+                        result
+                    };
                     let (dispatched, ()) = tokio::try_join!(
                         async { Ok::<_, anyhow::Error>(exchange.await) },
                         async {
-                            while let Some(head) = rx.recv().await {
+                            loop {
+                                tokio::select! {
+                                    head = interim_rx.recv() => {
+                                        let head = head.expect("connection owns the interim channel");
+                                        send_http1_interim_response(
+                                            &mut stream,
+                                            &head,
+                                            &mut response_head,
+                                        )
+                                        .await?;
+                                    }
+                                    _ = &mut done_rx => break,
+                                }
+                            }
+                            // The exchange has returned, so its sender clone is gone;
+                            // publish any heads that were queued alongside completion.
+                            while let Ok(head) = interim_rx.try_recv() {
                                 send_http1_interim_response(&mut stream, &head, &mut response_head)
                                     .await?;
                             }
