@@ -51,7 +51,10 @@ pub fn load_config(path: &Path) -> Result<Config> {
     load_config_with_sources(path).map(|(config, _sources)| config)
 }
 
-/// Loads one YAML config file and returns every source file that contributed.
+/// Loads one YAML config file and returns its source paths for file watching.
+///
+/// Sources include both the canonical target and the absolute configured entry
+/// when they differ, for the root file and each include.
 pub fn load_config_with_sources(path: &Path) -> Result<(Config, Vec<PathBuf>)> {
     let mut stack = Vec::new();
     let mut sources = Vec::new();
@@ -65,7 +68,8 @@ pub fn load_configs(paths: &[PathBuf]) -> Result<Config> {
     load_configs_with_sources(paths).map(|(config, _sources)| config)
 }
 
-/// Loads multiple config files and returns the merged config plus source list.
+/// Loads multiple config files and returns the merged config plus source paths
+/// as in [`load_config_with_sources`].
 pub fn load_configs_with_sources(paths: &[PathBuf]) -> Result<(Config, Vec<PathBuf>)> {
     if paths.is_empty() {
         return Err(ConfigLoadError::NoConfigFiles);
@@ -119,8 +123,14 @@ fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>)
     if stack.contains(&canonical) {
         return Err(anyhow!("config include loop detected at {}", canonical.display()).into());
     }
+    // The canonical target tracks edits (and identifies include cycles); the
+    // configured entry lets the watcher catch atomic symlink replacement.
     if !sources.contains(&canonical) {
         sources.push(canonical.clone());
+    }
+    let entry = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    if !sources.contains(&entry) {
+        sources.push(entry);
     }
     stack.push(canonical.clone());
 
