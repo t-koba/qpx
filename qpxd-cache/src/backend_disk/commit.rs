@@ -1,8 +1,10 @@
 //! Stable advisory locks, separate from evictable cache objects. Never unlink a
 //! lock file: replacing its inode would split coordination between processes.
 use super::*;
+use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+use std::time::Instant;
 
 pub(super) struct CommitLocks {
     directory: File,
@@ -28,18 +30,43 @@ impl CommitLocks {
         // create an overlapping but incompatible locking domain. This small file
         // is lock state, not a cache-object format change.
         let mut layout = locks.open("stripes")?;
-        layout
-            .try_lock()
-            .map_err(|e| anyhow!("disk commit lock setup: {e}"))?;
-        let mut stored = String::new();
-        layout.read_to_string(&mut stored)?;
-        if stored.is_empty() {
-            write!(layout, "{stripes}")?;
-            layout.sync_all()?;
-        } else if stored != stripes.to_string() {
+        // new() is sync: poll with a bounded deadline without blocking a runtime.
+        let retry_delay = (timeout / 64).max(Duration::from_millis(1));
+        let deadline = Instant::now() + timeout;
+        loop {
+            match layout.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    if Instant::now() >= deadline {
+                        return Err(anyhow!("disk commit lock setup timed out"));
+                    }
+                    std::thread::sleep(retry_delay);
+                }
+                Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
+            }
+        }
+        // A fixed-width record makes a torn write distinguishable from a
+        // deliberate layout mismatch: only a complete, different record fails
+        // closed; partial state is repaired under the exclusive layout lock.
+        let expected = format!("{:016x}\n", stripes);
+        let mut stored = Vec::new();
+        layout.read_to_end(&mut stored)?;
+        if stored == expected.as_bytes() {
+            // Already pinned to this stripe count.
+        } else if stored.len() == expected.len()
+            && stored[..16].iter().all(u8::is_ascii_hexdigit)
+            && stored[16] == b'\n'
+        {
             return Err(anyhow!(
                 "disk commit_lock_stripes differs from this root's lock layout"
             ));
+        } else {
+            // Truncate first so any interrupted write leaves a detectable
+            // prefix rather than bytes from a previous record.
+            layout.seek(SeekFrom::Start(0))?;
+            layout.set_len(0)?;
+            layout.write_all(expected.as_bytes())?;
+            layout.sync_all()?;
         }
         Ok(locks)
     }
@@ -155,6 +182,70 @@ mod tests {
     use super::*;
     use std::future::{Future, poll_fn};
     use std::task::Poll;
+
+    #[test]
+    fn startup_retries_a_contended_layout_lock_and_times_out_boundedly() {
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-startup-lock-{}", uuid::Uuid::new_v4()));
+        drop(DiskCacheBackend::new(config(&root)).unwrap());
+        let path = root.join(".qpx-commit-locks/stripes");
+        let external = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        // SAFETY: external is a live fd; flock only touches its open description.
+        let locked = unsafe { libc::flock(external.as_raw_fd(), libc::LOCK_EX) };
+        assert_eq!(locked, 0);
+
+        let short = CommitLocks::new(&root, 1, Duration::from_millis(20))
+            .err()
+            .unwrap();
+        assert!(short.to_string().contains("timed out"), "{short}");
+
+        let waiting_root = root.clone();
+        let waiting = std::thread::spawn(move || {
+            // Generous bound: the 60 ms hold below must not flake on a busy host.
+            CommitLocks::new(&waiting_root, 1, Duration::from_millis(2000))
+        });
+        std::thread::sleep(Duration::from_millis(60));
+        // SAFETY: the same valid fd as above, releasing its exclusive lock.
+        let unlocked = unsafe { libc::flock(external.as_raw_fd(), libc::LOCK_UN) };
+        assert_eq!(unlocked, 0);
+        assert!(waiting.join().unwrap().is_ok());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn torn_layout_record_is_repaired_but_a_complete_mismatch_fails_closed() {
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-torn-layout-{}", uuid::Uuid::new_v4()));
+        CommitLocks::new(&root, 1, Duration::from_millis(100)).unwrap();
+        let path = root.join(".qpx-commit-locks/stripes");
+        let expected = format!("{:016x}\n", 1usize);
+        assert_eq!(expected.len(), 17);
+
+        {
+            let mut file = OpenOptions::new()
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .unwrap();
+            file.write_all(&expected.as_bytes()[..13]).unwrap();
+            file.sync_all().unwrap();
+        }
+        assert!(CommitLocks::new(&root, 1, Duration::from_millis(100)).is_ok());
+        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+
+        let different = format!("{:016x}\n", 2usize);
+        fs::write(&path, &different).unwrap();
+        let error = CommitLocks::new(&root, 1, Duration::from_millis(100))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("commit_lock_stripes"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), different.as_bytes());
+        fs::remove_dir_all(root).unwrap();
+    }
 
     fn config(root: &Path) -> CacheBackendConfig {
         serde_json::from_value(serde_json::json!({
