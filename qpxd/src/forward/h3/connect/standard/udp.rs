@@ -1,7 +1,6 @@
 use super::super::super::backend_h3::ForwardH3Handler;
 use super::{
-    H3ConnectAuditContext, build_h3_connect_success_response,
-    normalize_h3_upstream_connect_headers, prepare_h3_connect_request,
+    H3ConnectAuditContext, normalize_h3_upstream_connect_headers, prepare_h3_connect_request,
     recv_upstream_h3_response_with_interim, send_h3_policy_response,
 };
 mod chained;
@@ -10,7 +9,9 @@ mod upstream;
 use self::chained::relay_h3_connect_udp_stream_chained;
 use self::upstream::{UpstreamConnectUdpParams, open_upstream_connect_udp_stream};
 use super::super::finalize_h3_connect_owner_response;
-use super::super::{apply_connect_udp_bandwidth_controls, forward_udp_capsules};
+use super::super::{
+    apply_connect_udp_bandwidth_controls, build_h3_connect_success_head, forward_udp_capsules,
+};
 use crate::http::dispatch::DispatchOutcome;
 use crate::http3::capsule::{
     CapsuleBuffer, decode_connect_udp_payload, encode_datagram_capsule_context_header,
@@ -204,11 +205,12 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
             .map_err(|_| anyhow!("CONNECT-UDP interim response send timed out"))??;
         }
 
-        let response = build_h3_connect_success_response(
+        let response = build_h3_connect_success_head(
             proxy_name.as_str(),
             &http::Method::CONNECT,
             true,
             response_headers.as_deref(),
+            "HTTP/3 CONNECT response",
         )?;
         super::super::emit_h3_connect_audit(
             &super::super::H3ConnectAuditContext {
@@ -294,11 +296,12 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
         }
     }
 
-    let response = build_h3_connect_success_response(
+    let response = build_h3_connect_success_head(
         proxy_name.as_str(),
         &http::Method::CONNECT,
         true,
         response_headers.as_deref(),
+        "HTTP/3 CONNECT response",
     )?;
     super::super::emit_h3_connect_audit(
         &super::super::H3ConnectAuditContext {

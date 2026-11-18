@@ -2,7 +2,7 @@ use super::super::super::super::connect::{
     ConnectPolicyInput, decide_connect_action_from_tls_metadata,
 };
 use super::super::super::backend_h3::ForwardH3Handler;
-use super::build_h3_connect_success_response;
+use super::super::build_h3_connect_success_head;
 use super::tunnel::{H3ConnectPolicyContext, prepare_h3_connect_stream, relay_h3_connect_stream};
 #[cfg(feature = "mitm")]
 use super::tunnel::{MitmH3ConnectInput, mitm_h3_connect_stream};
@@ -66,11 +66,12 @@ pub(super) async fn finish_h3_connect(input: EstablishedH3Connect) -> Result<()>
         server,
     } = input;
     let state = handler.runtime.state();
-    let established = build_h3_connect_success_response(
+    let established = build_h3_connect_success_head(
         proxy_name.as_str(),
         &http::Method::CONNECT,
         false,
         response_headers.as_deref(),
+        "HTTP/3 CONNECT response",
     )?;
     tokio::time::timeout(tunnel_idle_timeout, req_stream.send_response(established))
         .await

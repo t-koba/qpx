@@ -1,7 +1,6 @@
 use super::ForwardQpxHandler;
 use super::connect_upstream::{
-    OpenUpstreamQpxExtendedConnectInput, build_qpx_connect_success_head,
-    open_upstream_qpx_extended_connect_stream,
+    OpenUpstreamQpxExtendedConnectInput, open_upstream_qpx_extended_connect_stream,
 };
 use super::relay::{
     ChainedConnectIpRelay, relay_qpx_connect_ip_device, relay_qpx_connect_ip_stream_chained,
@@ -13,7 +12,8 @@ use super::response::{
 };
 use crate::forward::h3::connect::finalize_h3_connect_owner_response;
 use crate::forward::h3::connect::{
-    H3ConnectAuditContext, emit_h3_connect_audit, finalize_h3_connect_head_response,
+    H3ConnectAuditContext, build_h3_connect_success_head, emit_h3_connect_audit,
+    finalize_h3_connect_head_response,
 };
 use crate::forward::request::resolve_upstream;
 use crate::http::dispatch::DispatchOutcome;
@@ -256,8 +256,13 @@ async fn run_qpx_traditional_connect_tunnel(
         }
     };
 
-    let response =
-        build_qpx_connect_success_head(proxy_name.as_str(), false, response_headers.as_deref())?;
+    let response = build_h3_connect_success_head(
+        proxy_name.as_str(),
+        &http::Method::CONNECT,
+        false,
+        response_headers.as_deref(),
+        "QPX HTTP/3 extended CONNECT response",
+    )?;
     timeout(
         Duration::from_millis(state.plan.limits.timeouts.h3_read_timeout_ms.max(1)),
         req_stream.send_response_head(&response),
@@ -450,8 +455,13 @@ async fn handle_qpx_extended_connect_stream(
             handler.connect_ip.wintun_dll.as_deref(),
         )?;
         let interface_name = device.name().to_owned();
-        let established =
-            build_qpx_connect_success_head(proxy_name.as_str(), true, response_headers.as_deref())?;
+        let established = build_h3_connect_success_head(
+            proxy_name.as_str(),
+            &http::Method::CONNECT,
+            true,
+            response_headers.as_deref(),
+            "QPX HTTP/3 extended CONNECT response",
+        )?;
         timeout(
             upstream_timeout,
             req_stream.send_response_head(&established),

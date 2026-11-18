@@ -65,6 +65,39 @@ pub(super) fn finalize_h3_connect_response(
     )
 }
 
+/// Builds a successful HTTP/3 CONNECT response head for either backend.
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+pub(super) fn build_h3_connect_success_head(
+    proxy_name: &str,
+    request_method: &http::Method,
+    capsule_protocol: bool,
+    header_control: Option<&qpx_core::rules::CompiledHeaderControl>,
+    status_context: &str,
+) -> anyhow::Result<http::Response<()>> {
+    use qpx_http::protocol::semantics::validate_http_status_class;
+
+    let mut response = crate::http::protocol::common::connect_established_response();
+    if capsule_protocol {
+        response.headers_mut().insert(
+            qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol")?,
+            http::HeaderValue::from_static("?1"),
+        );
+    }
+    crate::http::protocol::l7::finalize_response_with_headers_in_place(
+        request_method,
+        http::Version::HTTP_3,
+        proxy_name,
+        &mut response,
+        header_control,
+        false,
+    );
+    let status = validate_http_status_class(response.status(), status_context)?;
+    let response = response.into_http_for_codec()?;
+    let mut out = http::Response::builder().status(status).body(())?;
+    *out.headers_mut() = crate::http3::codec::http_headers_to_h1(response.headers())?;
+    Ok(out)
+}
+
 /// Finalizes an owner-backed local response without exporting its head.
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 pub(super) fn finalize_h3_connect_owner_response(

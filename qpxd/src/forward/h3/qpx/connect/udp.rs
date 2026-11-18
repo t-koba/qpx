@@ -1,12 +1,12 @@
 use super::super::ForwardQpxHandler;
-use super::super::connect_upstream::{
-    build_qpx_connect_success_head, open_upstream_qpx_connect_udp_stream,
-};
+use super::super::connect_upstream::open_upstream_qpx_connect_udp_stream;
 use super::super::relay::{relay_qpx_connect_udp_stream, relay_qpx_connect_udp_stream_chained};
 use super::super::response::send_qpx_policy_response;
 use super::prepare::PreparedQpxConnect;
 use crate::forward::h3::connect::finalize_h3_connect_owner_response;
-use crate::forward::h3::connect::{H3ConnectAuditContext, emit_h3_connect_audit};
+use crate::forward::h3::connect::{
+    H3ConnectAuditContext, build_h3_connect_success_head, emit_h3_connect_audit,
+};
 use crate::forward::request::resolve_upstream_url;
 use crate::http::dispatch::DispatchOutcome;
 use crate::rate_limit::{AppliedRateLimits, RateLimitContext, TransportScope};
@@ -292,7 +292,13 @@ async fn send_connect_udp_success_head(
     req_stream: &mut qpx_h3::RequestStream,
 ) -> Result<()> {
     let proxy_name = ctx.state.plan.identity.proxy_name.as_ref();
-    let response = build_qpx_connect_success_head(proxy_name, true, ctx.response_headers)?;
+    let response = build_h3_connect_success_head(
+        proxy_name,
+        &http::Method::CONNECT,
+        true,
+        ctx.response_headers,
+        "QPX HTTP/3 extended CONNECT response",
+    )?;
     emit_h3_connect_audit(
         &H3ConnectAuditContext {
             state: ctx.state,

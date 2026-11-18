@@ -5,13 +5,8 @@ use self::pool::{QpxH3UpstreamSessionKey, open_pooled_qpx_h3_extended_connect_st
 use super::super::connect::parse::{
     H3ConnectProtocol, parse_extended_connect_upstream, validate_h3_connect_pseudo_headers,
 };
-use crate::http::protocol::common::connect_established_response as connect_established;
-use crate::http::protocol::l7::{
-    finalize_response_with_headers_in_place, prepare_request_with_headers_in_place,
-};
-use crate::http3::codec::http_headers_to_h1;
+use crate::http::protocol::l7::prepare_request_with_headers_in_place;
 use anyhow::{Result, anyhow};
-use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::capsule_protocol_enabled;
 use tokio::time::Duration;
@@ -48,36 +43,6 @@ pub(super) fn validate_qpx_connect_head(
         None => H3ConnectProtocol::Plain,
     };
     validate_h3_connect_pseudo_headers(req_head, headers, authority_host, authority_port, protocol)
-}
-
-pub(super) fn build_qpx_connect_success_head(
-    proxy_name: &str,
-    capsule_protocol: bool,
-    header_control: Option<&CompiledHeaderControl>,
-) -> Result<http::Response<()>> {
-    let mut response = connect_established();
-    if capsule_protocol {
-        response.headers_mut().insert(
-            qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol")?,
-            http::HeaderValue::from_static("?1"),
-        );
-    }
-    finalize_response_with_headers_in_place(
-        &http::Method::CONNECT,
-        http::Version::HTTP_3,
-        proxy_name,
-        &mut response,
-        header_control,
-        false,
-    );
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        response.status(),
-        "QPX HTTP/3 extended CONNECT response",
-    )?;
-    let response = response.into_http_for_codec()?;
-    let mut out = http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(response.headers())?;
-    Ok(out)
 }
 
 pub(super) async fn open_upstream_qpx_extended_connect_stream(

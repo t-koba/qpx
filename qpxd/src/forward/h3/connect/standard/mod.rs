@@ -1,6 +1,3 @@
-use crate::http::protocol::common::connect_established_response as connect_established;
-use crate::http::protocol::l7::finalize_response_with_headers_in_place;
-use crate::http3::codec::http_headers_to_h1;
 use crate::http3::server::{H3ServerRequestStream, send_h3_response};
 use crate::rate_limit::RateLimitContext;
 use anyhow::Result;
@@ -45,37 +42,6 @@ pub(super) struct PreparedH3Connect {
 }
 
 pub(super) use super::H3ConnectAuditContext;
-
-pub(super) fn build_h3_connect_success_response(
-    proxy_name: &str,
-    request_method: &http::Method,
-    capsule_protocol: bool,
-    header_control: Option<&CompiledHeaderControl>,
-) -> Result<::http::Response<()>> {
-    let mut response = connect_established();
-    if capsule_protocol {
-        response.headers_mut().insert(
-            qpx_core::http_message::OrdinaryHeaderName::try_from("capsule-protocol")?,
-            http::HeaderValue::from_static("?1"),
-        );
-    }
-    finalize_response_with_headers_in_place(
-        request_method,
-        http::Version::HTTP_3,
-        proxy_name,
-        &mut response,
-        header_control,
-        false,
-    );
-    let status = qpx_http::protocol::semantics::validate_http_status_class(
-        response.status(),
-        "HTTP/3 CONNECT response",
-    )?;
-    let response = response.into_http_for_codec()?;
-    let mut out = ::http::Response::builder().status(status).body(())?;
-    *out.headers_mut() = http_headers_to_h1(response.headers())?;
-    Ok(out)
-}
 
 pub(super) async fn send_h3_policy_response<R: crate::http::response_carrier::ResponseCarrier>(
     req_stream: &mut H3ServerRequestStream,
