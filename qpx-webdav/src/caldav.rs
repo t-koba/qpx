@@ -77,20 +77,20 @@ pub(crate) fn validate_calendar(body: &[u8]) -> Result<Vec<CalendarObject>> {
 }
 
 fn unfold_lines(text: &str) -> Result<Vec<String>> {
-    if text.contains('\0') || text.contains('\r') && text.contains("\r\r") {
-        return Err(anyhow!("iCalendar contains invalid control data"));
-    }
     let mut lines = Vec::<String>::new();
     for raw in text.replace("\r\n", "\n").split('\n') {
+        if raw.is_empty() {
+            continue;
+        }
+        if raw.bytes().any(|byte| byte < 0x20 && byte != b'\t') {
+            return Err(anyhow!("iCalendar contains a control character"));
+        }
         if raw.starts_with([' ', '\t']) {
             let previous = lines
                 .last_mut()
                 .ok_or_else(|| anyhow!("iCalendar folding has no preceding line"))?;
             previous.push_str(&raw[1..]);
-        } else if !raw.is_empty() {
-            if raw.bytes().any(|byte| byte < 0x20 && byte != b'\t') {
-                return Err(anyhow!("iCalendar contains a control character"));
-            }
+        } else {
             lines.push(raw.to_owned());
         }
     }
@@ -183,5 +183,11 @@ mod tests {
             format_datetime(parse_datetime("20260711").unwrap()),
             "20260711T000000Z"
         );
+    }
+
+    #[test]
+    fn rejects_control_characters_on_folded_lines() {
+        let body = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDTSTART:20260711T010000Z\r\nSUMMARY:x\r\n \x01y\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
+        assert!(validate_calendar(body).is_err());
     }
 }
