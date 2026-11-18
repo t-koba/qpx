@@ -186,6 +186,77 @@ async fn stale_if_error_fallback_omits_obsolete_warning_headers() {
 }
 
 #[tokio::test]
+async fn request_no_cache_blocks_stale_if_error_fallback() {
+    let now = super::util::now_millis();
+    let state_with = |no_cache: bool| {
+        let backend = Arc::new(MockBackend::new());
+        RevalidationState {
+            backend,
+            namespace: "ns".to_string(),
+            variant_key: "obj:x:y".to_string(),
+            request_method: Method::GET,
+            request_directives: RequestDirectives {
+                no_cache,
+                ..RequestDirectives::default()
+            },
+            stale_if_error_secs: Some(60),
+            envelope: CachedResponseEnvelope {
+                status: 200,
+                headers: crate::types::CachedHeaders::from_pairs(vec![(
+                    "cache-control".to_string(),
+                    "max-age=10, stale-if-error=60".to_string(),
+                )]),
+                body: CachedBody::default(),
+                body_len: 5,
+                stored_at_ms: now.saturating_sub(40_000),
+                initial_age_secs: 0,
+                response_delay_secs: 0,
+                freshness_lifetime_secs: 10,
+                vary_headers: Vec::new(),
+                vary_values: Vec::new(),
+                response_directives: Default::default(),
+                response_header_values: Default::default(),
+            },
+            revalidations: test_revalidations(),
+        }
+    };
+
+    let control = state_with(false);
+    control
+        .backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:x:y").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    assert!(
+        maybe_build_stale_if_error_response(&control)
+            .await
+            .is_some()
+    );
+
+    let no_cache = state_with(true);
+    no_cache
+        .backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:x:y").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    assert!(
+        maybe_build_stale_if_error_response(&no_cache)
+            .await
+            .is_none()
+    );
+}
+
+#[tokio::test]
 async fn must_revalidate_blocks_stale_if_error_fallback() {
     let now = super::util::now_millis();
     let state = RevalidationState {

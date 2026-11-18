@@ -462,7 +462,10 @@ pub async fn maybe_build_stale_if_error_response(
     state: &RevalidationState,
 ) -> Option<Response<Body>> {
     let directives = state.envelope.response_directives();
-    if directives.forbids_stale_reuse() {
+    // RFC 9111 §5.2.1.4: a request asking for successful validation must not
+    // be answered with a stale fallback after that validation fails. The other
+    // stale paths already reject this; the error fallback must do the same.
+    if state.request_directives.no_cache || directives.forbids_stale_reuse() {
         return None;
     }
     let limit = state.stale_if_error_secs?;
