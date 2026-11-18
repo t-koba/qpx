@@ -138,6 +138,7 @@ async fn qpx_request_content_length_mismatches_abort_body_relay() -> Result<()> 
                         grpc_observer: None,
                         listener_name: None,
                         grpc_stream_deadline: None,
+                        request_body_deadline: None,
                         observe_grpc_messages: false,
                     },
                 ),
@@ -179,6 +180,76 @@ async fn qpx_request_content_length_mismatches_abort_body_relay() -> Result<()> 
                 expected_error
             );
         }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
+#[tokio::test]
+async fn request_body_relay_deadline_stops_trickle_after_consumer_closes() -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        let mut tasks = tokio::task::JoinSet::new();
+        let (_client, conn, mut rx) = qpx_loopback(&mut tasks, None).await?;
+        let mut control = conn.open_uni().await?;
+        control.write_all(&[0x00, 0x04, 0x00]).await?;
+
+        let (mut remote, _response_recv) = conn.open_bi().await?;
+        let headers = b"\x00\x00\xd4\xd7\xc1\x50\x09localhost";
+        remote.write_all(&[0x01, headers.len() as u8]).await?;
+        remote.write_all(headers).await?;
+
+        let local = rx.recv().await.expect("captured QPX request stream");
+        let (_response_send, mut local) = local.split();
+        let (body_sender, mut body) = Body::channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let relay = tokio::spawn(async move {
+            relay_qpx_request_body_observed_from_recv(
+                &mut local,
+                body_sender,
+                QpxRequestBodyRelayOptions {
+                    read_timeout: Duration::from_secs(2),
+                    max_body_bytes: 1024,
+                    declared_content_length: None,
+                    grpc_observer: None,
+                    listener_name: None,
+                    grpc_stream_deadline: None,
+                    request_body_deadline: Some(deadline),
+                    observe_grpc_messages: false,
+                },
+            )
+            .await
+        });
+
+        // Prime the relay and drop its consumer, as when an upstream response
+        // closes the request-body channel before the client finishes uploading.
+        remote.write_all(b"\x00\x01x").await?;
+        assert_eq!(
+            timeout(Duration::from_secs(1), body.data())
+                .await?
+                .expect("initial relayed data")?,
+            Bytes::from_static(b"x")
+        );
+        drop(body);
+
+        // Keep trickling inside the 2s idle timeout. The shorter absolute body
+        // deadline must win and abort the H3 message stream anyway.
+        for _ in 0..6 {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            if remote.write_all(b"\x00\x01x").await.is_err() {
+                break;
+            }
+        }
+        let error = timeout(Duration::from_secs(2), relay)
+            .await??
+            .expect_err("absolute request-body deadline must stop the trickle");
+        assert_eq!(
+            error.to_string(),
+            "qpx-h3 request body duration exceeded configured limit"
+        );
+        assert_eq!(
+            remote.stopped().await?.map(u64::from),
+            Some(::h3::error::Code::H3_MESSAGE_ERROR.value())
+        );
         Ok::<_, anyhow::Error>(())
     })
     .await?

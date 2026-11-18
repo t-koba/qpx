@@ -189,6 +189,7 @@ impl H3RequestHandler for ReverseH3Handler {
             },
             fallback,
         )
+        .0
     }
 
     async fn handle_http(&self, req: Request<Body>, conn: H3ConnInfo) -> Self::Response {

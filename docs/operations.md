@@ -112,7 +112,9 @@ reload for compatible config edits.
   API's u32 stream-count ceiling are clamped. Changes restart listeners during
   configuration reload, because the cap is advertised by the QUIC transport.
 - `runtime.upstream_http_timeout_ms` is the default dial/request timeout for
-  upstream HTTP and reverse route proxying.
+  upstream HTTP and reverse route proxying. It also bounds the total lifetime
+  of non-gRPC HTTP/3 qpx request-body relays when no route-specific timeout is
+  known before body inspection; a selected reverse route uses its own timeout.
 - `runtime.upstream_max_idle_connections_per_origin` caps reusable direct
   HTTP/1 origin connections per origin. Raise it for high-concurrency reverse
   routes that concentrate traffic on a small upstream set.

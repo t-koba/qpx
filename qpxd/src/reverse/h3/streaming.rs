@@ -38,10 +38,13 @@ pub(super) fn request_streaming_limits_for_head(
     req_head: &Request<()>,
     peer: ReverseH3RequestPeer<'_>,
     fallback: ResolvedStreamingLimits,
-) -> ResolvedStreamingLimits {
+) -> (ResolvedStreamingLimits, std::time::Duration) {
     let state = reverse.runtime.state();
+    let default_request_timeout = std::time::Duration::from_millis(
+        state.plan.limits.timeouts.upstream_http_timeout_ms.max(1),
+    );
     let Some(edge) = state.plan.reverse_edge(reverse.name.as_ref()) else {
-        return fallback;
+        return (fallback, default_request_timeout);
     };
     let compiled = reverse.compiled.load_full();
     let router = compiled.router.as_ref();
@@ -71,6 +74,7 @@ pub(super) fn request_streaming_limits_for_head(
         .map(|cert| extract_upstream_certificate_info(Some(cert.as_slice())));
     let mut fallback_to_edge = false;
     let mut selected_limits = None;
+    let mut selected_timeout = None;
     let _ = router.try_for_each_candidate_route(prefilter_ctx, |_, route| {
         let resolution_override = route.plan.destination_resolution.as_ref();
         let effective_policy = route.plan.policy_context.clone();
@@ -128,14 +132,22 @@ pub(super) fn request_streaming_limits_for_head(
                     .map(|limits| limits.request_side_fail_closed(route.plan.streaming))
                     .unwrap_or(route.plan.streaming),
             );
+            selected_timeout = Some(route.policy.timeout);
             return Ok(true);
         }
         Ok(false)
     });
     if fallback_to_edge {
-        return edge.streaming;
+        return (edge.streaming, default_request_timeout);
     }
-    selected_limits.unwrap_or_else(|| deferred_limits.unwrap_or(edge.streaming))
+    let body_rules_deferred = deferred_limits.is_some();
+    let streaming = selected_limits.unwrap_or_else(|| deferred_limits.unwrap_or(edge.streaming));
+    let request_timeout = if body_rules_deferred {
+        default_request_timeout
+    } else {
+        selected_timeout.unwrap_or(default_request_timeout)
+    };
+    (streaming, request_timeout)
 }
 
 fn classify_reverse_h3_destination(

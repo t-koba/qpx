@@ -168,6 +168,22 @@ impl ForwardQpxHandler {
                 grpc_started,
             )
         });
+        // The upstream request timeout also caps a non-gRPC body relay's total
+        // lifetime, including any drain after the upstream consumer closes.
+        let request_body_deadline = if grpc_protocol.is_none() {
+            let upstream_timeout = Duration::from_millis(
+                self.runtime
+                    .state()
+                    .plan
+                    .limits
+                    .timeouts
+                    .upstream_http_timeout_ms
+                    .max(1),
+            );
+            Some(crate::runtime::tokio_deadline_after(upstream_timeout))
+        } else {
+            None
+        };
         let declared_content_length = request.headers().declared_content_length()?;
         if let Some(content_length) = declared_content_length
             && content_length > listener_streaming.max_request_body_bytes as u64
@@ -258,6 +274,7 @@ impl ForwardQpxHandler {
                 // the relay at expiry instead of failing it, so the inner
                 // relay must not abort the stream on the same instant.
                 grpc_stream_deadline: None,
+                request_body_deadline,
                 observe_grpc_messages: listener_streaming.observe_grpc_messages,
             },
         );

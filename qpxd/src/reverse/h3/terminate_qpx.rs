@@ -151,12 +151,20 @@ impl ReverseQpxHandler {
             .map(str::to_string);
         let grpc_started = Instant::now();
         let edge_streaming = self.edge_streaming_limits();
-        let request_streaming = super::streaming::request_streaming_limits_for_head(
+        let request_limits = super::streaming::request_streaming_limits_for_head(
             &self.reverse,
             &request.head,
             reverse_qpx_request_peer(&conn),
             edge_streaming,
         );
+        let (request_streaming, request_timeout) = request_limits;
+        // The request timeout is also the total lifetime of a non-gRPC body
+        // relay, including any drain after its upstream consumer closes.
+        let request_body_deadline = if grpc_protocol.is_none() {
+            Some(crate::runtime::tokio_deadline_after(request_timeout))
+        } else {
+            None
+        };
         let grpc_deadline = grpc_protocol.as_deref().map(|protocol| {
             crate::http::rpc::resolve_rpc_deadline(
                 &request_headers,
@@ -255,6 +263,7 @@ impl ReverseQpxHandler {
                 // the relay at expiry instead of failing it, so the inner
                 // relay must not abort the stream on the same instant.
                 grpc_stream_deadline: None,
+                request_body_deadline,
                 observe_grpc_messages: request_streaming.observe_grpc_messages,
             },
         );

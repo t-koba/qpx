@@ -1,7 +1,8 @@
 use crate::http3::stream_limits::timeout_or_deadline;
 use anyhow::{Result, anyhow};
-use qpx_http::body::Sender;
-use tokio::time::{Duration, Instant};
+use qpx_http::body::{BodyError, Sender};
+use std::future::Future;
+use tokio::time::{Duration, Instant, sleep_until};
 
 pub(crate) struct QpxRequestBodyRelayOptions<'a> {
     pub(crate) read_timeout: Duration,
@@ -10,7 +11,26 @@ pub(crate) struct QpxRequestBodyRelayOptions<'a> {
     pub(crate) grpc_observer: Option<crate::http::rpc::streaming::StreamingRpcObserver>,
     pub(crate) listener_name: Option<&'a str>,
     pub(crate) grpc_stream_deadline: Option<Instant>,
+    pub(crate) request_body_deadline: Option<Instant>,
     pub(crate) observe_grpc_messages: bool,
+}
+
+async fn send_before_deadline<F>(
+    future: F,
+    deadline: Option<Instant>,
+) -> Result<std::result::Result<(), BodyError>>
+where
+    F: Future<Output = std::result::Result<(), BodyError>>,
+{
+    match deadline {
+        Some(deadline) => tokio::select! {
+            _ = sleep_until(deadline) => Err(anyhow!(
+                "qpx-h3 request body duration exceeded configured limit"
+            )),
+            result = future => Ok(result),
+        },
+        None => Ok(future.await),
+    }
 }
 
 pub(crate) async fn relay_qpx_request_body_observed_from_recv(
@@ -19,15 +39,25 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
     options: QpxRequestBodyRelayOptions<'_>,
 ) -> Result<(u64, Option<crate::http::rpc::FramedBodySummary>)> {
     let mut grpc_observer = options.grpc_observer;
+    let (stream_deadline, deadline_message) = match options.request_body_deadline {
+        Some(deadline) => (
+            Some(deadline),
+            "qpx-h3 request body duration exceeded configured limit",
+        ),
+        None => (
+            options.grpc_stream_deadline,
+            "qpx-h3 gRPC stream duration exceeded configured limit",
+        ),
+    };
     let mut bytes_read = 0usize;
     let mut receiver_open = true;
     loop {
         let read = timeout_or_deadline(
             req_stream.recv_data(),
             options.read_timeout,
-            options.grpc_stream_deadline,
+            stream_deadline,
             "qpx-h3 request body read timed out",
-            "qpx-h3 gRPC stream duration exceeded configured limit",
+            deadline_message,
         );
         let chunk = if receiver_open {
             tokio::select! {
@@ -82,8 +112,17 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
             return Err(anyhow!(err));
         }
         bytes_read = next;
-        if receiver_open && sender.send_data(chunk).await.is_err() {
-            receiver_open = false;
+        if receiver_open {
+            match send_before_deadline(sender.send_data(chunk), options.request_body_deadline).await
+            {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => receiver_open = false,
+                Err(err) => {
+                    sender.abort();
+                    req_stream.abort_message_stream();
+                    return Err(err);
+                }
+            }
         }
     }
 
@@ -100,9 +139,9 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
     let trailers = timeout_or_deadline(
         req_stream.recv_trailers(),
         options.read_timeout,
-        options.grpc_stream_deadline,
+        stream_deadline,
         "qpx-h3 request trailers read timed out",
-        "qpx-h3 gRPC stream duration exceeded configured limit",
+        deadline_message,
     )
     .await;
     receiver_open &= !sender.is_closed();
@@ -120,8 +159,16 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
             req_stream.abort_message_stream();
             return Err(anyhow!("invalid qpx-h3 request trailers: {err}"));
         }
-        if receiver_open {
-            let _ = sender.send_trailers(trailers).await;
+        if receiver_open
+            && let Err(err) = send_before_deadline(
+                sender.send_trailers(trailers),
+                options.request_body_deadline,
+            )
+            .await
+        {
+            sender.abort();
+            req_stream.abort_message_stream();
+            return Err(err);
         }
     }
     let summary = if let Some(observer) = grpc_observer {

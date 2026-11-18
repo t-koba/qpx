@@ -76,7 +76,13 @@ edges:
 
 ## Protocol Guidance
 
-General HTTP usually works with the defaults. Increase
+General HTTP usually works with the defaults. `body_read_timeout_ms` is an
+idle timeout for each body read, not a total request-body duration. Non-gRPC
+HTTP/3 qpx ingress also applies an absolute request-body deadline: forward uses
+`runtime.upstream_http_timeout_ms`, while reverse uses the selected route's
+timeout (or the runtime timeout when body-dependent policy has not selected a
+route yet). This deadline still applies when the upstream stops consuming the
+body and qpx is draining the remaining HTTP/3 request. Increase
 `body_channel_capacity` only when upstream and downstream flow control can
 benefit from more in-flight chunks.
 
