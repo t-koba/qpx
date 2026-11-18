@@ -59,7 +59,9 @@ check_crate() {
 # CacheBackendConfig exposes `writer_mode` (default `single_instance`; `shared` is
 # limited to Unix disk) and `commit_lock_stripes` (default 64) for shared disk-cache writers.
 # AcmeDnsHookConfig exposes `timeout_secs` (default 60) to bound DNS challenge hooks.
-check_crate qpx-core 963a23be165a379ecbbd7a3f07bed06d08770bdf6b425cde0d7d350c92810f14
+# qpx-core intentionally exposes `canonical_fields_for_serialization`, the narrow
+# owner-based header serialization API used by IPC request metadata.
+check_crate qpx-core 496678eb981fc879df68f9249530750572f74102d21a54f9d3dacc1be86a53b8
 check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
 check_crate qpx-h3 24b3e088e981e7d045d04b3a6fa8461fda1f78d10443de0796ac7ac3adc23b8b
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
