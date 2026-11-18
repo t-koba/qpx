@@ -1,34 +1,18 @@
 use super::{ConfigReloadHandler, emit_config_reload_audit};
 use crate::server::ProxyTasks;
-use crate::startup::{log_runtime_ready, refresh_watches, validate_runtime_state};
+use crate::startup::{log_runtime_ready, validate_runtime_state};
 use crate::{runtime, tcp_bindings, udp_bindings};
-use anyhow::Result;
 use qpx_core::config::Config as ProxyConfig;
-use std::collections::HashSet;
-use std::path::PathBuf;
 use tracing::{info, warn};
 
-pub(super) struct RestartReloadInput<'a> {
-    pub(super) current: &'a mut ProxyConfig,
-    pub(super) runtime: &'a mut runtime::Runtime,
-    pub(super) proxy: &'a mut ProxyTasks,
-    pub(super) watcher: &'a mut dyn notify::Watcher,
-    pub(super) watched: &'a mut HashSet<PathBuf>,
-    pub(super) watch_sources: Vec<PathBuf>,
-    pub(super) new_config: ProxyConfig,
-}
-
 impl ConfigReloadHandler {
-    pub(super) async fn apply_restart_reload(&self, input: RestartReloadInput<'_>) -> Result<()> {
-        let RestartReloadInput {
-            current,
-            runtime,
-            proxy,
-            watcher,
-            watched,
-            watch_sources,
-            new_config,
-        } = input;
+    pub(super) async fn apply_restart_reload(
+        &self,
+        current: &mut ProxyConfig,
+        runtime: &mut runtime::Runtime,
+        proxy: &mut ProxyTasks,
+        new_config: ProxyConfig,
+    ) -> bool {
         let new_runtime = match runtime::Runtime::with_http_module_registry(
             new_config.clone(),
             self.http_module_registry.clone(),
@@ -43,7 +27,7 @@ impl ConfigReloadHandler {
                     self.configs_display.as_str(),
                     Some(&err),
                 );
-                return Ok(());
+                return false;
             }
         };
 
@@ -57,7 +41,7 @@ impl ConfigReloadHandler {
                 self.configs_display.as_str(),
                 Some(&err),
             );
-            return Ok(());
+            return false;
         }
 
         let tcp_bindings = match tcp_bindings::TcpBindings::bind_for_hot_reload(
@@ -68,7 +52,7 @@ impl ConfigReloadHandler {
             Ok(bindings) => bindings,
             Err(err) => {
                 warn!(error = ?err, "config reload bind failed");
-                return Ok(());
+                return false;
             }
         };
         let udp_bindings = match udp_bindings::UdpBindings::bind_for_hot_reload(
@@ -79,7 +63,7 @@ impl ConfigReloadHandler {
             Ok(bindings) => bindings,
             Err(err) => {
                 warn!(error = ?err, "config reload udp bind failed");
-                return Ok(());
+                return false;
             }
         };
 
@@ -97,7 +81,7 @@ impl ConfigReloadHandler {
             Ok(tasks) => tasks,
             Err(err) => {
                 warn!(error = ?err, "config reload start failed; keeping old proxy tasks");
-                return Ok(());
+                return false;
             }
         };
 
@@ -107,7 +91,6 @@ impl ConfigReloadHandler {
         }
         // `new_runtime` owns freshly built connection pools, so there is nothing to flush.
         log_runtime_ready(&new_runtime);
-        let _ = refresh_watches(watcher, watched, watch_sources);
         info!("config reloaded; listener/reverse server set restarted");
         emit_config_reload_audit(
             "applied",
@@ -118,6 +101,6 @@ impl ConfigReloadHandler {
         );
         *current = new_config;
         *runtime = new_runtime;
-        Ok(())
+        true
     }
 }

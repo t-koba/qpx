@@ -1,17 +1,15 @@
 use crate::http::modules::HttpModuleRegistry;
 use crate::server::{AdminTasks, ProxyTasks};
-use crate::startup::{refresh_watches, validate_runtime_state, watch_sources_for_config};
+use crate::startup::validate_runtime_state;
 use crate::{runtime, upgrade};
 use anyhow::{Context, Result};
 use qpx_core::config::{Config as ProxyConfig, load_configs_with_sources};
-use std::collections::HashSet;
 use std::fmt::Debug;
 use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::{info, warn};
 
 mod restart;
-use restart::RestartReloadInput;
 
 pub(crate) struct ConfigReloadHandler {
     config_paths: Vec<PathBuf>,
@@ -41,9 +39,7 @@ impl ConfigReloadHandler {
         current: &mut ProxyConfig,
         runtime: &mut runtime::Runtime,
         proxy: &mut ProxyTasks,
-        watcher: &mut dyn notify::Watcher,
-        watched: &mut HashSet<PathBuf>,
-    ) -> Result<()> {
+    ) -> Option<Vec<PathBuf>> {
         let (new_config, sources) = match load_configs_with_sources(&self.config_paths) {
             Ok(loaded) => loaded,
             Err(err) => {
@@ -55,7 +51,7 @@ impl ConfigReloadHandler {
                     self.configs_display.as_str(),
                     Some(&err),
                 );
-                return Ok(());
+                return None;
             }
         };
 
@@ -68,42 +64,24 @@ impl ConfigReloadHandler {
                 self.configs_display.as_str(),
                 Some(&err),
             );
-            return Ok(());
+            return None;
         }
 
-        let watch_sources = watch_sources_for_config(&new_config, sources);
-        if runtime::requires_server_restart(current, &new_config) {
-            self.apply_restart_reload(RestartReloadInput {
-                current,
-                runtime,
-                proxy,
-                watcher,
-                watched,
-                watch_sources,
-                new_config,
-            })
-            .await
+        let applied = if runtime::requires_server_restart(current, &new_config) {
+            self.apply_restart_reload(current, runtime, proxy, new_config)
+                .await
         } else {
-            self.apply_in_place_reload(
-                current,
-                runtime,
-                watcher,
-                watched,
-                watch_sources,
-                new_config,
-            )
-        }
+            self.apply_in_place_reload(current, runtime, new_config)
+        };
+        applied.then_some(sources)
     }
 
     fn apply_in_place_reload(
         &self,
         current: &mut ProxyConfig,
         runtime: &runtime::Runtime,
-        watcher: &mut dyn notify::Watcher,
-        watched: &mut HashSet<PathBuf>,
-        watch_sources: Vec<PathBuf>,
         new_config: ProxyConfig,
-    ) -> Result<()> {
+    ) -> bool {
         match runtime::RuntimeState::build_with_http_module_registry(
             new_config.clone(),
             self.http_module_registry.clone(),
@@ -118,14 +96,13 @@ impl ConfigReloadHandler {
                         self.configs_display.as_str(),
                         Some(&err),
                     );
-                    return Ok(());
+                    return false;
                 }
                 // `Runtime::swap` carries the connection-pool registry across the reload
                 // and adopts the new config's pool limits, so no explicit setter is needed.
                 runtime.swap(state);
                 // Flush direct-origin connections so the reload picks up new TLS/routing.
                 runtime.state().pools.direct_origin.clear();
-                let _ = refresh_watches(watcher, watched, watch_sources);
                 info!("config reloaded");
                 emit_config_reload_audit(
                     "applied",
@@ -135,6 +112,7 @@ impl ConfigReloadHandler {
                     None,
                 );
                 *current = new_config;
+                true
             }
             Err(err) => {
                 warn!(error = ?err, "config reload failed");
@@ -145,9 +123,9 @@ impl ConfigReloadHandler {
                     self.configs_display.as_str(),
                     Some(&err),
                 );
+                false
             }
         }
-        Ok(())
     }
 }
 

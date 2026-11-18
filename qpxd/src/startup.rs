@@ -2,9 +2,12 @@ use crate::cli::{ExplainFormat, InitTemplate, MatchConfigRequest, SchemaFormat};
 use crate::server::sets::wait_for_connection_drain;
 use crate::server::{AdminTasks, ProxyTasks};
 use anyhow::{Context, Result};
+use arc_swap::ArcSwap;
+use notify::Watcher;
 use qpx_core::config::{Config as ProxyConfig, load_configs, load_configs_with_sources};
 use qpx_observability::init_logging;
-use std::path::PathBuf;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::runtime::Runtime;
 use tracing::{info, warn};
@@ -244,28 +247,83 @@ pub(crate) async fn run(
 }
 
 struct ConfigWatcher {
-    rx: tokio::sync::mpsc::Receiver<notify::Result<notify::Event>>,
+    rx: tokio::sync::mpsc::Receiver<()>,
     watcher: notify::RecommendedWatcher,
-    watched: std::collections::HashSet<PathBuf>,
+    sources: Arc<ArcSwap<HashSet<PathBuf>>>,
+    directories: HashSet<PathBuf>,
+}
+
+impl ConfigWatcher {
+    fn refresh_watches(&mut self, sources: Vec<PathBuf>) -> notify::Result<()> {
+        let next = sources
+            .iter()
+            .filter_map(|source| source.parent().map(Path::to_path_buf))
+            .collect::<HashSet<_>>();
+        self.sources.store(Arc::new(sources.into_iter().collect()));
+
+        // Watch directory entries, not file inodes. Keep retained watches installed
+        // so replacing a file never requires a reload to succeed before the next edit.
+        self.directories.retain(|dir| {
+            if next.contains(dir) {
+                return true;
+            }
+            let _ = self.watcher.unwatch(dir);
+            false
+        });
+        let mut result = Ok(());
+        for dir in next {
+            if !self.directories.contains(&dir) {
+                match self
+                    .watcher
+                    .watch(&dir, notify::RecursiveMode::NonRecursive)
+                {
+                    Ok(()) => {
+                        self.directories.insert(dir);
+                    }
+                    Err(err) => result = Err(err),
+                }
+            }
+        }
+        result
+    }
 }
 
 fn start_config_watcher(config_paths: &[PathBuf]) -> Result<ConfigWatcher> {
-    let (tx, rx) = tokio::sync::mpsc::channel(4);
-    let mut watcher = notify::recommended_watcher(move |res| {
-        let _ = tx.blocking_send(res);
+    use notify::event::{AccessKind, AccessMode};
+
+    let (tx, rx) = tokio::sync::mpsc::channel(1);
+    let sources = Arc::new(ArcSwap::from_pointee(HashSet::new()));
+    let active_sources = sources.clone();
+    let watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+        let event = match res {
+            Ok(event) => event,
+            Err(err) => {
+                warn!(error = ?err, "watch error");
+                return;
+            }
+        };
+        // Do not reload on reads of the config itself; keep close-after-write.
+        let changed = !event.kind.is_access()
+            || event.kind == notify::EventKind::Access(AccessKind::Close(AccessMode::Write));
+        if event.need_rescan()
+            || (changed && {
+                let sources = active_sources.load();
+                event.paths.iter().any(|path| sources.contains(path))
+            })
+        {
+            // A queued notification already asks the loop to read the latest files.
+            let _ = tx.try_send(());
+        }
     })?;
-    let mut watched = std::collections::HashSet::new();
-    let (watch_config, sources) = load_configs_with_sources(config_paths)?;
-    refresh_watches(
-        &mut watcher,
-        &mut watched,
-        watch_sources_for_config(&watch_config, sources),
-    )?;
-    Ok(ConfigWatcher {
+    let mut config_watcher = ConfigWatcher {
         rx,
         watcher,
-        watched,
-    })
+        sources,
+        directories: HashSet::new(),
+    };
+    let (watch_config, sources) = load_configs_with_sources(config_paths)?;
+    config_watcher.refresh_watches(watch_sources_for_config(&watch_config, sources))?;
+    Ok(config_watcher)
 }
 
 async fn run_control_loop(
@@ -308,22 +366,15 @@ async fn run_control_loop(
                 };
             },
             event = config_watcher.rx.recv() => {
-                let Some(event) = event else {
+                if event.is_none() {
                     return Ok(());
-                };
-                match event {
-                    Ok(_) => {
-                        reload_handler
-                            .handle_config_event(
-                                &mut current,
-                                runtime,
-                                &mut proxy,
-                                &mut config_watcher.watcher,
-                                &mut config_watcher.watched,
-                            )
-                            .await?;
-                    }
-                    Err(err) => warn!(error = ?err, "watch error"),
+                }
+                if let Some(sources) = reload_handler
+                    .handle_config_event(&mut current, runtime, &mut proxy)
+                    .await
+                    && let Err(err) = config_watcher.refresh_watches(watch_sources_for_config(&current, sources))
+                {
+                    warn!(error = ?err, "failed to refresh config watches");
                 }
             },
             upgrade_requested = async {
@@ -498,10 +549,7 @@ pub(crate) fn validate_runtime_state(state: &crate::runtime::RuntimeState) -> Re
     Ok(())
 }
 
-pub(crate) fn watch_sources_for_config(
-    config: &ProxyConfig,
-    mut sources: Vec<PathBuf>,
-) -> Vec<PathBuf> {
+fn watch_sources_for_config(config: &ProxyConfig, mut sources: Vec<PathBuf>) -> Vec<PathBuf> {
     for set in &config.security.named_sets {
         let Some(path) = set.file.as_deref() else {
             continue;
@@ -517,27 +565,6 @@ pub(crate) fn watch_sources_for_config(
         }
     }
     sources
-}
-
-pub(crate) fn refresh_watches(
-    watcher: &mut dyn notify::Watcher,
-    watched: &mut std::collections::HashSet<PathBuf>,
-    sources: Vec<PathBuf>,
-) -> Result<()> {
-    let next: std::collections::HashSet<PathBuf> = sources.into_iter().collect();
-
-    // Config files are commonly updated via atomic replace. Some notify backends
-    // bind file watches to the old inode/handle, so refresh every retained path
-    // after a successful reload instead of only adding/removing set differences.
-    for stale in watched.iter() {
-        let _ = watcher.unwatch(stale);
-    }
-    for source in &next {
-        watcher.watch(source, notify::RecursiveMode::NonRecursive)?;
-    }
-
-    *watched = next;
-    Ok(())
 }
 
 #[cfg(test)]

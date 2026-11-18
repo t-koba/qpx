@@ -77,3 +77,90 @@ edges:
     wait_for_counter(&mirror_hits, 1).await?;
     Ok(())
 }
+
+#[tokio::test]
+async fn reverse_reloads_valid_atomic_config_after_rejected_replacement() -> Result<()> {
+    let dir = tempfile::tempdir()?;
+    let cfg = dir.path().join("reverse.yaml");
+    let log = dir.path().join("qpxd.log");
+    let state_dir = yaml_quote_path(&dir.path().join("state"));
+    let config = |port, body| {
+        format!(
+            r#"state_dir: {state_dir}
+runtime:
+  worker_threads: 1
+  acceptor_tasks_per_listener: 1
+  reuse_port: false
+edges:
+- kind: reverse
+  name: reverse
+  listen: 127.0.0.1:{port}
+  routes:
+  - match:
+      path:
+      - /
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: {body}"#
+        )
+    };
+    let (port, mut qpxd) =
+        spawn_qpxd_on_random_port(&cfg, log.clone(), |port| config(port, "before"))?;
+    let client = test_client();
+    let deadline = Duration::from_secs(5);
+    let response_body = || async {
+        timeout(deadline, async {
+            let response = client
+                .request(
+                    Request::builder()
+                        .uri(format!("http://127.0.0.1:{port}/"))
+                        .body(empty_body())?,
+                )
+                .await?;
+            assert_eq!(response.status(), StatusCode::OK);
+            collect_body(response.into_body()).await
+        })
+        .await?
+    };
+    let replace = |contents: &str| -> Result<()> {
+        let replacement = cfg.with_extension("tmp");
+        fs::write(&replacement, contents)?;
+        fs::rename(replacement, &cfg)?;
+        Ok(())
+    };
+
+    assert_eq!(response_body().await?.as_ref(), b"before");
+    replace("edges: [")?;
+    timeout(deadline, async {
+        while !fs::read_to_string(&log)?.contains("config reload parse failed") {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Ok::<_, anyhow::Error>(())
+    })
+    .await
+    .with_context(|| {
+        format!(
+            "qpxd did not observe the rejected config{}",
+            qpxd.log_tail()
+        )
+    })??;
+    assert_eq!(response_body().await?.as_ref(), b"before");
+
+    replace(&config(port, "after"))?;
+    timeout(deadline, async {
+        loop {
+            let body = response_body().await?;
+            if body.as_ref() == b"after" {
+                return Ok::<_, anyhow::Error>(());
+            }
+            assert_eq!(body.as_ref(), b"before");
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .with_context(|| format!("qpxd did not apply the valid config{}", qpxd.log_tail()))??;
+    assert!(qpxd.child.try_wait()?.is_none());
+    Ok(())
+}
