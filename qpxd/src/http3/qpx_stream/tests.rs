@@ -5,7 +5,9 @@ use http_body::Frame;
 use http_body_util::StreamBody;
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
+
+use super::request_body::RequestBodySendEvent;
 
 use super::test_support::qpx_loopback;
 
@@ -140,7 +142,8 @@ async fn qpx_request_content_length_mismatches_abort_body_relay() -> Result<()> 
                         grpc_stream_deadline: None,
                         request_body_deadline: None,
                         observe_grpc_messages: false,
-                    },
+                        send_probe: None,
+                    }
                 ),
                 async {
                     assert_eq!(
@@ -215,6 +218,7 @@ async fn request_body_relay_deadline_stops_trickle_after_consumer_closes() -> Re
                     grpc_stream_deadline: None,
                     request_body_deadline: Some(deadline),
                     observe_grpc_messages: false,
+                    send_probe: None,
                 },
             )
             .await
@@ -274,7 +278,8 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
         // in sender.send_data, so only the absolute send-side deadline can end
         // the relay; the read-side idle/deadline path is not waiting here.
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let (probe, mut events) = mpsc::unbounded_channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let relay = tokio::spawn(async move {
             relay_qpx_request_body_observed_from_recv(
                 &mut local,
@@ -288,17 +293,36 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
                     grpc_stream_deadline: None,
                     request_body_deadline: Some(deadline),
                     observe_grpc_messages: false,
+                    send_probe: Some(probe),
                 },
             )
             .await
         });
 
         remote.write_all(b"\x00\x01x").await?;
-        // Let the relay forward the first frame before queuing the second.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await?
+                .expect("send probe alive"),
+            RequestBodySendEvent::DataAccepted
+        );
+        assert!(
+            Instant::now() < deadline,
+            "first DATA accepted after deadline"
+        );
         remote.write_all(b"\x00\x01y").await?;
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await?
+                .expect("send probe alive"),
+            RequestBodySendEvent::DataSendPending
+        );
+        assert!(
+            Instant::now() < deadline,
+            "second DATA blocked after deadline"
+        );
 
-        let error = timeout(Duration::from_secs(2), relay)
+        let error = timeout(Duration::from_secs(3), relay)
             .await??
             .expect_err("absolute deadline must stop a blocked body send");
         assert_eq!(
@@ -334,7 +358,8 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
         // literal value len 4 then value.
         let trailers = b"\x00\x00\x25x-end\x04done";
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let (probe, mut events) = mpsc::unbounded_channel();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
         let relay = tokio::spawn(async move {
             relay_qpx_request_body_observed_from_recv(
                 &mut local,
@@ -348,19 +373,36 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
                     grpc_stream_deadline: None,
                     request_body_deadline: Some(deadline),
                     observe_grpc_messages: false,
+                    send_probe: Some(probe),
                 },
             )
             .await
         });
 
         remote.write_all(b"\x00\x01x").await?;
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await?
+                .expect("send probe alive"),
+            RequestBodySendEvent::DataAccepted
+        );
+        assert!(
+            Instant::now() < deadline,
+            "first DATA accepted after deadline"
+        );
         // A second HEADERS frame (0x01) carries trailer fields, then FIN ends data.
         remote.write_all(&[0x01, trailers.len() as u8]).await?;
         remote.write_all(trailers).await?;
         remote.finish()?;
+        assert_eq!(
+            timeout(Duration::from_secs(1), events.recv())
+                .await?
+                .expect("send probe alive"),
+            RequestBodySendEvent::TrailerSendPending
+        );
+        assert!(Instant::now() < deadline, "trailer blocked after deadline");
 
-        let error = timeout(Duration::from_secs(2), relay)
+        let error = timeout(Duration::from_secs(3), relay)
             .await??
             .expect_err("absolute deadline must stop a blocked trailer send");
         assert_eq!(

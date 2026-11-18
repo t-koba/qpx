@@ -276,6 +276,8 @@ impl ForwardQpxHandler {
                 grpc_stream_deadline: None,
                 request_body_deadline,
                 observe_grpc_messages: listener_streaming.observe_grpc_messages,
+                #[cfg(test)]
+                send_probe: None,
             },
         );
         // Cancel (do not fail) the relay when the stream budget expires: the

@@ -2,7 +2,54 @@ use crate::http3::stream_limits::timeout_or_deadline;
 use anyhow::{Result, anyhow};
 use qpx_http::body::{BodyError, Sender};
 use std::future::Future;
+#[cfg(test)]
+use std::task::Poll;
 use tokio::time::{Duration, Instant, sleep_until};
+
+#[cfg(test)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestBodySendEvent {
+    DataAccepted,
+    DataSendPending,
+    TrailerSendPending,
+}
+
+#[cfg(test)]
+pub(crate) type RequestBodySendProbe = tokio::sync::mpsc::UnboundedSender<RequestBodySendEvent>;
+
+// Test-only observation of a send's first poll outcome. It reports state
+// without awaiting anything extra, changing the send future, or polling it a
+// second time; production builds compile none of this.
+#[cfg(test)]
+async fn observed_send<F>(
+    future: F,
+    probe: Option<&RequestBodySendProbe>,
+    pending_event: RequestBodySendEvent,
+    accepted_event: Option<RequestBodySendEvent>,
+) -> F::Output
+where
+    F: Future,
+{
+    let mut future = std::pin::pin!(future);
+    let mut reported = false;
+    std::future::poll_fn(|cx| {
+        let poll = future.as_mut().poll(cx);
+        if !reported {
+            let event = match poll {
+                Poll::Pending => Some(pending_event),
+                Poll::Ready(_) => accepted_event,
+            };
+            if let Some(event) = event
+                && let Some(probe) = probe
+            {
+                let _ = probe.send(event);
+            }
+            reported = true;
+        }
+        poll
+    })
+    .await
+}
 
 pub(crate) struct QpxRequestBodyRelayOptions<'a> {
     pub(crate) read_timeout: Duration,
@@ -13,6 +60,8 @@ pub(crate) struct QpxRequestBodyRelayOptions<'a> {
     pub(crate) grpc_stream_deadline: Option<Instant>,
     pub(crate) request_body_deadline: Option<Instant>,
     pub(crate) observe_grpc_messages: bool,
+    #[cfg(test)]
+    pub(crate) send_probe: Option<RequestBodySendProbe>,
 }
 
 async fn send_before_deadline<F>(
@@ -113,8 +162,15 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
         }
         bytes_read = next;
         if receiver_open {
-            match send_before_deadline(sender.send_data(chunk), options.request_body_deadline).await
-            {
+            let send = sender.send_data(chunk);
+            #[cfg(test)]
+            let send = observed_send(
+                send,
+                options.send_probe.as_ref(),
+                RequestBodySendEvent::DataSendPending,
+                Some(RequestBodySendEvent::DataAccepted),
+            );
+            match send_before_deadline(send, options.request_body_deadline).await {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => receiver_open = false,
                 Err(err) => {
@@ -159,16 +215,20 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
             req_stream.abort_message_stream();
             return Err(anyhow!("invalid qpx-h3 request trailers: {err}"));
         }
-        if receiver_open
-            && let Err(err) = send_before_deadline(
-                sender.send_trailers(trailers),
-                options.request_body_deadline,
-            )
-            .await
-        {
-            sender.abort();
-            req_stream.abort_message_stream();
-            return Err(err);
+        if receiver_open {
+            let send = sender.send_trailers(trailers);
+            #[cfg(test)]
+            let send = observed_send(
+                send,
+                options.send_probe.as_ref(),
+                RequestBodySendEvent::TrailerSendPending,
+                None,
+            );
+            if let Err(err) = send_before_deadline(send, options.request_body_deadline).await {
+                sender.abort();
+                req_stream.abort_message_stream();
+                return Err(err);
+            }
         }
     }
     let summary = if let Some(observer) = grpc_observer {
