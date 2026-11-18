@@ -688,6 +688,47 @@ async fn chunked_response_with_conflicting_content_length_is_not_recycled() {
 }
 
 #[tokio::test]
+async fn raw_chunked_response_with_conflicting_content_length_is_not_recycled() {
+    let headers = [
+        httparse::Header {
+            name: "Transfer-Encoding",
+            value: b"chunked",
+        },
+        httparse::Header {
+            name: "Content-Length",
+            value: b"4",
+        },
+    ];
+    let mut raw =
+        RawHttp1ResponseHead::from_parsed(&headers, &Method::GET, StatusCode::OK, Version::HTTP_11)
+            .expect("raw response head");
+    assert!(!raw.upstream_keep_alive());
+    raw.finalize("qpx");
+    let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
+    assert!(!encoded.to_ascii_lowercase().contains("content-length:"));
+
+    let (stream, _peer) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_raw_response(
+        stream,
+        Arc::new(raw),
+        BytesMut::from(&b"4\r\nBODY\r\n0\r\n\r\n"[..]),
+        BytesMut::new(),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
+    );
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("body bytes"),
+        Bytes::from_static(b"BODY")
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn inline_content_length_response_recycles_before_body_release() {
     let (stream, _peer) = tokio::io::duplex(64);
     let recycled = Arc::new(AtomicUsize::new(0));
