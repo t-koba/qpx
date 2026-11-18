@@ -948,6 +948,7 @@ jobs:
     name: HTTP RFC compliance release gate
     if: always()
     needs:
+      - audit
       - e2e_tests
       - e2e_control_plane_windows
       - provider_neutral_matrix
