@@ -38,12 +38,18 @@ impl DeferredRequestBodyDeadline {
     }
 
     pub(crate) fn set(&self, deadline: Instant) {
-        *self.inner.deadline.lock().expect("deferred deadline lock") = Some(deadline);
+        match self.inner.deadline.lock() {
+            Ok(mut deadline_slot) => *deadline_slot = Some(deadline),
+            Err(poisoned) => *poisoned.into_inner() = Some(deadline),
+        }
         self.inner.armed.notify_waiters();
     }
 
     fn get(&self) -> Option<Instant> {
-        *self.inner.deadline.lock().expect("deferred deadline lock")
+        match self.inner.deadline.lock() {
+            Ok(deadline_slot) => *deadline_slot,
+            Err(poisoned) => *poisoned.into_inner(),
+        }
     }
 
     async fn wait_for_arm(&self) {

@@ -644,10 +644,7 @@ impl Headers {
                     if let Some(canonical) = canonical.as_ref() {
                         fields.push((
                             name.as_str().to_owned(),
-                            canonical
-                                .to_str()
-                                .expect("canonical decimal is textual")
-                                .to_owned(),
+                            String::from_utf8_lossy(canonical.as_ref()).into_owned(),
                         ));
                     }
                     emitted_length = true;
