@@ -1,5 +1,5 @@
 use anyhow::Result;
-use hyper::Request;
+use qpx_core::http_message::Request as OwnerRequest;
 use qpx_http::body::Body;
 use url::Url;
 
@@ -9,7 +9,7 @@ use super::OriginEndpoint;
 
 pub(super) async fn proxy_ipc_with_interim(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     origin: &OriginEndpoint,
     proxy_name: &str,
 ) -> Result<Http1ResponseWithInterim> {

@@ -9,9 +9,9 @@ use super::shm::{
 use super::{ClientConnInfo, IpcUpstream};
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
-use hyper::{Request, Response, StatusCode};
+use hyper::{Response, StatusCode};
 use qpx_core::config::IpcMode;
-use qpx_core::http_message::Response as OwnerResponse;
+use qpx_core::http_message::{Request as OwnerRequest, Response as OwnerResponse};
 use qpx_core::ipc::meta::IpcResponseMeta;
 use qpx_core::ipc::protocol::{read_frame, write_frame};
 use qpx_http::body::{Body, Sender};
@@ -25,7 +25,7 @@ use url::Url;
 
 pub(crate) async fn proxy_ipc(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     url: &Url,
     _proxy_name: &str,
 ) -> Result<OwnerResponse<Body>> {
@@ -71,7 +71,7 @@ pub(crate) struct IpcUpstreamRequestContext {
 
 pub(crate) async fn proxy_ipc_upstream(
     pools: &crate::pool::PoolRegistry,
-    req: Request<Body>,
+    req: OwnerRequest<Body>,
     upstream: &IpcUpstream,
     _proxy_name: &str,
     context: IpcUpstreamRequestContext,
@@ -107,7 +107,7 @@ struct IpcBackendRequest<'a> {
 
 async fn proxy_ipc_backend(
     ipc_pool: Arc<crate::ipc_client::IpcConnectionPool>,
-    mut req: Request<Body>,
+    mut req: OwnerRequest<Body>,
     backend_request: IpcBackendRequest<'_>,
 ) -> Result<OwnerResponse<Body>> {
     let IpcBackendRequest {
@@ -120,7 +120,9 @@ async fn proxy_ipc_backend(
         max_response_bytes,
         timeout_dur,
     } = backend_request;
-    let mut meta = build_ipc_meta(&req, conn, verified_identity, authorization_decision);
+    // Metadata serialization validates the owned framing declaration before
+    // any pool resource is acquired.
+    let mut meta = build_ipc_meta(&req, conn, verified_identity, authorization_decision)?;
 
     let (pool_key, mut conn) = checkout_stream(&ipc_pool, backend, timeout_dur).await?;
     let mut pending_req_ring = None;
@@ -326,7 +328,7 @@ fn spawn_tcp_response_reader(
 }
 
 async fn write_tcp_request_body(
-    req: &mut Request<Body>,
+    req: &mut OwnerRequest<Body>,
     conn: &mut PooledIpcConnection,
     max_request_bytes: Option<usize>,
     timeout_dur: Duration,

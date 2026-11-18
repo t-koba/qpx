@@ -301,10 +301,7 @@ async fn proxy_http_with_interim_timeout_inner(
         }
         OriginScheme::H3 => proxy_h3(pools, req, origin, proxy_name, trust, timeout_dur).await,
         OriginScheme::Ipc | OriginScheme::IpcUnix => {
-            let hyper_req = req
-                .into_http_for_codec()
-                .map_err(|err| anyhow::anyhow!("{err}"))?;
-            proxy_ipc_with_interim(pools, hyper_req, origin, proxy_name).await
+            proxy_ipc_with_interim(pools, req, origin, proxy_name).await
         }
     }
 }

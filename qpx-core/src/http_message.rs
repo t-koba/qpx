@@ -622,6 +622,45 @@ impl Headers {
             .collect()
     }
 
+    /// Render all textual field occurrences for an external metadata message.
+    ///
+    /// Unlike ordinary-field access, this serializer includes the framing
+    /// declaration: a present Content-Length is validated and replaced by one
+    /// canonical decimal occurrence, with the same rules and position as codec
+    /// export. An absent declaration yields no occurrence, so absence stays
+    /// distinct from zero. Other fields keep their spelling, per-name duplicate
+    /// order and position; non-textual values are omitted. The live message and
+    /// its raw map are never exposed, and the live declaration is unchanged.
+    pub fn canonical_fields_for_serialization(
+        &self,
+    ) -> Result<Vec<(String, String)>, ContentLengthError> {
+        let length = self.declared_content_length()?;
+        let canonical = length.map(canonical_content_length_value);
+        let mut fields = Vec::with_capacity(self.inner.len());
+        let mut emitted_length = false;
+        for (name, value) in self.inner.iter() {
+            if name == CONTENT_LENGTH {
+                if !emitted_length {
+                    if let Some(canonical) = canonical.as_ref() {
+                        fields.push((
+                            name.as_str().to_owned(),
+                            canonical
+                                .to_str()
+                                .expect("canonical decimal is textual")
+                                .to_owned(),
+                        ));
+                    }
+                    emitted_length = true;
+                }
+                continue;
+            }
+            if let Ok(text) = value.to_str() {
+                fields.push((name.as_str().to_owned(), text.to_owned()));
+            }
+        }
+        Ok(fields)
+    }
+
     /// Closed cache persistence fields without a hot-path JSON round trip.
     ///
     /// Collects the historical textual field pairs directly (names and values

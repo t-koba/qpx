@@ -124,12 +124,9 @@ pub(super) async fn proxy_reverse_http_attempt(
         {
             let url = Url::parse(upstream_origin.upstream.as_str())
                 .map_err(|err| anyhow!("invalid ipc upstream url: {}", err))?;
-            let hyper_req = req_for_upstream
-                .into_http_for_codec()
-                .map_err(|err| anyhow!("{err}"))?;
             return Ok((
                 Vec::new(),
-                proxy_ipc(pools, hyper_req, &url, proxy_name).await?,
+                proxy_ipc(pools, req_for_upstream, &url, proxy_name).await?,
                 None,
             ));
         }

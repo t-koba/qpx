@@ -138,7 +138,7 @@ async fn proxy_tcp_response(
     tokio::time::timeout(std::time::Duration::from_secs(2), async {
         let result = super::proxy_ipc(
             &crate::pool::PoolRegistry::new(),
-            hyper::Request::new(Body::from("request")),
+            qpx_core::http_message::Request::new(Body::from("request")),
             &url,
             "test",
         )
@@ -221,4 +221,60 @@ async fn ipc_response_owner_retains_status_and_header_validation() {
         .await;
         assert!(result.is_err(), "accepted {status} {name}: {value:?}");
     }
+}
+
+#[tokio::test]
+async fn invalid_content_length_is_rejected_before_ipc_checkout() {
+    use super::{IpcUpstream, IpcUpstreamRequestContext};
+    use hyper::header::HeaderValue;
+    use qpx_core::http_message::Request as OwnerRequest;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind probe listener");
+    let upstream = IpcUpstream {
+        mode: qpx_core::config::IpcMode::Tcp,
+        backend: super::backend::IpcBackend::Tcp {
+            host: "127.0.0.1".to_owned(),
+            port: listener.local_addr().expect("local addr").port(),
+        },
+        timeout: Duration::from_secs(1),
+        max_request_bytes: None,
+        max_response_bytes: None,
+    };
+    for lengths in [vec!["invalid"], vec!["3", "4"]] {
+        let mut req = OwnerRequest::new(Body::empty());
+        for length in lengths {
+            req.headers_mut()
+                .append_content_length_value(HeaderValue::from_static(length));
+        }
+        let err = timeout(
+            Duration::from_secs(2),
+            super::proxy_ipc_upstream(
+                &crate::pool::PoolRegistry::new(),
+                req,
+                &upstream,
+                "test",
+                IpcUpstreamRequestContext {
+                    conn: Default::default(),
+                    verified_identity: None,
+                    authorization_decision: None,
+                    route_timeout: Duration::from_secs(1),
+                },
+            ),
+        )
+        .await
+        .expect("rejection must not hang")
+        .expect_err("invalid declaration must be refused");
+        assert!(
+            err.to_string().contains("content-length"),
+            "unexpected error: {err:#}"
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(50), listener.accept())
+            .await
+            .is_err(),
+        "invalid requests must not check out an IPC connection"
+    );
 }
