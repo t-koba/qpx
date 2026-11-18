@@ -10,10 +10,10 @@ use qpx_core::shm_ring::ShmRingBuffer;
 use qpx_http::body::Body;
 #[cfg(unix)]
 use std::path::PathBuf;
+use std::time::Duration;
 #[cfg(unix)]
 use std::time::{SystemTime, UNIX_EPOCH};
-#[cfg(unix)]
-use tokio::time::{Duration, timeout};
+use tokio::time::timeout;
 
 #[cfg(unix)]
 fn temp_shm_path(name: &str) -> PathBuf {
