@@ -64,8 +64,8 @@ The private `.qpx-commit-locks` directory holds two bounded stripe domains
 (primary and object), at most twice that many stable lock files plus one layout file; never remove/replace this directory or its files while any
 client uses the root. They live for the root's lifetime and are not cache objects
 or eviction candidates. Simultaneous layout setup is retried within the lock
-timeout before failing closed; torn layout records are repaired under the
-layout lock without replacing the inode that coordinates processes.
+timeout before failing closed. The layout lock inode is never replaced; only
+first initialization writes the pin.
 
 The backend `timeout_ms` bounds primary/object lock contention (retries are spaced at
 roughly 1/64 of that timeout, with a 1 ms minimum interval). Index publication,
