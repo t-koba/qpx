@@ -651,6 +651,43 @@ async fn chunked_response_build_removes_conflicting_content_length() {
 }
 
 #[tokio::test]
+async fn chunked_response_with_conflicting_content_length_is_not_recycled() {
+    let mut headers = HeaderMap::new();
+    headers.insert(TRANSFER_ENCODING, HeaderValue::from_static("chunked"));
+    headers.insert(CONTENT_LENGTH, HeaderValue::from_static("4"));
+    let body_kind = determine_response_body_kind(&Method::GET, StatusCode::OK, &headers)
+        .expect("declared response framing");
+    assert!(matches!(body_kind, ResponseBodyKind::Chunked));
+
+    let (stream, _peer) = tokio::io::duplex(64);
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let response = build_response(
+        stream,
+        ParsedResponseHead {
+            version: Version::HTTP_11,
+            status: StatusCode::OK,
+            headers,
+            body_kind,
+        },
+        BytesMut::from(&b"4\r\nBODY\r\n0\r\n\r\n"[..]),
+        BytesMut::new(),
+        Some(Http1ConnectionRecycler::new(
+            move |_stream, _read_buf, _write_buf| {
+                recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+            },
+        )),
+    );
+
+    assert!(!response.headers().contains_key(CONTENT_LENGTH));
+    assert_eq!(
+        to_bytes(response.into_body()).await.expect("body bytes"),
+        Bytes::from_static(b"BODY")
+    );
+    assert_eq!(recycled.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
 async fn inline_content_length_response_recycles_before_body_release() {
     let (stream, _peer) = tokio::io::duplex(64);
     let recycled = Arc::new(AtomicUsize::new(0));

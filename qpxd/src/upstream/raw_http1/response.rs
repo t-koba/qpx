@@ -14,7 +14,7 @@ use super::{MAX_CHUNKED_BODY_BYTES, READ_BUF_SIZE};
 use crate::http::codec::h1_common::{http1_keep_alive, parse_header_map_recycled, parse_version};
 use anyhow::{Result, anyhow};
 use bytes::{Buf, BytesMut};
-use hyper::header::CONTENT_LENGTH;
+use hyper::header::{CONTENT_LENGTH, TRANSFER_ENCODING};
 use hyper::{HeaderMap, Method, Response, StatusCode, Version};
 use qpx_http::body::Body;
 use std::cell::RefCell;
@@ -351,14 +351,20 @@ pub(super) fn build_response<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
+    // Ambiguous framing is unsafe to pool even though the body decoder gives
+    // Transfer-Encoding precedence for this response. Snapshot it before
+    // stripping Content-Length from the forwarded headers.
+    let conflicting_framing =
+        head.headers.contains_key(CONTENT_LENGTH) && head.headers.contains_key(TRANSFER_ENCODING);
     if matches!(head.body_kind, ResponseBodyKind::Chunked) {
         head.headers.remove(CONTENT_LENGTH);
     }
     let reset_content_framed = head.status != StatusCode::RESET_CONTENT
-        || (!head.headers.contains_key(hyper::header::TRANSFER_ENCODING)
+        || (!head.headers.contains_key(TRANSFER_ENCODING)
             && parse_declared_content_length(&head.headers).ok().flatten() == Some(0));
     let upstream_reusable = head.status != StatusCode::SWITCHING_PROTOCOLS
         && reset_content_framed
+        && !conflicting_framing
         && http1_keep_alive(head.version, &head.headers);
     let body = match head.body_kind {
         ResponseBodyKind::Empty => {
