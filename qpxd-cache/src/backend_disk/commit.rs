@@ -1,7 +1,7 @@
 //! Stable advisory locks, separate from evictable cache objects. Never unlink a
 //! lock file: replacing its inode would split coordination between processes.
 use super::*;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::time::Instant;
@@ -29,62 +29,118 @@ impl CommitLocks {
         // Pin the stripe mapping for this root. A different count cannot silently
         // create an overlapping but incompatible locking domain. This small file
         // is lock state, not a cache-object format change.
-        let mut layout = locks.open("stripes")?;
+        let (mut layout, fresh) = locks.open_stripes()?;
         // new() is sync: poll with a bounded deadline without blocking a runtime.
         let retry_delay = (timeout / 64).max(Duration::from_millis(1));
         let deadline = Instant::now() + timeout;
+        let expected = format!("{:016x}\n", stripes);
         loop {
             match layout.try_lock() {
-                Ok(()) => break,
+                Ok(()) => {}
                 Err(std::fs::TryLockError::WouldBlock) => {
                     if Instant::now() >= deadline {
                         return Err(anyhow!("disk commit lock setup timed out"));
                     }
                     std::thread::sleep(retry_delay);
+                    continue;
                 }
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
-        }
-        // A complete record is either the current fixed-width hex format or
-        // the original canonical decimal. Never rewrite an established pin:
-        // an interrupted update would leave an unreadable record while an older
-        // writer still uses its in-memory stripe count. Only first initialization
-        // may publish a record, and an interrupted first write fails closed.
-        let expected = format!("{:016x}\n", stripes);
-        let mut stored = Vec::new();
-        layout.read_to_end(&mut stored)?;
-        if stored.is_empty() {
-            layout.write_all(expected.as_bytes())?;
-            layout.sync_all()?;
-        } else {
-            let parse = |bytes: &[u8], radix| -> Result<usize> {
-                let text = std::str::from_utf8(bytes)?;
-                usize::from_str_radix(text, radix)
-                    .map_err(|_| anyhow!("disk commit_lock_stripes record is unreadable"))
-            };
-            let complete = if stored.len() == 17
-                && stored[..16].iter().all(u8::is_ascii_hexdigit)
-                && stored[16] == b'\n'
-            {
-                Some(parse(&stored[..16], 16)?)
-            } else if stored[0] != b'0' && stored.iter().all(u8::is_ascii_digit) {
-                Some(parse(&stored, 10)?)
+            // Rewind before every read so a retry after yielding the lock
+            // cannot misread from EOF.
+            layout.rewind()?;
+            let mut stored = Vec::new();
+            layout.read_to_end(&mut stored)?;
+            if fresh {
+                // This inode is ours alone until the layout lock is released. A
+                // record appearing before that point means another initializer
+                // raced us; never overwrite it. Publish a complete record in one
+                // write so no startup can observe a partial pin, and fail closed
+                // on a short write instead of retrying into an ambiguous record.
+                if !stored.is_empty() {
+                    return Err(anyhow!(
+                        "disk commit_lock_stripes record changed during first initialization; restore it or use a fresh cache root"
+                    ));
+                }
+                let written = layout.write(expected.as_bytes())?;
+                if written != expected.len() {
+                    return Err(anyhow!(
+                        "disk commit_lock_stripes pin write was short: {written} of {} bytes",
+                        expected.len()
+                    ));
+                }
+                layout.sync_all()?;
+                return Ok(locks);
+            } else if stored.is_empty() {
+                // An established pin is immutable: an interrupted truncate may leave
+                // an empty record while an older writer still uses its in-memory
+                // stripe count. Recreating it would split the locking domain. A
+                // simultaneous legitimate first initialization may still be
+                // publishing its pin, so yield the lock and retry until the
+                // deadline; a genuinely torn record still fails closed.
+                layout.unlock()?;
+                if Instant::now() >= deadline {
+                    return Err(anyhow!(
+                        "disk commit_lock_stripes record is empty; restore it or use a fresh cache root"
+                    ));
+                }
+                std::thread::sleep(retry_delay);
+                continue;
             } else {
-                None
-            };
-            let count = complete.ok_or_else(|| {
+                // A complete record is either the current fixed-width hex format or
+                // the original canonical decimal. Never rewrite an established pin.
+                let parse = |bytes: &[u8], radix| -> Result<usize> {
+                    let text = std::str::from_utf8(bytes)?;
+                    usize::from_str_radix(text, radix)
+                        .map_err(|_| anyhow!("disk commit_lock_stripes record is unreadable"))
+                };
+                let complete = if stored.len() == 17
+                    && stored[..16].iter().all(u8::is_ascii_hexdigit)
+                    && stored[16] == b'\n'
+                {
+                    Some(parse(&stored[..16], 16)?)
+                } else if stored[0] != b'0' && stored.iter().all(u8::is_ascii_digit) {
+                    Some(parse(&stored, 10)?)
+                } else {
+                    None
+                };
+                let count = complete.ok_or_else(|| {
                 anyhow!("disk commit_lock_stripes record is unreadable; restore it or use a fresh cache root")
             })?;
-            if count != stripes {
-                return Err(anyhow!(
-                    "disk commit_lock_stripes mismatch: stored {count}, expected {stripes}; restore commit_lock_stripes to {count} or use a fresh cache root"
-                ));
+                if count != stripes {
+                    return Err(anyhow!(
+                        "disk commit_lock_stripes mismatch: stored {count}, expected {stripes}; restore commit_lock_stripes to {count} or use a fresh cache root"
+                    ));
+                }
+                return Ok(locks);
             }
         }
-        Ok(locks)
     }
 
     fn open(&self, name: &str) -> Result<File> {
+        self.open_at(name, libc::O_CREAT)
+    }
+
+    /// O_EXCL tells first initialization apart from an established pin, so an
+    /// empty established record cannot be mistaken for fresh setup.
+    fn open_stripes(&self) -> Result<(File, bool)> {
+        match self.open_at("stripes", libc::O_CREAT | libc::O_EXCL) {
+            Ok(file) => Ok((file, true)),
+            Err(error)
+                if matches!(
+                    error.downcast_ref::<std::io::Error>(),
+                    Some(e) if e.kind() == std::io::ErrorKind::AlreadyExists
+                ) =>
+            {
+                // No O_CREAT here: a pin that vanished after another writer
+                // opened it fails closed instead of splitting the lock domain.
+                Ok((self.open_at("stripes", 0)?, false))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn open_at(&self, name: &str, creation: libc::c_int) -> Result<File> {
         let name = std::ffi::CString::new(name)?;
         // SAFETY: directory is an owned directory fd and name is NUL-terminated.
         // openat anchors lookup to that fd even if the directory path is moved.
@@ -92,11 +148,7 @@ impl CommitLocks {
             libc::openat(
                 self.directory.as_raw_fd(),
                 name.as_ptr(),
-                libc::O_CREAT
-                    | libc::O_RDWR
-                    | libc::O_NOFOLLOW
-                    | libc::O_CLOEXEC
-                    | libc::O_NONBLOCK,
+                creation | libc::O_RDWR | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
                 0o600,
             )
         };
@@ -253,6 +305,115 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("commit_lock_stripes"), "{error}");
         assert_eq!(fs::read(&path).unwrap(), different.as_bytes());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn fresh_pin_is_published_once_and_keeps_its_inode() {
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-fresh-pin-{}", uuid::Uuid::new_v4()));
+        let directory = root.join(".qpx-commit-locks");
+        let path = directory.join("stripes");
+        CommitLocks::new(&root, 1, Duration::from_millis(100)).unwrap();
+        let expected = format!("{:016x}\n", 1usize);
+        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        let meta = fs::metadata(&path).unwrap();
+        let inode = (meta.dev(), meta.ino());
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+
+        // The established open must never recreate or rewrite the pin.
+        CommitLocks::new(&root, 1, Duration::from_millis(100)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        let meta = fs::metadata(&path).unwrap();
+        assert_eq!((meta.dev(), meta.ino()), inode);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_established_pin_fails_closed_without_disturbing_an_older_writer() {
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-empty-pin-{}", uuid::Uuid::new_v4()));
+        let first = DiskCacheBackend::new(config(&root)).unwrap();
+        let held = first.lock_commit("ns", "primary").await.unwrap();
+        let path = root.join(".qpx-commit-locks/stripes");
+        fs::write(&path, b"").unwrap();
+
+        let error = CommitLocks::new(&root, 1, Duration::from_millis(100))
+            .err()
+            .unwrap();
+        let message = error.to_string();
+        assert!(message.contains("commit_lock_stripes"), "{message}");
+        assert!(message.contains("empty"), "{message}");
+        assert!(fs::read(&path).unwrap().is_empty());
+
+        let stripe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join(".qpx-commit-locks/0.lock"))
+            .unwrap();
+        assert!(stripe.try_lock().is_err());
+        drop((held, stripe, first));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn simultaneous_first_initializers_converge_on_one_pin() {
+        use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-race-pin-{}", uuid::Uuid::new_v4()));
+        let directory = root.join(".qpx-commit-locks");
+        fs::create_dir_all(&directory).unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o700)).unwrap();
+        }
+        let path = directory.join("stripes");
+        // Be the O_EXCL creator with an empty in-progress record.
+        let mut creator = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+            .unwrap();
+        let initial = fs::metadata(&path).unwrap();
+        let initial_inode = (initial.dev(), initial.ino());
+
+        let waiting_root = root.clone();
+        let waiter = std::thread::spawn(move || {
+            CommitLocks::new(&waiting_root, 1, Duration::from_millis(2000))
+        });
+        // Let the second initializer observe the empty record: several retry
+        // periods for a ~2 s timeout.
+        std::thread::sleep(Duration::from_millis(100));
+        // Publish exactly as the first initializer would: lock, single write,
+        // sync, unlock. Poll the lock so the waiter's yielding is exercised.
+        loop {
+            match creator.try_lock() {
+                Ok(()) => break,
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    panic!("creator lock failed: {error}")
+                }
+            }
+        }
+        let expected = format!("{:016x}\n", 1usize);
+        assert_eq!(expected.len(), 17);
+        let written = std::io::Write::write(&mut creator, expected.as_bytes()).unwrap();
+        assert_eq!(written, expected.len());
+        creator.sync_all().unwrap();
+        creator.unlock().unwrap();
+
+        let second = waiter.join().unwrap().unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        let stored = fs::metadata(&path).unwrap();
+        assert_eq!((stored.dev(), stored.ino()), initial_inode);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        drop(second);
+        drop(creator);
         fs::remove_dir_all(root).unwrap();
     }
 
