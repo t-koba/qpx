@@ -166,7 +166,7 @@ fn join_qpx_h3_cookie_fields(headers: &mut OwnerHeaders) -> Result<()> {
     if values.len() <= 1 {
         return Ok(());
     }
-    let merged = join_duplicate_cookie_values(values.into_iter())?;
+    let merged = join_duplicate_cookie_values(values)?;
     headers.remove(&cookie);
     if let Some(value) = merged {
         headers.insert(cookie, value);
