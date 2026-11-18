@@ -190,4 +190,16 @@ mod tests {
         let body = b"BEGIN:VCALENDAR\r\nVERSION:2.0\r\nBEGIN:VEVENT\r\nDTSTART:20260711T010000Z\r\nSUMMARY:x\r\n \x01y\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n";
         assert!(validate_calendar(body).is_err());
     }
+
+    #[test]
+    fn rejects_nul_and_bare_cr_on_any_line() {
+        for value in ["a\0b", "a\rb"] {
+            let body = format!(
+                "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTART:20260711T010000Z\nSUMMARY:{value}\nEND:VEVENT\nEND:VCALENDAR\n"
+            );
+            assert!(validate_calendar(body.as_bytes()).is_err(), "{value:?}");
+        }
+        let folded = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTART:20260711T010000Z\nSUMMARY:a\n \0b\nEND:VEVENT\nEND:VCALENDAR\n";
+        assert!(validate_calendar(folded.as_bytes()).is_err());
+    }
 }
