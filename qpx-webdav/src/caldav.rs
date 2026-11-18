@@ -193,13 +193,21 @@ mod tests {
 
     #[test]
     fn rejects_nul_and_bare_cr_on_any_line() {
-        for value in ["a\0b", "a\rb"] {
-            let body = format!(
-                "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTART:20260711T010000Z\nSUMMARY:{value}\nEND:VEVENT\nEND:VCALENDAR\n"
-            );
-            assert!(validate_calendar(body.as_bytes()).is_err(), "{value:?}");
+        for control in ['\0', '\r'] {
+            for folded in [false, true] {
+                let value = if folded {
+                    format!("a\n {control}b")
+                } else {
+                    format!("a{control}b")
+                };
+                let body = format!(
+                    "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTART:20260711T010000Z\nSUMMARY:{value}\nEND:VEVENT\nEND:VCALENDAR\n"
+                );
+                assert!(
+                    validate_calendar(body.as_bytes()).is_err(),
+                    "{control:?} folded={folded}"
+                );
+            }
         }
-        let folded = "BEGIN:VCALENDAR\nVERSION:2.0\nBEGIN:VEVENT\nDTSTART:20260711T010000Z\nSUMMARY:a\n \0b\nEND:VEVENT\nEND:VCALENDAR\n";
-        assert!(validate_calendar(folded.as_bytes()).is_err());
     }
 }
