@@ -138,6 +138,13 @@ impl RawHttp1ResponseHead {
             && !chunked
             && raw_has_connection_token(headers, b"content-length");
         let transfer_encoding_overrides_zero_length = chunked && !successful_connect;
+        // A message carrying both Transfer-Encoding and Content-Length has
+        // ambiguous framing (RFC 9112 §6.3). Its connection must not return
+        // to the pool even though TE wins for this response's own decoding.
+        let conflicting_framing = content_length.is_some()
+            && headers
+                .iter()
+                .any(|header| header.name.eq_ignore_ascii_case("transfer-encoding"));
         let framing =
             if no_body || (content_length == Some(0) && !transfer_encoding_overrides_zero_length) {
                 RawHttp1BodyFraming::Empty
@@ -151,7 +158,8 @@ impl RawHttp1ResponseHead {
         let upstream_keep_alive = match version {
             Version::HTTP_10 => raw_has_connection_token(headers, b"keep-alive"),
             _ => !raw_has_connection_token(headers, b"close"),
-        } && reset_content_upstream_reusable;
+        } && reset_content_upstream_reusable
+            && !conflicting_framing;
         let strip_content_length = response_status_forbids_content_length(status)
             || (no_body && request_method != Method::HEAD && status != StatusCode::NOT_MODIFIED)
             || chunked;
@@ -500,6 +508,31 @@ mod tests {
         raw.finalize("qpx");
         let encoded = std::str::from_utf8(raw.header_lines()).expect("ASCII head");
         assert!(content_length_lines(encoded).is_empty());
+    }
+
+    #[test]
+    fn response_with_transfer_encoding_and_content_length_is_not_reusable() {
+        // RFC 9112 §6.3: TE overrides CL, but a message carrying both has
+        // ambiguous framing and must not leave a connection in the pool.
+        let headers = [
+            httparse::Header {
+                name: "Transfer-Encoding",
+                value: b"chunked",
+            },
+            httparse::Header {
+                name: "Content-Length",
+                value: b"4",
+            },
+        ];
+        let raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("ordinary response head");
+        assert_eq!(raw.framing(), RawHttp1BodyFraming::Chunked);
+        assert!(!raw.upstream_keep_alive());
     }
 
     /// The content-length field lines of a head.
