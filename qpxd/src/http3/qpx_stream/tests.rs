@@ -254,3 +254,122 @@ async fn request_body_relay_deadline_stops_trickle_after_consumer_closes() -> Re
     })
     .await?
 }
+#[tokio::test]
+async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        let mut tasks = tokio::task::JoinSet::new();
+        let (_client, conn, mut rx) = qpx_loopback(&mut tasks, None).await?;
+        let mut control = conn.open_uni().await?;
+        control.write_all(&[0x00, 0x04, 0x00]).await?;
+
+        let (mut remote, _response_recv) = conn.open_bi().await?;
+        let headers = b"\x00\x00\xd4\xd7\xc1\x50\x09localhost";
+        remote.write_all(&[0x01, headers.len() as u8]).await?;
+        remote.write_all(headers).await?;
+
+        let local = rx.recv().await.expect("captured QPX request stream");
+        let (_response_send, mut local) = local.split();
+        // Keep the consumer alive but never drain it. With capacity 1, the
+        // first forwarded DATA frame fills the channel and the second blocks
+        // in sender.send_data, so only the absolute send-side deadline can end
+        // the relay; the read-side idle/deadline path is not waiting here.
+        let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let relay = tokio::spawn(async move {
+            relay_qpx_request_body_observed_from_recv(
+                &mut local,
+                body_sender,
+                QpxRequestBodyRelayOptions {
+                    read_timeout: Duration::from_secs(3),
+                    max_body_bytes: 1024,
+                    declared_content_length: None,
+                    grpc_observer: None,
+                    listener_name: None,
+                    grpc_stream_deadline: None,
+                    request_body_deadline: Some(deadline),
+                    observe_grpc_messages: false,
+                },
+            )
+            .await
+        });
+
+        remote.write_all(b"\x00\x01x").await?;
+        // Let the relay forward the first frame before queuing the second.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        remote.write_all(b"\x00\x01y").await?;
+
+        let error = timeout(Duration::from_secs(2), relay)
+            .await??
+            .expect_err("absolute deadline must stop a blocked body send");
+        assert_eq!(
+            error.to_string(),
+            "qpx-h3 request body duration exceeded configured limit"
+        );
+        assert_eq!(
+            remote.stopped().await?.map(u64::from),
+            Some(::h3::error::Code::H3_MESSAGE_ERROR.value())
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+#[tokio::test]
+async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> {
+    timeout(Duration::from_secs(5), async {
+        let mut tasks = tokio::task::JoinSet::new();
+        let (_client, conn, mut rx) = qpx_loopback(&mut tasks, None).await?;
+        let mut control = conn.open_uni().await?;
+        control.write_all(&[0x00, 0x04, 0x00]).await?;
+
+        let (mut remote, _response_recv) = conn.open_bi().await?;
+        let headers = b"\x00\x00\xd4\xd7\xc1\x50\x09localhost";
+        remote.write_all(&[0x01, headers.len() as u8]).await?;
+        remote.write_all(headers).await?;
+
+        let local = rx.recv().await.expect("captured QPX request stream");
+        let (_response_send, mut local) = local.split();
+        // Keep the consumer alive but undrained so the single data frame fills
+        // the channel and the subsequent trailer send blocks. QPACK literal
+        // "x-end: done": header prefix 00 00, literal name len 5 then name,
+        // literal value len 4 then value.
+        let trailers = b"\x00\x00\x25x-end\x04done";
+        let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+        let relay = tokio::spawn(async move {
+            relay_qpx_request_body_observed_from_recv(
+                &mut local,
+                body_sender,
+                QpxRequestBodyRelayOptions {
+                    read_timeout: Duration::from_secs(3),
+                    max_body_bytes: 1024,
+                    declared_content_length: None,
+                    grpc_observer: None,
+                    listener_name: None,
+                    grpc_stream_deadline: None,
+                    request_body_deadline: Some(deadline),
+                    observe_grpc_messages: false,
+                },
+            )
+            .await
+        });
+
+        remote.write_all(b"\x00\x01x").await?;
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        // A second HEADERS frame (0x01) carries trailer fields, then FIN ends data.
+        remote.write_all(&[0x01, trailers.len() as u8]).await?;
+        remote.write_all(trailers).await?;
+        remote.finish()?;
+
+        let error = timeout(Duration::from_secs(2), relay)
+            .await??
+            .expect_err("absolute deadline must stop a blocked trailer send");
+        assert_eq!(
+            error.to_string(),
+            "qpx-h3 request body duration exceeded configured limit"
+        );
+        // The client has already FIN'd this stream, so STOP_SENDING is not
+        // observable here; the blocked-send deadline error is the assertion.
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
