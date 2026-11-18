@@ -15,7 +15,54 @@ pub(crate) enum RequestBodySendEvent {
 }
 
 #[cfg(test)]
-pub(crate) type RequestBodySendProbe = tokio::sync::mpsc::UnboundedSender<RequestBodySendEvent>;
+#[derive(Clone)]
+pub(crate) struct DeferredRequestBodyDeadline {
+    inner: std::sync::Arc<DeferredDeadlineInner>,
+}
+
+#[cfg(test)]
+struct DeferredDeadlineInner {
+    deadline: std::sync::Mutex<Option<Instant>>,
+    armed: tokio::sync::Notify,
+}
+
+#[cfg(test)]
+impl DeferredRequestBodyDeadline {
+    pub(crate) fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(DeferredDeadlineInner {
+                deadline: std::sync::Mutex::new(None),
+                armed: tokio::sync::Notify::new(),
+            }),
+        }
+    }
+
+    pub(crate) fn set(&self, deadline: Instant) {
+        *self.inner.deadline.lock().expect("deferred deadline lock") = Some(deadline);
+        self.inner.armed.notify_waiters();
+    }
+
+    fn get(&self) -> Option<Instant> {
+        *self.inner.deadline.lock().expect("deferred deadline lock")
+    }
+
+    async fn wait_for_arm(&self) {
+        loop {
+            let notified = self.inner.armed.notified();
+            if self.get().is_some() {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+#[cfg(test)]
+#[derive(Clone)]
+pub(crate) struct RequestBodySendProbe {
+    pub(crate) events: tokio::sync::mpsc::UnboundedSender<RequestBodySendEvent>,
+    pub(crate) deferred: Option<DeferredRequestBodyDeadline>,
+}
 
 // Test-only observation of a send's first poll outcome. It reports state
 // without awaiting anything extra, changing the send future, or polling it a
@@ -42,7 +89,7 @@ where
             if let Some(event) = event
                 && let Some(probe) = probe
             {
-                let _ = probe.send(event);
+                let _ = probe.events.send(event);
             }
             reported = true;
         }
@@ -79,6 +126,37 @@ where
             result = future => Ok(result),
         },
         None => Ok(future.await),
+    }
+}
+
+#[cfg(test)]
+async fn send_before_deadline_with_probe<F>(
+    future: F,
+    deadline: Option<Instant>,
+    probe: Option<&RequestBodySendProbe>,
+) -> Result<std::result::Result<(), BodyError>>
+where
+    F: Future<Output = std::result::Result<(), BodyError>>,
+{
+    let Some(deferred) = probe.and_then(|probe| probe.deferred.clone()) else {
+        return send_before_deadline(future, deadline).await;
+    };
+    // The test arms this deadline only after backpressure is observed, so an
+    // immediate deadline must not be set alongside it.
+    debug_assert!(deadline.is_none());
+    let mut future = std::pin::pin!(future);
+    tokio::select! {
+        result = &mut future => return Ok(result),
+        _ = deferred.wait_for_arm() => {},
+    }
+    let armed = deferred
+        .get()
+        .expect("deferred deadline armed before send deadline");
+    tokio::select! {
+        _ = sleep_until(armed) => Err(anyhow!(
+            "qpx-h3 request body duration exceeded configured limit"
+        )),
+        result = &mut future => Ok(result),
     }
 }
 
@@ -170,7 +248,16 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::DataSendPending,
                 Some(RequestBodySendEvent::DataAccepted),
             );
-            match send_before_deadline(send, options.request_body_deadline).await {
+            #[cfg(test)]
+            let send_result = send_before_deadline_with_probe(
+                send,
+                options.request_body_deadline,
+                options.send_probe.as_ref(),
+            )
+            .await;
+            #[cfg(not(test))]
+            let send_result = send_before_deadline(send, options.request_body_deadline).await;
+            match send_result {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => receiver_open = false,
                 Err(err) => {
@@ -224,7 +311,16 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::TrailerSendPending,
                 None,
             );
-            if let Err(err) = send_before_deadline(send, options.request_body_deadline).await {
+            #[cfg(test)]
+            let send_result = send_before_deadline_with_probe(
+                send,
+                options.request_body_deadline,
+                options.send_probe.as_ref(),
+            )
+            .await;
+            #[cfg(not(test))]
+            let send_result = send_before_deadline(send, options.request_body_deadline).await;
+            if let Err(err) = send_result {
                 sender.abort();
                 req_stream.abort_message_stream();
                 return Err(err);
