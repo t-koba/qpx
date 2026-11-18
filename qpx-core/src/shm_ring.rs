@@ -201,7 +201,7 @@ impl ShmRingBuffer {
             return Err(anyhow!("Message length exceeds u32: {}", msg_len));
         }
 
-        if required_space > self.capacity {
+        if required_space >= self.capacity {
             return Err(anyhow!("Message is larger than ring buffer capacity"));
         }
 
@@ -353,7 +353,7 @@ impl ShmRingBuffer {
                 max_msg
             ));
         }
-        if required_space > self.capacity {
+        if required_space >= self.capacity {
             return Err(anyhow!("Message is larger than ring buffer capacity"));
         }
 
@@ -878,7 +878,7 @@ fn init_header(mmap: &mut MmapMut, capacity: usize) -> Result<()> {
     atomic_usize_at(mmap, WRITE_IDX_OFFSET).store(0, Ordering::Relaxed);
     atomic_usize_at(mmap, QUEUE_SIZE_OFFSET).store(capacity, Ordering::Relaxed);
     atomic_usize_at(mmap, MAX_MSG_BYTES_OFFSET).store(
-        MAX_MESSAGE_BYTES.min(capacity.saturating_sub(4)),
+        MAX_MESSAGE_BYTES.min(capacity.saturating_sub(5)),
         Ordering::Relaxed,
     );
     atomic_u32_at(mmap, CONSUMER_WAITING_OFFSET).store(0, Ordering::Relaxed);
@@ -1132,6 +1132,40 @@ mod tests {
 
         assert_eq!(ring.try_pop()?.as_deref(), Some(msg2.as_slice()));
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shm_ring_rejects_message_that_fills_entire_capacity() -> Result<()> {
+        let temp_file = NamedTempFile::new()?;
+        let mut ring = ShmRingBuffer::create_or_open(temp_file.path(), HEADER_SIZE + 20)?;
+
+        assert_eq!(ring.max_msg_bytes().load(Ordering::Relaxed), 15);
+
+        let msg = b"0123456789ABCDE"; // 15 bytes + 4 = 19
+        assert!(ring.try_push(msg)?);
+        assert_eq!(ring.try_pop()?.as_deref(), Some(msg.as_slice()));
+
+        // A legacy header can advertise more than the ring can actually hold.
+        ring.max_msg_bytes().store(20, Ordering::Relaxed);
+        let result = ring.try_push(&[0; 16]);
+        assert!(result.is_err(), "expected an error, got {result:?}");
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shm_ring_wait_for_space_rejects_message_that_fills_entire_capacity() -> Result<()> {
+        let temp_file = NamedTempFile::new()?;
+        let ring = ShmRingBuffer::create_or_open(temp_file.path(), HEADER_SIZE + 20)?;
+        ring.max_msg_bytes().store(20, Ordering::Relaxed);
+
+        let result = tokio::time::timeout(Duration::from_millis(50), ring.wait_for_space(16)).await;
+        assert!(
+            matches!(result, Ok(Err(_))),
+            "expected an immediate error, got {result:?}"
+        );
         Ok(())
     }
 
