@@ -1,6 +1,3 @@
-[files]
-extend-exclude = ["vendor/h3", "vendor/quinn-proto"]
-
 [default.extend-words]
 # QUIC packet number abbreviation.
 pn = "pn"
