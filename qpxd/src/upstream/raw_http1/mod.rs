@@ -63,6 +63,7 @@ pub(crate) struct Http1ResponseWithInterim {
 pub(crate) struct RawHttp1ResponseRelay<S> {
     pub(crate) interim: Vec<InterimResponseHead>,
     pub(crate) raw: Arc<RawHttp1ResponseHead>,
+    pub(crate) response_body_read_timeout: tokio::time::Duration,
     pub(crate) stream: Option<S>,
     pub(crate) read_buf: BytesMut,
     pub(crate) write_buf: BytesMut,
@@ -182,6 +183,7 @@ where
         let Self {
             interim,
             raw,
+            response_body_read_timeout: _,
             stream,
             read_buf,
             write_buf,
@@ -335,6 +337,7 @@ where
     Ok(RawHttp1ResponseRelay {
         interim,
         raw: final_head,
+        response_body_read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
         stream: Some(stream),
         read_buf: buffered_body,
         write_buf,
@@ -383,6 +386,7 @@ where
     Ok(RawHttp1ResponseRelay {
         interim,
         raw: final_head,
+        response_body_read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
         stream: Some(stream),
         read_buf: buffered_body,
         write_buf,

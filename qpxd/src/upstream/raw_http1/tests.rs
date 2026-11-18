@@ -1211,6 +1211,7 @@ async fn raw_direct_relay_finalization_preserves_upstream_via_protocol() {
     let mut relay = super::RawHttp1ResponseRelay {
         interim: Vec::new(),
         raw: raw.clone(),
+        response_body_read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
         stream: Some(stream),
         read_buf: BytesMut::new(),
         write_buf: BytesMut::new(),

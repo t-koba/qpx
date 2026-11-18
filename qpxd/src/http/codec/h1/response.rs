@@ -6,8 +6,8 @@ use crate::http::codec::h1_common::{has_only_chunked_transfer_encoding, serializ
 use crate::http::codec::h2::parse_declared_content_length;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::{
-    InterimResponseHead, RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT, RawHttp1BodyFraming,
-    RawHttp1ResponseHead, RawHttp1ResponseRelay, ReusableRawHttp1Connection,
+    InterimResponseHead, RawHttp1BodyFraming, RawHttp1ResponseHead, RawHttp1ResponseRelay,
+    ReusableRawHttp1Connection,
 };
 use anyhow::{Result, anyhow};
 use bytes::BufMut;
@@ -558,7 +558,15 @@ pub(crate) async fn send_raw_http1_response_relay_with_interim(
             recycle_direct_raw_upstream_if_clean(&mut response);
         }
         ResponseBodyKind::ContentLength(length) => {
-            relay_direct_content_length_response(writer, head, &mut response, length).await?;
+            let body_read_timeout = response.response_body_read_timeout;
+            relay_direct_content_length_response(
+                writer,
+                head,
+                &mut response,
+                length,
+                body_read_timeout,
+            )
+            .await?;
         }
         ResponseBodyKind::Chunked | ResponseBodyKind::CloseDelimited => unreachable!(),
     }
@@ -574,6 +582,7 @@ async fn relay_direct_content_length_response(
     head: &[u8],
     response: &mut RawHttp1ResponseRelay<TcpStream>,
     length: u64,
+    body_read_timeout: Duration,
 ) -> Result<()> {
     let first_len = response.read_buf.len().min(length as usize);
     if first_len == 0 {
@@ -587,7 +596,13 @@ async fn relay_direct_content_length_response(
     if remaining > 0 {
         #[cfg(target_os = "linux")]
         if remaining <= DIRECT_RELAY_SPLICE_THRESHOLD {
-            relay_small_direct_content_length_response(writer, response, remaining).await?;
+            relay_small_direct_content_length_response(
+                writer,
+                response,
+                remaining,
+                body_read_timeout,
+            )
+            .await?;
         } else {
             let stream = response
                 .stream
@@ -597,7 +612,7 @@ async fn relay_direct_content_length_response(
                 stream,
                 writer,
                 remaining,
-                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
+                body_read_timeout,
                 RESPONSE_WRITE_TIMEOUT,
             )
             .await?;
@@ -613,12 +628,10 @@ async fn relay_direct_content_length_response(
                     let Some(stream) = response.stream.as_mut() else {
                         return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
                     };
-                    let read = timeout_after_pending(
-                        RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-                        stream.read_buf(&mut limited),
-                    )
-                    .await
-                    .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
+                    let read =
+                        timeout_after_pending(body_read_timeout, stream.read_buf(&mut limited))
+                            .await
+                            .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
                     if read == 0 {
                         return Err(anyhow!(
                             "response body ended before declared content-length was satisfied"
@@ -645,6 +658,7 @@ async fn relay_small_direct_content_length_response(
     writer: &mut TcpStream,
     response: &mut RawHttp1ResponseRelay<TcpStream>,
     mut remaining: u64,
+    body_read_timeout: Duration,
 ) -> Result<()> {
     while remaining > 0 {
         if response.read_buf.is_empty() {
@@ -654,12 +668,9 @@ async fn relay_small_direct_content_length_response(
             let Some(stream) = response.stream.as_mut() else {
                 return Err(anyhow!("raw HTTP/1 relay stream is unavailable"));
             };
-            let read = timeout_after_pending(
-                RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
-                stream.read_buf(&mut limited),
-            )
-            .await
-            .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
+            let read = timeout_after_pending(body_read_timeout, stream.read_buf(&mut limited))
+                .await
+                .map_err(|_| anyhow!("HTTP/1 response body read timed out"))??;
             if read == 0 {
                 return Err(anyhow!(
                     "response body ended before declared content-length was satisfied"

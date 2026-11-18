@@ -614,6 +614,8 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
     record_reverse_upstream_status(selected_upstream, &route.policy, proxied.status(), started);
     if proxied.supports_direct_relay(route.plan.streaming.max_response_body_bytes) {
         proxied.finalize(prepared.state.plan.identity.proxy_name.as_ref());
+        proxied.response_body_read_timeout =
+            tokio::time::Duration::from_millis(route.plan.streaming.body_read_timeout_ms);
         return Ok(PreparedRawHttp1Response::Direct(proxied));
     }
     session.recycle_response_globally(&mut proxied);

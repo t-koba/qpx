@@ -1,4 +1,5 @@
 use super::*;
+use crate::upstream::raw_http1::RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT;
 use bytes::Bytes;
 use http::Response;
 use http_body::Frame;
@@ -737,6 +738,7 @@ async fn direct_content_length_relay_reports_upstream_underflow_after_forwarding
     let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
         interim: Vec::new(),
         raw: Arc::new(raw_head),
+        response_body_read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
         stream: Some(upstream),
         read_buf: BytesMut::from(&b"O"[..]),
         write_buf: BytesMut::new(),
@@ -795,6 +797,65 @@ async fn direct_content_length_relay_reports_upstream_underflow_after_forwarding
 }
 
 #[tokio::test]
+async fn direct_content_length_relay_honors_configured_body_read_timeout() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind listener");
+    let address = listener.local_addr().expect("listener address");
+
+    // Cover both buffered and splice reads on Linux.
+    for content_length in [b"4".as_slice(), b"131072"] {
+        let (upstream, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let (_idle_upstream_peer, _) = accepted.expect("accept upstream peer");
+        let (downstream, accepted) = tokio::join!(TcpStream::connect(address), listener.accept());
+        let _downstream_peer = downstream.expect("connect downstream peer");
+        let (mut writer, _) = accepted.expect("accept downstream");
+
+        let parsed = [httparse::Header {
+            name: "Content-Length",
+            value: content_length,
+        }];
+        let mut raw_head = crate::upstream::raw_http1::RawHttp1ResponseHead::from_parsed(
+            &parsed,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_11,
+        )
+        .expect("raw response head");
+        raw_head.finalize("qpx");
+        let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
+            interim: Vec::new(),
+            raw: Arc::new(raw_head),
+            response_body_read_timeout: Duration::from_millis(100),
+            stream: Some(upstream.expect("connect upstream")),
+            read_buf: BytesMut::new(),
+            write_buf: BytesMut::new(),
+            recycler: None,
+            active_permit: None,
+        };
+
+        let mut head_buf = BytesMut::new();
+        let result = tokio::time::timeout(
+            Duration::from_secs(3),
+            send_raw_http1_response_relay_with_interim(
+                &mut writer,
+                Version::HTTP_11,
+                &Method::GET,
+                relay,
+                true,
+                &mut head_buf,
+            ),
+        )
+        .await
+        .expect("configured body read timeout must fire before the test deadline");
+        let Err(error) = result else {
+            panic!("stalled direct response body must fail");
+        };
+        assert!(error.to_string().contains("read timed out"), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn interim_precedes_unchanged_raw_final_http1_relay() {
     check_raw_relay_with_interim(true).await;
 }
@@ -849,6 +910,7 @@ async fn check_raw_relay_with_interim(with_interim: bool) {
             Vec::new()
         },
         raw: Arc::new(raw_head),
+        response_body_read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
         stream: Some(upstream),
         read_buf: BytesMut::new(),
         write_buf: BytesMut::new(),
@@ -2355,6 +2417,7 @@ async fn direct_raw_http1_connection_nominated_content_length_closes_downstream(
         let relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
             interim: Vec::new(),
             raw: Arc::new(raw_head),
+            response_body_read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
             stream: Some(upstream),
             read_buf: BytesMut::new(),
             write_buf: BytesMut::new(),
@@ -2449,6 +2512,7 @@ async fn raw_http1_zero_length_with_chunked_transfer_encoding_uses_chunked_fallb
     let mut relay = crate::upstream::raw_http1::RawHttp1ResponseRelay {
         interim: Vec::new(),
         raw: Arc::new(raw),
+        response_body_read_timeout: RAW_HTTP1_RESPONSE_BODY_IDLE_TIMEOUT,
         stream: Some(upstream),
         read_buf: BytesMut::new(),
         write_buf: BytesMut::new(),
