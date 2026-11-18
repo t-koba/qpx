@@ -16,6 +16,8 @@ edges:
         X-Proxy: qpx
       response_set:
         X-Proxy-Handled: qpx
+    # path_rewrite mechanically transforms the raw path; it is not an
+    # upstream scope boundary. Put path-based policy in match/identity rules.
     path_rewrite:
       strip_prefix: "/api"
       add_prefix: "/v1"

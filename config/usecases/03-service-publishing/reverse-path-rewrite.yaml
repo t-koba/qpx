@@ -11,6 +11,8 @@ edges:
       path:
       - "/api/v1/*"
     timeout_ms: 10000
+    # path_rewrite mechanically transforms the raw path; it is not an
+    # upstream scope boundary. Put path-based policy in match/identity rules.
     path_rewrite:
       strip_prefix: "/api/v1"
       add_prefix: "/v2"

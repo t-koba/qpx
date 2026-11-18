@@ -23,6 +23,13 @@ validate a concrete config file.
 Reverse routes use exactly one typed `target`: `upstream`, `weighted`, `ipc`,
 `local_response`, or `tls_passthrough`.
 
+Reverse-route `path_rewrite` (`strip_prefix`, `add_prefix`, `regex`) is a
+mechanical transformation of the raw request path, not an authorization or
+upstream scope boundary. qpx matches routes and rewrites the same opaque path
+representation; it does not decode percent escapes or resolve dot segments.
+Enforce path-based access with `match` and identity rules, which see that same
+raw path, and rely on the upstream to interpret the path it receives.
+
 Browser-facing reverse routes can own CORS under
 `edges[kind=reverse].routes[].http.cors`. The same policy surface covers every
 HTTP reverse target. See [`docs/cors.md`](cors.md).
