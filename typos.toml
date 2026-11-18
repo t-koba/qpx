@@ -7,3 +7,5 @@ controllen = "controllen"
 wrk = "wrk"
 # Windows SDDL SID abbreviation (Built-in Administrators).
 ba = "ba"
+# Deliberately mixed-case header fixture (Proxy-Authorization-Info) in framing tests.
+fo = "fo"
