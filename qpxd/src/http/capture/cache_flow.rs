@@ -207,6 +207,7 @@ pub(crate) async fn process_upstream_response_for_cache(
         .await?;
     }
 
+    // A cache-owned 304 handles its own writeback; do not store its replay.
     if let (Some(policy), Some(_), Some(revalidation)) =
         (cache_policy, cache_lookup_key, revalidation_state)
         && response.status() == StatusCode::NOT_MODIFIED
@@ -221,9 +222,7 @@ pub(crate) async fn process_upstream_response_for_cache(
             backends,
         )
         .await?;
-    }
-
-    if let (Some(policy), Some(key)) = (cache_policy, cache_lookup_key)
+    } else if let (Some(policy), Some(key)) = (cache_policy, cache_lookup_key)
         && response.status() != StatusCode::NOT_MODIFIED
     {
         response = cache::maybe_store(
@@ -246,3 +245,7 @@ pub(crate) async fn process_upstream_response_for_cache(
 
     Ok(response)
 }
+
+#[cfg(test)]
+#[path = "cache_flow_tests.rs"]
+mod tests;
