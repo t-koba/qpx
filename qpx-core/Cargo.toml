@@ -20,7 +20,7 @@ tls-rustls = [
   "dep:webpki-roots",
   "dep:rcgen",
   "dep:lru",
-  "dep:chrono",
+  "dep:time",
   "tls-cert-info",
 ]
 
@@ -43,7 +43,7 @@ globset.workspace = true
 url.workspace = true
 percent-encoding.workspace = true
 tracing-subscriber.workspace = true
-chrono = { workspace = true, optional = true }
+time = { workspace = true, optional = true }
 dirs-next = { workspace = true, optional = true }
 http.workspace = true
 libc.workspace = true

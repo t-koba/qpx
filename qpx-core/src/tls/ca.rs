@@ -1,5 +1,4 @@
 use anyhow::{Context, anyhow};
-use chrono::Datelike as _;
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, IsCa, Issuer, KeyPair,
 };
@@ -55,19 +54,16 @@ pub fn load_or_generate_ca(state_dir: &Path) -> Result<CaStore> {
         .distinguished_name
         .push(DnType::CommonName, "qpx Proxy CA");
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
-    let now = chrono::Utc::now();
-    let not_before = now.date_naive();
-    let not_after = (now + chrono::Duration::days(365 * 10)).date_naive();
+    let now = time::OffsetDateTime::from(std::time::SystemTime::now());
+    let not_before = now.date();
+    let not_after = (now + time::Duration::days(365 * 10)).date();
     params.not_before = rcgen::date_time_ymd(
         not_before.year(),
         not_before.month() as u8,
-        not_before.day() as u8,
+        not_before.day(),
     );
-    params.not_after = rcgen::date_time_ymd(
-        not_after.year(),
-        not_after.month() as u8,
-        not_after.day() as u8,
-    );
+    params.not_after =
+        rcgen::date_time_ymd(not_after.year(), not_after.month() as u8, not_after.day());
 
     let key_pair = KeyPair::generate()?;
     let ca_cert = params.self_signed(&key_pair)?;

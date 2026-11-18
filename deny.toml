@@ -1,12 +1,7 @@
 [advisories]
 version = 2
 yanked = "warn"
-ignore = [
-  # RUSTSEC-2026-0543 reports chrono as unmaintained with no safe upgrade.
-  # Use is limited to certificate validity dates and PCAPNG timestamp names;
-  # migration to a maintained date/time crate is tracked separately.
-  { id = "RUSTSEC-2026-0543", reason = "chrono 0.4 has no safe upgrade; migration tracked; all other advisories remain enforced" },
-]
+ignore = []
 
 [licenses]
 version = 2

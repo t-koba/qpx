@@ -24,7 +24,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 pcap-file.workspace = true
 etherparse.workspace = true
-chrono.workspace = true
+time.workspace = true
 cidr.workspace = true
 rustls = { workspace = true, optional = true }
 tokio-rustls = { workspace = true, optional = true }

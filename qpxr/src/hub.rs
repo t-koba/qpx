@@ -276,9 +276,15 @@ impl RotatingFileSink {
 
     fn rotate(&mut self) -> Result<()> {
         self.index = self.index.saturating_add(1);
+        let now = time::OffsetDateTime::from(std::time::SystemTime::now());
         let filename = format!(
-            "capture-{}-{:06}.pcapng",
-            chrono::Utc::now().format("%Y%m%d%H%M%S"),
+            "capture-{:04}{:02}{:02}{:02}{:02}{:02}-{:06}.pcapng",
+            now.year(),
+            now.month() as u8,
+            now.day(),
+            now.hour(),
+            now.minute(),
+            now.second(),
             self.index
         );
         let path = self.dir.join(filename);
