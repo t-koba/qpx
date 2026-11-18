@@ -15,6 +15,7 @@ This document focuses on practical scale-out settings for `qpxd` on multi-core h
    - forward/reverse/transparent listeners bind multiple sockets when configured.
    - each socket has its own async accept loop.
    - this reduces lock contention around a single accept path and improves multicore scaling.
+   - This fan-out is Linux-oriented: macOS does not distribute accepted connections across `SO_REUSEPORT` listeners, so `reuse_port: true` does not provide multicore accept scaling there.
 
 3. Matcher hot path allocation control
     - rule and reverse prefilter matching reuses thread-local bitset buffers.
