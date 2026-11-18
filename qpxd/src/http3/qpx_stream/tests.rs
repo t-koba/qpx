@@ -283,6 +283,7 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
         // slow runner cannot expire it during setup.
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
+        let read_deadline = Instant::now() + Duration::from_secs(4);
         let deferred = DeferredRequestBodyDeadline::new();
         let deferred_for_relay = deferred.clone();
         let relay = tokio::spawn(async move {
@@ -296,7 +297,9 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
                     grpc_observer: None,
                     listener_name: None,
                     grpc_stream_deadline: None,
-                    request_body_deadline: None,
+                    // Keep the read-side deadline far away; the send-side
+                    // deadline is armed from observed backpressure below.
+                    request_body_deadline: Some(read_deadline),
                     observe_grpc_messages: false,
                     send_probe: Some(RequestBodySendProbe {
                         events: probe_tx,
@@ -373,6 +376,7 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
         let trailers = b"\x00\x00\x25x-end\x04done";
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
+        let read_deadline = Instant::now() + Duration::from_secs(4);
         let deferred = DeferredRequestBodyDeadline::new();
         let deferred_for_relay = deferred.clone();
         let relay = tokio::spawn(async move {
@@ -386,7 +390,9 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
                     grpc_observer: None,
                     listener_name: None,
                     grpc_stream_deadline: None,
-                    request_body_deadline: None,
+                    // Keep the read-side deadline far away; the send-side
+                    // deadline is armed from observed backpressure below.
+                    request_body_deadline: Some(read_deadline),
                     observe_grpc_messages: false,
                     send_probe: Some(RequestBodySendProbe {
                         events: probe_tx,

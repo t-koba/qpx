@@ -114,49 +114,32 @@ pub(crate) struct QpxRequestBodyRelayOptions<'a> {
 async fn send_before_deadline<F>(
     future: F,
     deadline: Option<Instant>,
+    #[cfg(test)] deferred: Option<DeferredRequestBodyDeadline>,
 ) -> Result<std::result::Result<(), BodyError>>
 where
     F: Future<Output = std::result::Result<(), BodyError>>,
 {
+    let mut future = std::pin::pin!(future);
+    #[cfg(test)]
+    let deadline = if let Some(deferred) = deferred {
+        // Test-only arming gate: keep polling the real send while the test
+        // waits for observed backpressure before starting the deadline. The
+        // deadline select and message below remain the production code path.
+        tokio::select! {
+            result = &mut future => return Ok(result),
+            _ = deferred.wait_for_arm() => deferred.get(),
+        }
+    } else {
+        deadline
+    };
     match deadline {
         Some(deadline) => tokio::select! {
             _ = sleep_until(deadline) => Err(anyhow!(
                 "qpx-h3 request body duration exceeded configured limit"
             )),
-            result = future => Ok(result),
+            result = &mut future => Ok(result),
         },
         None => Ok(future.await),
-    }
-}
-
-#[cfg(test)]
-async fn send_before_deadline_with_probe<F>(
-    future: F,
-    deadline: Option<Instant>,
-    probe: Option<&RequestBodySendProbe>,
-) -> Result<std::result::Result<(), BodyError>>
-where
-    F: Future<Output = std::result::Result<(), BodyError>>,
-{
-    let Some(deferred) = probe.and_then(|probe| probe.deferred.clone()) else {
-        return send_before_deadline(future, deadline).await;
-    };
-    // The test arms this deadline only after backpressure is observed, so an
-    // immediate deadline must not be set alongside it.
-    debug_assert!(deadline.is_none());
-    let mut future = std::pin::pin!(future);
-    tokio::select! {
-        result = &mut future => return Ok(result),
-        _ = deferred.wait_for_arm() => {},
-    }
-    let armed = deferred
-        .get()
-        .expect("deferred deadline armed before send deadline");
-    tokio::select! {
-        _ = sleep_until(armed) => Err(anyhow!(
-            "qpx-h3 request body duration exceeded configured limit"
-        )),
-        result = &mut future => Ok(result),
     }
 }
 
@@ -248,15 +231,16 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::DataSendPending,
                 Some(RequestBodySendEvent::DataAccepted),
             );
-            #[cfg(test)]
-            let send_result = send_before_deadline_with_probe(
+            let send_result = send_before_deadline(
                 send,
                 options.request_body_deadline,
-                options.send_probe.as_ref(),
+                #[cfg(test)]
+                options
+                    .send_probe
+                    .as_ref()
+                    .and_then(|probe| probe.deferred.clone()),
             )
             .await;
-            #[cfg(not(test))]
-            let send_result = send_before_deadline(send, options.request_body_deadline).await;
             match send_result {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => receiver_open = false,
@@ -311,15 +295,16 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::TrailerSendPending,
                 None,
             );
-            #[cfg(test)]
-            let send_result = send_before_deadline_with_probe(
+            let send_result = send_before_deadline(
                 send,
                 options.request_body_deadline,
-                options.send_probe.as_ref(),
+                #[cfg(test)]
+                options
+                    .send_probe
+                    .as_ref()
+                    .and_then(|probe| probe.deferred.clone()),
             )
             .await;
-            #[cfg(not(test))]
-            let send_result = send_before_deadline(send, options.request_body_deadline).await;
             if let Err(err) = send_result {
                 sender.abort();
                 req_stream.abort_message_stream();
