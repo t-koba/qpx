@@ -444,6 +444,20 @@ pub fn build_only_if_cached_miss_response(message: &str) -> Response<Body> {
     response
 }
 
+/// Whether a request permits a stored response of the given staleness.
+///
+/// RFC 9111 §5.2.1.1: max-age without max-stale means the client does not
+/// want a stale response. §5.2.1.2: max-stale permits staleness only up to
+/// its stated limit. Shared by the freshness classifier and the stale-on-error
+/// fallback so a request preference cannot be bypassed by either path.
+fn request_allows_stale(req: &RequestDirectives, staleness: u64) -> bool {
+    match req.max_stale {
+        Some(Some(limit)) => staleness <= limit,
+        Some(None) => true,
+        None => req.max_age.is_none(),
+    }
+}
+
 pub async fn maybe_build_stale_if_error_response(
     state: &RevalidationState,
 ) -> Option<Response<Body>> {
@@ -462,7 +476,7 @@ pub async fn maybe_build_stale_if_error_response(
         return None;
     }
     let staleness = age.saturating_sub(freshness);
-    if staleness > limit {
+    if staleness > limit || !request_allows_stale(&state.request_directives, staleness) {
         return None;
     }
     if state.request_method == Method::HEAD {
@@ -532,12 +546,10 @@ pub fn classify_for_request(
 
         // Staleness 0 (the exact expiry second) is inside the window: the
         // entry is stale per the strict boundary and RFC 5861 §3 permits
-        // serving it while revalidating. RFC 9111 §5.2.1.1 also forbids
-        // serving a stale response to a client that sent max-age without
-        // max-stale; SWR must not bypass that request-side gate.
-        let request_allows_stale = req.max_stale.is_some() || req.max_age.is_none();
+        // serving it while revalidating. The request-side stale gate still
+        // applies, including a bounded max-stale limit.
         if let Some(swr) = resp.stale_while_revalidate
-            && request_allows_stale
+            && request_allows_stale(req, staleness)
             && !req.no_cache
             && !resp.forbids_stale_reuse()
             && staleness <= swr

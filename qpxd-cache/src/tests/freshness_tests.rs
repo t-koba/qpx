@@ -575,6 +575,36 @@ fn request_max_stale_restores_swr_after_request_max_age() {
 }
 
 #[test]
+fn bounded_max_stale_cannot_be_bypassed_by_swr() {
+    // RFC 9111 §5.2.1.2: max-stale=0 permits no staleness, so SWR must not
+    // rescue a response that is already five seconds past its lifetime.
+    let req = RequestDirectives {
+        max_age: Some(0),
+        max_stale: Some(Some(0)),
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("max-age=60, stale-while-revalidate=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 65_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn bounded_max_stale_above_staleness_still_serves_stale() {
+    // Control: the bound is a limit, not a blanket prohibition.
+    let req = RequestDirectives {
+        max_age: Some(0),
+        max_stale: Some(Some(60)),
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("max-age=60, stale-while-revalidate=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 65_000);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
+}
+
+#[test]
 fn exact_expiry_swr_serves_stale_while_revalidate() {
     // The exact expiry second is stale with staleness 0, which is inside the
     // stale-while-revalidate window (RFC 5861 §3).
@@ -635,6 +665,72 @@ async fn stale_if_error_serves_at_exact_expiry() {
     };
     let mut state = state;
     state.envelope.stored_at_ms = now.saturating_sub(60_000);
+    state.envelope.body_len = 5;
+    assert!(maybe_build_stale_if_error_response(&state).await.is_some());
+}
+
+#[tokio::test]
+async fn stale_if_error_respects_request_max_age() {
+    let now = super::util::now_millis();
+    let backend = Arc::new(MockBackend::new());
+    backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:stale_err:max_age").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    let state = RevalidationState {
+        backend,
+        namespace: "ns".to_string(),
+        variant_key: "obj:stale_err:max_age".to_string(),
+        request_method: Method::GET,
+        request_directives: RequestDirectives {
+            max_age: Some(0),
+            ..RequestDirectives::default()
+        },
+        stale_if_error_secs: Some(60),
+        envelope: s_maxage_envelope("max-age=60, stale-if-error=60", 60),
+        revalidations: test_revalidations(),
+    };
+    let mut state = state;
+    state.envelope.stored_at_ms = now.saturating_sub(65_000);
+    state.envelope.body_len = 5;
+    assert!(maybe_build_stale_if_error_response(&state).await.is_none());
+}
+
+#[tokio::test]
+async fn stale_if_error_allows_explicit_unbounded_max_stale() {
+    // Control: an explicit stale allowance restores the error fallback.
+    let now = super::util::now_millis();
+    let backend = Arc::new(MockBackend::new());
+    backend
+        .put(
+            "ns",
+            cache_body_storage_key("obj:stale_err:max_stale").as_str(),
+            b"hello",
+            60,
+        )
+        .await
+        .expect("put body");
+    let state = RevalidationState {
+        backend,
+        namespace: "ns".to_string(),
+        variant_key: "obj:stale_err:max_stale".to_string(),
+        request_method: Method::GET,
+        request_directives: RequestDirectives {
+            max_age: Some(0),
+            max_stale: Some(None),
+            ..RequestDirectives::default()
+        },
+        stale_if_error_secs: Some(60),
+        envelope: s_maxage_envelope("max-age=60, stale-if-error=60", 60),
+        revalidations: test_revalidations(),
+    };
+    let mut state = state;
+    state.envelope.stored_at_ms = now.saturating_sub(65_000);
     state.envelope.body_len = 5;
     assert!(maybe_build_stale_if_error_response(&state).await.is_some());
 }
