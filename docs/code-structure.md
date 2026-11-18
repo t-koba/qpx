@@ -13,24 +13,10 @@ inventory; the recorded debt only goes down. Workspace-wide gates read the
 crate list from the root `Cargo.toml`, so a new or split-out member is covered
 without editing a second list. Members must be literal directories at the
 workspace root; a pattern member or a member without a directory fails the
-gates closed instead of being skipped.
-
-`Headers` enforces Content-Length ownership only on adopted paths. On raw-map
-paths, the syntax backstop flags `.get`/`.get_all`/index reads keyed by
-`CONTENT_LENGTH`, case-insensitive literals, literal `from_static`/`from_bytes`
-calls, or direct local, constant, static, or renamed-import aliases. It also
-flags explicit keys passed to named helper parameters used as read keys,
-including parameter-to-parameter forwarding, and to `macro_rules!` captures
-used as read keys in a parseable template. It checks flat macro matchers with
-fixed tokens and `expr`, `expr_2021`, `path`, `literal`, `ident`, `tt`, `ty`, or
-`block` captures, plus an optional trailing comma.
-
-The backstop matches names within one source file, without resolving Rust
-scopes or types. It skips the owner (`qpx-core/src/http_content_length.rs`),
-test files, test-only cfg code, and xtask fixtures. It does not follow alias
-chains, calls across files or through function values, nested or repeated macro
-captures, or code hidden in other macro invocations. It does not expand macros,
-track computed keys, or prove workspace-wide ownership.
+gates closed instead of being skipped. `Headers` enforces ownership only on adopted paths; raw-map
+paths remain under the structural migration. The syntax backstop catches only explicit production
+`.get`/`.get_all`/index reads keyed by `CONTENT_LENGTH`, case-insensitive literals, or literal
+`from_static`/`from_bytes` calls outside the owner; it excludes test-only cfg, expands no macros, infers no aliases/dataflow, and is not a workspace-wide proof.
 
 ## Architecture overview
 

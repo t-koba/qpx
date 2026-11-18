@@ -2,13 +2,10 @@ use crate::budget::TotalLocBudgets;
 use crate::files::{has_cfg_test, is_test_file, rust_files_under};
 use crate::visitors::{FinalizeVisitor, PanicVisitor, UnwrapVisitor};
 use anyhow::{Context, Result, anyhow, bail};
-use proc_macro2::{Group, TokenStream, TokenTree};
 use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
-use syn::ext::IdentExt;
-use syn::parse::Parser;
 use syn::spanned::Spanned;
 use syn::visit::Visit;
 use syn::{GenericArgument, PathArguments, ReturnType, Type, Visibility};
@@ -1578,8 +1575,7 @@ fn check_http_token_vocabulary_single_owner(root: &Path) -> Result<()> {
 
 /// Parsing and canonicalization live here; opaque `Headers` enforce ownership
 /// in-domain. This is only a syntactic backstop at raw codec/library boundaries:
-/// it recognizes explicit keys and positional forwarding within a source file,
-/// without Rust name resolution or general dataflow.
+/// no aliases, helper-name inventory, macro expansion or dataflow inference.
 const CONTENT_LENGTH_OWNER: &str = "qpx-core/src/http_content_length.rs";
 
 fn check_content_length_single_owner(root: &Path) -> Result<()> {
@@ -1597,7 +1593,7 @@ fn check_content_length_single_owner(root: &Path) -> Result<()> {
             let rel = rel_path(root, &path);
             let content = fs::read_to_string(&path)
                 .with_context(|| format!("failed to read {}", path.display()))?;
-            violations.extend(content_length_read_violations(&rel, &content)?);
+            violations.extend(content_length_direct_read_violations(&rel, &content)?);
         }
     }
     if !violations.is_empty() {
@@ -1609,7 +1605,7 @@ fn check_content_length_single_owner(root: &Path) -> Result<()> {
     Ok(())
 }
 
-fn content_length_read_violations(path: &str, content: &str) -> Result<Vec<String>> {
+fn content_length_direct_read_violations(path: &str, content: &str) -> Result<Vec<String>> {
     if path == CONTENT_LENGTH_OWNER || is_test_file(Path::new(path)) {
         return Ok(Vec::new());
     }
@@ -1617,152 +1613,22 @@ fn content_length_read_violations(path: &str, content: &str) -> Result<Vec<Strin
     if has_cfg_test(&syntax.attrs) {
         return Ok(Vec::new());
     }
-    let mut scan = ContentLengthScan::default();
-    scan.visit_file(&syntax);
-    Ok(scan
-        .violation_lines()
+    let mut visitor = ContentLengthDirectReads::default();
+    visitor.visit_file(&syntax);
+    Ok(visitor
+        .lines
         .into_iter()
-        .map(|line| format!("{path}:{line}: explicit Content-Length value read"))
+        .map(|line| format!("{path}:{line}: direct Content-Length value read"))
         .collect())
 }
 
 #[derive(Default)]
-struct ContentLengthScan<'ast> {
-    aliases: BTreeSet<String>,
-    function: Option<&'ast syn::Signature>,
-    readers: HeaderReaderSlots,
-    reads: Vec<(usize, &'ast syn::Expr)>,
-    calls: Vec<HeaderCall<'ast>>,
-    macros: BTreeMap<String, Vec<Vec<HeaderMacroArm>>>,
-    invocations: Vec<&'ast syn::Macro>,
+struct ContentLengthDirectReads {
+    lines: Vec<usize>,
 }
 
-// A reader slot includes the receiver offset for `receiver.method(...)` calls.
-// Path calls (`helper(...)`, `Self::method(receiver, ...)`) use the full signature.
-type HeaderReaderSlots = BTreeMap<String, BTreeSet<(usize, bool)>>;
-
-struct HeaderCall<'ast> {
-    name: String,
-    method: bool,
-    args: &'ast syn::punctuated::Punctuated<syn::Expr, syn::Token![,]>,
-    caller: Option<&'ast syn::Signature>,
-    line: usize,
-}
-
-impl HeaderCall<'_> {
-    fn read_arguments<'a>(
-        &'a self,
-        readers: &'a HeaderReaderSlots,
-    ) -> impl Iterator<Item = &'a syn::Expr> {
-        readers
-            .get(&self.name)
-            .into_iter()
-            .flatten()
-            .filter_map(|&(index, receiver)| {
-                let index = if self.method {
-                    receiver.then(|| index.checked_sub(1)).flatten()?
-                } else {
-                    index
-                };
-                self.args.iter().nth(index)
-            })
-    }
-}
-
-fn header_reader_slot(signature: &syn::Signature, key: &syn::Expr) -> Option<(usize, bool)> {
-    let syn::Expr::Path(key) = bare_header_key(key) else {
-        return None;
-    };
-    let key = key.path.get_ident()?.unraw();
-    signature
-        .inputs
-        .iter()
-        .position(|arg| {
-            matches!(arg, syn::FnArg::Typed(arg)
-            if matches!(&*arg.pat, syn::Pat::Ident(binding) if binding.ident.unraw() == key))
-        })
-        .map(|index| (index, signature.receiver().is_some()))
-}
-
-impl<'ast> ContentLengthScan<'ast> {
-    fn collect_alias(&mut self, name: &syn::Ident, initializer: &syn::Expr) {
-        if is_explicit_content_length(initializer, |_| false) {
-            self.aliases.insert(name.unraw().to_string());
-        }
-    }
-
-    fn explicit_key(&self, key: &syn::Expr) -> bool {
-        is_explicit_content_length(key, |name| self.aliases.contains(&name.to_string()))
-    }
-
-    fn record_read(&mut self, key: &'ast syn::Expr, read: &impl Spanned) {
-        self.reads.push((read.span().start().line, key));
-        if let Some(signature) = self.function
-            && let Some(slot) = header_reader_slot(signature, key)
-        {
-            self.readers
-                .entry(signature.ident.unraw().to_string())
-                .or_default()
-                .insert(slot);
-        }
-    }
-
-    fn violation_lines(mut self) -> Vec<usize> {
-        // Propagate only unchanged parameter keys. Each pass adds reader slots
-        // or terminates, including for recursive helpers.
-        loop {
-            let mut changed = false;
-            for call in &self.calls {
-                let Some(caller) = call.caller else { continue };
-                let forwarded = call
-                    .read_arguments(&self.readers)
-                    .filter_map(|key| header_reader_slot(caller, key))
-                    .collect::<Vec<_>>();
-                if !forwarded.is_empty() {
-                    let slots = self
-                        .readers
-                        .entry(caller.ident.unraw().to_string())
-                        .or_default();
-                    for slot in forwarded {
-                        changed |= slots.insert(slot);
-                    }
-                }
-            }
-            if !changed {
-                break;
-            }
-        }
-
-        let mut lines = Vec::new();
-        lines.extend(
-            self.reads
-                .iter()
-                .filter_map(|(line, key)| self.explicit_key(key).then_some(*line)),
-        );
-        lines.extend(self.calls.iter().filter_map(|call| {
-            call.read_arguments(&self.readers)
-                .any(|key| self.explicit_key(key))
-                .then_some(call.line)
-        }));
-        lines.extend(self.invocations.iter().filter_map(|call| {
-            let name = call.path.segments.last()?.ident.unraw().to_string();
-            let definitions = self.macros.get(&name)?;
-            definitions
-                .iter()
-                .any(|arms| {
-                    arms.iter()
-                        .find_map(|arm| arm.reads_explicit_key(call, |key| self.explicit_key(key)))
-                        .unwrap_or(false)
-                })
-                .then(|| call.path.span().start().line)
-        }));
-        lines.sort_unstable();
-        lines
-    }
-}
-
-impl<'ast> Visit<'ast> for ContentLengthScan<'ast> {
-    fn visit_item(&mut self, node: &'ast syn::Item) {
+impl Visit<'_> for ContentLengthDirectReads {
+    fn visit_item(&mut self, node: &syn::Item) {
         let attrs = match node {
             syn::Item::Fn(item) => &item.attrs,
             syn::Item::Mod(item) => &item.attrs,
@@ -1770,46 +1636,18 @@ impl<'ast> Visit<'ast> for ContentLengthScan<'ast> {
             syn::Item::Trait(item) => &item.attrs,
             syn::Item::Const(item) => &item.attrs,
             syn::Item::Static(item) => &item.attrs,
-            syn::Item::Use(item) => &item.attrs,
-            syn::Item::Macro(item) => &item.attrs,
             _ => return syn::visit::visit_item(self, node),
         };
         if !has_cfg_test(attrs) && !attrs.iter().any(|attr| attr.path().is_ident("test")) {
-            match node {
-                syn::Item::Const(item) => self.collect_alias(&item.ident, &item.expr),
-                syn::Item::Static(item) => self.collect_alias(&item.ident, &item.expr),
-                _ => {}
-            }
             syn::visit::visit_item(self, node);
         }
     }
 
-    fn visit_local(&mut self, node: &'ast syn::Local) {
-        if has_cfg_test(&node.attrs) {
-            return;
-        }
-        let pattern = match &node.pat {
-            syn::Pat::Type(typed) => &*typed.pat,
-            pattern => pattern,
-        };
-        if let (syn::Pat::Ident(binding), Some(init)) = (pattern, &node.init) {
-            self.collect_alias(&binding.ident, &init.expr);
-        }
-        syn::visit::visit_local(self, node);
-    }
-
-    fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
-        if node.ident.unraw() == "CONTENT_LENGTH" {
-            self.aliases.insert(node.rename.unraw().to_string());
-        }
-    }
-
-    fn visit_impl_item(&mut self, node: &'ast syn::ImplItem) {
+    fn visit_impl_item(&mut self, node: &syn::ImplItem) {
         let attrs = match node {
             syn::ImplItem::Fn(item) => &item.attrs,
             syn::ImplItem::Const(item) => &item.attrs,
             syn::ImplItem::Type(item) => &item.attrs,
-            syn::ImplItem::Macro(item) => &item.attrs,
             _ => return syn::visit::visit_impl_item(self, node),
         };
         if !has_cfg_test(attrs) {
@@ -1817,12 +1655,11 @@ impl<'ast> Visit<'ast> for ContentLengthScan<'ast> {
         }
     }
 
-    fn visit_trait_item(&mut self, node: &'ast syn::TraitItem) {
+    fn visit_trait_item(&mut self, node: &syn::TraitItem) {
         let attrs = match node {
             syn::TraitItem::Fn(item) => &item.attrs,
             syn::TraitItem::Const(item) => &item.attrs,
             syn::TraitItem::Type(item) => &item.attrs,
-            syn::TraitItem::Macro(item) => &item.attrs,
             _ => return syn::visit::visit_trait_item(self, node),
         };
         if !has_cfg_test(attrs) {
@@ -1830,295 +1667,34 @@ impl<'ast> Visit<'ast> for ContentLengthScan<'ast> {
         }
     }
 
-    fn visit_item_fn(&mut self, node: &'ast syn::ItemFn) {
-        let enclosing = self.function.replace(&node.sig);
-        syn::visit::visit_item_fn(self, node);
-        self.function = enclosing;
-    }
-
-    fn visit_impl_item_fn(&mut self, node: &'ast syn::ImplItemFn) {
-        let enclosing = self.function.replace(&node.sig);
-        syn::visit::visit_impl_item_fn(self, node);
-        self.function = enclosing;
-    }
-
-    fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
-        let enclosing = self.function.replace(&node.sig);
-        syn::visit::visit_trait_item_fn(self, node);
-        self.function = enclosing;
-    }
-
-    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if !has_cfg_test(&node.attrs) {
-            if let syn::Expr::Path(path) = bare_header_key(&node.func)
-                && let Some(segment) = path.path.segments.last()
-            {
-                self.calls.push(HeaderCall {
-                    name: segment.ident.unraw().to_string(),
-                    method: false,
-                    args: &node.args,
-                    caller: self.function,
-                    line: node.span().start().line,
-                });
-            }
-            syn::visit::visit_expr_call(self, node);
-        }
-    }
-
-    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
-        if has_cfg_test(&node.attrs) {
-            return;
-        }
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
         if (node.method == "get" || node.method == "get_all")
-            && let Some(key) = node.args.first()
+            && node.args.first().is_some_and(is_explicit_content_length)
         {
-            self.record_read(key, node);
+            self.lines.push(node.span().start().line);
         }
-        self.calls.push(HeaderCall {
-            name: node.method.unraw().to_string(),
-            method: true,
-            args: &node.args,
-            caller: self.function,
-            line: node.span().start().line,
-        });
         syn::visit::visit_expr_method_call(self, node);
     }
 
-    fn visit_expr_block(&mut self, node: &'ast syn::ExprBlock) {
-        if !has_cfg_test(&node.attrs) {
-            syn::visit::visit_expr_block(self, node);
+    fn visit_expr_index(&mut self, node: &syn::ExprIndex) {
+        if is_explicit_content_length(&node.index) {
+            self.lines.push(node.span().start().line);
         }
-    }
-
-    fn visit_expr_index(&mut self, node: &'ast syn::ExprIndex) {
-        if !has_cfg_test(&node.attrs) {
-            self.record_read(&node.index, node);
-            syn::visit::visit_expr_index(self, node);
-        }
-    }
-
-    fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
-        if node.mac.path.is_ident("macro_rules") {
-            if let Some(name) = &node.ident
-                && let Ok(arms) = node.mac.parse_body_with(parse_header_macro_arms)
-                && arms.iter().any(|arm| !arm.keys.is_empty())
-            {
-                self.macros
-                    .entry(name.unraw().to_string())
-                    .or_default()
-                    .push(arms);
-            }
-        } else {
-            self.visit_macro(&node.mac);
-        }
-    }
-
-    fn visit_stmt_macro(&mut self, node: &'ast syn::StmtMacro) {
-        if !has_cfg_test(&node.attrs) {
-            self.visit_macro(&node.mac);
-        }
-    }
-
-    fn visit_expr_macro(&mut self, node: &'ast syn::ExprMacro) {
-        if !has_cfg_test(&node.attrs) {
-            self.visit_macro(&node.mac);
-        }
-    }
-
-    fn visit_macro(&mut self, node: &'ast syn::Macro) {
-        self.invocations.push(node);
+        syn::visit::visit_expr_index(self, node);
     }
 }
 
-struct HeaderMacroArm {
-    matcher: Vec<TokenTree>,
-    keys: BTreeSet<String>,
-}
-
-fn parse_header_macro_arms(input: syn::parse::ParseStream<'_>) -> syn::Result<Vec<HeaderMacroArm>> {
-    let mut arms = Vec::new();
-    while !input.is_empty() {
-        let matcher: Group = input.parse()?;
-        input.parse::<syn::Token![=>]>()?;
-        let body: Group = input.parse()?;
-        arms.push(HeaderMacroArm {
-            matcher: matcher.stream().into_iter().collect(),
-            keys: macro_header_read_keys(body.stream()),
-        });
-        if !input.is_empty() && input.parse::<Option<syn::Token![;]>>()?.is_none() {
-            input.parse::<syn::Token![,]>()?;
-        }
-    }
-    Ok(arms)
-}
-
-fn macro_punct(token: Option<&TokenTree>, ch: char) -> bool {
-    matches!(token, Some(TokenTree::Punct(punct)) if punct.as_char() == ch)
-}
-
-fn macro_header_read_keys(body: TokenStream) -> BTreeSet<String> {
-    // Parse the template, not an expansion. Replace `$ident` with an identifier
-    // marked by the dollar's source position (distinct from a bare `ident`).
-    fn mark(tokens: TokenStream, positions: &mut BTreeSet<(usize, usize)>) -> TokenStream {
-        let mut tokens = tokens.into_iter().peekable();
-        let mut parsed = TokenStream::new();
-        while let Some(token) = tokens.next() {
-            let token = match token {
-                TokenTree::Group(group) => {
-                    let mut marked = Group::new(group.delimiter(), mark(group.stream(), positions));
-                    marked.set_span(group.span());
-                    TokenTree::Group(marked)
-                }
-                TokenTree::Punct(punct) if punct.as_char() == '$' => {
-                    if let Some(TokenTree::Ident(_)) = tokens.peek()
-                        && let Some(TokenTree::Ident(mut ident)) = tokens.next()
-                    {
-                        let start = punct.span().start();
-                        positions.insert((start.line, start.column));
-                        ident.set_span(punct.span());
-                        TokenTree::Ident(ident)
-                    } else {
-                        TokenTree::Punct(punct)
-                    }
-                }
-                token => token,
-            };
-            parsed.extend([token]);
-        }
-        parsed
-    }
-
-    let mut positions = BTreeSet::new();
-    let Ok(statements) = syn::Block::parse_within.parse2(mark(body, &mut positions)) else {
-        return BTreeSet::new();
-    };
-    let mut scan = ContentLengthScan::default();
-    for stmt in &statements {
-        scan.visit_stmt(stmt);
-    }
-    scan.reads
-        .iter()
-        .filter_map(|(_, key)| {
-            let syn::Expr::Path(path) = bare_header_key(key) else {
-                return None;
-            };
-            let ident = path.path.get_ident()?;
-            let start = ident.span().start();
-            positions
-                .contains(&(start.line, start.column))
-                .then(|| ident.unraw().to_string())
-        })
-        .collect()
-}
-
-impl HeaderMacroArm {
-    // Match flat captures and fixed tokens (including an optional trailing
-    // comma). Try arms in order so a literal-selector arm can override a reader.
-    fn reads_explicit_key(
-        &self,
-        invocation: &syn::Macro,
-        explicit: impl Fn(&syn::Expr) -> bool,
-    ) -> Option<bool> {
-        invocation
-            .parse_body_with(|input: syn::parse::ParseStream<'_>| {
-                let mut tokens = self.matcher.as_slice();
-                let mut hit = false;
-                while let Some((token, tail)) = tokens.split_first() {
-                    tokens = tail;
-                    if macro_punct(Some(token), '$') {
-                        match tokens {
-                            [
-                                TokenTree::Ident(name),
-                                colon,
-                                TokenTree::Ident(fragment),
-                                rest @ ..,
-                            ] if macro_punct(Some(colon), ':') => {
-                                tokens = rest;
-                                hit |= macro_argument_is_explicit(input, fragment, |key| {
-                                    self.keys.contains(&name.unraw().to_string()) && explicit(key)
-                                })?;
-                            }
-                            [TokenTree::Group(group), question]
-                                if group.stream().to_string() == ","
-                                    && macro_punct(Some(question), '?') =>
-                            {
-                                input.parse::<Option<syn::Token![,]>>()?;
-                                break;
-                            }
-                            _ => return Err(input.error("unsupported macro matcher")),
-                        }
-                    } else if input.parse::<TokenTree>()?.to_string() != token.to_string() {
-                        return Err(input.error("macro matcher did not match"));
-                    }
-                }
-                Ok(hit)
-            })
-            .ok()
-    }
-}
-
-fn macro_argument_is_explicit(
-    input: syn::parse::ParseStream<'_>,
-    fragment: &syn::Ident,
-    explicit: impl FnOnce(&syn::Expr) -> bool,
-) -> syn::Result<bool> {
-    let key = match fragment.to_string().as_str() {
-        "expr" | "expr_2021" => {
-            let expr = input.parse()?;
-            if fragment == "expr_2021" && matches!(expr, syn::Expr::Const(_) | syn::Expr::Infer(_))
-            {
-                return Err(input.error("expected a 2021 expression"));
-            }
-            expr
-        }
-        "path" => syn::Expr::Path(input.parse()?),
-        "literal" => {
-            let negative = input.parse::<Option<syn::Token![-]>>()?.is_some();
-            let lit = input.parse()?;
-            if negative {
-                return Ok(false);
-            }
-            syn::Expr::Lit(syn::ExprLit {
-                attrs: Vec::new(),
-                lit,
-            })
-        }
-        "ident" | "tt" => {
-            let token = input.parse::<TokenTree>()?;
-            if fragment == "ident" && !matches!(token, TokenTree::Ident(_)) {
-                return Err(input.error("expected identifier"));
-            }
-            return Ok(syn::parse2(TokenStream::from(token)).is_ok_and(|key| explicit(&key)));
-        }
-        "ty" => {
-            input.parse::<syn::Type>()?;
-            return Ok(false);
-        }
-        "block" => {
-            input.parse::<syn::Block>()?;
-            return Ok(false);
-        }
-        _ => return Err(input.error("unsupported macro capture")),
-    };
-    Ok(explicit(&key))
-}
-
-fn bare_header_key(expr: &syn::Expr) -> &syn::Expr {
+fn is_explicit_content_length(expr: &syn::Expr) -> bool {
     match expr {
-        syn::Expr::Reference(reference) => bare_header_key(&reference.expr),
-        syn::Expr::Paren(paren) => bare_header_key(&paren.expr),
-        syn::Expr::Group(group) => bare_header_key(&group.expr),
-        _ => expr,
-    }
-}
-
-fn is_explicit_content_length(expr: &syn::Expr, is_alias: impl Fn(&syn::Ident) -> bool) -> bool {
-    match bare_header_key(expr) {
-        syn::Expr::Path(path) => path.path.segments.last().is_some_and(|segment| {
-            let name = segment.ident.unraw();
-            name == "CONTENT_LENGTH" || is_alias(&name)
-        }),
+        syn::Expr::Path(path) => path
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "CONTENT_LENGTH"),
         syn::Expr::Lit(literal) => is_content_length_literal(&literal.lit),
+        syn::Expr::Reference(reference) => is_explicit_content_length(&reference.expr),
+        syn::Expr::Paren(paren) => is_explicit_content_length(&paren.expr),
+        syn::Expr::Group(group) => is_explicit_content_length(&group.expr),
         syn::Expr::Call(call) => {
             let field_name_constructor = match &*call.func {
                 syn::Expr::Path(path) => path.path.segments.last().is_some_and(|segment| {
@@ -2137,7 +1713,13 @@ fn is_explicit_content_length(expr: &syn::Expr, is_alias: impl Fn(&syn::Ident) -
 }
 
 fn is_content_length_literal_expr(expr: &syn::Expr) -> bool {
-    matches!(bare_header_key(expr), syn::Expr::Lit(literal) if is_content_length_literal(&literal.lit))
+    match expr {
+        syn::Expr::Lit(literal) => is_content_length_literal(&literal.lit),
+        syn::Expr::Reference(reference) => is_content_length_literal_expr(&reference.expr),
+        syn::Expr::Paren(paren) => is_content_length_literal_expr(&paren.expr),
+        syn::Expr::Group(group) => is_content_length_literal_expr(&group.expr),
+        _ => false,
+    }
 }
 
 fn is_content_length_literal(literal: &syn::Lit) -> bool {
@@ -5022,71 +4604,20 @@ mod tests {
                     "fn reader() {{ let _ = declared_content_length(h); let _ = {read}; }}"
                 );
                 assert_eq!(
-                    content_length_read_violations("qpx-http/src/codec.rs", &source)
+                    content_length_direct_read_violations("qpx-http/src/codec.rs", &source)
                         .unwrap()
                         .len(),
                     1,
                     "{read}"
                 );
                 assert!(
-                    content_length_read_violations(CONTENT_LENGTH_OWNER, &source)
+                    content_length_direct_read_violations(CONTENT_LENGTH_OWNER, &source)
                         .unwrap()
                         .is_empty()
                 );
             }
         }
-        assert!(content_length_read_violations("qpx-http/src/codec.rs", "fn {").is_err());
-    }
-
-    #[test]
-    fn content_length_backstop_follows_local_binding() {
-        for binding in ["n = CONTENT_LENGTH", "n: &str = (\"Content-Length\")"] {
-            let source = format!("fn reader() {{ let {binding}; let _ = h.get(n); }}");
-            assert_eq!(
-                content_length_read_violations("qpx-http/src/codec.rs", &source)
-                    .unwrap()
-                    .len(),
-                1,
-                "{binding}"
-            );
-            assert!(
-                content_length_read_violations(CONTENT_LENGTH_OWNER, &source)
-                    .unwrap()
-                    .is_empty()
-            );
-        }
-    }
-
-    #[test]
-    fn content_length_backstop_follows_const_and_static() {
-        let source = r#"
-            fn reader() {
-                let _ = h.get_all(crate::LEN_CONST);
-                let _ = h.get_all(&LEN_STATIC);
-            }
-            const LEN_CONST: HeaderName = CONTENT_LENGTH;
-            static LEN_STATIC: HeaderName = HeaderName::from_static("content-length");
-        "#;
-        assert_eq!(
-            content_length_read_violations("qpx-http/src/codec.rs", source)
-                .unwrap()
-                .len(),
-            2
-        );
-    }
-
-    #[test]
-    fn content_length_backstop_follows_renamed_import() {
-        let source = r#"
-            use http::header::CONTENT_LENGTH as CL;
-            fn reader() { let _ = h[CL]; }
-        "#;
-        assert_eq!(
-            content_length_read_violations("qpx-http/src/codec.rs", source)
-                .unwrap()
-                .len(),
-            1
-        );
+        assert!(content_length_direct_read_violations("qpx-http/src/codec.rs", "fn {").is_err());
     }
 
     #[test]
@@ -5100,10 +4631,6 @@ mod tests {
                 let _ = h.iter();
                 let _ = h.get("content-type");
                 let _ = h.get_all(CONTENT_TYPE);
-                let ct = CONTENT_TYPE;
-                let _ = h.get(ct);
-                let other = "content-type";
-                let _ = h.get(other);
                 let _ = h["x-content-length"];
                 let _ = declared_content_length(h);
                 let _ = owned.declared_content_length();
@@ -5111,7 +4638,7 @@ mod tests {
             }
         "#;
         assert!(
-            content_length_read_violations("qpx-http/src/codec.rs", source)
+            content_length_direct_read_violations("qpx-http/src/codec.rs", source)
                 .unwrap()
                 .is_empty()
         );
@@ -5120,12 +4647,7 @@ mod tests {
     #[test]
     fn content_length_backstop_uses_shared_test_predicate_not_module_spelling() {
         let source = r#"
-            #[cfg(test)] mod arbitrary {
-                fn helper() { let test_key = CONTENT_LENGTH; h.get(test_key); h.get(CONTENT_LENGTH); }
-            }
-            #[cfg(test)] use http::header::CONTENT_LENGTH as TEST_CL;
-            #[cfg(not(test))] use http::header::CONTENT_TYPE as TEST_CL;
-            fn unrelated() { let test_key = CONTENT_TYPE; h.get(test_key); h.get(TEST_CL); }
+            #[cfg(test)] mod arbitrary { fn helper() { h.get(CONTENT_LENGTH); } }
             #[cfg(all(test, feature = "http3"))]
             fn helper() { h.get_all("CONTENT-LENGTH"); }
             #[test] fn assertion() { h[CONTENT_LENGTH]; }
@@ -5141,118 +4663,25 @@ mod tests {
             #[cfg(not(test))] fn production() { h.get_all("Content-Length"); }
         "#;
         assert_eq!(
-            content_length_read_violations("qpx-http/src/codec.rs", source)
+            content_length_direct_read_violations("qpx-http/src/codec.rs", source)
                 .unwrap()
                 .len(),
             2
         );
         for path in ["qpx-http/src/tests.rs", "qpx-http/tests/framing.rs"] {
             assert!(
-                content_length_read_violations(path, source)
+                content_length_direct_read_violations(path, source)
                     .unwrap()
                     .is_empty()
             );
         }
         assert!(
-            content_length_read_violations(
+            content_length_direct_read_violations(
                 "qpx-http/src/helper.rs",
                 "#![cfg(all(test, feature = \"http3\"))]\nfn helper() { h[CONTENT_LENGTH]; }"
             )
             .unwrap()
             .is_empty()
-        );
-    }
-
-    #[test]
-    fn content_length_backstop_follows_only_the_parameter_read_by_local_helpers() {
-        let source = r#"use http::header::CONTENT_LENGTH as LENGTH;
-            fn outer(key: &str, h: &HeaderMap) { middle(h, "other", key); }
-            fn middle(h: &HeaderMap, unused: &str, name: &str) { leaf(h, name); }
-            fn leaf(h: &HeaderMap, key: &str) { h.get_all((key)); }
-            fn unrelated(h: &HeaderMap, key: &str) { h.get("content-type"); }
-            impl Reader {
-                fn read(&self, unused: &str, key: &str) { self.h[key]; }
-            }
-            fn caller(h: &HeaderMap, r: Reader) {
-                outer("CoNtEnT-LeNgTh", h);
-                middle(h, LENGTH, "content-type");
-                unrelated(h, LENGTH);
-                r.read("other", LENGTH);
-                Reader::read(&r, LENGTH, "content-type");
-                Reader::read(&r, "other", HeaderName::from_static("content-length"));
-            }
-        "#;
-        assert_eq!(
-            content_length_read_violations("qpx-http/src/codec.rs", source).unwrap(),
-            [10, 13, 15].map(|line| format!(
-                "qpx-http/src/codec.rs:{line}: explicit Content-Length value read"
-            ))
-        );
-    }
-
-    #[test]
-    fn content_length_backstop_checks_the_invoked_macro_arm_and_key_slot() {
-        let source = r#"const LENGTH: &str = "content-length";
-            macro_rules! read {
-                (other, $h:expr, $key:expr) => { $h.get(HeaderName::from_static("content-type")) };
-                ($h:expr, $key:expr $(,)?) => {{ $h.get((&$key)) }};
-            }
-            macro_rules! index {
-                ($h:expr, $key:literal) => { $h.get_all($key) };
-                ($h:expr, $key:ident) => { $h[$key] };
-            }
-            macro_rules! array {
-                ($key:expr) => { [$key] };
-            }
-            fn caller(h: &HeaderMap) {
-                read!(other, h, CONTENT_LENGTH);
-                read!(h, HeaderName::from_bytes(b"Content-Length"),);
-                index!(h, LENGTH);
-                index!(h, "Content-Length");
-                read!(h, "content-type");
-                array!(CONTENT_LENGTH);
-            }
-        "#;
-        assert_eq!(
-            content_length_read_violations("qpx-http/src/codec.rs", source).unwrap(),
-            [15, 16, 17].map(|line| format!(
-                "qpx-http/src/codec.rs:{line}: explicit Content-Length value read"
-            ))
-        );
-    }
-
-    #[test]
-    fn content_length_backstop_excludes_test_only_indirection_and_the_owner() {
-        let source = r#"
-            fn read(h: &HeaderMap, key: &str) { h.get(key); }
-            macro_rules! read_macro { ($h:expr, $key:expr) => { $h[$key] }; }
-            #[cfg(test)] fn test_only(h: &HeaderMap) {
-                read(h, CONTENT_LENGTH);
-                read_macro!(h, CONTENT_LENGTH);
-            }
-            #[cfg(test)] macro_rules! cfg_read { ($key:expr) => { h.get($key) }; }
-            #[cfg(test)] fn cfg_helper(key: &str) { h.get(key); }
-            #[cfg(not(test))] macro_rules! cfg_read { ($key:expr) => { h.get("content-type") }; }
-            #[cfg(not(test))] fn cfg_helper(key: &str) { h.get("content-type"); }
-            fn production(h: &HeaderMap) {
-                #[cfg(test)] read_macro!(h, CONTENT_LENGTH);
-                #[cfg(test)] { read(h, CONTENT_LENGTH); }
-                cfg_read!(CONTENT_LENGTH);
-                cfg_helper(CONTENT_LENGTH);
-            }
-        "#;
-        assert!(
-            content_length_read_violations("qpx-http/src/codec.rs", source)
-                .unwrap()
-                .is_empty()
-        );
-        let source = format!(
-            "{source} fn owner(h: &HeaderMap) {{ read(h, CONTENT_LENGTH); read_macro!(h, CONTENT_LENGTH); }}"
-        );
-        assert!(
-            content_length_read_violations(CONTENT_LENGTH_OWNER, &source)
-                .unwrap()
-                .is_empty()
         );
     }
 
