@@ -1,7 +1,7 @@
 //! Stable advisory locks, separate from evictable cache objects. Never unlink a
 //! lock file: replacing its inode would split coordination between processes.
 use super::*;
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{Read, Write};
 use std::os::fd::{AsRawFd, FromRawFd};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
 use std::time::Instant;
@@ -46,12 +46,17 @@ impl CommitLocks {
             }
         }
         // A complete record is either the current fixed-width hex format or
-        // the original canonical decimal; only a different count fails closed.
-        // Partial state is repaired under the exclusive layout lock.
+        // the original canonical decimal. Never rewrite an established pin:
+        // an interrupted update would leave an unreadable record while an older
+        // writer still uses its in-memory stripe count. Only first initialization
+        // may publish a record, and an interrupted first write fails closed.
         let expected = format!("{:016x}\n", stripes);
         let mut stored = Vec::new();
         layout.read_to_end(&mut stored)?;
-        if stored != expected.as_bytes() {
+        if stored.is_empty() {
+            layout.write_all(expected.as_bytes())?;
+            layout.sync_all()?;
+        } else {
             let parse = |bytes: &[u8], radix| -> Result<usize> {
                 let text = std::str::from_utf8(bytes)?;
                 usize::from_str_radix(text, radix)
@@ -62,27 +67,19 @@ impl CommitLocks {
                 && stored[16] == b'\n'
             {
                 Some(parse(&stored[..16], 16)?)
-            } else if !stored.is_empty()
-                && stored[0] != b'0'
-                && stored.iter().all(u8::is_ascii_digit)
-            {
+            } else if stored[0] != b'0' && stored.iter().all(u8::is_ascii_digit) {
                 Some(parse(&stored, 10)?)
             } else {
                 None
             };
-            if let Some(count) = complete
-                && count != stripes
-            {
+            let count = complete.ok_or_else(|| {
+                anyhow!("disk commit_lock_stripes record is unreadable; restore it or use a fresh cache root")
+            })?;
+            if count != stripes {
                 return Err(anyhow!(
                     "disk commit_lock_stripes mismatch: stored {count}, expected {stripes}; restore commit_lock_stripes to {count} or use a fresh cache root"
                 ));
             }
-            // Same count or torn state: rewrite the pin in place, never by
-            // replacing the inode that coordinates processes.
-            layout.seek(SeekFrom::Start(0))?;
-            layout.set_len(0)?;
-            layout.write_all(expected.as_bytes())?;
-            layout.sync_all()?;
         }
         Ok(locks)
     }
@@ -233,7 +230,7 @@ mod tests {
     }
 
     #[test]
-    fn torn_layout_record_is_repaired_but_a_complete_mismatch_fails_closed() {
+    fn torn_layout_record_fails_closed_without_erasing_the_pin() {
         let root = crate::tests::canonical_temp_dir()
             .join(format!("qpx-torn-layout-{}", uuid::Uuid::new_v4()));
         CommitLocks::new(&root, 1, Duration::from_millis(100)).unwrap();
@@ -241,17 +238,13 @@ mod tests {
         let expected = format!("{:016x}\n", 1usize);
         assert_eq!(expected.len(), 17);
 
-        {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .truncate(true)
-                .open(&path)
-                .unwrap();
-            file.write_all(&expected.as_bytes()[..13]).unwrap();
-            file.sync_all().unwrap();
-        }
-        assert!(CommitLocks::new(&root, 1, Duration::from_millis(100)).is_ok());
-        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        let torn = &expected.as_bytes()[..13];
+        fs::write(&path, torn).unwrap();
+        let error = CommitLocks::new(&root, 1, Duration::from_millis(100))
+            .err()
+            .unwrap();
+        assert!(error.to_string().contains("unreadable"), "{error}");
+        assert_eq!(fs::read(&path).unwrap(), torn);
 
         let different = format!("{:016x}\n", 2usize);
         fs::write(&path, &different).unwrap();
@@ -264,12 +257,11 @@ mod tests {
     }
 
     #[test]
-    fn legacy_decimal_layout_migrates_only_when_the_count_matches() {
+    fn legacy_decimal_layout_is_preserved_when_the_count_matches() {
         let root = crate::tests::canonical_temp_dir()
             .join(format!("qpx-legacy-layout-{}", uuid::Uuid::new_v4()));
         CommitLocks::new(&root, 8, Duration::from_millis(100)).unwrap();
         let path = root.join(".qpx-commit-locks/stripes");
-        let expected = format!("{:016x}\n", 8usize);
 
         fs::write(&path, b"16").unwrap();
         let error = CommitLocks::new(&root, 8, Duration::from_millis(100))
@@ -283,12 +275,37 @@ mod tests {
 
         // A zero-padded prefix is a torn new-format write, not a legacy record.
         fs::write(&path, b"0000000000000").unwrap();
-        CommitLocks::new(&root, 8, Duration::from_millis(100)).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        assert!(CommitLocks::new(&root, 8, Duration::from_millis(100)).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"0000000000000");
 
         fs::write(&path, b"8").unwrap();
         CommitLocks::new(&root, 8, Duration::from_millis(100)).unwrap();
-        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+        assert_eq!(fs::read(&path).unwrap(), b"8");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn matching_pin_is_not_rewritten_while_an_older_writer_is_active() {
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-active-writer-layout-{}", uuid::Uuid::new_v4()));
+        let first = DiskCacheBackend::new(config(&root)).unwrap();
+        let held = first.lock_commit("ns", "primary").await.unwrap();
+        let path = root.join(".qpx-commit-locks/stripes");
+        // An older writer may still be using a legacy representation of the
+        // same count; a later startup must accept it without truncation.
+        fs::write(&path, b"1").unwrap();
+
+        let second = CommitLocks::new(&root, 1, Duration::from_millis(100)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"1");
+
+        let stripe = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(root.join(".qpx-commit-locks/0.lock"))
+            .unwrap();
+        assert!(stripe.try_lock().is_err());
+        drop(held);
+        drop((first, second));
         fs::remove_dir_all(root).unwrap();
     }
 

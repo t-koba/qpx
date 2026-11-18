@@ -57,6 +57,9 @@ All writers of the same root must use shared mode, the same user, and the same
 is rejected with the stored count, the expected count and the recovery options
 (restore that count or use a fresh cache root). Change the count only with all
 clients stopped and the lock directory reset.
+A complete pin is never rewritten: an interrupted update could erase the count
+an already running writer uses. An unreadable pin fails closed until the layout
+file is restored or the root is replaced.
 The private `.qpx-commit-locks` directory holds two bounded stripe domains
 (primary and object), at most twice that many stable lock files plus one layout file; never remove/replace this directory or its files while any
 client uses the root. They live for the root's lifetime and are not cache objects
