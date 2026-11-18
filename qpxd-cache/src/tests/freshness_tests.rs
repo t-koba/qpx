@@ -545,6 +545,36 @@ fn request_max_age_zero_still_permits_fresh_response() {
 }
 
 #[test]
+fn request_max_age_blocks_stale_while_revalidate() {
+    // RFC 9111 §5.2.1.1: with max-age and no max-stale the client does not
+    // want a stale response; SWR must not bypass that request preference.
+    let req = RequestDirectives {
+        max_age: Some(0),
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("max-age=60, stale-while-revalidate=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(
+        disposition,
+        CacheEntryDisposition::RequiresRevalidation
+    ));
+}
+
+#[test]
+fn request_max_stale_restores_swr_after_request_max_age() {
+    // Control: RFC 9111 §5.2.1.1 makes the stale prohibition conditional on
+    // max-stale being absent, so an explicit allowance also restores SWR.
+    let req = RequestDirectives {
+        max_age: Some(0),
+        max_stale: Some(Some(60)),
+        ..RequestDirectives::default()
+    };
+    let envelope = s_maxage_envelope("max-age=60, stale-while-revalidate=60", 60);
+    let disposition = classify_for_request(&req, &envelope, 60_000);
+    assert!(matches!(disposition, CacheEntryDisposition::ServeStale));
+}
+
+#[test]
 fn exact_expiry_swr_serves_stale_while_revalidate() {
     // The exact expiry second is stale with staleness 0, which is inside the
     // stale-while-revalidate window (RFC 5861 §3).

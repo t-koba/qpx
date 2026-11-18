@@ -532,8 +532,12 @@ pub fn classify_for_request(
 
         // Staleness 0 (the exact expiry second) is inside the window: the
         // entry is stale per the strict boundary and RFC 5861 §3 permits
-        // serving it while revalidating.
+        // serving it while revalidating. RFC 9111 §5.2.1.1 also forbids
+        // serving a stale response to a client that sent max-age without
+        // max-stale; SWR must not bypass that request-side gate.
+        let request_allows_stale = req.max_stale.is_some() || req.max_age.is_none();
         if let Some(swr) = resp.stale_while_revalidate
+            && request_allows_stale
             && !req.no_cache
             && !resp.forbids_stale_reuse()
             && staleness <= swr
