@@ -45,24 +45,40 @@ impl CommitLocks {
                 Err(std::fs::TryLockError::Error(error)) => return Err(error.into()),
             }
         }
-        // A fixed-width record makes a torn write distinguishable from a
-        // deliberate layout mismatch: only a complete, different record fails
-        // closed; partial state is repaired under the exclusive layout lock.
+        // A complete record is either the current fixed-width hex format or
+        // the original canonical decimal; only a different count fails closed.
+        // Partial state is repaired under the exclusive layout lock.
         let expected = format!("{:016x}\n", stripes);
         let mut stored = Vec::new();
         layout.read_to_end(&mut stored)?;
-        if stored == expected.as_bytes() {
-            // Already pinned to this stripe count.
-        } else if stored.len() == expected.len()
-            && stored[..16].iter().all(u8::is_ascii_hexdigit)
-            && stored[16] == b'\n'
-        {
-            return Err(anyhow!(
-                "disk commit_lock_stripes differs from this root's lock layout"
-            ));
-        } else {
-            // Truncate first so any interrupted write leaves a detectable
-            // prefix rather than bytes from a previous record.
+        if stored != expected.as_bytes() {
+            let parse = |bytes: &[u8], radix| -> Result<usize> {
+                let text = std::str::from_utf8(bytes)?;
+                usize::from_str_radix(text, radix)
+                    .map_err(|_| anyhow!("disk commit_lock_stripes record is unreadable"))
+            };
+            let complete = if stored.len() == 17
+                && stored[..16].iter().all(u8::is_ascii_hexdigit)
+                && stored[16] == b'\n'
+            {
+                Some(parse(&stored[..16], 16)?)
+            } else if !stored.is_empty()
+                && stored[0] != b'0'
+                && stored.iter().all(u8::is_ascii_digit)
+            {
+                Some(parse(&stored, 10)?)
+            } else {
+                None
+            };
+            if let Some(count) = complete
+                && count != stripes
+            {
+                return Err(anyhow!(
+                    "disk commit_lock_stripes mismatch: stored {count}, expected {stripes}; restore commit_lock_stripes to {count} or use a fresh cache root"
+                ));
+            }
+            // Same count or torn state: rewrite the pin in place, never by
+            // replacing the inode that coordinates processes.
             layout.seek(SeekFrom::Start(0))?;
             layout.set_len(0)?;
             layout.write_all(expected.as_bytes())?;
@@ -244,6 +260,35 @@ mod tests {
             .unwrap();
         assert!(error.to_string().contains("commit_lock_stripes"), "{error}");
         assert_eq!(fs::read(&path).unwrap(), different.as_bytes());
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn legacy_decimal_layout_migrates_only_when_the_count_matches() {
+        let root = crate::tests::canonical_temp_dir()
+            .join(format!("qpx-legacy-layout-{}", uuid::Uuid::new_v4()));
+        CommitLocks::new(&root, 8, Duration::from_millis(100)).unwrap();
+        let path = root.join(".qpx-commit-locks/stripes");
+        let expected = format!("{:016x}\n", 8usize);
+
+        fs::write(&path, b"16").unwrap();
+        let error = CommitLocks::new(&root, 8, Duration::from_millis(100))
+            .err()
+            .unwrap();
+        let message = error.to_string();
+        assert!(message.contains("commit_lock_stripes"), "{message}");
+        assert!(message.contains("16") && message.contains("8"), "{message}");
+        assert!(message.contains("fresh cache root"), "{message}");
+        assert_eq!(fs::read(&path).unwrap(), b"16");
+
+        // A zero-padded prefix is a torn new-format write, not a legacy record.
+        fs::write(&path, b"0000000000000").unwrap();
+        CommitLocks::new(&root, 8, Duration::from_millis(100)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
+
+        fs::write(&path, b"8").unwrap();
+        CommitLocks::new(&root, 8, Duration::from_millis(100)).unwrap();
+        assert_eq!(fs::read(&path).unwrap(), expected.as_bytes());
         fs::remove_dir_all(root).unwrap();
     }
 
