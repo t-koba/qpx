@@ -54,12 +54,15 @@ honors process-shared advisory OS file locks. Other platforms reject shared mode
 lock setup/acquisition errors fail closed, not back to process-local locking.
 All writers of the same root must use shared mode, the same user, and the same
 `commit_lock_stripes` (>0, default 64). The root pins the stripe count: a mismatch
-is rejected. Change it only with all clients stopped and the lock directory reset.
+is rejected with the stored count, the expected count and the recovery options
+(restore that count or use a fresh cache root). Change the count only with all
+clients stopped and the lock directory reset.
 The private `.qpx-commit-locks` directory holds two bounded stripe domains
 (primary and object), at most twice that many stable lock files plus one layout file; never remove/replace this directory or its files while any
 client uses the root. They live for the root's lifetime and are not cache objects
-or eviction candidates. Simultaneous lock-layout setup may fail closed; retry
-startup after the other initializer completes.
+or eviction candidates. Simultaneous layout setup is retried within the lock
+timeout before failing closed; torn layout records are repaired under the
+layout lock without replacing the inode that coordinates processes.
 
 The backend `timeout_ms` bounds primary/object lock contention (retries are spaced at
 roughly 1/64 of that timeout, with a 1 ms minimum interval). Index publication,
