@@ -52,6 +52,13 @@ impl ConfigReloadHandler {
             Ok(bindings) => bindings,
             Err(err) => {
                 warn!(error = ?err, "config reload bind failed");
+                emit_config_reload_audit(
+                    "failed",
+                    None,
+                    Some("tcp_bind_error"),
+                    self.configs_display.as_str(),
+                    Some(&err),
+                );
                 return false;
             }
         };
@@ -63,6 +70,13 @@ impl ConfigReloadHandler {
             Ok(bindings) => bindings,
             Err(err) => {
                 warn!(error = ?err, "config reload udp bind failed");
+                emit_config_reload_audit(
+                    "failed",
+                    None,
+                    Some("udp_bind_error"),
+                    self.configs_display.as_str(),
+                    Some(&err),
+                );
                 return false;
             }
         };
@@ -81,6 +95,13 @@ impl ConfigReloadHandler {
             Ok(tasks) => tasks,
             Err(err) => {
                 warn!(error = ?err, "config reload start failed; keeping old proxy tasks");
+                emit_config_reload_audit(
+                    "failed",
+                    None,
+                    Some("start_error"),
+                    self.configs_display.as_str(),
+                    Some(&err),
+                );
                 return false;
             }
         };
@@ -102,5 +123,126 @@ impl ConfigReloadHandler {
         *current = new_config;
         *runtime = new_runtime;
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::http::modules::default_http_module_registry;
+    use std::io::{self, Write};
+    use std::net::TcpListener;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::util::SubscriberInitExt;
+
+    #[derive(Default)]
+    struct AuditOutput(Mutex<Vec<u8>>);
+
+    impl Write for &AuditOutput {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().write(bytes)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[cfg(windows)]
+    fn bind_exclusive_listener() -> io::Result<TcpListener> {
+        use socket2::{Domain, SockAddr, Socket, Type};
+        use std::net::SocketAddr;
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            SO_EXCLUSIVEADDRUSE, SOL_SOCKET, WSAGetLastError, setsockopt,
+        };
+
+        let socket = Socket::new(Domain::IPV4, Type::STREAM, None)?;
+        // Windows SO_REUSEADDR can otherwise let the reload bind an occupied port.
+        let exclusive = 1_i32;
+        // SAFETY: The socket is live and the pointer is valid for the option's i32 size.
+        if unsafe {
+            setsockopt(
+                socket.as_raw_socket() as _,
+                SOL_SOCKET,
+                SO_EXCLUSIVEADDRUSE,
+                (&raw const exclusive).cast(),
+                size_of::<i32>() as i32,
+            )
+        } != 0
+        {
+            // SAFETY: WSAGetLastError reads the calling thread's error and takes no arguments.
+            let error = unsafe { WSAGetLastError() };
+            return Err(io::Error::from_raw_os_error(error));
+        }
+        socket.bind(&SockAddr::from(SocketAddr::from(([127, 0, 0, 1], 0))))?;
+        socket.listen(1)?;
+        Ok(socket.into())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn config_reload_restart_reports_tcp_bind_failure() {
+        let mut current: ProxyConfig = serde_yaml::from_str(
+            "
+            runtime: { acceptor_tasks_per_listener: 1 }
+            edges:
+              - kind: forward
+                name: test
+                listen: 127.0.0.1:0
+                default_action: { type: direct }
+            ",
+        )
+        .expect("parse current config");
+        let mut runtime = runtime::Runtime::new(current.clone()).expect("build current runtime");
+        let mut proxy = ProxyTasks::start(
+            &current,
+            runtime.clone(),
+            tcp_bindings::TcpBindings::bind(&current).expect("bind current TCP listeners"),
+            udp_bindings::UdpBindings::bind(&current).expect("bind current UDP sockets"),
+            None,
+            #[cfg(feature = "http3")]
+            None,
+        )
+        .expect("start current proxy");
+        let old_task = proxy.tcp_task.id();
+
+        #[cfg(not(windows))]
+        let occupied = TcpListener::bind("127.0.0.1:0").expect("hold the new listen address");
+        #[cfg(windows)]
+        let occupied = bind_exclusive_listener().expect("hold the new listen address");
+        let mut next = current.clone();
+        next.ingress_edges_mut().next().unwrap().listen =
+            occupied.local_addr().unwrap().to_string();
+        let handler =
+            ConfigReloadHandler::new(vec!["test.yaml".into()], default_http_module_registry());
+        let output = Arc::new(AuditOutput::default());
+        let applied = {
+            let _guard = tracing_subscriber::fmt()
+                .json()
+                .without_time()
+                .with_max_level(tracing::Level::WARN)
+                .with_writer(output.clone())
+                .set_default();
+            handler
+                .apply_restart_reload(&mut current, &mut runtime, &mut proxy, next)
+                .await
+        };
+        let retained_task = proxy.tcp_task.id();
+        proxy.stop_all().await.expect("stop proxy");
+
+        assert!(!applied, "reload must reject the occupied listener");
+        assert_eq!(retained_task, old_task, "reload replaced the old proxy");
+        let output = output.0.lock().unwrap();
+        let output = std::str::from_utf8(&output).expect("UTF-8 log output");
+        assert!(
+            output.lines().any(|line| {
+                let entry: serde_json::Value = serde_json::from_str(line).expect("JSON log entry");
+                entry["target"] == "audit_log"
+                    && entry["fields"]["event"] == "config_reload"
+                    && entry["fields"]["outcome"] == "failed"
+                    && entry["fields"]["reason"] == "tcp_bind_error"
+            }),
+            "missing TCP bind failure audit event: {output}"
+        );
     }
 }
