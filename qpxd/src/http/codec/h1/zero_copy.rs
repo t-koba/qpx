@@ -25,11 +25,9 @@ const LOW_CONTENTION_FILE_ZERO_COPY_QUANTUM: u64 = 1024 * 1024;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_ZERO_COPY_QUANTUM: u64 = 64 * 1024;
 
-// Buffered body relays move up to one read buffer per readiness event. The
-// same fairness rule as the zero-copy path applies under concurrent transfer
-// pressure: shrink the per-poll quantum so one connection cannot monopolize a
-// worker and inflate every peer's scheduler queue delay.
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+// Beyond this many concurrent file transfers, shrink the per-readiness quantum
+// so large transfers interleave between socket-buffer drains instead of
+// letting a single connection monopolize a worker and inflate tail latency.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const CONTENDED_FILE_TRANSFER_THRESHOLD: usize = 4;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
