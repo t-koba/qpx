@@ -167,4 +167,21 @@ mod tests {
         assert_eq!(objects[0].component, "VEVENT");
         assert!(objects[0].end > objects[0].start);
     }
+
+    #[test]
+    fn calendar_datetime_round_trips() {
+        for value in [
+            "19700101T000000Z",
+            "20260228T235959Z",
+            "20260711T010000Z",
+            "20261231T235960Z",
+        ] {
+            let instant = parse_datetime(value).unwrap();
+            assert_eq!(format_datetime(instant), value, "round trip for {value}");
+        }
+        assert_eq!(
+            format_datetime(parse_datetime("20260711").unwrap()),
+            "20260711T000000Z"
+        );
+    }
 }
