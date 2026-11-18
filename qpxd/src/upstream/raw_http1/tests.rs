@@ -1283,3 +1283,152 @@ async fn finalized_raw_head_cache_key_coheres_across_versions() {
         via_for(http11_wire, Version::HTTP_2).await
     );
 }
+
+/// Regression for the reverse terminate path when the downstream request body
+/// ends short of its declared Content-Length (for example an HTTP/3 HEADERS
+/// frame with FIN and no DATA that declares a nonzero length). The upstream
+/// request head is written first with the declared length; the body is then
+/// rejected before `build_response` can install the recycler. A desynchronized
+/// upstream connection must therefore be dropped, never returned to the pool.
+async fn assert_short_request_body_never_recycles(make_body: impl FnOnce() -> Body) {
+    let (stream, mut peer) = tokio::io::duplex(4096);
+
+    // Stand-in origin: consume the request head and respond early with a
+    // reusable keep-alive response. It never sees a complete declared body.
+    let origin = tokio::spawn(async move {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        crate::test_util::read_request_head(&mut peer, &mut raw, &mut buf).await;
+        let _ = peer
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nOK")
+            .await;
+        raw
+    });
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/upload")
+        .header("host", "origin.example.test")
+        .header(CONTENT_LENGTH, "5")
+        .body(make_body())
+        .expect("request");
+
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let recycler = Http1ConnectionRecycler::new(move |_stream, _read_buf, _write_buf| {
+        recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        super::send_http1_request_with_interim_reusable(
+            stream,
+            BytesMut::new(),
+            BytesMut::new(),
+            request,
+            recycler,
+        ),
+    )
+    .await
+    .expect("short-body upstream send must not hang");
+
+    assert!(
+        result.is_err(),
+        "a request body short of its declared Content-Length must fail before the response head is read"
+    );
+    assert_eq!(
+        recycled.load(Ordering::SeqCst),
+        0,
+        "the desynchronized upstream connection must not be returned to the pool"
+    );
+    let head = origin.await.expect("origin task");
+    assert!(
+        String::from_utf8_lossy(&head)
+            .to_ascii_lowercase()
+            .contains("content-length: 5"),
+        "the declared request head must still have been written upstream"
+    );
+}
+
+#[tokio::test]
+async fn aborted_request_body_never_recycles_upstream_connection() {
+    // Mirrors the H3 relay calling Sender::abort() on a Content-Length mismatch.
+    assert_short_request_body_never_recycles(|| {
+        let (mut sender, body) = qpx_http::body::Body::channel();
+        sender.abort();
+        body
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn underlength_request_body_never_recycles_upstream_connection() {
+    // Mirrors a body that reaches FIN with fewer bytes than declared.
+    assert_short_request_body_never_recycles(|| {
+        qpx_http::body::Body::replay_chunks(vec![Bytes::from_static(b"OK")], None)
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn complete_request_body_still_recycles_upstream_connection() {
+    // Positive control: proves the recycler above is wired to the normal path,
+    // so the two short-body assertions are not vacuous.
+    let (stream, mut peer) = tokio::io::duplex(4096);
+    let origin = tokio::spawn(async move {
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 1024];
+        crate::test_util::read_request_head(&mut peer, &mut raw, &mut buf).await;
+        let _ = peer
+            .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\nOK")
+            .await;
+    });
+
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/upload")
+        .header("host", "origin.example.test")
+        .header(CONTENT_LENGTH, "5")
+        .body(qpx_http::body::Body::replay_chunks(
+            vec![Bytes::from_static(b"HELLO")],
+            None,
+        ))
+        .expect("request");
+
+    let recycled = Arc::new(AtomicUsize::new(0));
+    let recycled_in_closure = recycled.clone();
+    let recycler = Http1ConnectionRecycler::new(move |_stream, _read_buf, _write_buf| {
+        recycled_in_closure.fetch_add(1, Ordering::SeqCst);
+    });
+
+    let mut response = tokio::time::timeout(
+        Duration::from_secs(2),
+        super::send_http1_request_with_interim_reusable(
+            stream,
+            BytesMut::new(),
+            BytesMut::new(),
+            request,
+            recycler,
+        ),
+    )
+    .await
+    .expect("complete-body upstream send must not hang")
+    .expect("complete body must be accepted");
+    assert_eq!(response.response.status(), StatusCode::OK);
+    assert_eq!(
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            to_bytes(response.response.body_mut())
+        )
+        .await
+        .expect("response body must not hang")
+        .expect("response body"),
+        Bytes::from_static(b"OK")
+    );
+    assert_eq!(
+        recycled.load(Ordering::SeqCst),
+        1,
+        "a fully-satisfied body must allow the reusable connection to be pooled"
+    );
+    origin.await.expect("origin task");
+}
