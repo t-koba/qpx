@@ -2206,9 +2206,9 @@ async fn assert_owner_raw_head_wire(placeholder_lengths: &[&'static str]) {
 async fn raw_http1_407_forwards_only_unnominated_proxy_auth() {
     for nominated in [
         "x-drop",
-        "PrOxY-AuThEnTiCaTe",
-        "PrOxY-AuThEnTiCaTiOn-InFo",
-        "PrOxY-AuThEnTiCaTe, PrOxY-AuThEnTiCaTiOn-InFo",
+        "PROXY-AUTHENTICATE",
+        "PROXY-AUTHENTICATION-INFO",
+        "PROXY-AUTHENTICATE, PROXY-AUTHENTICATION-INFO",
     ] {
         let (mut client, server) = tokio::io::duplex(4096);
         let (read_half, mut write_half) = tokio::io::split(server);

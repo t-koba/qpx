@@ -553,9 +553,9 @@ mod tests {
         for status in [StatusCode::OK, StatusCode::PROXY_AUTHENTICATION_REQUIRED] {
             for nominated in [
                 b"x-drop".as_slice(),
-                b"PrOxY-AuThEnTiCaTe",
-                b"PrOxY-AuThEnTiCaTiOn-InFo",
-                b"PrOxY-AuThEnTiCaTe, PrOxY-AuThEnTiCaTiOn-InFo",
+                b"PROXY-AUTHENTICATE",
+                b"PROXY-AUTHENTICATION-INFO",
+                b"PROXY-AUTHENTICATE, PROXY-AUTHENTICATION-INFO",
             ] {
                 let headers = [
                     httparse::Header {

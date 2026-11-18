@@ -134,9 +134,9 @@ response_remove:
 fn paired_407_finalization_respects_connection_nominated_proxy_auth() {
     for nominated in [
         "x-drop",
-        "PrOxY-AuThEnTiCaTe",
-        "PrOxY-AuThEnTiCaTiOn-InFo",
-        "PrOxY-AuThEnTiCaTe, PrOxY-AuThEnTiCaTiOn-InFo",
+        "PROXY-AUTHENTICATE",
+        "PROXY-AUTHENTICATION-INFO",
+        "PROXY-AUTHENTICATE, PROXY-AUTHENTICATION-INFO",
     ] {
         let make_response = || {
             let mut response = response(407, Body::empty());
