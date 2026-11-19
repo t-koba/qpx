@@ -65,7 +65,9 @@ impl<B: Buf> quic::Connection<B> for Connection {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Self::BidiStream, ConnectionErrorIncoming>> {
         let (send, recv) = ready!(self.incoming_bi.poll_next_unpin(cx))
-            .expect("incoming_bi stream never ends")
+            .ok_or_else(|| {
+                ConnectionErrorIncoming::InternalError("incoming_bi stream ended".to_string())
+            })?
             .map_err(convert_connection_error)?;
         Poll::Ready(Ok(BidiStream {
             send: SendStream::new(send),
@@ -78,7 +80,9 @@ impl<B: Buf> quic::Connection<B> for Connection {
         cx: &mut Context<'_>,
     ) -> Poll<Result<Self::RecvStream, ConnectionErrorIncoming>> {
         let recv = ready!(self.incoming_uni.poll_next_unpin(cx))
-            .expect("incoming_uni stream never ends")
+            .ok_or_else(|| {
+                ConnectionErrorIncoming::InternalError("incoming_uni stream ended".to_string())
+            })?
             .map_err(convert_connection_error)?;
         Poll::Ready(Ok(RecvStream::new(recv)))
     }
@@ -108,7 +112,7 @@ impl<B: Buf> quic::OpenStreams<B> for Connection {
 
     fn close(&mut self, code: Code, reason: &[u8]) {
         self.conn.close(
-            quinn::VarInt::from_u64(code.value()).expect("invalid error code"),
+            quinn::VarInt::from_u64(code.value()).unwrap_or(quinn::VarInt::MAX),
             reason,
         );
     }
@@ -167,7 +171,7 @@ impl<B: Buf> quic::OpenStreams<B> for OpenStreams {
 
     fn close(&mut self, code: Code, reason: &[u8]) {
         self.conn.close(
-            quinn::VarInt::from_u64(code.value()).expect("invalid error code"),
+            quinn::VarInt::from_u64(code.value()).unwrap_or(quinn::VarInt::MAX),
             reason,
         );
     }
@@ -184,7 +188,11 @@ fn poll_open_bidi<B: Buf>(
         }))
     });
     let (send, recv) = ready!(opening.poll_next_unpin(cx))
-        .expect("opening_bi stream never ends")
+        .ok_or_else(|| {
+            stream_connection_error(ConnectionErrorIncoming::InternalError(
+                "opening_bi stream ended".to_string(),
+            ))
+        })?
         .map_err(|e| stream_connection_error(convert_connection_error(e)))?;
     Poll::Ready(Ok(BidiStream {
         send: SendStream::new(send),
@@ -203,7 +211,11 @@ fn poll_open_send<B: Buf>(
         }))
     });
     let send = ready!(opening.poll_next_unpin(cx))
-        .expect("opening_uni stream never ends")
+        .ok_or_else(|| {
+            stream_connection_error(ConnectionErrorIncoming::InternalError(
+                "opening_uni stream ended".to_string(),
+            ))
+        })?
         .map_err(|e| stream_connection_error(convert_connection_error(e)))?;
     Poll::Ready(Ok(SendStream::new(send)))
 }
@@ -303,13 +315,13 @@ impl quic::RecvStream for RecvStream {
     }
 
     fn stop_sending(&mut self, error_code: u64) {
-        let code = quinn::VarInt::from_u64(error_code).expect("invalid error code");
+        let code = quinn::VarInt::from_u64(error_code).unwrap_or(quinn::VarInt::MAX);
         let _ = self.stream.stop(code);
     }
 
     fn recv_id(&self) -> StreamId {
         let num: u64 = self.stream.id().into();
-        num.try_into().expect("invalid stream id")
+        stream_id(num)
     }
 }
 
@@ -368,7 +380,7 @@ impl<B: Buf> quic::SendStream<B> for SendStream<B> {
 
     fn send_id(&self) -> StreamId {
         let num: u64 = self.stream.id().into();
-        num.try_into().expect("invalid stream id")
+        stream_id(num)
     }
 }
 
@@ -379,13 +391,25 @@ impl<B: Buf> quic::SendStreamUnframed<B> for SendStream<B> {
         buf: &mut D,
     ) -> Poll<Result<usize, StreamErrorIncoming>> {
         if self.writing.is_some() {
-            panic!("poll_send called before send stream was ready");
+            return Poll::Ready(Err(stream_connection_error(
+                ConnectionErrorIncoming::InternalError(
+                    "poll_send called before send stream was ready".to_string(),
+                ),
+            )));
         }
         let written = ready!(Pin::new(&mut self.stream).poll_write(cx, buf.chunk()))
             .map_err(convert_write_error)?;
         buf.advance(written);
         Poll::Ready(Ok(written))
     }
+}
+
+fn stream_id(num: u64) -> StreamId {
+    // Quinn stream ids are QUIC varints (< 2^62), so this conversion cannot
+    // fail for ids Quinn produces. Keep a bounded fallback so a malformed id
+    // degrades gracefully instead of panicking the proxy.
+    num.try_into()
+        .unwrap_or(StreamId::from(h3::proto::varint::VarInt::MAX))
 }
 
 fn stream_connection_error(error: ConnectionErrorIncoming) -> StreamErrorIncoming {
@@ -421,11 +445,10 @@ fn convert_read_error(error: quinn::ReadError) -> StreamErrorIncoming {
         quinn::ReadError::ConnectionLost(error) => {
             stream_connection_error(convert_connection_error(error))
         }
-        error @ quinn::ReadError::ClosedStream | error @ quinn::ReadError::ZeroRttRejected => {
+        error @ quinn::ReadError::ClosedStream
+        | error @ quinn::ReadError::ZeroRttRejected
+        | error @ quinn::ReadError::IllegalOrderedRead => {
             StreamErrorIncoming::Unknown(Box::new(error))
-        }
-        quinn::ReadError::IllegalOrderedRead => {
-            panic!("qpx h3 adapter only performs ordered reads")
         }
     }
 }
