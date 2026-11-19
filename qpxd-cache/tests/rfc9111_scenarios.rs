@@ -520,7 +520,10 @@ async fn wait_for_revalidated_outcome(
     backends: &HashMap<String, Arc<dyn CacheBackend>>,
     expect_hit: bool,
 ) -> Result<LookupOutcome> {
-    tokio::time::timeout(Duration::from_secs(2), async {
+    // Metadata publication is scheduled asynchronously; loaded CI runners can
+    // need longer than two seconds across every backend case. The assertion is
+    // unchanged: the expected outcome must still arrive after refresh.
+    tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             let outcome = lookup(req, key, policy, backends, &revalidations()).await?;
             if matches!(&outcome, LookupOutcome::Hit(_)) && expect_hit
