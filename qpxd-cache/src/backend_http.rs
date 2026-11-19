@@ -35,6 +35,7 @@ fn owner_request(method: Method, uri: Uri, body: Body) -> OwnerRequest<Body> {
 pub struct HttpCacheBackend {
     endpoint: String,
     timeout: Duration,
+    writer_lease_ttl: Duration,
     max_object_bytes: usize,
     auth_header: Option<(http::HeaderName, http::HeaderValue)>,
     user_agent: Option<http::HeaderValue>,
@@ -48,6 +49,9 @@ impl HttpCacheBackend {
             return Err(anyhow!(
                 "writer_mode shared is supported only by the disk backend on Unix"
             ));
+        }
+        if cfg.writer_lease_ttl_ms == 0 {
+            return Err(anyhow!("writer_lease_ttl_ms must be greater than zero"));
         }
         let endpoint = cfg.endpoint.trim().trim_end_matches('/').to_string();
         if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
@@ -78,6 +82,7 @@ impl HttpCacheBackend {
         Ok(Self {
             endpoint,
             timeout: Duration::from_millis(cfg.timeout_ms),
+            writer_lease_ttl: Duration::from_millis(cfg.writer_lease_ttl_ms),
             max_object_bytes: cfg.max_object_bytes,
             auth_header,
             user_agent,
@@ -329,7 +334,9 @@ impl HttpCacheBackend {
 /// Namespace-wide writer lease implemented with HTTP conditional requests:
 /// `PUT ... If-None-Match: *` creates the lease only when absent, and
 /// `DELETE ... If-Match: "<token>"` releases only the holder's own lease.
-/// A gateway that does not implement these semantics fails closed.
+/// The create carries `X-Qpx-Writer-Lease-Ttl-Ms`; a compliant gateway expires
+/// the lease after that bound. A gateway that does not implement the endpoint
+/// falls back to process-local coordination only, with a warning.
 struct HttpCommitLease {
     backend: HttpCacheBackend,
     uri: Uri,
@@ -338,7 +345,7 @@ struct HttpCommitLease {
 }
 
 impl HttpCommitLease {
-    async fn acquire(backend: &HttpCacheBackend, namespace: &str) -> Result<Self> {
+    async fn acquire(backend: &HttpCacheBackend, namespace: &str) -> Result<Option<Self>> {
         let token = uuid::Uuid::new_v4().to_string();
         let uri =
             format!("{}/v1/cache/{}/_writer_lock", backend.endpoint, namespace).parse::<Uri>()?;
@@ -360,6 +367,10 @@ impl HttpCommitLease {
             );
             req.headers_mut()
                 .insert(ord("if-none-match"), http::HeaderValue::from_static("*"));
+            req.headers_mut().insert(
+                ord("x-qpx-writer-lease-ttl-ms"),
+                http::HeaderValue::from_str(&backend.writer_lease_ttl.as_millis().to_string())?,
+            );
             req.headers_mut()
                 .set_content_length(candidate.token.len() as u64);
             backend.apply_common_headers(&mut req);
@@ -373,8 +384,15 @@ impl HttpCommitLease {
                 }
             };
             match status {
-                StatusCode::CREATED => return Ok(candidate),
+                StatusCode::CREATED => return Ok(Some(candidate)),
                 StatusCode::PRECONDITION_FAILED => {}
+                StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => {
+                    tracing::warn!(
+                        uri = %candidate.uri,
+                        "http cache gateway has no writer lease endpoint; using process-local coordination only"
+                    );
+                    return Ok(None);
+                }
                 status => {
                     let err = anyhow!(
                         "http cache backend does not implement the writer lease at {} (PUT returned {}); refusing to write without exclusive coordination",
@@ -401,6 +419,20 @@ impl HttpCommitLease {
     async fn release_request(&self) -> Result<()> {
         release_http_lease(&self.backend, &self.uri, &self.token).await
     }
+
+    async fn validate_request(&self) -> Result<()> {
+        let mut req = owner_request(Method::GET, self.uri.clone(), Body::empty());
+        self.backend.apply_common_headers(&mut req);
+        let (status, body) = self.backend.send_collect(req).await?;
+        if status == StatusCode::OK && body.as_ref() == self.token.as_bytes() {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "http cache writer lease {} is no longer held (GET returned {}, expected the holder token)",
+            self.uri,
+            status
+        ))
+    }
 }
 
 async fn release_http_lease(backend: &HttpCacheBackend, uri: &Uri, token: &str) -> Result<()> {
@@ -426,6 +458,10 @@ impl CommitLease for HttpCommitLease {
         self.release_request().await?;
         self.released.store(true, Ordering::Release);
         Ok(())
+    }
+
+    async fn validate(&self) -> Result<()> {
+        self.validate_request().await
     }
 }
 
@@ -490,9 +526,9 @@ impl CacheBackend for HttpCacheBackend {
         _primary: &str,
     ) -> Result<Option<Arc<dyn CommitLease>>> {
         // Namespace-wide: distinct backends/paths must not bypass coordination.
-        Ok(Some(Arc::new(
-            HttpCommitLease::acquire(self, namespace).await?,
-        )))
+        Ok(HttpCommitLease::acquire(self, namespace)
+            .await?
+            .map(|lease| Arc::new(lease) as Arc<dyn CommitLease>))
     }
 
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<bytes::Bytes>> {

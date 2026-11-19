@@ -510,6 +510,10 @@ pub(super) fn default_cache_timeout_ms() -> u64 {
     1500
 }
 
+pub(super) fn default_cache_writer_lease_ttl_ms() -> u64 {
+    5_000
+}
+
 pub(super) fn default_cache_max_object_bytes() -> usize {
     1024 * 1024
 }

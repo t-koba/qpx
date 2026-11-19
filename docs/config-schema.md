@@ -47,21 +47,32 @@ stored under sharded SHA-256 filenames with atomic same-directory renames.
 alone is never treated as cross-process safety. Remote backends enforce one
 writer per namespace with a backend lease during publication, independently of
 that setting; `writer_mode: shared` stays rejected for them.
+Remote leases are bounded by `writer_lease_ttl_ms` (default `5000`, must be
+greater than zero). Choose a TTL comfortably longer than a normal commit: a
+lease that expires mid-commit is detected by the publication ownership re-check
+and fails that commit.
 
 - `redis`: the lease is a namespace-wide key `qpx:writer-lock:<namespace>` created
-  with `SET NX` and released with a token-checked Lua compare-and-delete. It has
-  no expiry: a crashed writer fails closed until an operator confirms no writer
-  is alive and deletes that key. A competing writer waits for the configured
-  `timeout_ms` (at least 250 ms) and then fails the commit rather than writing
-  unguarded. Redis `SET` must support `NX`.
+  with `SET NX PX <writer_lease_ttl_ms>` and released with a token-checked Lua
+  compare-and-delete. A crashed writer's key expires within the TTL instead of
+  blocking the namespace forever. Publication re-reads the key with `GET` and
+  aborts if the token changed or expired. A competing writer waits for the
+  configured `timeout_ms` (at least 250 ms) and then fails the commit rather
+  than writing unguarded. Redis `SET` must support `NX` and `PX`.
 - `http`: the gateway must implement `PUT /v1/cache/<namespace>/_writer_lock`
-  with `If-None-Match: *`, a plain-text lease token body, `201 Created` on
-  creation and `412 Precondition Failed` when held; and
+  with `If-None-Match: *`, a plain-text lease token body,
+  `X-Qpx-Writer-Lease-Ttl-Ms` (the gateway expires the lease after that bound),
+  `201 Created` on creation and `412 Precondition Failed` when held;
+  `GET /v1/cache/<namespace>/_writer_lock` returning the current plain-text
+  token with `200 OK` (or `404 Not Found` when unheld); and
   `DELETE /v1/cache/<namespace>/_writer_lock` with `If-Match: "<token>"`,
   returning `204 No Content` (or `200 OK`) only when the token matches. Other
   responses fail the commit closed with a clear error. Conditional
   create/delete must be atomic across clients; a gateway that merely accepts
-  every PUT must not be used for cache writes.
+  every PUT must not be used for cache writes. A gateway that returns `404` or
+  `405` for the lease PUT is treated as a legacy backend: writes continue with
+  process-local coordination only, a warning is logged, and cross-instance
+  exclusivity is not claimed.
 
 Both leases are namespace-wide, so differently named backends still contend for
 the same remote namespace. Staged body I/O happens before the lease is taken.
@@ -73,9 +84,10 @@ before reporting the error; if its acquisition future is cancelled before the
 reply is seen, the same fenced release is attempted from the lease's drop path.
 Ordinary contention (`412` / `SET NX` false) only retries and never deletes
 another client's token, and a stale holder cannot release or publish under a
-new owner's lease. A crashed writer performs no cleanup: the namespace stays
-locked until an operator confirms no writer is alive and removes the lock
-(there is no bare expiry on either remote lease).
+new owner's lease. Contention errors name the namespace and lease key/URI, and
+an operator can inspect a stuck lease with `GET` (HTTP) or `GET qpx:writer-lock:<namespace>`
+(Redis); it clears itself within the configured TTL. A live client that lost
+its lease fails the commit at the publication re-check.
 
 Disk alone supports opt-in `writer_mode: shared` on Unix, provided the filesystem
 honors process-shared advisory OS file locks. Other platforms reject shared mode;

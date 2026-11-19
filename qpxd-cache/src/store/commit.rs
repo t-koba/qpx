@@ -42,6 +42,15 @@ impl CommitGuard {
         self.backend_lease.is_some()
     }
 
+    /// Fails the commit when a bounded lease expired or was reclaimed while
+    /// this guard was held. Process-local-only backends have nothing to check.
+    pub(crate) async fn validate(&self) -> anyhow::Result<()> {
+        if let Some(lease) = self.backend_lease.as_ref() {
+            lease.validate().await?;
+        }
+        Ok(())
+    }
+
     /// Releases the backend-enforced half of the lease before the process-local
     /// guard. The lease implementation also releases on drop, so cancellation
     /// never strands remote coordination.

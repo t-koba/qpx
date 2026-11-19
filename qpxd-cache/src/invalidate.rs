@@ -81,6 +81,7 @@ pub async fn invalidate_primary(
     // local single-instance backends use only the process-local registry.
     let (variants, default_variant) = {
         let commit = crate::store::commit::lock(backend, namespace, primary).await?;
+        commit.validate().await?;
         let index = load_variant_index(backend, namespace, primary).await?;
         let default_variant = variant_storage_key(primary, &[]);
         // Do not claim invalidation if the canonical fallback could not be

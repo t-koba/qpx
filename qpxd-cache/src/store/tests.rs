@@ -275,6 +275,7 @@ async fn canonical_writeback_remains_available_after_index_eviction() {
                     max_bytes: Some(1024 * 1024),
                     sweep_interval_secs: 60,
                     timeout_ms: 1000,
+                    writer_lease_ttl_ms: 5_000,
                     max_object_bytes: 1024,
                     auth_header_env: None,
                 })

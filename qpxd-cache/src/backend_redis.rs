@@ -57,6 +57,7 @@ pub(super) struct RedisClient {
     db: Option<u32>,
     password: Option<String>,
     timeout: Duration,
+    writer_lease_ttl: Duration,
     idle: Arc<AsyncMutex<Vec<RedisConnection>>>,
 }
 
@@ -74,6 +75,9 @@ impl RedisCacheBackend {
                 "writer_mode shared is supported only by the disk backend on Unix"
             ));
         }
+        if cfg.writer_lease_ttl_ms == 0 {
+            return Err(anyhow!("writer_lease_ttl_ms must be greater than zero"));
+        }
         let endpoint = cfg.endpoint.trim();
         let spec = parse_endpoint(endpoint)?;
 
@@ -84,6 +88,7 @@ impl RedisCacheBackend {
                 db: spec.db,
                 password: spec.password,
                 timeout: Duration::from_millis(cfg.timeout_ms),
+                writer_lease_ttl: Duration::from_millis(cfg.writer_lease_ttl_ms),
                 idle: Arc::new(AsyncMutex::new(Vec::new())),
             }),
             key_prefix: cfg.name,
@@ -98,6 +103,10 @@ impl RedisCacheBackend {
 }
 
 impl RedisClient {
+    fn max_object_bytes_for_lease(&self) -> usize {
+        8 * 1024
+    }
+
     async fn open(&self) -> Result<RedisConnection> {
         let stream: DynStream = match &self.transport {
             RedisTransport::Tcp { addr } => {
@@ -149,10 +158,10 @@ impl RedisClient {
     }
 }
 
-/// A namespace-wide writer lease backed by Redis `SET NX` and an atomic
-/// compare-and-delete. There is deliberately no expiry: a lost client fails
-/// closed until an operator removes the lock key, rather than allowing a second
-/// writer in while the first may still be committing.
+/// A namespace-wide writer lease backed by Redis `SET NX PX` and an atomic
+/// compare-and-delete. The bounded expiry prevents a crashed writer from
+/// blocking the fleet forever; publication re-checks ownership before its
+/// critical section, and release is always fenced by the holder token.
 struct RedisCommitLease {
     client: Arc<RedisClient>,
     key: String,
@@ -182,6 +191,8 @@ impl RedisCommitLease {
                 key.clone().into_bytes(),
                 token.clone().into_bytes(),
                 b"NX".to_vec(),
+                b"PX".to_vec(),
+                client.writer_lease_ttl.as_millis().to_string().into_bytes(),
             ]);
             let result = async {
                 timeout(client.timeout, stream.stream.write_all(&cmd)).await??;
@@ -246,6 +257,33 @@ impl CommitLease for RedisCommitLease {
         release_redis_lease(self.client.clone(), self.key.clone(), self.token.clone()).await?;
         self.released.store(true, Ordering::Release);
         Ok(())
+    }
+
+    async fn validate(&self) -> Result<()> {
+        let cmd = encode_command(&[b"GET".to_vec(), self.key.clone().into_bytes()]);
+        let mut stream = self.client.checkout().await?;
+        let result = async {
+            timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
+            read_bulk_string(
+                &mut stream,
+                self.client.timeout,
+                self.client.max_object_bytes_for_lease(),
+            )
+            .await
+        }
+        .await;
+        if result.is_ok() {
+            self.client.recycle(stream).await;
+        }
+        let current = result?;
+        if current.as_deref() == Some(self.token.as_bytes()) {
+            return Ok(());
+        }
+        Err(anyhow!(
+            "redis cache writer lease for {} is no longer held (lock key {})",
+            self.token,
+            self.key
+        ))
     }
 }
 

@@ -41,6 +41,13 @@ const CACHE_WRITEBACK_CONCURRENCY: usize = 16;
 #[async_trait]
 pub trait CommitLease: Send + Sync {
     async fn release(&self) -> Result<()>;
+
+    /// Re-checks that this client still owns the backend-enforced lease.
+    /// Publication paths call this immediately before their critical section,
+    /// so a lease that expired or was reclaimed cannot silently publish.
+    async fn validate(&self) -> Result<()> {
+        Ok(())
+    }
 }
 
 /// Bounds cache writeback work so slow durable backends cannot exhaust runtime

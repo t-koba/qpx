@@ -30,6 +30,7 @@ async fn http_response_stream_error_does_not_complete_put_or_write_metadata() {
             max_bytes: None,
             sweep_interval_secs: 60,
             timeout_ms: 2000,
+            writer_lease_ttl_ms: 5_000,
             max_object_bytes: 1024,
             auth_header_env: None,
         },
@@ -119,6 +120,7 @@ async fn backend_serving(
             max_bytes: None,
             sweep_interval_secs: 60,
             timeout_ms: 2000,
+            writer_lease_ttl_ms: 5_000,
             max_object_bytes,
             auth_header_env: None,
         },
@@ -194,6 +196,15 @@ async fn the_cache_backend_never_sees_a_declaration_the_owner_refuses() {
 }
 
 fn backend_at(endpoint: String, timeout_ms: u64, name: &str) -> HttpCacheBackend {
+    backend_at_with_ttl(endpoint, timeout_ms, 5_000, name)
+}
+
+fn backend_at_with_ttl(
+    endpoint: String,
+    timeout_ms: u64,
+    writer_lease_ttl_ms: u64,
+    name: &str,
+) -> HttpCacheBackend {
     HttpCacheBackend::new(
         CacheBackendConfig {
             writer_mode: Default::default(),
@@ -205,6 +216,7 @@ fn backend_at(endpoint: String, timeout_ms: u64, name: &str) -> HttpCacheBackend
             max_bytes: None,
             sweep_interval_secs: 60,
             timeout_ms,
+            writer_lease_ttl_ms,
             max_object_bytes: 1024,
             auth_header_env: None,
         },
@@ -256,17 +268,36 @@ async fn spawn_lease_gateway_with(
     let addr = listener.local_addr().expect("address");
     let leases: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>> =
         Arc::new(Default::default());
+    let expiries: Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        Arc::new(Default::default());
     let server_leases = leases.clone();
+    let server_expiries = expiries.clone();
     let (applied_tx, applied_rx) = mpsc::unbounded_channel();
     let (deleted_tx, deleted_rx) = mpsc::unbounded_channel();
     let fault = Arc::new(std::sync::Mutex::new(fault));
     let server = tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             let leases = server_leases.clone();
+            let expiries = server_expiries.clone();
             let applied = applied_tx.clone();
             let deleted = deleted_tx.clone();
             let fault = fault.clone();
             tokio::spawn(async move {
+                // The gateway honors the client's bound and clears an expired
+                // lease before evaluating any conditional operation.
+                fn live(
+                    leases: &mut std::collections::HashMap<String, String>,
+                    expiries: &mut std::collections::HashMap<String, std::time::Instant>,
+                    path: &str,
+                ) {
+                    if expiries
+                        .get(path)
+                        .is_some_and(|at| *at <= std::time::Instant::now())
+                    {
+                        leases.remove(path);
+                        expiries.remove(path);
+                    }
+                }
                 loop {
                     let mut request_line = String::new();
                     let read = reader_read_line(&mut stream, &mut request_line).await;
@@ -296,9 +327,13 @@ async fn spawn_lease_gateway_with(
                     let method = parts.next().unwrap_or("").to_string();
                     let path = parts.next().unwrap_or("").to_string();
                     let reply = if !path.ends_with("/_writer_lock") {
-                        "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n"
+                        "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_string()
                     } else {
                         let mut leases = leases.lock().expect("lease map");
+                        {
+                            let mut expiries = expiries.lock().expect("lease expiries");
+                            live(&mut leases, &mut expiries, &path);
+                        }
                         match method.as_str() {
                             "PUT"
                                 if headers.get("if-none-match").map(String::as_str)
@@ -307,6 +342,15 @@ async fn spawn_lease_gateway_with(
                                 match leases.entry(path.clone()) {
                                     std::collections::hash_map::Entry::Vacant(entry) => {
                                         let token = String::from_utf8(body).expect("utf8 token");
+                                        let ttl_ms: u64 = headers
+                                            .get("x-qpx-writer-lease-ttl-ms")
+                                            .and_then(|v| v.parse().ok())
+                                            .expect("lease ttl header");
+                                        expiries.lock().expect("lease expiries").insert(
+                                            path.clone(),
+                                            std::time::Instant::now()
+                                                + std::time::Duration::from_millis(ttl_ms),
+                                        );
                                         entry.insert(token.clone());
                                         let mode = {
                                             let mut fault = fault.lock().expect("fault");
@@ -322,14 +366,28 @@ async fn spawn_lease_gateway_with(
                                                 CreateFault::None => {}
                                             }
                                         }
-                                        "HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n"
+                                        "HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n".to_string()
                                     }
                                     std::collections::hash_map::Entry::Occupied(_) => {
-                                        "HTTP/1.1 412 Precondition Failed\r\ncontent-length: 0\r\n\r\n"
+                                        "HTTP/1.1 412 Precondition Failed\r\ncontent-length: 0\r\n\r\n".to_string()
                                     }
                                 }
                             }
+                            "GET" => {
+                                live(&mut leases, &mut expiries.lock().expect("lease expiries"), &path);
+                                match leases.get(&path) {
+                                    Some(token) => format!(
+                                        "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
+                                        token.len(), token
+                                    ),
+                                    None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n".to_string(),
+                                }
+                            }
                             "DELETE" => {
+                                {
+                                    let mut expiries = expiries.lock().expect("lease expiries");
+                                    live(&mut leases, &mut expiries, &path);
+                                }
                                 let expected = format!(
                                     "\"{}\"",
                                     leases.get(&path).map(String::as_str).unwrap_or("")
@@ -338,13 +396,14 @@ async fn spawn_lease_gateway_with(
                                     == Some(expected.as_str())
                                     && leases.remove(&path).is_some()
                                 {
+                                    expiries.lock().expect("lease expiries").remove(&path);
                                     let _ = deleted.send(expected.trim_matches('\"').to_string());
-                                    "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n"
+                                    "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string()
                                 } else {
-                                    "HTTP/1.1 412 Precondition Failed\r\ncontent-length: 0\r\n\r\n"
+                                    "HTTP/1.1 412 Precondition Failed\r\ncontent-length: 0\r\n\r\n".to_string()
                                 }
                             }
-                            _ => "HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\n\r\n",
+                            _ => "HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\n\r\n".to_string(),
                         }
                     };
                     if stream.write_all(reply.as_bytes()).await.is_err() {
@@ -404,7 +463,7 @@ async fn independent_http_clients_get_one_namespace_writer() {
 }
 
 #[tokio::test]
-async fn http_lease_fails_closed_when_gateway_lacks_conditional_create() {
+async fn http_backend_without_writer_lease_keeps_local_only_coordination() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listen");
@@ -419,14 +478,13 @@ async fn http_lease_fails_closed_when_gateway_lacks_conditional_create() {
             .expect("reply");
     });
     let backend = backend_at(endpoint, 500, "http");
-    let err = backend
+    let lease = backend
         .lock_commit("ns", "primary")
         .await
-        .err()
-        .expect("unsupported lease must fail closed");
+        .expect("legacy gateway must not fail cache writes");
     assert!(
-        err.to_string()
-            .contains("does not implement the writer lease")
+        lease.is_none(),
+        "a gateway without the lease endpoint only has process-local coordination"
     );
     server.abort();
 }
@@ -530,5 +588,37 @@ async fn cancelled_http_acquisition_releases_the_applied_lease() {
     .expect("acquisition")
     .expect("lease");
     held.release().await.expect("second client releases");
+    server.abort();
+}
+
+#[tokio::test]
+async fn expired_http_lease_is_reclaimable_and_fences_the_old_holder() {
+    let (endpoint, leases, server) = spawn_lease_gateway().await;
+    let first = backend_at_with_ttl(endpoint.clone(), 500, 40, "http-a");
+    let second = backend_at(endpoint, 500, "http-b");
+
+    let old = first
+        .lock_commit("ns", "primary-a")
+        .await
+        .expect("first lease")
+        .expect("backend lease");
+    // Simulate a writer that died without cleanup: the gateway expires the
+    // lease, so another instance can continue within a bounded time.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let current = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .expect("second lease after expiry")
+        .expect("backend lease");
+    assert_eq!(leases.lock().expect("lease map").len(), 1);
+
+    let err = old
+        .validate()
+        .await
+        .expect_err("the expired holder cannot publish");
+    assert!(err.to_string().contains("no longer held"), "{err}");
+    current.validate().await.expect("current holder is valid");
+
+    current.release().await.expect("release current lease");
     server.abort();
 }

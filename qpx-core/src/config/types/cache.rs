@@ -28,6 +28,8 @@ pub struct CacheBackendConfig {
     pub sweep_interval_secs: u64,
     #[serde(default = "default_cache_timeout_ms")]
     pub timeout_ms: u64,
+    #[serde(default = "default_cache_writer_lease_ttl_ms")]
+    pub writer_lease_ttl_ms: u64,
     #[serde(default = "default_cache_max_object_bytes")]
     pub max_object_bytes: usize,
     #[serde(default)]

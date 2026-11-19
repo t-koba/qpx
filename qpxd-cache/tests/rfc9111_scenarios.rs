@@ -196,6 +196,7 @@ fn backend_cases(name: &str) -> Vec<BackendCase> {
         max_bytes: Some(1024 * 1024),
         sweep_interval_secs: 1,
         timeout_ms: 500,
+        writer_lease_ttl_ms: 5_000,
         max_object_bytes: 1024 * 1024,
         auth_header_env: None,
     };

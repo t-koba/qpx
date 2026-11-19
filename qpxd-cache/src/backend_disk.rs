@@ -1994,6 +1994,7 @@ mod tests {
             max_bytes: Some(max_bytes),
             sweep_interval_secs: 1,
             timeout_ms: 500,
+            writer_lease_ttl_ms: 5_000,
             max_object_bytes: 1024 * 1024,
             auth_header_env: None,
         }

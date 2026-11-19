@@ -288,6 +288,7 @@ impl CacheWriteback {
                     &self.storage_primary,
                 )
                 .await?;
+                commit.validate().await?;
                 let result = async {
                     let mut index = load_variant_index(
                         self.backend.as_ref(),
@@ -660,6 +661,7 @@ async fn migrate_revalidated_legacy(
         staged?;
         let committed_pair: (bool, Vec<String>) = {
             let commit = commit::lock(backend, namespace, primary).await?;
+            commit.validate().await?;
             let result = async {
                 if let Some(mut index) =
                     legacy_refresh_index(backend, namespace, variant_key, primary, &legacy.original)

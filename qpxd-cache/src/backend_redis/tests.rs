@@ -9,6 +9,10 @@ use super::protocol::{read_bulk_string, read_integer};
 use super::{RedisCacheBackend, RedisConnection, RedisTransport, release_redis_lease};
 
 fn cfg(endpoint: &str) -> CacheBackendConfig {
+    cfg_with_ttl(endpoint, 5_000)
+}
+
+fn cfg_with_ttl(endpoint: &str, writer_lease_ttl_ms: u64) -> CacheBackendConfig {
     CacheBackendConfig {
         writer_mode: Default::default(),
         commit_lock_stripes: 64,
@@ -19,6 +23,7 @@ fn cfg(endpoint: &str) -> CacheBackendConfig {
         max_bytes: None,
         sweep_interval_secs: 60,
         timeout_ms: 500,
+        writer_lease_ttl_ms,
         max_object_bytes: 1024,
         auth_header_env: None,
     }
@@ -250,13 +255,17 @@ async fn spawn_writer_lease_server_with(
     let addr = listener.local_addr().expect("address");
     let locks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>> =
         Arc::new(Default::default());
+    let expiries: Arc<tokio::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>> =
+        Arc::new(Default::default());
     let server_locks = locks.clone();
+    let server_expiries = expiries.clone();
     let (applied_tx, applied_rx) = mpsc::unbounded_channel();
     let (deleted_tx, deleted_rx) = mpsc::unbounded_channel();
     let fault = Arc::new(std::sync::Mutex::new(fault));
     let server = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let locks = server_locks.clone();
+            let expiries = server_expiries.clone();
             let applied = applied_tx.clone();
             let deleted = deleted_tx.clone();
             let fault = fault.clone();
@@ -264,10 +273,29 @@ async fn spawn_writer_lease_server_with(
                 let mut reader = BufReader::new(stream);
                 while let Some(parts) = command(&mut reader).await {
                     let reply = match parts.first().map(String::as_str) {
-                        Some("SET") if parts.get(3).map(String::as_str) == Some("NX") => {
+                        Some("SET")
+                            if parts.get(3).map(String::as_str) == Some("NX")
+                                && parts.get(4).map(String::as_str) == Some("PX") =>
+                        {
+                            let ttl_ms: u64 = parts[5].parse().expect("PX ttl");
                             let mut locks = locks.lock().await;
+                            {
+                                let mut expiries = expiries.lock().await;
+                                if expiries
+                                    .get(&parts[1])
+                                    .is_some_and(|at| *at <= std::time::Instant::now())
+                                {
+                                    locks.remove(&parts[1]);
+                                    expiries.remove(&parts[1]);
+                                }
+                            }
                             match locks.entry(parts[1].clone()) {
                                 std::collections::hash_map::Entry::Vacant(entry) => {
+                                    expiries.lock().await.insert(
+                                        parts[1].clone(),
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_millis(ttl_ms),
+                                    );
                                     entry.insert(parts[2].clone());
                                     let mode = {
                                         let mut fault = fault.lock().expect("fault");
@@ -290,13 +318,41 @@ async fn spawn_writer_lease_server_with(
                                 }
                             }
                         }
+                        Some("GET") => {
+                            let mut locks = locks.lock().await;
+                            {
+                                let mut expiries = expiries.lock().await;
+                                if expiries
+                                    .get(&parts[1])
+                                    .is_some_and(|at| *at <= std::time::Instant::now())
+                                {
+                                    locks.remove(&parts[1]);
+                                    expiries.remove(&parts[1]);
+                                }
+                            }
+                            match locks.get(&parts[1]) {
+                                Some(token) => format!("${}\r\n{}\r\n", token.len(), token),
+                                None => "$-1\r\n".to_string(),
+                            }
+                        }
                         Some("SELECT") => "+OK\r\n".to_string(),
                         Some("EVAL") => {
                             // The lease script is compare-and-delete on KEYS[1]/ARGV[1].
                             let mut locks = locks.lock().await;
+                            {
+                                let mut expiries = expiries.lock().await;
+                                if expiries
+                                    .get(&parts[3])
+                                    .is_some_and(|at| *at <= std::time::Instant::now())
+                                {
+                                    locks.remove(&parts[3]);
+                                    expiries.remove(&parts[3]);
+                                }
+                            }
                             let held = locks.get(&parts[3]).map(String::as_str) == Some(&parts[4]);
                             if held {
                                 locks.remove(&parts[3]);
+                                expiries.lock().await.remove(&parts[3]);
                                 let _ = deleted.send(parts[4].clone());
                             }
                             format!(":{}\r\n", u8::from(held))
@@ -458,5 +514,35 @@ async fn cancelled_redis_acquisition_releases_the_applied_lease() {
     .expect("acquisition")
     .expect("lease");
     held.release().await.expect("second client releases");
+    server.abort();
+}
+
+#[tokio::test]
+async fn expired_redis_lease_is_reclaimable_and_fences_the_old_holder() {
+    let (endpoint, locks, server) = spawn_writer_lease_server().await;
+    let first = RedisCacheBackend::new(cfg_with_ttl(&endpoint, 40)).expect("first backend");
+    let second = RedisCacheBackend::new(cfg(&endpoint)).expect("second backend");
+    let old = first
+        .lock_commit("ns", "primary-a")
+        .await
+        .expect("first lease")
+        .expect("backend lease");
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    let current = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .expect("second lease after expiry")
+        .expect("backend lease");
+    assert_eq!(locks.lock().await.len(), 1);
+
+    let err = old
+        .validate()
+        .await
+        .expect_err("the expired holder cannot publish");
+    assert!(err.to_string().contains("no longer held"), "{err}");
+    current.validate().await.expect("current holder is valid");
+
+    current.release().await.expect("release current lease");
+    assert!(locks.lock().await.is_empty());
     server.abort();
 }
