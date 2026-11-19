@@ -66,6 +66,17 @@ that setting; `writer_mode: shared` stays rejected for them.
 Both leases are namespace-wide, so differently named backends still contend for
 the same remote namespace. Staged body I/O happens before the lease is taken.
 
+The lease value is created with its token before the conditional create is sent.
+A live client whose create was applied but whose reply is lost or times out
+releases that exact token (`If-Match` DELETE / token-checked Lua compare-and-delete)
+before reporting the error; if its acquisition future is cancelled before the
+reply is seen, the same fenced release is attempted from the lease's drop path.
+Ordinary contention (`412` / `SET NX` false) only retries and never deletes
+another client's token, and a stale holder cannot release or publish under a
+new owner's lease. A crashed writer performs no cleanup: the namespace stays
+locked until an operator confirms no writer is alive and removes the lock
+(there is no bare expiry on either remote lease).
+
 Disk alone supports opt-in `writer_mode: shared` on Unix, provided the filesystem
 honors process-shared advisory OS file locks. Other platforms reject shared mode;
 lock setup/acquisition errors fail closed, not back to process-local locking.

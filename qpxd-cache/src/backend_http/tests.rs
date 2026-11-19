@@ -213,6 +213,16 @@ fn backend_at(endpoint: String, timeout_ms: u64, name: &str) -> HttpCacheBackend
     .expect("backend")
 }
 
+/// How the gateway mishandles the first successful conditional create.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreateFault {
+    None,
+    /// Apply the create, signal the token, then close without a reply.
+    DropReply,
+    /// Apply the create, signal the token, then never acknowledge it.
+    HangReply,
+}
+
 /// HTTP gateway implementing only the writer-lease contract: conditional
 /// create (`If-None-Match: *`) and conditional release (`If-Match: <etag>`).
 async fn spawn_lease_gateway() -> (
@@ -220,7 +230,25 @@ async fn spawn_lease_gateway() -> (
     Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     tokio::task::JoinHandle<()>,
 ) {
+    let (endpoint, leases, _applied, _deleted, server) =
+        spawn_lease_gateway_with(CreateFault::None).await;
+    (endpoint, leases, server)
+}
+
+/// Same gateway, with a deterministic ambiguous-create fault and channels that
+/// announce the applied token and each token-checked deletion.
+#[allow(clippy::type_complexity)]
+async fn spawn_lease_gateway_with(
+    fault: CreateFault,
+) -> (
+    String,
+    Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::sync::mpsc;
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
@@ -229,9 +257,15 @@ async fn spawn_lease_gateway() -> (
     let leases: Arc<std::sync::Mutex<std::collections::HashMap<String, String>>> =
         Arc::new(Default::default());
     let server_leases = leases.clone();
+    let (applied_tx, applied_rx) = mpsc::unbounded_channel();
+    let (deleted_tx, deleted_rx) = mpsc::unbounded_channel();
+    let fault = Arc::new(std::sync::Mutex::new(fault));
     let server = tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
             let leases = server_leases.clone();
+            let applied = applied_tx.clone();
+            let deleted = deleted_tx.clone();
+            let fault = fault.clone();
             tokio::spawn(async move {
                 loop {
                     let mut request_line = String::new();
@@ -272,7 +306,22 @@ async fn spawn_lease_gateway() -> (
                             {
                                 match leases.entry(path.clone()) {
                                     std::collections::hash_map::Entry::Vacant(entry) => {
-                                        entry.insert(String::from_utf8(body).expect("utf8 token"));
+                                        let token = String::from_utf8(body).expect("utf8 token");
+                                        entry.insert(token.clone());
+                                        let mode = {
+                                            let mut fault = fault.lock().expect("fault");
+                                            let mode = *fault;
+                                            *fault = CreateFault::None;
+                                            mode
+                                        };
+                                        if mode != CreateFault::None {
+                                            let _ = applied.send(token);
+                                            match mode {
+                                                CreateFault::DropReply => return,
+                                                CreateFault::HangReply => continue,
+                                                CreateFault::None => {}
+                                            }
+                                        }
                                         "HTTP/1.1 201 Created\r\ncontent-length: 0\r\n\r\n"
                                     }
                                     std::collections::hash_map::Entry::Occupied(_) => {
@@ -289,6 +338,7 @@ async fn spawn_lease_gateway() -> (
                                     == Some(expected.as_str())
                                     && leases.remove(&path).is_some()
                                 {
+                                    let _ = deleted.send(expected.trim_matches('\"').to_string());
                                     "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n"
                                 } else {
                                     "HTTP/1.1 412 Precondition Failed\r\ncontent-length: 0\r\n\r\n"
@@ -304,7 +354,13 @@ async fn spawn_lease_gateway() -> (
             });
         }
     });
-    (format!("http://{addr}"), leases, server)
+    (
+        format!("http://{addr}"),
+        leases,
+        applied_rx,
+        deleted_rx,
+        server,
+    )
 }
 
 async fn reader_read_line(stream: &mut tokio::net::TcpStream, line: &mut String) -> usize {
@@ -372,5 +428,107 @@ async fn http_lease_fails_closed_when_gateway_lacks_conditional_create() {
         err.to_string()
             .contains("does not implement the writer lease")
     );
+    server.abort();
+}
+
+#[tokio::test]
+async fn http_lost_create_reply_is_released_and_fences_the_stale_holder() {
+    let (endpoint, leases, mut applied, mut deleted, server) =
+        spawn_lease_gateway_with(CreateFault::DropReply).await;
+    let first = backend_at(endpoint.clone(), 500, "http-a");
+    let second = backend_at(endpoint.clone(), 500, "http-b");
+
+    let first_acquire = tokio::spawn(async move { first.lock_commit("ns", "primary-a").await });
+    let stale = timeout(Duration::from_secs(2), applied.recv())
+        .await
+        .expect("conditional create was applied")
+        .expect("applied signal");
+    let outcome = timeout(Duration::from_secs(3), first_acquire)
+        .await
+        .expect("acquisition terminates after the lost reply")
+        .expect("task");
+    let err = match outcome {
+        Ok(_) => panic!("a lost create reply must not be reported as a held lease"),
+        Err(err) => err,
+    };
+    assert!(
+        !err.to_string()
+            .contains("does not implement the writer lease"),
+        "{err}"
+    );
+    // Cleanup is a fenced delete of the same token, awaited before the error.
+    let cleaned = timeout(Duration::from_secs(2), deleted.recv())
+        .await
+        .expect("live client cleaned up")
+        .expect("deleted signal");
+    assert_eq!(cleaned, stale);
+    assert!(leases.lock().expect("lease map").is_empty());
+
+    let held = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .expect("second client can acquire")
+        .expect("lease");
+    let current = {
+        let leases = leases.lock().expect("lease map");
+        assert_eq!(leases.len(), 1);
+        leases.values().next().unwrap().clone()
+    };
+    assert_ne!(current, stale);
+
+    // A stale holder with the old token cannot revoke the new lease.
+    let uri = format!("{endpoint}/v1/cache/ns/_writer_lock")
+        .parse::<Uri>()
+        .expect("lease uri");
+    let mut req = owner_request(Method::DELETE, uri, Body::empty());
+    req.headers_mut().insert(
+        ord("if-match"),
+        http::HeaderValue::from_str(&format!("\"{stale}\"")).expect("token header"),
+    );
+    let status = second.send_status(req).await.expect("stale delete sent");
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(leases.lock().expect("lease map").len(), 1);
+
+    held.release().await.expect("second client releases");
+    assert!(leases.lock().expect("lease map").is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancelled_http_acquisition_releases_the_applied_lease() {
+    let (endpoint, leases, mut applied, mut deleted, server) =
+        spawn_lease_gateway_with(CreateFault::HangReply).await;
+    let backend = backend_at(endpoint.clone(), 2000, "http-a");
+
+    let acquire = tokio::spawn(async move { backend.lock_commit("ns", "primary-a").await });
+    let token = timeout(Duration::from_secs(2), applied.recv())
+        .await
+        .expect("conditional create was applied")
+        .expect("applied signal");
+    assert!(!leases.lock().expect("lease map").is_empty());
+    acquire.abort();
+    let aborted = acquire.await;
+    assert!(
+        matches!(aborted, Err(err) if err.is_cancelled()),
+        "acquisition was cancelled before its acknowledgement"
+    );
+
+    let cleaned = timeout(Duration::from_secs(2), deleted.recv())
+        .await
+        .expect("Drop fallback cleaned up")
+        .expect("deleted signal");
+    assert_eq!(cleaned, token);
+    assert!(leases.lock().expect("lease map").is_empty());
+
+    let second = backend_at(endpoint, 500, "http-b");
+    let held = timeout(
+        Duration::from_secs(3),
+        second.lock_commit("ns", "primary-b"),
+    )
+    .await
+    .expect("second client can acquire")
+    .expect("acquisition")
+    .expect("lease");
+    held.release().await.expect("second client releases");
     server.abort();
 }

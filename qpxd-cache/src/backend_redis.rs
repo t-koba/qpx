@@ -164,6 +164,14 @@ impl RedisCommitLease {
     async fn acquire(client: Arc<RedisClient>, namespace: &str) -> Result<Self> {
         let token = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
         let key = format!("qpx:writer-lock:{}", namespace);
+        // Own the cleanup token before sending the conditional create, so a
+        // lost reply or a cancelled future can still release this exact lease.
+        let candidate = Self {
+            client: client.clone(),
+            key: key.clone(),
+            token: token.clone(),
+            released: AtomicBool::new(false),
+        };
         // Process-local commits are already serialized by commit::lock. Only a
         // genuinely held cross-client lease should make an operation wait.
         let deadline = std::time::Instant::now() + client.timeout.max(Duration::from_millis(250));
@@ -183,20 +191,25 @@ impl RedisCommitLease {
             if result.is_ok() {
                 client.recycle(stream).await;
             }
-            if result? {
-                return Ok(Self {
-                    client,
-                    key,
-                    token,
-                    released: AtomicBool::new(false),
-                });
+            let created = match result {
+                Ok(created) => created,
+                Err(err) => {
+                    // SET NX may have succeeded before the reply was lost.
+                    let _ = candidate.release().await;
+                    return Err(err);
+                }
+            };
+            if created {
+                return Ok(candidate);
             }
             if std::time::Instant::now() >= deadline {
-                return Err(anyhow!(
+                let err = anyhow!(
                     "redis cache namespace {} already has an active writer (lock key {})",
                     namespace,
                     key
-                ));
+                );
+                let _ = candidate.release().await;
+                return Err(err);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }

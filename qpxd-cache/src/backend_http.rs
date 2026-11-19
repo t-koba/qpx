@@ -342,57 +342,81 @@ impl HttpCommitLease {
         let token = uuid::Uuid::new_v4().to_string();
         let uri =
             format!("{}/v1/cache/{}/_writer_lock", backend.endpoint, namespace).parse::<Uri>()?;
+        // Own the cleanup token before sending the conditional create. If the
+        // create is applied but its reply is lost, or this future is cancelled,
+        // the value still knows which lease to release.
+        let candidate = Self {
+            backend: backend.clone(),
+            uri,
+            token,
+            released: AtomicBool::new(false),
+        };
         let deadline = Instant::now() + backend.timeout.max(Duration::from_millis(250));
         loop {
-            let mut req = owner_request(Method::PUT, uri.clone(), Body::from(token.clone()));
+            let mut req = owner_request(
+                Method::PUT,
+                candidate.uri.clone(),
+                Body::from(candidate.token.clone()),
+            );
             req.headers_mut()
                 .insert(ord("if-none-match"), http::HeaderValue::from_static("*"));
-            req.headers_mut().set_content_length(token.len() as u64);
+            req.headers_mut()
+                .set_content_length(candidate.token.len() as u64);
             backend.apply_common_headers(&mut req);
-            match backend.send_status(req).await? {
-                StatusCode::CREATED => {
-                    return Ok(Self {
-                        backend: backend.clone(),
-                        uri,
-                        token,
-                        released: AtomicBool::new(false),
-                    });
+            let status = match backend.send_status(req).await {
+                Ok(status) => status,
+                Err(err) => {
+                    // The create may have been applied before the reply was
+                    // lost. Clean up this token before reporting the error.
+                    let _ = candidate.release().await;
+                    return Err(err);
                 }
+            };
+            match status {
+                StatusCode::CREATED => return Ok(candidate),
                 StatusCode::PRECONDITION_FAILED => {}
                 status => {
-                    return Err(anyhow!(
+                    let err = anyhow!(
                         "http cache backend does not implement the writer lease at {} (PUT returned {}); refusing to write without exclusive coordination",
-                        uri,
+                        candidate.uri,
                         status
-                    ));
+                    );
+                    let _ = candidate.release().await;
+                    return Err(err);
                 }
             }
             if Instant::now() >= deadline {
-                return Err(anyhow!(
+                let err = anyhow!(
                     "http cache namespace {} already has an active writer (lease {})",
                     namespace,
-                    uri
-                ));
+                    candidate.uri
+                );
+                let _ = candidate.release().await;
+                return Err(err);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
 
     async fn release_request(&self) -> Result<()> {
-        let mut req = owner_request(Method::DELETE, self.uri.clone(), Body::empty());
-        req.headers_mut().insert(
-            ord("if-match"),
-            http::HeaderValue::from_str(&format!("\"{}\"", self.token))?,
-        );
-        self.backend.apply_common_headers(&mut req);
-        match self.backend.send_status(req).await? {
-            StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
-            status => Err(anyhow!(
-                "http cache writer lease {} was not released (DELETE returned {})",
-                self.uri,
-                status
-            )),
-        }
+        release_http_lease(&self.backend, &self.uri, &self.token).await
+    }
+}
+
+async fn release_http_lease(backend: &HttpCacheBackend, uri: &Uri, token: &str) -> Result<()> {
+    let mut req = owner_request(Method::DELETE, uri.clone(), Body::empty());
+    req.headers_mut().insert(
+        ord("if-match"),
+        http::HeaderValue::from_str(&format!("\"{}\"", token))?,
+    );
+    backend.apply_common_headers(&mut req);
+    match backend.send_status(req).await? {
+        StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
+        status => Err(anyhow!(
+            "http cache writer lease {} was not released (DELETE returned {})",
+            uri,
+            status
+        )),
     }
 }
 
@@ -413,17 +437,11 @@ impl Drop for HttpCommitLease {
         // Cancellation cannot block on the network. The conditional delete is
         // idempotent, so a detached best-effort release is safe.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            let lease = self.backend.clone();
+            let backend = self.backend.clone();
             let uri = self.uri.clone();
             let token = self.token.clone();
             handle.spawn(async move {
-                let lease = HttpCommitLease {
-                    backend: lease,
-                    uri,
-                    token,
-                    released: AtomicBool::new(true),
-                };
-                let _ = lease.release_request().await;
+                let _ = release_http_lease(&backend, &uri, &token).await;
             });
         }
     }

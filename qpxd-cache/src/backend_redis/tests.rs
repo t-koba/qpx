@@ -3,7 +3,7 @@ use bytes::BytesMut;
 use qpx_core::config::CacheBackendConfig;
 use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
-use tokio::time::Duration;
+use tokio::time::{Duration, timeout};
 
 use super::protocol::{read_bulk_string, read_integer};
 use super::{RedisCacheBackend, RedisConnection, RedisTransport, release_redis_lease};
@@ -188,6 +188,16 @@ async fn redis_response_stream_error_never_renames_staged_body() {
         .expect("server");
 }
 
+/// How the RESP server mishandles the first successful conditional create.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CreateFault {
+    None,
+    /// Apply SET NX, signal the token, then close without a reply.
+    DropReply,
+    /// Apply SET NX, signal the token, then never acknowledge it.
+    HangReply,
+}
+
 /// Minimal RESP server whose SET NX and compare-and-delete are the only
 /// atomic operations used by the writer lease. Each connection is independent,
 /// like a separate qpx process.
@@ -196,7 +206,25 @@ async fn spawn_writer_lease_server() -> (
     Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
     tokio::task::JoinHandle<()>,
 ) {
+    let (endpoint, locks, _applied, _deleted, server) =
+        spawn_writer_lease_server_with(CreateFault::None).await;
+    (endpoint, locks, server)
+}
+
+/// Same server, with a deterministic ambiguous-create fault and channels that
+/// announce the applied token and each token-checked deletion.
+#[allow(clippy::type_complexity)]
+async fn spawn_writer_lease_server_with(
+    fault: CreateFault,
+) -> (
+    String,
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
     use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::sync::mpsc;
 
     async fn command(reader: &mut BufReader<tokio::net::TcpStream>) -> Option<Vec<String>> {
         let mut head = String::new();
@@ -223,9 +251,15 @@ async fn spawn_writer_lease_server() -> (
     let locks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>> =
         Arc::new(Default::default());
     let server_locks = locks.clone();
+    let (applied_tx, applied_rx) = mpsc::unbounded_channel();
+    let (deleted_tx, deleted_rx) = mpsc::unbounded_channel();
+    let fault = Arc::new(std::sync::Mutex::new(fault));
     let server = tokio::spawn(async move {
         while let Ok((stream, _)) = listener.accept().await {
             let locks = server_locks.clone();
+            let applied = applied_tx.clone();
+            let deleted = deleted_tx.clone();
+            let fault = fault.clone();
             tokio::spawn(async move {
                 let mut reader = BufReader::new(stream);
                 while let Some(parts) = command(&mut reader).await {
@@ -235,6 +269,20 @@ async fn spawn_writer_lease_server() -> (
                             match locks.entry(parts[1].clone()) {
                                 std::collections::hash_map::Entry::Vacant(entry) => {
                                     entry.insert(parts[2].clone());
+                                    let mode = {
+                                        let mut fault = fault.lock().expect("fault");
+                                        let mode = *fault;
+                                        *fault = CreateFault::None;
+                                        mode
+                                    };
+                                    if mode != CreateFault::None {
+                                        let _ = applied.send(parts[2].clone());
+                                        match mode {
+                                            CreateFault::DropReply => return,
+                                            CreateFault::HangReply => continue,
+                                            CreateFault::None => {}
+                                        }
+                                    }
                                     "+OK\r\n".to_string()
                                 }
                                 std::collections::hash_map::Entry::Occupied(_) => {
@@ -249,6 +297,7 @@ async fn spawn_writer_lease_server() -> (
                             let held = locks.get(&parts[3]).map(String::as_str) == Some(&parts[4]);
                             if held {
                                 locks.remove(&parts[3]);
+                                let _ = deleted.send(parts[4].clone());
                             }
                             format!(":{}\r\n", u8::from(held))
                         }
@@ -261,7 +310,13 @@ async fn spawn_writer_lease_server() -> (
             });
         }
     });
-    (format!("redis://{addr}/0"), locks, server)
+    (
+        format!("redis://{addr}/0"),
+        locks,
+        applied_rx,
+        deleted_rx,
+        server,
+    )
 }
 
 #[tokio::test]
@@ -299,5 +354,109 @@ async fn independent_redis_clients_get_one_namespace_writer() {
     acquired.release().await.unwrap();
     drop(second);
     drop(first);
+    server.abort();
+}
+
+#[tokio::test]
+async fn redis_lost_create_reply_is_released_and_fences_the_stale_holder() {
+    let (endpoint, locks, mut applied, mut deleted, server) =
+        spawn_writer_lease_server_with(CreateFault::DropReply).await;
+    let first = RedisCacheBackend::new(cfg(&endpoint)).expect("first backend");
+    let mut second_config = cfg(&endpoint);
+    second_config.name = "cache-b".to_string();
+    let second = RedisCacheBackend::new(second_config).expect("second backend");
+    let key = "qpx:writer-lock:ns".to_string();
+
+    let first_acquire = tokio::spawn(async move { first.lock_commit("ns", "primary-a").await });
+    let stale = timeout(Duration::from_secs(2), applied.recv())
+        .await
+        .expect("conditional create was applied")
+        .expect("applied signal");
+    let outcome = timeout(Duration::from_secs(3), first_acquire)
+        .await
+        .expect("acquisition terminates after the lost reply")
+        .expect("task");
+    let err = match outcome {
+        Ok(_) => panic!("a lost create reply must not be reported as a held lease"),
+        Err(err) => err,
+    };
+    assert!(
+        !err.to_string()
+            .contains("does not implement the writer lease"),
+        "{err}"
+    );
+    let cleaned = timeout(Duration::from_secs(2), deleted.recv())
+        .await
+        .expect("live client cleaned up")
+        .expect("deleted signal");
+    assert_eq!(cleaned, stale);
+    assert!(locks.lock().await.is_empty());
+
+    let held = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .expect("second client can acquire")
+        .expect("lease");
+    let current = {
+        let locks = locks.lock().await;
+        assert_eq!(locks.len(), 1);
+        locks.get(&key).expect("second token").clone()
+    };
+    assert_ne!(current, stale);
+
+    // The stale token cannot remove the lease held under the new token.
+    release_redis_lease(second.client.clone(), key.clone(), stale)
+        .await
+        .expect("fenced release of a stale token is harmless");
+    {
+        let locks = locks.lock().await;
+        assert_eq!(locks.get(&key).map(String::as_str), Some(current.as_str()));
+    }
+
+    held.release().await.expect("second client releases");
+    assert!(locks.lock().await.is_empty());
+    server.abort();
+}
+
+#[tokio::test]
+async fn cancelled_redis_acquisition_releases_the_applied_lease() {
+    let (endpoint, locks, mut applied, mut deleted, server) =
+        spawn_writer_lease_server_with(CreateFault::HangReply).await;
+    let backend = RedisCacheBackend::new(cfg(&endpoint)).expect("backend");
+    let key = "qpx:writer-lock:ns".to_string();
+
+    let acquire = tokio::spawn(async move { backend.lock_commit("ns", "primary-a").await });
+    let token = timeout(Duration::from_secs(2), applied.recv())
+        .await
+        .expect("conditional create was applied")
+        .expect("applied signal");
+    assert_eq!(
+        locks.lock().await.get(&key).map(String::as_str),
+        Some(token.as_str())
+    );
+    acquire.abort();
+    let aborted = acquire.await;
+    assert!(
+        matches!(aborted, Err(err) if err.is_cancelled()),
+        "acquisition was cancelled before its acknowledgement"
+    );
+
+    let cleaned = timeout(Duration::from_secs(2), deleted.recv())
+        .await
+        .expect("Drop fallback cleaned up")
+        .expect("deleted signal");
+    assert_eq!(cleaned, token);
+    assert!(locks.lock().await.is_empty());
+
+    let second = RedisCacheBackend::new(cfg(&endpoint)).expect("second backend");
+    let held = timeout(
+        Duration::from_secs(3),
+        second.lock_commit("ns", "primary-b"),
+    )
+    .await
+    .expect("second client can acquire")
+    .expect("acquisition")
+    .expect("lease");
+    held.release().await.expect("second client releases");
     server.abort();
 }
