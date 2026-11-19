@@ -47,10 +47,12 @@ stored under sharded SHA-256 filenames with atomic same-directory renames.
 alone is never treated as cross-process safety. Remote backends enforce one
 writer per namespace with a backend lease during publication, independently of
 that setting; `writer_mode: shared` stays rejected for them.
-Remote leases are bounded by `writer_lease_ttl_ms` (default `5000`, must be
-greater than zero). While a writer holds a lease it renews that lease every
-third of the TTL, so slow commits cannot lose ownership simply by running
-longer than one bound. A failed renewal revokes the lease in-process. The
+Remote leases are bounded by `writer_lease_ttl_ms` (default `5000`, minimum
+`30`). TTLs below `30` ms are rejected because one third of the TTL would be
+shorter than the 10 ms heartbeat timer tick and the first renewal could be
+scheduled after expiry. While a writer holds a lease it renews that lease every
+third of the TTL with no timer floor, so every accepted TTL has renewal
+headroom. A failed renewal revokes the lease in-process. The
 authoritative variant-index and metadata mutations carry the holder token
 inside the same backend operation: Redis runs a Lua `EVAL` that checks the lease
 key and applies `SET`/`DEL` atomically, and the HTTP gateway must check

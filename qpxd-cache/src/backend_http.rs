@@ -36,6 +36,7 @@ pub struct HttpCacheBackend {
     endpoint: String,
     timeout: Duration,
     writer_lease_ttl: Duration,
+    writer_lease_renewal: Duration,
     allow_local_only_remote_coordination: bool,
     max_object_bytes: usize,
     auth_header: Option<(http::HeaderName, http::HeaderValue)>,
@@ -51,9 +52,8 @@ impl HttpCacheBackend {
                 "writer_mode shared is supported only by the disk backend on Unix"
             ));
         }
-        if cfg.writer_lease_ttl_ms == 0 {
-            return Err(anyhow!("writer_lease_ttl_ms must be greater than zero"));
-        }
+        let writer_lease_renewal =
+            super::util::writer_lease_renewal_interval(cfg.writer_lease_ttl_ms)?;
         let endpoint = cfg.endpoint.trim().trim_end_matches('/').to_string();
         if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
             return Err(anyhow!(
@@ -84,6 +84,7 @@ impl HttpCacheBackend {
             endpoint,
             timeout: Duration::from_millis(cfg.timeout_ms),
             writer_lease_ttl: Duration::from_millis(cfg.writer_lease_ttl_ms),
+            writer_lease_renewal,
             allow_local_only_remote_coordination: cfg.allow_local_only_remote_coordination,
             max_object_bytes: cfg.max_object_bytes,
             auth_header,
@@ -357,6 +358,7 @@ struct HttpCommitLease {
     uri: Uri,
     token: String,
     ttl: Duration,
+    renewal_interval: Duration,
     released: AtomicBool,
     revoked: Arc<AtomicBool>,
     stop: Arc<Notify>,
@@ -375,6 +377,7 @@ impl HttpCommitLease {
             uri,
             token,
             ttl: backend.writer_lease_ttl,
+            renewal_interval: backend.writer_lease_renewal,
             released: AtomicBool::new(false),
             revoked: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(Notify::new()),
@@ -458,10 +461,10 @@ impl HttpCommitLease {
         let uri = self.uri.clone();
         let token = self.token.clone();
         let ttl = self.ttl;
+        let interval = self.renewal_interval;
         let revoked = self.revoked.clone();
         let stop = self.stop.clone();
         tokio::spawn(async move {
-            let interval = (ttl / 3).max(Duration::from_millis(10));
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {

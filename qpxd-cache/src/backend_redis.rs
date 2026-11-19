@@ -58,6 +58,7 @@ pub(super) struct RedisClient {
     password: Option<String>,
     timeout: Duration,
     writer_lease_ttl: Duration,
+    writer_lease_renewal: Duration,
     idle: Arc<AsyncMutex<Vec<RedisConnection>>>,
 }
 
@@ -75,9 +76,8 @@ impl RedisCacheBackend {
                 "writer_mode shared is supported only by the disk backend on Unix"
             ));
         }
-        if cfg.writer_lease_ttl_ms == 0 {
-            return Err(anyhow!("writer_lease_ttl_ms must be greater than zero"));
-        }
+        let writer_lease_renewal =
+            super::util::writer_lease_renewal_interval(cfg.writer_lease_ttl_ms)?;
         let endpoint = cfg.endpoint.trim();
         let spec = parse_endpoint(endpoint)?;
 
@@ -89,6 +89,7 @@ impl RedisCacheBackend {
                 password: spec.password,
                 timeout: Duration::from_millis(cfg.timeout_ms),
                 writer_lease_ttl: Duration::from_millis(cfg.writer_lease_ttl_ms),
+                writer_lease_renewal,
                 idle: Arc::new(AsyncMutex::new(Vec::new())),
             }),
             key_prefix: cfg.name,
@@ -167,6 +168,7 @@ struct RedisCommitLease {
     key: String,
     token: String,
     ttl: Duration,
+    renewal_interval: Duration,
     released: AtomicBool,
     revoked: Arc<AtomicBool>,
     stop: Arc<Notify>,
@@ -183,6 +185,7 @@ impl RedisCommitLease {
             key: key.clone(),
             token: token.clone(),
             ttl: client.writer_lease_ttl,
+            renewal_interval: client.writer_lease_renewal,
             released: AtomicBool::new(false),
             revoked: Arc::new(AtomicBool::new(false)),
             stop: Arc::new(Notify::new()),
@@ -264,10 +267,10 @@ impl RedisCommitLease {
         let key = self.key.clone();
         let token = self.token.clone();
         let ttl = self.ttl;
+        let interval = self.renewal_interval;
         let revoked = self.revoked.clone();
         let stop = self.stop.clone();
         tokio::spawn(async move {
-            let interval = (ttl / 3).max(Duration::from_millis(10));
             loop {
                 tokio::select! {
                     _ = tokio::time::sleep(interval) => {

@@ -228,6 +228,29 @@ fn backend_at_with_ttl(
     .expect("backend")
 }
 
+#[test]
+fn http_backend_rejects_lease_ttl_shorter_than_a_heartbeat_tick() {
+    let config = CacheBackendConfig {
+        writer_mode: Default::default(),
+        commit_lock_stripes: 64,
+        name: "http".to_string(),
+        kind: "http".to_string(),
+        endpoint: "http://127.0.0.1:1".to_string(),
+        path: None,
+        max_bytes: None,
+        sweep_interval_secs: 60,
+        timeout_ms: 500,
+        writer_lease_ttl_ms: 29,
+        allow_local_only_remote_coordination: false,
+        max_object_bytes: 1024,
+        auth_header_env: None,
+    };
+    let err = HttpCacheBackend::new(config, None)
+        .err()
+        .expect("sub-tick lease must be rejected");
+    assert!(err.to_string().contains("at least 30"), "{err}");
+}
+
 /// How the gateway mishandles the first successful conditional create.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum CreateFault {

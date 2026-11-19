@@ -33,6 +33,16 @@ fn cfg_with_ttl(endpoint: &str, writer_lease_ttl_ms: u64) -> CacheBackendConfig 
 }
 
 #[test]
+fn redis_backend_rejects_lease_ttl_shorter_than_a_heartbeat_tick() {
+    let err = RedisCacheBackend::new(cfg_with_ttl("redis://unused.invalid", 29))
+        .err()
+        .expect("sub-tick lease must be rejected");
+    assert!(err.to_string().contains("at least 30"), "{err}");
+    RedisCacheBackend::new(cfg_with_ttl("redis://unused.invalid", 30))
+        .expect("the smallest schedulable lease is accepted");
+}
+
+#[test]
 fn parse_plain_redis_tcp() {
     let backend = RedisCacheBackend::new(cfg("redis://cache.internal:6380/2")).expect("backend");
     assert!(matches!(
