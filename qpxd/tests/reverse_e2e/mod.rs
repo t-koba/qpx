@@ -122,6 +122,24 @@ async fn handle_cache_backend(
     let key = req.uri().path().to_string();
     if key.ends_with("/_writer_lock") {
         return Ok(match *req.method() {
+            hyper::Method::PUT if req.headers().get("if-match").is_some() => {
+                let expected = leases
+                    .lock()
+                    .await
+                    .get(&key)
+                    .map(|token| format!("\"{token}\""));
+                let matched = expected.is_some()
+                    && req.headers().get("if-match").map(|v| v.as_bytes())
+                        == expected.as_deref().map(str::as_bytes);
+                Response::builder()
+                    .status(if matched {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::PRECONDITION_FAILED
+                    })
+                    .body(empty_body())
+                    .unwrap()
+            }
             hyper::Method::PUT
                 if req.headers().get("if-none-match").map(|v| v.as_bytes()) == Some(b"*") =>
             {
@@ -143,6 +161,19 @@ async fn handle_cache_backend(
                     }
                     std::collections::hash_map::Entry::Occupied(_) => Response::builder()
                         .status(StatusCode::PRECONDITION_FAILED)
+                        .body(empty_body())
+                        .unwrap(),
+                }
+            }
+            hyper::Method::GET => {
+                let token = leases.lock().await.get(&key).cloned();
+                match token {
+                    Some(token) => Response::builder()
+                        .status(StatusCode::OK)
+                        .body(full_body(token.into_bytes()))
+                        .unwrap(),
+                    None => Response::builder()
+                        .status(StatusCode::NOT_FOUND)
                         .body(empty_body())
                         .unwrap(),
                 }
