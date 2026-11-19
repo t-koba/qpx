@@ -254,7 +254,7 @@ async fn invalid_authority_rejected_before_streaming_limit_selection() -> Result
                 peer_certificates: None,
             };
             let mut h3_conn = ::h3::server::builder()
-                .build::<_, Bytes>(h3_quinn::Connection::new(conn))
+                .build::<_, Bytes>(crate::http3::quinn_adapter::Connection::new(conn))
                 .await
                 .unwrap();
             while let Some(resolver) = h3_conn.accept().await.unwrap() {
@@ -272,7 +272,7 @@ async fn invalid_authority_rejected_before_streaming_limit_selection() -> Result
             }
         });
         let (mut connection, mut sender) = ::h3::client::builder()
-            .build::<_, _, Bytes>(h3_quinn::Connection::new(client_conn))
+            .build::<_, _, Bytes>(crate::http3::quinn_adapter::Connection::new(client_conn))
             .await?;
         tasks.spawn(async move {
             let _ = std::future::poll_fn(|cx| connection.poll_close(cx)).await;
@@ -315,7 +315,7 @@ async fn standard_h3_request_content_length_mismatches_fail_reads_and_drains() -
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         tasks.spawn(async move {
             let mut connection = ::h3::server::builder()
-                .build::<_, Bytes>(h3_quinn::Connection::new(server_conn))
+                .build::<_, Bytes>(crate::http3::quinn_adapter::Connection::new(server_conn))
                 .await
                 .unwrap();
             while let Some(resolver) = connection.accept().await.unwrap() {
@@ -476,7 +476,7 @@ async fn standard_h3_open_send_overflow_aborts_without_panicking() -> Result<()>
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         connection_tasks.spawn(async move {
             let mut connection = ::h3::server::builder()
-                .build::<_, Bytes>(h3_quinn::Connection::new(server_conn))
+                .build::<_, Bytes>(crate::http3::quinn_adapter::Connection::new(server_conn))
                 .await
                 .unwrap();
             while let Some(resolver) = connection.accept().await.unwrap() {
@@ -547,6 +547,85 @@ async fn standard_h3_open_send_overflow_aborts_without_panicking() -> Result<()>
         let response = response.read_to_end(1024).await?;
         assert_eq!(response.first(), Some(&0x01), "response HEADERS frame");
         assert!(conn.close_reason().is_none(), "connection must stay open");
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
+// The origin response-abort path calls stop_sending(H3_REQUEST_CANCELLED)
+// while h3 may still have a trailing-frame read pending. Exercise that exact
+// adapter state on a real QUIC stream: a pending read must not own the stream.
+#[tokio::test]
+async fn origin_h3_request_cancelled_stops_pending_adapter_read() -> Result<()> {
+    use bytes::Bytes;
+    use h3::quic::{OpenStreams as _, RecvStream as _};
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (_endpoint, _client, origin_conn, client_conn) = h3_loopback().await?;
+        let mut qpx_conn = crate::http3::quinn_adapter::Connection::new(client_conn);
+        let stream: crate::http3::quinn_adapter::BidiStream<Bytes> =
+            std::future::poll_fn(|cx| qpx_conn.poll_open_bidi(cx)).await?;
+        let (mut send, mut recv) = ::h3::quic::BidiStream::split(stream);
+        // QUIC publishes a stream to the peer once it carries a frame or FIN.
+        std::future::poll_fn(|cx| ::h3::quic::SendStream::poll_finish(&mut send, cx)).await?;
+        let (origin_send, _origin_recv) = origin_conn.accept_bi().await?;
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                std::future::poll_fn(|cx| recv.poll_data(cx)),
+            )
+            .await
+            .is_err(),
+            "origin response read must be pending before cancellation"
+        );
+        let code = ::h3::error::Code::H3_REQUEST_CANCELLED;
+        recv.stop_sending(code.value());
+        assert_eq!(
+            origin_send.stopped().await?,
+            Some(quinn::VarInt::from_u64(code.value())?),
+            "origin send half must observe the exact H3_REQUEST_CANCELLED code"
+        );
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
+// Cancelling a read future must not swallow the peer's later data: a fresh
+// borrowing read_chunk future has to wake and deliver it unchanged.
+#[tokio::test]
+async fn h3_pending_adapter_read_wakes_when_origin_resumes() -> Result<()> {
+    use bytes::Bytes;
+    use h3::quic::{OpenStreams as _, RecvStream as _};
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (_endpoint, _client, origin_conn, client_conn) = h3_loopback().await?;
+        let mut qpx_conn = crate::http3::quinn_adapter::Connection::new(client_conn);
+        let stream: crate::http3::quinn_adapter::BidiStream<Bytes> =
+            std::future::poll_fn(|cx| qpx_conn.poll_open_bidi(cx)).await?;
+        let (mut send, mut recv) = ::h3::quic::BidiStream::split(stream);
+        // QUIC publishes a stream to the peer once it carries a frame or FIN.
+        std::future::poll_fn(|cx| ::h3::quic::SendStream::poll_finish(&mut send, cx)).await?;
+        let (mut origin_send, _origin_recv) = origin_conn.accept_bi().await?;
+
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                std::future::poll_fn(|cx| recv.poll_data(cx)),
+            )
+            .await
+            .is_err(),
+            "read must be pending before the origin sends"
+        );
+        origin_send.write_all(b"resumed").await?;
+        let chunk = tokio::time::timeout(
+            Duration::from_secs(1),
+            std::future::poll_fn(|cx| recv.poll_data(cx)),
+        )
+        .await
+        .expect("pending read must wake")?
+        .expect("origin data");
+        assert_eq!(chunk, Bytes::from_static(b"resumed"));
         Ok::<_, anyhow::Error>(())
     })
     .await?

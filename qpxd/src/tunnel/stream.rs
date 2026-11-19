@@ -84,7 +84,7 @@ where
 
 #[cfg(feature = "http3-backend-h3")]
 #[async_trait]
-impl TunnelHalf for ::h3::server::RequestStream<h3_quinn::RecvStream, Bytes> {
+impl TunnelHalf for ::h3::server::RequestStream<crate::http3::quinn_adapter::RecvStream, Bytes> {
     async fn recv(&mut self) -> io::Result<Option<Bytes>> {
         h3_recv_data(self.recv_data().await)
     }
@@ -92,7 +92,9 @@ impl TunnelHalf for ::h3::server::RequestStream<h3_quinn::RecvStream, Bytes> {
 
 #[cfg(feature = "http3-backend-h3")]
 #[async_trait]
-impl TunnelHalfWrite for ::h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes> {
+impl TunnelHalfWrite
+    for ::h3::server::RequestStream<crate::http3::quinn_adapter::SendStream<Bytes>, Bytes>
+{
     async fn send(&mut self, data: Bytes) -> io::Result<()> {
         h3_result(self.send_data(data).await)
     }
@@ -104,7 +106,7 @@ impl TunnelHalfWrite for ::h3::server::RequestStream<h3_quinn::SendStream<Bytes>
 
 #[cfg(feature = "http3-backend-h3")]
 #[async_trait]
-impl TunnelHalf for ::h3::client::RequestStream<h3_quinn::RecvStream, Bytes> {
+impl TunnelHalf for ::h3::client::RequestStream<crate::http3::quinn_adapter::RecvStream, Bytes> {
     async fn recv(&mut self) -> io::Result<Option<Bytes>> {
         h3_recv_data(self.recv_data().await)
     }
@@ -112,7 +114,9 @@ impl TunnelHalf for ::h3::client::RequestStream<h3_quinn::RecvStream, Bytes> {
 
 #[cfg(feature = "http3-backend-h3")]
 #[async_trait]
-impl TunnelHalfWrite for ::h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes> {
+impl TunnelHalfWrite
+    for ::h3::client::RequestStream<crate::http3::quinn_adapter::SendStream<Bytes>, Bytes>
+{
     async fn send(&mut self, data: Bytes) -> io::Result<()> {
         h3_result(self.send_data(data).await)
     }

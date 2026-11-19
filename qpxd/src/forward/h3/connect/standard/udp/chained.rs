@@ -10,9 +10,9 @@ use tokio::time::{Duration, timeout};
 use crate::http3::capsule::encode_datagram_capsule_header;
 
 pub(super) async fn relay_h3_connect_udp_stream_chained(
-    downstream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    downstream: ::h3::server::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     mut downstream_datagrams: Option<H3StreamDatagrams>,
-    upstream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    upstream: ::h3::client::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     mut upstream_datagrams: Option<H3StreamDatagrams>,
     connect_udp_cfg: ConnectUdpConfig,
     rate_limit_ctx: RateLimitContext,

@@ -28,6 +28,12 @@ pub(crate) mod qpx_stream;
 #[cfg(feature = "http3")]
 pub(crate) mod quic;
 pub(crate) mod quic_packet;
+#[cfg(all(
+    feature = "http3",
+    feature = "http3-backend-h3",
+    not(feature = "http3-backend-qpx")
+))]
+pub(crate) mod quinn_adapter;
 pub(crate) mod quinn_socket;
 #[cfg(feature = "http3")]
 pub(crate) mod response_error;

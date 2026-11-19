@@ -111,7 +111,7 @@ async fn serve_connection<H: H3RequestHandler>(
         .enable_extended_connect(handler.enable_extended_connect())
         .enable_datagram(handler.enable_datagram());
     let mut h3_conn = builder
-        .build::<_, Bytes>(h3_quinn::Connection::new(connection))
+        .build::<_, Bytes>(crate::http3::quinn_adapter::Connection::new(connection))
         .await?;
 
     let datagram_dispatch = if handler.enable_datagram() {

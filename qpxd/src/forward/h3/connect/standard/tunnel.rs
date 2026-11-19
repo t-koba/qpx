@@ -66,7 +66,7 @@ pub(super) struct MitmH3ConnectInput {
 }
 
 pub(super) async fn relay_h3_connect_stream(
-    req_stream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    req_stream: ::h3::server::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     client_prefetch: Bytes,
     server: TunnelIo,
     idle_timeout: Duration,
@@ -269,7 +269,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
 
 #[cfg(feature = "mitm")]
 async fn relay_h3_connect_stream_to_io(
-    req_stream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    req_stream: ::h3::server::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     io: tokio::io::DuplexStream,
     idle_timeout: Duration,
 ) -> Result<()> {

@@ -213,7 +213,7 @@ async fn content_length_mismatches_reset_response_stream_with_message_error() ->
         let server = tokio::spawn(async move {
             let conn = endpoint.accept().await.unwrap().await.unwrap();
             let mut connection = ::h3::server::builder()
-                .build::<_, Bytes>(h3_quinn::Connection::new(conn))
+                .build::<_, Bytes>(crate::http3::quinn_adapter::Connection::new(conn))
                 .await
                 .unwrap();
             for overflow in [false, true] {
@@ -264,7 +264,7 @@ async fn content_length_mismatches_reset_response_stream_with_message_error() ->
         )));
         let conn = client.connect(addr, "localhost")?.await?;
         let (mut connection, mut sender) = ::h3::client::builder()
-            .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
+            .build::<_, _, Bytes>(crate::http3::quinn_adapter::Connection::new(conn))
             .await?;
         let driver =
             tokio::spawn(async move { std::future::poll_fn(|cx| connection.poll_close(cx)).await });

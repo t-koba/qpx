@@ -40,10 +40,13 @@ const DEFAULT_MAX_INFLIGHT_STREAMS_PER_CONNECTION: usize = 128;
 const H3_ORIGIN_POOL_SHARDS: usize = 64;
 const MAX_H3_ORIGIN_POOL_KEYS: usize = 1024;
 
-type H3SendRequest = ::h3::client::SendRequest<h3_quinn::OpenStreams, Bytes>;
-type H3ClientRequestStream = ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
-type H3ClientSendStream = ::h3::client::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
-type H3ClientRecvStream = ::h3::client::RequestStream<h3_quinn::RecvStream, Bytes>;
+type H3SendRequest = ::h3::client::SendRequest<crate::http3::quinn_adapter::OpenStreams, Bytes>;
+type H3ClientRequestStream =
+    ::h3::client::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>;
+type H3ClientSendStream =
+    ::h3::client::RequestStream<crate::http3::quinn_adapter::SendStream<Bytes>, Bytes>;
+type H3ClientRecvStream =
+    ::h3::client::RequestStream<crate::http3::quinn_adapter::RecvStream, Bytes>;
 type H3RequestRelayJoin = JoinHandle<Result<()>>;
 
 pub(crate) struct H3OriginPool {
@@ -316,7 +319,7 @@ async fn connect_h3_origin(
     .map_err(|_| anyhow!("HTTP/3 upstream connect timed out"))??;
     let upstream_cert = extract_h3_connection_certificate_info(&connection);
     enforce_h3_connection_trust(&connection, key.server_name.as_str(), trust)?;
-    let quic_conn = h3_quinn::Connection::new(connection);
+    let quic_conn = crate::http3::quinn_adapter::Connection::new(connection);
     let mut builder = ::h3::client::builder();
     builder.max_field_section_size(H3_MAX_FIELD_SECTION_SIZE);
     let h3_build = builder.build::<_, _, Bytes>(quic_conn);

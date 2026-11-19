@@ -338,7 +338,7 @@ pub(in crate::forward::h3) async fn handle_h3_connect_udp(
 }
 
 async fn relay_h3_connect_udp_stream(
-    req_stream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    req_stream: ::h3::server::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     udp: UdpSocket,
     connect_udp_cfg: ConnectUdpConfig,
     mut datagrams: Option<H3StreamDatagrams>,

@@ -16,7 +16,8 @@ pub(super) struct UpstreamConnectUdpStream {
     pub(super) driver: tokio::task::JoinHandle<()>,
     pub(super) datagram_task: tokio::task::JoinHandle<()>,
     pub(super) datagrams: Option<H3StreamDatagrams>,
-    pub(super) req_stream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    pub(super) req_stream:
+        ::h3::client::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
 }
 
 pub(super) struct UpstreamConnectUdpParams<'a> {
@@ -72,7 +73,8 @@ pub(super) async fn open_upstream_connect_udp_stream(
         .enable_extended_connect(true)
         .enable_datagram(true)
         .max_field_section_size(H3_MAX_FIELD_SECTION_SIZE);
-    let h3_build = builder.build::<_, _, Bytes>(h3_quinn::Connection::new(connection));
+    let h3_build =
+        builder.build::<_, _, Bytes>(crate::http3::quinn_adapter::Connection::new(connection));
     let (mut h3_conn, mut sender) = timeout(timeout_dur, h3_build).await??;
     use h3_datagram::datagram_handler::HandleDatagramsExt as _;
     let datagram_dispatch = Arc::new(H3DatagramDispatch::new(datagram_channel_capacity));

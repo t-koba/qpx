@@ -369,7 +369,7 @@ edges:
             let mut builder = ::h3::server::builder();
             builder.enable_extended_connect(true);
             let mut connection = builder
-                .build::<_, Bytes>(h3_quinn::Connection::new(conn))
+                .build::<_, Bytes>(crate::http3::quinn_adapter::Connection::new(conn))
                 .await
                 .unwrap();
             let resolver = connection.accept().await.unwrap().unwrap();
@@ -424,7 +424,7 @@ edges:
         let mut builder = ::h3::client::builder();
         builder.enable_extended_connect(true);
         let (mut connection, mut sender) = builder
-            .build::<_, _, Bytes>(h3_quinn::Connection::new(conn))
+            .build::<_, _, Bytes>(crate::http3::quinn_adapter::Connection::new(conn))
             .await?;
         let driver =
             tokio::spawn(async move { std::future::poll_fn(|cx| connection.poll_close(cx)).await });

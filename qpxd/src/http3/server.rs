@@ -21,9 +21,12 @@ pub(crate) use self::response::{
     send_h3_response_with_timeouts, send_h3_static_response,
 };
 
-pub type H3ServerRequestStream = ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>;
-pub type H3ServerSendStream = ::h3::server::RequestStream<h3_quinn::SendStream<Bytes>, Bytes>;
-pub type H3ServerRecvStream = ::h3::server::RequestStream<h3_quinn::RecvStream, Bytes>;
+pub type H3ServerRequestStream =
+    ::h3::server::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>;
+pub type H3ServerSendStream =
+    ::h3::server::RequestStream<crate::http3::quinn_adapter::SendStream<Bytes>, Bytes>;
+pub type H3ServerRecvStream =
+    ::h3::server::RequestStream<crate::http3::quinn_adapter::RecvStream, Bytes>;
 
 pub(crate) struct H3IncomingBodyOptions {
     pub read_timeout: Duration,

@@ -22,7 +22,8 @@ use tracing::warn;
 pub(super) struct UpstreamExtendedConnectStream {
     pub(super) interim: Vec<InterimResponseHead>,
     pub(super) response: ::http::Response<()>,
-    pub(super) req_stream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    pub(super) req_stream:
+        ::h3::client::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     pub(super) datagrams: Option<H3StreamDatagrams>,
     pub(super) _endpoint: quinn::Endpoint,
     pub(super) driver: tokio::task::JoinHandle<()>,
@@ -76,7 +77,10 @@ pub(in crate::forward) fn normalize_h3_upstream_connect_headers(
 }
 
 pub(in crate::forward) async fn recv_upstream_h3_response_with_interim(
-    req_stream: &mut ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    req_stream: &mut ::h3::client::RequestStream<
+        crate::http3::quinn_adapter::BidiStream<Bytes>,
+        Bytes,
+    >,
     timeout_dur: Duration,
     context: &str,
 ) -> Result<(Vec<InterimResponseHead>, ::http::Response<()>)> {
@@ -132,7 +136,7 @@ pub(super) async fn open_upstream_extended_connect_stream(
         Err(_) => return Err(anyhow!("extended CONNECT upstream connect timed out")),
     };
     enforce_h3_connection_trust(&connection, &connect_host, input.trust)?;
-    let quic_conn = h3_quinn::Connection::new(connection);
+    let quic_conn = crate::http3::quinn_adapter::Connection::new(connection);
     let mut builder = ::h3::client::builder();
     builder.enable_extended_connect(true);
     builder.enable_datagram(input.enable_datagram);
@@ -210,7 +214,7 @@ pub(super) async fn open_upstream_extended_connect_stream(
 
 pub(super) fn upstream_extended_connect_error_response(
     response: ::http::Response<()>,
-    upstream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    upstream: ::h3::client::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     proxy_name: &str,
     header_control: Option<&CompiledHeaderControl>,
     body_read_timeout: Duration,
@@ -255,14 +259,14 @@ fn owner_h3_connect_error_response(
 
 define_upstream_error_response_body!(
     body_from_upstream_h3_stream,
-    ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    ::h3::client::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     |chunk| crate::http3::h3_buf_to_bytes(chunk),
 );
 
 pub(super) async fn relay_h3_extended_connect_stream(
-    downstream: ::h3::server::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    downstream: ::h3::server::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     mut downstream_datagrams: Option<H3StreamDatagrams>,
-    upstream: ::h3::client::RequestStream<h3_quinn::BidiStream<Bytes>, Bytes>,
+    upstream: ::h3::client::RequestStream<crate::http3::quinn_adapter::BidiStream<Bytes>, Bytes>,
     mut upstream_datagrams: Option<H3StreamDatagrams>,
     idle_timeout: Duration,
 ) -> Result<()> {
