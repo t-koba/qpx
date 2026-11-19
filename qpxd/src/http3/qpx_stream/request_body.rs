@@ -16,58 +16,8 @@ pub(crate) enum RequestBodySendEvent {
 
 #[cfg(test)]
 #[derive(Clone)]
-pub(crate) struct DeferredRequestBodyDeadline {
-    inner: std::sync::Arc<DeferredDeadlineInner>,
-}
-
-#[cfg(test)]
-struct DeferredDeadlineInner {
-    deadline: std::sync::Mutex<Option<Instant>>,
-    armed: tokio::sync::Notify,
-}
-
-#[cfg(test)]
-impl DeferredRequestBodyDeadline {
-    pub(crate) fn new() -> Self {
-        Self {
-            inner: std::sync::Arc::new(DeferredDeadlineInner {
-                deadline: std::sync::Mutex::new(None),
-                armed: tokio::sync::Notify::new(),
-            }),
-        }
-    }
-
-    pub(crate) fn set(&self, deadline: Instant) {
-        match self.inner.deadline.lock() {
-            Ok(mut deadline_slot) => *deadline_slot = Some(deadline),
-            Err(poisoned) => *poisoned.into_inner() = Some(deadline),
-        }
-        self.inner.armed.notify_waiters();
-    }
-
-    fn get(&self) -> Option<Instant> {
-        match self.inner.deadline.lock() {
-            Ok(deadline_slot) => *deadline_slot,
-            Err(poisoned) => *poisoned.into_inner(),
-        }
-    }
-
-    async fn wait_for_arm(&self) {
-        loop {
-            let notified = self.inner.armed.notified();
-            if self.get().is_some() {
-                return;
-            }
-            notified.await;
-        }
-    }
-}
-
-#[cfg(test)]
-#[derive(Clone)]
 pub(crate) struct RequestBodySendProbe {
     pub(crate) events: tokio::sync::mpsc::UnboundedSender<RequestBodySendEvent>,
-    pub(crate) deferred: Option<DeferredRequestBodyDeadline>,
 }
 
 // Test-only observation of a send's first poll outcome. It reports state
@@ -120,24 +70,11 @@ pub(crate) struct QpxRequestBodyRelayOptions<'a> {
 async fn send_before_deadline<F>(
     future: F,
     deadline: Option<Instant>,
-    #[cfg(test)] deferred: Option<DeferredRequestBodyDeadline>,
 ) -> Result<std::result::Result<(), BodyError>>
 where
     F: Future<Output = std::result::Result<(), BodyError>>,
 {
     let mut future = std::pin::pin!(future);
-    #[cfg(test)]
-    let deadline = if let Some(deferred) = deferred {
-        // Test-only arming gate: keep polling the real send while the test
-        // waits for observed backpressure before starting the deadline. The
-        // deadline select and message below remain the production code path.
-        tokio::select! {
-            result = &mut future => return Ok(result),
-            _ = deferred.wait_for_arm() => deferred.get(),
-        }
-    } else {
-        deadline
-    };
     match deadline {
         Some(deadline) => tokio::select! {
             _ = sleep_until(deadline) => Err(anyhow!(
@@ -237,16 +174,7 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::DataSendPending,
                 Some(RequestBodySendEvent::DataAccepted),
             );
-            let send_result = send_before_deadline(
-                send,
-                options.request_body_deadline,
-                #[cfg(test)]
-                options
-                    .send_probe
-                    .as_ref()
-                    .and_then(|probe| probe.deferred.clone()),
-            )
-            .await;
+            let send_result = send_before_deadline(send, options.request_body_deadline).await;
             match send_result {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => receiver_open = false,
@@ -301,16 +229,7 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::TrailerSendPending,
                 None,
             );
-            let send_result = send_before_deadline(
-                send,
-                options.request_body_deadline,
-                #[cfg(test)]
-                options
-                    .send_probe
-                    .as_ref()
-                    .and_then(|probe| probe.deferred.clone()),
-            )
-            .await;
+            let send_result = send_before_deadline(send, options.request_body_deadline).await;
             if let Err(err) = send_result {
                 sender.abort();
                 req_stream.abort_message_stream();
