@@ -1,4 +1,4 @@
-use crate::types::CacheBackend;
+use crate::types::{CacheBackend, CommitLease};
 use bytes::BytesMut;
 use qpx_core::config::CacheBackendConfig;
 use std::sync::Arc;
@@ -6,7 +6,9 @@ use tokio::io::AsyncWriteExt;
 use tokio::time::{Duration, timeout};
 
 use super::protocol::{read_bulk_string, read_integer};
-use super::{RedisCacheBackend, RedisConnection, RedisTransport, release_redis_lease};
+use super::{
+    RedisCacheBackend, RedisCommitLease, RedisConnection, RedisTransport, release_redis_lease,
+};
 
 fn cfg(endpoint: &str) -> CacheBackendConfig {
     cfg_with_ttl(endpoint, 5_000)
@@ -336,6 +338,19 @@ async fn spawn_writer_lease_server_with(
                             }
                         }
                         Some("SELECT") => "+OK\r\n".to_string(),
+                        Some("EVAL") if parts.get(1).is_some_and(|s| s.contains("pexpire")) => {
+                            let locks = locks.lock().await;
+                            let ttl_ms: u64 = parts[5].parse().expect("PX ttl");
+                            let held = locks.get(&parts[3]).map(String::as_str) == Some(&parts[4]);
+                            if held {
+                                expiries.lock().await.insert(
+                                    parts[3].clone(),
+                                    std::time::Instant::now()
+                                        + std::time::Duration::from_millis(ttl_ms),
+                                );
+                            }
+                            format!(":{}\r\n", u8::from(held))
+                        }
                         Some("EVAL") => {
                             // The lease script is compare-and-delete on KEYS[1]/ARGV[1].
                             let mut locks = locks.lock().await;
@@ -522,11 +537,10 @@ async fn expired_redis_lease_is_reclaimable_and_fences_the_old_holder() {
     let (endpoint, locks, server) = spawn_writer_lease_server().await;
     let first = RedisCacheBackend::new(cfg_with_ttl(&endpoint, 40)).expect("first backend");
     let second = RedisCacheBackend::new(cfg(&endpoint)).expect("second backend");
-    let old = first
-        .lock_commit("ns", "primary-a")
+    let old = RedisCommitLease::acquire(first.client.clone(), "ns")
         .await
-        .expect("first lease")
-        .expect("backend lease");
+        .expect("first lease");
+    old.stop.notify_one();
     tokio::time::sleep(Duration::from_millis(80)).await;
     let current = second
         .lock_commit("ns", "primary-b")
@@ -545,4 +559,43 @@ async fn expired_redis_lease_is_reclaimable_and_fences_the_old_holder() {
     current.release().await.expect("release current lease");
     assert!(locks.lock().await.is_empty());
     server.abort();
+}
+
+#[tokio::test]
+async fn redis_heartbeat_keeps_a_live_writer_lease_past_its_initial_ttl() {
+    let (endpoint, locks, server) = spawn_writer_lease_server().await;
+    let first = RedisCacheBackend::new(cfg_with_ttl(&endpoint, 60)).expect("first backend");
+    let second = RedisCacheBackend::new(cfg(&endpoint)).expect("second backend");
+    let held = first
+        .lock_commit("ns", "primary-a")
+        .await
+        .expect("first lease")
+        .expect("backend lease");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    held.validate().await.expect("heartbeat renewed the lease");
+    assert_eq!(locks.lock().await.len(), 1);
+    let denied = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .err()
+        .expect("renewed lease still excludes the second writer");
+    assert!(denied.to_string().contains("already has an active writer"));
+
+    held.release().await.expect("release renewed lease");
+    server.abort();
+}
+
+#[tokio::test]
+async fn redis_validate_rejects_a_lease_whose_heartbeat_was_revoked() {
+    let (endpoint, _locks, _server) = spawn_writer_lease_server().await;
+    let backend = RedisCacheBackend::new(cfg_with_ttl(&endpoint, 30)).expect("backend");
+    let held = RedisCommitLease::acquire(backend.client.clone(), "ns")
+        .await
+        .expect("lease");
+    held.stop.notify_one();
+    held.revoked
+        .store(true, std::sync::atomic::Ordering::Release);
+    let err = held.validate().await.expect_err("revoked lease cannot publish");
+    assert!(err.to_string().contains("was not renewed"), "{err}");
+    drop(held);
 }

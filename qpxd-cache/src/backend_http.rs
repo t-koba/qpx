@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 use tokio::time::timeout;
 
 const HTTP_CACHE_MAX_IDLE_CONNECTIONS: usize = 8;
@@ -341,7 +341,10 @@ struct HttpCommitLease {
     backend: HttpCacheBackend,
     uri: Uri,
     token: String,
+    ttl: Duration,
     released: AtomicBool,
+    revoked: Arc<AtomicBool>,
+    stop: Arc<Notify>,
 }
 
 impl HttpCommitLease {
@@ -356,7 +359,10 @@ impl HttpCommitLease {
             backend: backend.clone(),
             uri,
             token,
+            ttl: backend.writer_lease_ttl,
             released: AtomicBool::new(false),
+            revoked: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(Notify::new()),
         };
         let deadline = Instant::now() + backend.timeout.max(Duration::from_millis(250));
         loop {
@@ -384,7 +390,10 @@ impl HttpCommitLease {
                 }
             };
             match status {
-                StatusCode::CREATED => return Ok(Some(candidate)),
+                StatusCode::CREATED => {
+                    candidate.start_heartbeat();
+                    return Ok(Some(candidate));
+                }
                 StatusCode::PRECONDITION_FAILED => {}
                 StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => {
                     tracing::warn!(
@@ -420,7 +429,36 @@ impl HttpCommitLease {
         release_http_lease(&self.backend, &self.uri, &self.token).await
     }
 
+    fn start_heartbeat(&self) {
+        let backend = self.backend.clone();
+        let uri = self.uri.clone();
+        let token = self.token.clone();
+        let ttl = self.ttl;
+        let revoked = self.revoked.clone();
+        let stop = self.stop.clone();
+        tokio::spawn(async move {
+            let interval = (ttl / 3).max(Duration::from_millis(10));
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {
+                        if renew_http_lease(&backend, &uri, &token, ttl).await.is_err() {
+                            revoked.store(true, Ordering::Release);
+                            break;
+                        }
+                    }
+                    _ = stop.notified() => break,
+                }
+            }
+        });
+    }
+
     async fn validate_request(&self) -> Result<()> {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(anyhow!(
+                "http cache writer lease {} was not renewed and is no longer held",
+                self.uri
+            ));
+        }
         let mut req = owner_request(Method::GET, self.uri.clone(), Body::empty());
         self.backend.apply_common_headers(&mut req);
         let (status, body) = self.backend.send_collect(req).await?;
@@ -432,6 +470,32 @@ impl HttpCommitLease {
             self.uri,
             status
         ))
+    }
+}
+
+async fn renew_http_lease(
+    backend: &HttpCacheBackend,
+    uri: &Uri,
+    token: &str,
+    ttl: Duration,
+) -> Result<()> {
+    let mut req = owner_request(Method::PUT, uri.clone(), Body::empty());
+    req.headers_mut().insert(
+        ord("if-match"),
+        http::HeaderValue::from_str(&format!("\"{}\"", token))?,
+    );
+    req.headers_mut().insert(
+        ord("x-qpx-writer-lease-ttl-ms"),
+        http::HeaderValue::from_str(&ttl.as_millis().to_string())?,
+    );
+    backend.apply_common_headers(&mut req);
+    match backend.send_status(req).await? {
+        StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
+        status => Err(anyhow!(
+            "http cache writer lease {} was not renewed (PUT returned {})",
+            uri,
+            status
+        )),
     }
 }
 
@@ -455,6 +519,7 @@ async fn release_http_lease(backend: &HttpCacheBackend, uri: &Uri, token: &str) 
 #[async_trait]
 impl CommitLease for HttpCommitLease {
     async fn release(&self) -> Result<()> {
+        self.stop.notify_one();
         self.release_request().await?;
         self.released.store(true, Ordering::Release);
         Ok(())
@@ -470,6 +535,7 @@ impl Drop for HttpCommitLease {
         if self.released.load(Ordering::Acquire) {
             return;
         }
+        self.stop.notify_one();
         // Cancellation cannot block on the network. The conditional delete is
         // idempotent, so a detached best-effort release is safe.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

@@ -97,6 +97,7 @@ pub async fn invalidate_primary(
         if commit.has_backend_lease() {
             deleted?;
         }
+        commit.validate().await?;
         (index.variants, default_variant)
     };
     for variant in variants {

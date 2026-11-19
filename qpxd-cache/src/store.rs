@@ -319,6 +319,7 @@ impl CacheWriteback {
                     Ok::<_, anyhow::Error>(obsolete)
                 }
                 .await;
+                commit.validate().await?;
                 commit.release().await?;
                 result?
             };
@@ -687,6 +688,7 @@ async fn migrate_revalidated_legacy(
                 }
             }
             .await;
+            commit.validate().await?;
             commit.release().await?;
             result?
         };

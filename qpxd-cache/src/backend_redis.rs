@@ -16,7 +16,7 @@ use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 #[cfg(unix)]
 use tokio::net::UnixStream;
-use tokio::sync::{Mutex as AsyncMutex, Semaphore};
+use tokio::sync::{Mutex as AsyncMutex, Notify, Semaphore};
 use tokio::time::{Duration, timeout};
 use url::Url;
 
@@ -166,7 +166,10 @@ struct RedisCommitLease {
     client: Arc<RedisClient>,
     key: String,
     token: String,
+    ttl: Duration,
     released: AtomicBool,
+    revoked: Arc<AtomicBool>,
+    stop: Arc<Notify>,
 }
 
 impl RedisCommitLease {
@@ -179,7 +182,10 @@ impl RedisCommitLease {
             client: client.clone(),
             key: key.clone(),
             token: token.clone(),
+            ttl: client.writer_lease_ttl,
             released: AtomicBool::new(false),
+            revoked: Arc::new(AtomicBool::new(false)),
+            stop: Arc::new(Notify::new()),
         };
         // Process-local commits are already serialized by commit::lock. Only a
         // genuinely held cross-client lease should make an operation wait.
@@ -211,6 +217,7 @@ impl RedisCommitLease {
                 }
             };
             if created {
+                candidate.start_heartbeat();
                 return Ok(candidate);
             }
             if std::time::Instant::now() >= deadline {
@@ -251,15 +258,77 @@ async fn release_redis_lease(client: Arc<RedisClient>, key: String, token: Strin
     result
 }
 
+impl RedisCommitLease {
+    fn start_heartbeat(&self) {
+        let client = self.client.clone();
+        let key = self.key.clone();
+        let token = self.token.clone();
+        let ttl = self.ttl;
+        let revoked = self.revoked.clone();
+        let stop = self.stop.clone();
+        tokio::spawn(async move {
+            let interval = (ttl / 3).max(Duration::from_millis(10));
+            loop {
+                tokio::select! {
+                    _ = tokio::time::sleep(interval) => {
+                        if renew_redis_lease(&client, &key, &token, ttl).await.is_err() {
+                            revoked.store(true, Ordering::Release);
+                            break;
+                        }
+                    }
+                    _ = stop.notified() => break,
+                }
+            }
+        });
+    }
+}
+
+async fn renew_redis_lease(
+    client: &Arc<RedisClient>,
+    key: &str,
+    token: &str,
+    ttl: Duration,
+) -> Result<()> {
+    // A renewal can only extend the caller's own token. A reclaimed token
+    // cannot be revived, so a lost lease is never silently resurrected.
+    const RENEW: &[u8] = b"if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('pexpire', KEYS[1], ARGV[2]) else return 0 end";
+    let cmd = encode_command(&[
+        b"EVAL".to_vec(),
+        RENEW.to_vec(),
+        b"1".to_vec(),
+        key.as_bytes().to_vec(),
+        token.as_bytes().to_vec(),
+        ttl.as_millis().to_string().into_bytes(),
+    ]);
+    let mut stream = client.checkout().await?;
+    let result = async {
+        timeout(client.timeout, stream.stream.write_all(&cmd)).await??;
+        read_integer(&mut stream, client.timeout).await?;
+        Ok(())
+    }
+    .await;
+    if result.is_ok() {
+        client.recycle(stream).await;
+    }
+    result
+}
+
 #[async_trait]
 impl CommitLease for RedisCommitLease {
     async fn release(&self) -> Result<()> {
+        self.stop.notify_one();
         release_redis_lease(self.client.clone(), self.key.clone(), self.token.clone()).await?;
         self.released.store(true, Ordering::Release);
         Ok(())
     }
 
     async fn validate(&self) -> Result<()> {
+        if self.revoked.load(Ordering::Acquire) {
+            return Err(anyhow!(
+                "redis cache writer lease for {} was not renewed and is no longer held",
+                self.token
+            ));
+        }
         let cmd = encode_command(&[b"GET".to_vec(), self.key.clone().into_bytes()]);
         let mut stream = self.client.checkout().await?;
         let result = async {
@@ -292,6 +361,7 @@ impl Drop for RedisCommitLease {
         if self.released.load(Ordering::Acquire) {
             return;
         }
+        self.stop.notify_one();
         // Cancellation happens in an async context, so cannot block on I/O.
         // A detached compare-and-delete is safe and idempotent.
         if let Ok(handle) = tokio::runtime::Handle::try_current() {

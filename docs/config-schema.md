@@ -48,9 +48,12 @@ alone is never treated as cross-process safety. Remote backends enforce one
 writer per namespace with a backend lease during publication, independently of
 that setting; `writer_mode: shared` stays rejected for them.
 Remote leases are bounded by `writer_lease_ttl_ms` (default `5000`, must be
-greater than zero). Choose a TTL comfortably longer than a normal commit: a
-lease that expires mid-commit is detected by the publication ownership re-check
-and fails that commit.
+greater than zero). While a writer holds a lease it renews that lease every
+third of the TTL, so slow commits cannot lose ownership simply by running
+longer than one bound. A failed renewal revokes the lease in-process; both the
+publication ownership re-check before the critical section and the final check
+after it fail the commit rather than publishing with a lost lease. Choose a TTL
+long enough to tolerate normal backend latency between renewals.
 
 - `redis`: the lease is a namespace-wide key `qpx:writer-lock:<namespace>` created
   with `SET NX PX <writer_lease_ttl_ms>` and released with a token-checked Lua
@@ -62,8 +65,11 @@ and fails that commit.
 - `http`: the gateway must implement `PUT /v1/cache/<namespace>/_writer_lock`
   with `If-None-Match: *`, a plain-text lease token body,
   `X-Qpx-Writer-Lease-Ttl-Ms` (the gateway expires the lease after that bound),
-  `201 Created` on creation and `412 Precondition Failed` when held;
-  `GET /v1/cache/<namespace>/_writer_lock` returning the current plain-text
+  `201 Created` on creation and `412 Precondition Failed` when held. The same
+  path must also accept `PUT` with `If-Match: "<token>"` and
+  `X-Qpx-Writer-Lease-Ttl-Ms` to renew one's own lease, returning `204 No
+  Content` (or `200 OK`) only when the token still matches; a failed renewal
+  revokes the holder. `GET /v1/cache/<namespace>/_writer_lock` returning the current plain-text
   token with `200 OK` (or `404 Not Found` when unheld); and
   `DELETE /v1/cache/<namespace>/_writer_lock` with `If-Match: "<token>"`,
   returning `204 No Content` (or `200 OK`) only when the token matches. Other

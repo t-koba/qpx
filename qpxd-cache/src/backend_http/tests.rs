@@ -385,6 +385,26 @@ async fn spawn_lease_gateway_with(
                                     }
                                 }
                             }
+                            "PUT" => {
+                                let expected = format!(
+                                    "\"{}\"",
+                                    leases.get(&path).map(String::as_str).unwrap_or("")
+                                );
+                                if headers.get("if-match").map(String::as_str) == Some(expected.as_str()) {
+                                    let ttl_ms: u64 = headers
+                                        .get("x-qpx-writer-lease-ttl-ms")
+                                        .and_then(|v| v.parse().ok())
+                                        .expect("lease ttl header");
+                                    expiries.lock().expect("lease expiries").insert(
+                                        path.clone(),
+                                        std::time::Instant::now()
+                                            + std::time::Duration::from_millis(ttl_ms),
+                                    );
+                                    "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string()
+                                } else {
+                                    "HTTP/1.1 412 Precondition Failed\r\ncontent-length: 0\r\n\r\n".to_string()
+                                }
+                            }
                             "GET" => {
                                 live(&mut leases, &mut expiries.lock().expect("lease expiries"), &path);
                                 match leases.get(&path) {
@@ -609,13 +629,13 @@ async fn expired_http_lease_is_reclaimable_and_fences_the_old_holder() {
     let first = backend_at_with_ttl(endpoint.clone(), 500, 40, "http-a");
     let second = backend_at(endpoint, 500, "http-b");
 
-    let old = first
-        .lock_commit("ns", "primary-a")
+    let old = HttpCommitLease::acquire(&first, "ns")
         .await
         .expect("first lease")
         .expect("backend lease");
-    // Simulate a writer that died without cleanup: the gateway expires the
-    // lease, so another instance can continue within a bounded time.
+    // Simulate a writer that died without cleanup: stop its renewal but keep
+    // the token, so the gateway expires the lease within a bounded time.
+    old.stop.notify_one();
     tokio::time::sleep(Duration::from_millis(80)).await;
     let current = second
         .lock_commit("ns", "primary-b")
@@ -633,4 +653,45 @@ async fn expired_http_lease_is_reclaimable_and_fences_the_old_holder() {
 
     current.release().await.expect("release current lease");
     server.abort();
+}
+
+#[tokio::test]
+async fn http_heartbeat_keeps_a_live_writer_lease_past_its_initial_ttl() {
+    let (endpoint, leases, server) = spawn_lease_gateway().await;
+    let first = backend_at_with_ttl(endpoint.clone(), 500, 60, "http-a");
+    let second = backend_at(endpoint, 500, "http-b");
+
+    let held = first
+        .lock_commit("ns", "primary-a")
+        .await
+        .expect("first lease")
+        .expect("backend lease");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+    held.validate().await.expect("heartbeat renewed the lease");
+    assert_eq!(leases.lock().expect("lease map").len(), 1);
+    let denied = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .err()
+        .expect("renewed lease still excludes the second writer");
+    assert!(denied.to_string().contains("already has an active writer"));
+
+    held.release().await.expect("release renewed lease");
+    server.abort();
+}
+
+#[tokio::test]
+async fn http_validate_rejects_a_lease_whose_heartbeat_was_revoked() {
+    let (endpoint, _leases, _server) = spawn_lease_gateway().await;
+    let backend = backend_at_with_ttl(endpoint, 500, 30, "http");
+    let held = HttpCommitLease::acquire(&backend, "ns")
+        .await
+        .expect("lease")
+        .expect("backend lease");
+    held.stop.notify_one();
+    held.revoked
+        .store(true, std::sync::atomic::Ordering::Release);
+    let err = held.validate().await.expect_err("revoked lease cannot publish");
+    assert!(err.to_string().contains("was not renewed"), "{err}");
+    drop(held);
 }
