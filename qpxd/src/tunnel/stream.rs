@@ -82,7 +82,7 @@ where
     }
 }
 
-#[cfg(feature = "http3-backend-h3")]
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 #[async_trait]
 impl TunnelHalf for ::h3::server::RequestStream<crate::http3::quinn_adapter::RecvStream, Bytes> {
     async fn recv(&mut self) -> io::Result<Option<Bytes>> {
@@ -90,7 +90,7 @@ impl TunnelHalf for ::h3::server::RequestStream<crate::http3::quinn_adapter::Rec
     }
 }
 
-#[cfg(feature = "http3-backend-h3")]
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 #[async_trait]
 impl TunnelHalfWrite
     for ::h3::server::RequestStream<crate::http3::quinn_adapter::SendStream<Bytes>, Bytes>
@@ -104,7 +104,7 @@ impl TunnelHalfWrite
     }
 }
 
-#[cfg(feature = "http3-backend-h3")]
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 #[async_trait]
 impl TunnelHalf for ::h3::client::RequestStream<crate::http3::quinn_adapter::RecvStream, Bytes> {
     async fn recv(&mut self) -> io::Result<Option<Bytes>> {
@@ -112,7 +112,7 @@ impl TunnelHalf for ::h3::client::RequestStream<crate::http3::quinn_adapter::Rec
     }
 }
 
-#[cfg(feature = "http3-backend-h3")]
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 #[async_trait]
 impl TunnelHalfWrite
     for ::h3::client::RequestStream<crate::http3::quinn_adapter::SendStream<Bytes>, Bytes>
@@ -166,7 +166,7 @@ impl TunnelHalfWrite for qpx_h3::StreamSend {
     }
 }
 
-#[cfg(feature = "http3-backend-h3")]
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 fn h3_recv_data<B>(
     result: std::result::Result<Option<B>, ::h3::error::StreamError>,
 ) -> io::Result<Option<Bytes>>
@@ -178,7 +178,7 @@ where
         .map_err(io_other)
 }
 
-#[cfg(feature = "http3-backend-h3")]
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 fn h3_result<T>(result: std::result::Result<T, ::h3::error::StreamError>) -> io::Result<T> {
     result.map_err(io_other)
 }

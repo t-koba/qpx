@@ -52,7 +52,7 @@ pub(crate) mod server;
 #[cfg(feature = "http3")]
 pub(crate) mod stream_limits;
 
-#[cfg(feature = "http3-backend-h3")]
+#[cfg(all(feature = "http3-backend-h3", not(feature = "http3-backend-qpx")))]
 pub(crate) fn h3_buf_to_bytes(mut buf: impl bytes::Buf) -> bytes::Bytes {
     let len = buf.remaining();
     buf.copy_to_bytes(len)
