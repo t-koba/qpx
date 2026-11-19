@@ -3,6 +3,101 @@ use crate::types::CommitLease;
 use crate::types::{BodyStreamWriteOptions, MetadataEncoder};
 use tokio::sync::mpsc;
 
+struct FailingReleaseLease {
+    token: String,
+    fence_key: String,
+}
+
+#[async_trait]
+impl CommitLease for FailingReleaseLease {
+    async fn release(&self) -> Result<()> {
+        anyhow::bail!("injected lease release failure")
+    }
+
+    fn fence_token(&self) -> Option<&str> {
+        Some(&self.token)
+    }
+
+    fn fence_key(&self) -> Option<&str> {
+        Some(&self.fence_key)
+    }
+}
+
+/// Records a successful authoritative index write, then fails lease release.
+struct PublishedIndexFailingReleaseBackend {
+    inner: Arc<dyn CacheBackend>,
+    publications: mpsc::UnboundedSender<String>,
+}
+
+#[async_trait]
+impl CacheBackend for PublishedIndexFailingReleaseBackend {
+    async fn lock_commit(&self, _ns: &str, primary: &str) -> Result<Option<Arc<dyn CommitLease>>> {
+        Ok(Some(Arc::new(FailingReleaseLease {
+            token: format!("writer-{primary}"),
+            fence_key: format!("commit-{primary}"),
+        })))
+    }
+
+    async fn get(&self, ns: &str, key: &str) -> Result<Option<Bytes>> {
+        self.inner.get(ns, key).await
+    }
+
+    async fn get_many(&self, ns: &str, keys: &[String]) -> Result<Vec<Option<Bytes>>> {
+        self.inner.get_many(ns, keys).await
+    }
+
+    async fn put(&self, ns: &str, key: &str, value: &[u8], ttl: u64) -> Result<()> {
+        self.inner.put(ns, key, value, ttl).await
+    }
+
+    async fn put_object_stream(
+        &self,
+        ns: &str,
+        key: &str,
+        body: Body,
+        max_body_bytes: usize,
+        body_read_timeout: Duration,
+        ttl_secs: u64,
+    ) -> Result<u64> {
+        self.inner
+            .put_object_stream(ns, key, body, max_body_bytes, body_read_timeout, ttl_secs)
+            .await
+    }
+
+    async fn put_fenced(
+        &self,
+        ns: &str,
+        key: &str,
+        value: &[u8],
+        ttl: u64,
+        token: Option<&str>,
+        fence_key: Option<&str>,
+    ) -> Result<()> {
+        let result = self
+            .inner
+            .put_fenced(ns, key, value, ttl, token, fence_key)
+            .await;
+        if result.is_ok() && key.starts_with("idx:") {
+            self.publications.send(key.to_owned()).unwrap();
+        }
+        result
+    }
+
+    async fn get_object_stream(
+        &self,
+        ns: &str,
+        key: &str,
+        expected: u64,
+        range: Option<(u64, u64)>,
+    ) -> Result<Option<CachedBodyStream>> {
+        self.inner.get_object_stream(ns, key, expected, range).await
+    }
+
+    async fn delete(&self, ns: &str, key: &str) -> Result<()> {
+        self.inner.delete(ns, key).await
+    }
+}
+
 // Observe completed backend operations, not elapsed time or scheduler yields.
 // Delegating put_response and decoded reads preserves disk's co-located format;
 // MockBackend exercises the split body/metadata publication used by HTTP/Redis.
@@ -256,6 +351,108 @@ async fn publish(
     };
     let (settled, ()) = tokio::join!(waiter.wait(Duration::from_secs(1)), store);
     assert!(settled, "writeback did not settle");
+}
+
+#[tokio::test]
+async fn writeback_keeps_published_generation_when_lease_release_fails() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let inner = Arc::new(MockBackend::new()) as Arc<dyn CacheBackend>;
+        let (publications, mut published) = mpsc::unbounded_channel();
+        let backend = Arc::new(PublishedIndexFailingReleaseBackend {
+            inner: inner.clone(),
+            publications,
+        });
+        let backends = HashMap::from([("b".to_owned(), backend.clone() as Arc<dyn CacheBackend>)]);
+        let request = make_get_request("/published-release-failure");
+        let key = CacheRequestKey::for_lookup(&request, "http")
+            .unwrap()
+            .unwrap();
+        let policy = policy();
+        let namespace = super::util::cache_namespace(&policy, "default");
+        let collapse = test_request_collapse();
+        let RequestCollapseJoin::Leader(leader) = collapse.begin(&key) else {
+            panic!("leader")
+        };
+        let RequestCollapseJoin::Follower(waiter) = collapse.begin(&key) else {
+            panic!("follower")
+        };
+        let admission = test_writeback_admission();
+        let store = async {
+            let response = maybe_store(
+                &request,
+                &key,
+                &policy,
+                qpx_core::http_message::Response::from_http(make_response(
+                    StatusCode::OK,
+                    "public, max-age=30",
+                    "published body",
+                )),
+                CacheStoreContext {
+                    timing: CacheStoreTiming {
+                        response_delay_secs: 0,
+                        body_read_timeout: Duration::from_secs(1),
+                        request_collapse_guard: Some(leader),
+                    },
+                    writeback_admission: &admission,
+                    backends: &backends,
+                },
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                qpx_http::body::to_bytes(response.into_head_and_body().1)
+                    .await
+                    .unwrap(),
+                "published body"
+            );
+        };
+        let (settled, ()) = tokio::join!(waiter.wait(Duration::from_secs(2)), store);
+        assert!(settled, "writeback did not settle");
+        assert_eq!(
+            published.try_recv().unwrap(),
+            index_storage_key(&key.primary_hash())
+        );
+        let index = load_variant_index(backend.as_ref(), namespace, &key.primary_hash())
+            .await
+            .unwrap();
+        assert_eq!(index.variants.len(), 1);
+        let generation = &index.variants[0];
+        let metadata = backend
+            .get_decoded_response_metadata_many(namespace, std::slice::from_ref(generation))
+            .await
+            .unwrap()
+            .remove(0)
+            .unwrap();
+        let stream = backend
+            .get_object_stream(
+                namespace,
+                &cache_body_storage_key(generation),
+                metadata.body_len,
+                None,
+            )
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            qpx_http::body::to_bytes(stream.body).await.unwrap(),
+            "published body"
+        );
+        let LookupOutcome::Hit(hit) =
+            lookup(&request, &key, &policy, &backends, &test_revalidations())
+                .await
+                .unwrap()
+        else {
+            panic!("published generation must remain a fresh hit")
+        };
+        assert_eq!(
+            qpx_http::body::to_bytes(hit.into_head_and_body().1)
+                .await
+                .unwrap(),
+            "published body"
+        );
+    })
+    .await
+    .expect("bounded writeback publication check");
 }
 
 #[tokio::test]

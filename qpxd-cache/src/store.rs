@@ -42,6 +42,37 @@ pub(crate) mod commit;
 use self::body::{expected_body_length, validate_body_length};
 
 const CACHE_WRITEBACK_MIRROR_CHANNEL_CAPACITY: usize = 128;
+
+/// Whether a staged generation is still unreferenced by any variant index.
+/// Once the index write may have taken effect, its objects must be left to
+/// their TTL: deleting them would leave readers a dangling index entry.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IndexPublication {
+    Unpublished,
+    Published,
+    Uncertain,
+}
+
+impl IndexPublication {
+    fn may_delete_staged(self) -> bool {
+        matches!(self, Self::Unpublished)
+    }
+}
+
+/// A failed fenced write cannot distinguish a refused mutation from an
+/// acknowledgement lost after the index was updated, so it is uncertain.
+fn track_index_publication(state: &mut IndexPublication, result: Result<()>) -> Result<()> {
+    match result {
+        Ok(()) => {
+            *state = IndexPublication::Published;
+            Ok(())
+        }
+        Err(err) => {
+            *state = IndexPublication::Uncertain;
+            Err(err)
+        }
+    }
+}
 pub struct CacheStoreTiming {
     pub response_delay_secs: u64,
     pub body_read_timeout: Duration,
@@ -279,6 +310,7 @@ impl CacheWriteback {
         // Stage the immutable object before taking publication coordination:
         // backend producers/writers must release their operation permits first.
         let staged = response_put.await;
+        let mut publication = IndexPublication::Unpublished;
         let committed: Result<()> = async {
             staged?;
             let obsolete = {
@@ -309,16 +341,19 @@ impl CacheWriteback {
                         // even when that canonical key was listed in an old index.
                         .filter(|key| key != &legacy_key)
                         .collect::<Vec<_>>();
-                    self.backend
-                        .put_fenced(
-                            &self.namespace,
-                            &index_storage_key(&self.storage_primary),
-                            &serde_json::to_vec(&index)?,
-                            self.ttl.max(INDEX_TTL_SECS),
-                            token,
-                            fence_key,
-                        )
-                        .await?;
+                    track_index_publication(
+                        &mut publication,
+                        self.backend
+                            .put_fenced(
+                                &self.namespace,
+                                &index_storage_key(&self.storage_primary),
+                                &serde_json::to_vec(&index)?,
+                                self.ttl.max(INDEX_TTL_SECS),
+                                token,
+                                fence_key,
+                            )
+                            .await,
+                    )?;
                     Ok::<_, anyhow::Error>(obsolete)
                 }
                 .await;
@@ -333,11 +368,13 @@ impl CacheWriteback {
             Ok(())
         }
         .await;
-        if let Err(err) = committed {
+        // Lease validate/release and acknowledgement errors are independent of
+        // whether the index was updated. Only a definitely unpublished staged
+        // generation can be removed; a published or uncertain one expires by TTL.
+        if committed.is_err() && publication.may_delete_staged() {
             invalidate_revalidated(self.backend.as_ref(), &self.namespace, &self.variant_key).await;
-            return Err(err);
         }
-        Ok(())
+        committed
     }
 }
 
@@ -661,6 +698,7 @@ async fn migrate_revalidated_legacy(
             Box::new(move |_| Ok(payload)),
         )
         .await;
+    let mut publication = IndexPublication::Unpublished;
     let committed = async {
         staged?;
         let committed_pair: (bool, Vec<String>) = {
@@ -678,16 +716,19 @@ async fn migrate_revalidated_legacy(
                     // No newer generation can appear between this check and
                     // publication: invalidation holds the same per-primary lock.
                     let obsolete = upsert_variant_with_cap(&mut index, &generation);
-                    backend
-                        .put_fenced(
-                            namespace,
-                            &index_storage_key(primary),
-                            &serde_json::to_vec(&index)?,
-                            ttl.max(INDEX_TTL_SECS),
-                            token,
-                            fence_key,
-                        )
-                        .await?;
+                    track_index_publication(
+                        &mut publication,
+                        backend
+                            .put_fenced(
+                                namespace,
+                                &index_storage_key(primary),
+                                &serde_json::to_vec(&index)?,
+                                ttl.max(INDEX_TTL_SECS),
+                                token,
+                                fence_key,
+                            )
+                            .await,
+                    )?;
                     Ok::<_, anyhow::Error>((true, obsolete))
                 } else {
                     Ok((false, Vec::new()))
@@ -715,9 +756,10 @@ async fn migrate_revalidated_legacy(
         Ok::<_, anyhow::Error>(true)
     }
     .await;
-    if !matches!(committed, Ok(true)) {
-        // A losing or failed staged generation is never left until TTL unless
-        // the backend itself refuses cleanup.
+    if !matches!(committed, Ok(true)) && publication.may_delete_staged() {
+        // A losing or definitely unpublished staged generation is never left
+        // until TTL. A published or uncertain one stays: deleting its objects
+        // would break the index that may already reference it.
         invalidate_revalidated(backend, namespace, &generation).await;
     }
     committed.map(|_| ())
