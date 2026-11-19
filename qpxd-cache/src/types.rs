@@ -48,6 +48,18 @@ pub trait CommitLease: Send + Sync {
     async fn validate(&self) -> Result<()> {
         Ok(())
     }
+
+    /// Opaque holder token that a remote backend must check atomically with
+    /// each authoritative mutation. `None` means process-local coordination.
+    fn fence_token(&self) -> Option<&str> {
+        None
+    }
+
+    /// Backend-specific coordination key to compare inside the same atomic
+    /// mutation. Redis uses it for the server-side lease key; HTTP does not.
+    fn fence_key(&self) -> Option<&str> {
+        None
+    }
 }
 
 /// Bounds cache writeback work so slow durable backends cannot exhaust runtime
@@ -270,6 +282,44 @@ pub trait CacheBackend: Send + Sync {
     /// object, so independent eviction cannot make the response discoverable.
     /// An error must prevent publication of the replacement's variant index.
     async fn retire_response_metadata(&self, namespace: &str, key: &str) -> Result<()> {
+        self.delete(namespace, key).await
+    }
+
+    /// Authoritative index/metadata publication guarded by the current writer
+    /// lease. Backends with a remote lease MUST override this so the token is
+    /// checked in the same backend operation as the mutation; wrappers must
+    /// delegate it. The default is only for process-local backends.
+    async fn put_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl_secs: u64,
+        _token: Option<&str>,
+        _fence_key: Option<&str>,
+    ) -> Result<()> {
+        self.put(namespace, key, value, ttl_secs).await
+    }
+
+    /// Fenced counterpart of `retire_response_metadata`.
+    async fn retire_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        _token: Option<&str>,
+        _fence_key: Option<&str>,
+    ) -> Result<()> {
+        self.retire_response_metadata(namespace, key).await
+    }
+
+    /// Fenced counterpart of `delete`, used for the authoritative index.
+    async fn delete_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        _token: Option<&str>,
+        _fence_key: Option<&str>,
+    ) -> Result<()> {
         self.delete(namespace, key).await
     }
 

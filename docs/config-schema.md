@@ -50,18 +50,25 @@ that setting; `writer_mode: shared` stays rejected for them.
 Remote leases are bounded by `writer_lease_ttl_ms` (default `5000`, must be
 greater than zero). While a writer holds a lease it renews that lease every
 third of the TTL, so slow commits cannot lose ownership simply by running
-longer than one bound. A failed renewal revokes the lease in-process; both the
-publication ownership re-check before the critical section and the final check
-after it fail the commit rather than publishing with a lost lease. Choose a TTL
-long enough to tolerate normal backend latency between renewals.
+longer than one bound. A failed renewal revokes the lease in-process. The
+authoritative variant-index and metadata mutations carry the holder token
+inside the same backend operation: Redis runs a Lua `EVAL` that checks the lease
+key and applies `SET`/`DEL` atomically, and the HTTP gateway must check
+`X-Qpx-Writer-Lease` in the same object `PUT`/`DELETE`. A lease lost between the
+pre-check and the mutation therefore cannot overwrite a successor's published
+state. The pre- and post-publication ownership checks remain as early aborts and
+diagnostics; they are not the fencing mechanism. Choose a TTL long enough to
+tolerate normal backend latency between renewals.
 
 - `redis`: the lease is a namespace-wide key `qpx:writer-lock:<namespace>` created
   with `SET NX PX <writer_lease_ttl_ms>` and released with a token-checked Lua
   compare-and-delete. A crashed writer's key expires within the TTL instead of
-  blocking the namespace forever. Publication re-reads the key with `GET` and
-  aborts if the token changed or expired. A competing writer waits for the
-  configured `timeout_ms` (at least 250 ms) and then fails the commit rather
-  than writing unguarded. Redis `SET` must support `NX` and `PX`.
+  blocking the namespace forever. Authoritative `SET` and `DEL` of index and
+  metadata objects use `EVAL` scripts that compare the lease key to the holder
+  token and apply the mutation only on a match; a stale writer cannot alter the
+  successor's objects. A competing writer waits for the configured `timeout_ms`
+  (at least 250 ms) and then fails the commit rather than writing unguarded.
+  Redis `SET` must support `NX` and `PX`, and the server must allow `EVAL`.
 - `http`: the gateway must implement `PUT /v1/cache/<namespace>/_writer_lock`
   with `If-None-Match: *`, a plain-text lease token body,
   `X-Qpx-Writer-Lease-Ttl-Ms` (the gateway expires the lease after that bound),
@@ -73,9 +80,13 @@ long enough to tolerate normal backend latency between renewals.
   token with `200 OK` (or `404 Not Found` when unheld); and
   `DELETE /v1/cache/<namespace>/_writer_lock` with `If-Match: "<token>"`,
   returning `204 No Content` (or `200 OK`) only when the token matches. Other
-  responses fail the commit closed with a clear error. Conditional
-  create/delete must be atomic across clients; a gateway that merely accepts
-  every PUT must not be used for cache writes. A gateway that returns `404` or
+  responses fail the commit closed with a clear error. On authoritative object
+  `PUT` and `DELETE` the gateway must also receive `X-Qpx-Writer-Lease:
+  <token>`, compare it with the live lease value, and apply the object mutation
+  only on a match, in one atomic gateway operation; reject a missing or stale
+  token with `409 Conflict`. Conditional create/delete and these fenced object
+  mutations must be atomic across clients; a gateway that merely accepts every
+  PUT must not be used for cache writes. A gateway that returns `404` or
   `405` for the lease PUT is treated as a legacy backend only when
   `allow_local_only_remote_coordination` is explicitly set to `true` on that
   backend (default `false`): writes then continue with process-local
@@ -93,8 +104,9 @@ releases that exact token (`If-Match` DELETE / token-checked Lua compare-and-del
 before reporting the error; if its acquisition future is cancelled before the
 reply is seen, the same fenced release is attempted from the lease's drop path.
 Ordinary contention (`412` / `SET NX` false) only retries and never deletes
-another client's token, and a stale holder cannot release or publish under a
-new owner's lease. Contention errors name the namespace and lease key/URI, and
+another client's token, and a stale holder cannot release, retire, or publish
+under a new owner's lease. Contention errors name the namespace and lease
+key/URI, and
 an operator can inspect a stuck lease with `GET` (HTTP) or `GET qpx:writer-lock:<namespace>`
 (Redis); it clears itself within the configured TTL. A live client that lost
 its lease fails the commit at the publication re-check.

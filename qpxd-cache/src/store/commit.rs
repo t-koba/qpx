@@ -51,6 +51,15 @@ impl CommitGuard {
         Ok(())
     }
 
+    /// Token and coordination key that authoritative backend mutations must
+    /// check atomically. Both are absent only for process-local coordination.
+    pub(crate) fn fence(&self) -> (Option<&str>, Option<&str>) {
+        match self.backend_lease.as_ref() {
+            Some(lease) => (lease.fence_token(), lease.fence_key()),
+            None => (None, None),
+        }
+    }
+
     /// Releases the backend-enforced half of the lease before the process-local
     /// guard. The lease implementation also releases on drop, so cancellation
     /// never strands remote coordination.

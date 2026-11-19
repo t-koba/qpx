@@ -98,6 +98,19 @@ impl HttpCacheBackend {
         Ok(uri.parse()?)
     }
 
+    /// Gateways must compare this token with the live writer-lease value in
+    /// the same operation that applies an object PUT/DELETE. A stale writer
+    /// cannot pass the check after its lease has been reclaimed.
+    fn apply_fence_header(&self, req: &mut OwnerRequest<Body>, token: Option<&str>) -> Result<()> {
+        if let Some(token) = token {
+            req.headers_mut().insert(
+                ord("x-qpx-writer-lease"),
+                http::HeaderValue::from_str(token)?,
+            );
+        }
+        Ok(())
+    }
+
     fn batch_get_uri(&self, namespace: &str) -> Result<Uri> {
         let uri = format!("{}/v1/cache/{}/_batch_get", self.endpoint, namespace);
         Ok(uri.parse()?)
@@ -529,6 +542,10 @@ async fn release_http_lease(backend: &HttpCacheBackend, uri: &Uri, token: &str) 
 
 #[async_trait]
 impl CommitLease for HttpCommitLease {
+    fn fence_token(&self) -> Option<&str> {
+        Some(&self.token)
+    }
+
     async fn release(&self) -> Result<()> {
         self.stop.notify_one();
         self.release_request().await?;
@@ -800,6 +817,19 @@ impl CacheBackend for HttpCacheBackend {
     }
 
     async fn put(&self, namespace: &str, key: &str, value: &[u8], ttl_secs: u64) -> Result<()> {
+        self.put_fenced(namespace, key, value, ttl_secs, None, None)
+            .await
+    }
+
+    async fn put_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl_secs: u64,
+        token: Option<&str>,
+        _fence_key: Option<&str>,
+    ) -> Result<()> {
         if value.len() > self.max_object_bytes {
             return Err(anyhow!(
                 "http cache put payload too large: {} > {}",
@@ -818,6 +848,7 @@ impl CacheBackend for HttpCacheBackend {
             http::HeaderValue::from_str(ttl_secs.to_string().as_str())?,
         );
         self.apply_common_headers(&mut req);
+        self.apply_fence_header(&mut req, token)?;
 
         let status = self.send_status(req).await?;
         if status != StatusCode::OK && status != StatusCode::CREATED {
@@ -897,9 +928,30 @@ impl CacheBackend for HttpCacheBackend {
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
+        self.delete_fenced(namespace, key, None, None).await
+    }
+
+    async fn retire_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        token: Option<&str>,
+        fence_key: Option<&str>,
+    ) -> Result<()> {
+        self.delete_fenced(namespace, key, token, fence_key).await
+    }
+
+    async fn delete_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        token: Option<&str>,
+        _fence_key: Option<&str>,
+    ) -> Result<()> {
         let uri = self.object_uri(namespace, key)?;
         let mut req = owner_request(Method::DELETE, uri, Body::empty());
         self.apply_common_headers(&mut req);
+        self.apply_fence_header(&mut req, token)?;
         let status = self.send_status(req).await?;
         if status != StatusCode::OK
             && status != StatusCode::NO_CONTENT

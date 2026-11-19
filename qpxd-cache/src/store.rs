@@ -289,6 +289,7 @@ impl CacheWriteback {
                 )
                 .await?;
                 commit.validate().await?;
+                let (token, fence_key) = commit.fence();
                 let result = async {
                     let mut index = load_variant_index(
                         self.backend.as_ref(),
@@ -299,7 +300,7 @@ impl CacheWriteback {
                     let legacy_key = variant_storage_key(&self.storage_primary, &[]);
                     if legacy_key != self.variant_key {
                         self.backend
-                            .retire_response_metadata(&self.namespace, &legacy_key)
+                            .retire_fenced(&self.namespace, &legacy_key, token, fence_key)
                             .await?;
                     }
                     let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key)
@@ -309,11 +310,13 @@ impl CacheWriteback {
                         .filter(|key| key != &legacy_key)
                         .collect::<Vec<_>>();
                     self.backend
-                        .put(
+                        .put_fenced(
                             &self.namespace,
                             &index_storage_key(&self.storage_primary),
                             &serde_json::to_vec(&index)?,
                             self.ttl.max(INDEX_TTL_SECS),
+                            token,
+                            fence_key,
                         )
                         .await?;
                     Ok::<_, anyhow::Error>(obsolete)
@@ -663,23 +666,26 @@ async fn migrate_revalidated_legacy(
         let committed_pair: (bool, Vec<String>) = {
             let commit = commit::lock(backend, namespace, primary).await?;
             commit.validate().await?;
+            let (token, fence_key) = commit.fence();
             let result = async {
                 if let Some(mut index) =
                     legacy_refresh_index(backend, namespace, variant_key, primary, &legacy.original)
                         .await?
                 {
                     backend
-                        .retire_response_metadata(namespace, variant_key)
+                        .retire_fenced(namespace, variant_key, token, fence_key)
                         .await?;
                     // No newer generation can appear between this check and
                     // publication: invalidation holds the same per-primary lock.
                     let obsolete = upsert_variant_with_cap(&mut index, &generation);
                     backend
-                        .put(
+                        .put_fenced(
                             namespace,
                             &index_storage_key(primary),
                             &serde_json::to_vec(&index)?,
                             ttl.max(INDEX_TTL_SECS),
+                            token,
+                            fence_key,
                         )
                         .await?;
                     Ok::<_, anyhow::Error>((true, obsolete))

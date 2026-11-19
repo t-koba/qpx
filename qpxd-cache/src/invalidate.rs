@@ -82,6 +82,7 @@ pub async fn invalidate_primary(
     let (variants, default_variant) = {
         let commit = crate::store::commit::lock(backend, namespace, primary).await?;
         commit.validate().await?;
+        let (token, fence_key) = commit.fence();
         let index = load_variant_index(backend, namespace, primary).await?;
         let default_variant = variant_storage_key(primary, &[]);
         // Do not claim invalidation if the canonical fallback could not be
@@ -89,10 +90,15 @@ pub async fn invalidate_primary(
         // lock only with an explicit error, so an in-flight 304 cannot race a
         // falsely successful invalidation.
         backend
-            .retire_response_metadata(namespace, default_variant.as_str())
+            .retire_fenced(namespace, default_variant.as_str(), token, fence_key)
             .await?;
         let deleted = backend
-            .delete(namespace, index_storage_key(primary).as_str())
+            .delete_fenced(
+                namespace,
+                index_storage_key(primary).as_str(),
+                token,
+                fence_key,
+            )
             .await;
         if commit.has_backend_lease() {
             deleted?;

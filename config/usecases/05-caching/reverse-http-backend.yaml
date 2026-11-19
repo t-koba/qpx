@@ -6,7 +6,8 @@ caches:
   endpoint: http://127.0.0.1:19080
   # A gateway used for cache writes must implement the writer-lease contract
   # (PUT/GET/DELETE /v1/cache/<namespace>/_writer_lock with conditional
-  # create, renewal and release). See docs/config-schema.md. Without it cache
+  # create, renewal and release, plus X-Qpx-Writer-Lease checks on object
+  # PUT/DELETE). See docs/config-schema.md. Without it cache
   # writes fail closed; do not enable allow_local_only_remote_coordination
   # unless exactly one process ever writes this namespace.
   timeout_ms: 1500

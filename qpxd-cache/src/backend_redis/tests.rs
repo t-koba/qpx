@@ -339,6 +339,40 @@ async fn spawn_writer_lease_server_with(
                             }
                         }
                         Some("SELECT") => "+OK\r\n".to_string(),
+                        Some("EVAL")
+                            if parts.get(2).map(String::as_str) == Some("2")
+                                && parts.get(1).is_some_and(|s| s.contains("qpx:fenced-put")) =>
+                        {
+                            let mut locks = locks.lock().await;
+                            {
+                                let mut expiries = expiries.lock().await;
+                                if expiries
+                                    .get(&parts[3])
+                                    .is_some_and(|at| *at <= std::time::Instant::now())
+                                {
+                                    locks.remove(&parts[3]);
+                                    expiries.remove(&parts[3]);
+                                }
+                            }
+                            let held = locks.get(&parts[3]).map(String::as_str) == Some(&parts[5]);
+                            if held {
+                                locks.insert(parts[4].clone(), parts[6].clone());
+                            }
+                            format!(":{}\r\n", u8::from(held))
+                        }
+                        Some("EVAL")
+                            if parts.get(2).map(String::as_str) == Some("2")
+                                && parts
+                                    .get(1)
+                                    .is_some_and(|s| s.contains("qpx:fenced-delete")) =>
+                        {
+                            let mut locks = locks.lock().await;
+                            let held = locks.get(&parts[3]).map(String::as_str) == Some(&parts[5]);
+                            if held {
+                                locks.remove(&parts[4]);
+                            }
+                            format!(":{}\r\n", u8::from(held))
+                        }
                         Some("EVAL") if parts.get(1).is_some_and(|s| s.contains("pexpire")) => {
                             let locks = locks.lock().await;
                             let ttl_ms: u64 = parts[5].parse().expect("PX ttl");
@@ -530,6 +564,75 @@ async fn cancelled_redis_acquisition_releases_the_applied_lease() {
     .expect("acquisition")
     .expect("lease");
     held.release().await.expect("second client releases");
+    server.abort();
+}
+
+#[tokio::test]
+async fn redis_fenced_publication_cannot_overwrite_the_successors_index() {
+    let (endpoint, locks, server) = spawn_writer_lease_server().await;
+    let backend = RedisCacheBackend::new(cfg(&endpoint)).expect("backend");
+    let lease = backend
+        .lock_commit("ns", "primary")
+        .await
+        .expect("lease")
+        .expect("backend lease");
+    let (token, fence_key) = (lease.fence_token().unwrap(), lease.fence_key().unwrap());
+    let index_key = "index";
+    backend
+        .put_fenced("ns", index_key, b"first", 60, Some(token), Some(fence_key))
+        .await
+        .expect("current writer publishes");
+
+    // Redis reclaimed the lease and a successor published a newer index.
+    locks
+        .lock()
+        .await
+        .insert(fence_key.to_string(), "successor".to_string());
+    backend
+        .put_fenced(
+            "ns",
+            index_key,
+            b"successor",
+            60,
+            Some("successor"),
+            Some(fence_key),
+        )
+        .await
+        .expect("successor publishes");
+
+    let err = backend
+        .put_fenced("ns", index_key, b"stale", 60, Some(token), Some(fence_key))
+        .await
+        .expect_err("stale writer must be fenced at the mutation");
+    assert!(
+        err.to_string()
+            .contains("lost before the authoritative mutation"),
+        "{err}"
+    );
+    assert_eq!(
+        locks
+            .lock()
+            .await
+            .get("qpx:cache-a:ns:index")
+            .map(String::as_str),
+        Some("successor"),
+        "stale writer must not change the published index"
+    );
+
+    // Retirement is fenced by the same server-side check.
+    backend
+        .delete_fenced("ns", index_key, Some(token), Some(fence_key))
+        .await
+        .expect_err("stale writer cannot retire the successor's index");
+    assert_eq!(
+        locks
+            .lock()
+            .await
+            .get("qpx:cache-a:ns:index")
+            .map(String::as_str),
+        Some("successor")
+    );
+    lease.release().await.expect("release");
     server.abort();
 }
 

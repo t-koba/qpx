@@ -342,7 +342,40 @@ async fn spawn_lease_gateway_with(
                     let method = parts.next().unwrap_or("").to_string();
                     let path = parts.next().unwrap_or("").to_string();
                     let reply = if !path.ends_with("/_writer_lock") {
-                        "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_string()
+                        // Object mutations must carry the live lease token.
+                        // The check and the map update are one gateway
+                        // operation, so a stale holder cannot win a race.
+                        let namespace = path
+                            .strip_prefix("/v1/cache/")
+                            .and_then(|rest| rest.split('/').next())
+                            .unwrap_or("");
+                        let lease_path = format!("/v1/cache/{namespace}/_writer_lock");
+                        let presented = headers.get("x-qpx-writer-lease").map(String::as_str);
+                        let holder = leases.lock().expect("lease map").get(&lease_path).cloned();
+                        let authorized = holder.is_some() && presented == holder.as_deref();
+                        match method.as_str() {
+                            "PUT" if authorized => {
+                                leases.lock().expect("lease map").insert(
+                                    path.clone(),
+                                    String::from_utf8_lossy(&body).into_owned(),
+                                );
+                                "HTTP/1.1 200 OK\r\ncontent-length: 0\r\n\r\n".to_string()
+                            }
+                            "DELETE" if authorized => {
+                                leases.lock().expect("lease map").remove(&path);
+                                "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string()
+                            }
+                            "GET" => match leases.lock().expect("lease map").get(&path) {
+                                Some(value) => format!(
+                                    "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
+                                    value.len(),
+                                    value
+                                ),
+                                None => "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\n\r\n"
+                                    .to_string(),
+                            },
+                            _ => "HTTP/1.1 409 Conflict\r\ncontent-length: 0\r\n\r\n".to_string(),
+                        }
                     } else {
                         let mut leases = leases.lock().expect("lease map");
                         {
@@ -669,6 +702,61 @@ async fn cancelled_http_acquisition_releases_the_applied_lease() {
     .expect("acquisition")
     .expect("lease");
     held.release().await.expect("second client releases");
+    server.abort();
+}
+
+#[tokio::test]
+async fn http_fenced_publication_cannot_overwrite_the_successors_index() {
+    let (endpoint, leases, server) = spawn_lease_gateway().await;
+    let backend = backend_at(endpoint, 500, "http");
+    let lease = backend
+        .lock_commit("ns", "primary")
+        .await
+        .expect("lease")
+        .expect("backend lease");
+    let token = lease.fence_token().expect("holder token").to_string();
+    let index_path = "/v1/cache/ns/index";
+    backend
+        .put_fenced("ns", "index", b"first", 60, Some(&token), None)
+        .await
+        .expect("current writer publishes");
+
+    leases.lock().expect("lease map").insert(
+        "/v1/cache/ns/_writer_lock".to_string(),
+        "successor".to_string(),
+    );
+    backend
+        .put_fenced("ns", "index", b"successor", 60, Some("successor"), None)
+        .await
+        .expect("successor publishes");
+
+    let err = backend
+        .put_fenced("ns", "index", b"stale", 60, Some(&token), None)
+        .await
+        .expect_err("stale writer must be fenced by the gateway");
+    assert!(err.to_string().contains("409"), "{err}");
+    assert_eq!(
+        leases
+            .lock()
+            .expect("map")
+            .get(index_path)
+            .map(String::as_str),
+        Some("successor"),
+        "stale writer must not change the published index"
+    );
+
+    backend
+        .delete_fenced("ns", "index", Some(&token), None)
+        .await
+        .expect_err("stale writer cannot retire the successor's index");
+    assert_eq!(
+        leases
+            .lock()
+            .expect("map")
+            .get(index_path)
+            .map(String::as_str),
+        Some("successor")
+    );
     server.abort();
 }
 

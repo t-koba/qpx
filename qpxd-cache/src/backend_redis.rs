@@ -323,6 +323,14 @@ async fn renew_redis_lease(
 
 #[async_trait]
 impl CommitLease for RedisCommitLease {
+    fn fence_token(&self) -> Option<&str> {
+        Some(&self.token)
+    }
+
+    fn fence_key(&self) -> Option<&str> {
+        Some(&self.key)
+    }
+
     async fn release(&self) -> Result<()> {
         self.stop.notify_one();
         release_redis_lease(self.client.clone(), self.key.clone(), self.token.clone()).await?;
@@ -381,6 +389,67 @@ impl Drop for RedisCommitLease {
             });
         }
     }
+}
+
+/// Atomically applies a mutation only while the writer-lease key still holds
+/// the caller's token. Validation and publication are one Redis script, so a
+/// lease lost between them cannot overwrite the successor's state.
+struct FencedMutation<'a> {
+    script: &'a [u8],
+    namespace: &'a str,
+    key: &'a str,
+    token: &'a str,
+    fence_key: &'a str,
+    value: Option<&'a [u8]>,
+    ttl_secs: Option<u64>,
+}
+
+async fn fenced_redis_mutation(
+    backend: &RedisCacheBackend,
+    mutation: FencedMutation<'_>,
+) -> Result<()> {
+    let _permit = backend
+        .active
+        .clone()
+        .acquire_owned()
+        .await
+        .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
+    let mut parts = vec![
+        b"EVAL".to_vec(),
+        mutation.script.to_vec(),
+        b"2".to_vec(),
+        mutation.fence_key.as_bytes().to_vec(),
+        backend
+            .full_key(mutation.namespace, mutation.key)
+            .into_bytes(),
+        mutation.token.as_bytes().to_vec(),
+    ];
+    if let Some(value) = mutation.value {
+        parts.push(value.to_vec());
+    }
+    if let Some(ttl_secs) = mutation.ttl_secs {
+        parts.push(ttl_secs.to_string().into_bytes());
+    }
+    let cmd = encode_command(&parts);
+    let mut stream = backend.client.checkout().await?;
+    let result = async {
+        timeout(backend.client.timeout, stream.stream.write_all(&cmd)).await??;
+        let applied = read_integer(&mut stream, backend.client.timeout).await?;
+        if applied == 1 {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "redis cache writer lease {} was lost before the authoritative mutation (script returned {})",
+                mutation.token,
+                applied
+            ))
+        }
+    }
+    .await;
+    if result.is_ok() {
+        backend.client.recycle(stream).await;
+    }
+    result
 }
 
 #[async_trait]
@@ -537,6 +606,87 @@ impl CacheBackend for RedisCacheBackend {
             body,
             producer_done,
         )))
+    }
+
+    async fn put_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        value: &[u8],
+        ttl_secs: u64,
+        token: Option<&str>,
+        fence_key: Option<&str>,
+    ) -> Result<()> {
+        const SCRIPT: &[u8] = b"-- qpx:fenced-put\nif redis.call('get', KEYS[1]) == ARGV[1] then redis.call('set', KEYS[2], ARGV[2], 'EX', ARGV[3]) return 1 else return 0 end";
+        let (token, fence_key) = match (token, fence_key) {
+            (Some(token), Some(fence_key)) => (token, fence_key),
+            _ => {
+                return Err(anyhow!(
+                    "redis cache fenced put requires the current writer lease"
+                ));
+            }
+        };
+        if value.len() > self.max_object_bytes {
+            return Err(anyhow!(
+                "redis cache put payload too large: {} > {}",
+                value.len(),
+                self.max_object_bytes
+            ));
+        }
+        fenced_redis_mutation(
+            self,
+            FencedMutation {
+                script: SCRIPT,
+                namespace,
+                key,
+                token,
+                fence_key,
+                value: Some(value),
+                ttl_secs: Some(ttl_secs),
+            },
+        )
+        .await
+    }
+
+    async fn retire_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        token: Option<&str>,
+        fence_key: Option<&str>,
+    ) -> Result<()> {
+        self.delete_fenced(namespace, key, token, fence_key).await
+    }
+
+    async fn delete_fenced(
+        &self,
+        namespace: &str,
+        key: &str,
+        token: Option<&str>,
+        fence_key: Option<&str>,
+    ) -> Result<()> {
+        const SCRIPT: &[u8] = b"-- qpx:fenced-delete\nif redis.call('get', KEYS[1]) == ARGV[1] then redis.call('del', KEYS[2]) return 1 else return 0 end";
+        let (token, fence_key) = match (token, fence_key) {
+            (Some(token), Some(fence_key)) => (token, fence_key),
+            _ => {
+                return Err(anyhow!(
+                    "redis cache fenced delete requires the current writer lease"
+                ));
+            }
+        };
+        fenced_redis_mutation(
+            self,
+            FencedMutation {
+                script: SCRIPT,
+                namespace,
+                key,
+                token,
+                fence_key,
+                value: None,
+                ttl_secs: None,
+            },
+        )
+        .await
     }
 
     async fn put(&self, namespace: &str, key: &str, value: &[u8], ttl_secs: u64) -> Result<()> {
