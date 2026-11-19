@@ -303,8 +303,16 @@ async fn renew_redis_lease(
     let mut stream = client.checkout().await?;
     let result = async {
         timeout(client.timeout, stream.stream.write_all(&cmd)).await??;
-        read_integer(&mut stream, client.timeout).await?;
-        Ok(())
+        let renewed = read_integer(&mut stream, client.timeout).await?;
+        if renewed == 1 {
+            Ok(())
+        } else {
+            Err(anyhow!(
+                "redis cache writer lease for {} was not renewed (script returned {})",
+                token,
+                renewed
+            ))
+        }
     }
     .await;
     if result.is_ok() {

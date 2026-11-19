@@ -603,3 +603,27 @@ async fn redis_validate_rejects_a_lease_whose_heartbeat_was_revoked() {
     assert!(err.to_string().contains("was not renewed"), "{err}");
     drop(held);
 }
+
+#[tokio::test]
+async fn redis_lost_lease_revokes_on_renewal_result_zero() {
+    let (endpoint, locks, server) = spawn_writer_lease_server().await;
+    let backend = RedisCacheBackend::new(cfg_with_ttl(&endpoint, 40)).expect("backend");
+    let held = RedisCommitLease::acquire(backend.client.clone(), "ns")
+        .await
+        .expect("lease");
+
+    // Another actor reclaims the key. The next conditional renewal returns 0,
+    // which must revoke the holder without manually setting the flag.
+    locks
+        .lock()
+        .await
+        .insert("qpx:writer-lock:ns".to_string(), "reclaimer".to_string());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let err = held
+        .validate()
+        .await
+        .expect_err("lost lease cannot publish");
+    assert!(err.to_string().contains("was not renewed"), "{err}");
+    drop(held);
+    server.abort();
+}
