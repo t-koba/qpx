@@ -231,6 +231,23 @@ Security-focused CI includes:
 - Short `cargo-fuzz` jobs for shared-memory ring operations, PROXY v2 parsing,
   HTTP/1 request-head parsing, QPACK decoding, and TLS ClientHello sniffing.
 
+### Dependency cooldown
+
+`.cargo/config.toml` sets `[registry] global-min-publish-age = "3 days"`, so
+Cargo 1.100+ skips registry versions published more recently than three days
+when resolving dependencies. This pre-resolution control complements the
+`cargo audit`/`cargo deny` gate; the committed `Cargo.lock` and `--locked
+--offline` CI builds are unaffected. Cargo older than 1.100 warns and ignores
+the key.
+
+For an urgent patch to a version still inside the window, override the check
+for that one update. The resulting version stays in `Cargo.lock` until a later
+`cargo update` re-resolves it:
+
+```sh
+CARGO_RESOLVER_INCOMPATIBLE_PUBLISH_AGE=allow cargo update -p <crate> --precise <version>
+```
+
 ## Helper Scripts
 
 - `scripts/check-config-samples.sh`: validates sample configs.
