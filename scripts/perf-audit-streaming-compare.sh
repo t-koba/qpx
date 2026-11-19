@@ -1111,6 +1111,7 @@ for key in sorted(expected | reference_keys):
         "benchmark_schema_version": 9,
         "sample_extremes": {
             "p99_chunk_gap_ms": extremes(records, "p99_chunk_gap_ms"),
+            "max_chunk_gap_ms": extremes(records, "max_chunk_gap_ms"),
             "requests_per_total_cpu_second": extremes(
                 records, "requests_per_total_cpu_second"
             ),
@@ -1134,6 +1135,7 @@ for key in sorted(expected | reference_keys):
                 records, "requests_per_total_cpu_second"
             ),
             "p99_chunk_gap_ms_ratio": spread(records, "p99_chunk_gap_ms"),
+            "max_chunk_gap_ms_ratio": spread(records, "max_chunk_gap_ms"),
             "scheduler_queue_delay_us_per_transfer_ratio": spread_or_one(
                 records, "scheduler_queue_delay_us_per_transfer"
             ),

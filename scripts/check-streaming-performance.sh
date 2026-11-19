@@ -270,10 +270,15 @@ with open(JSONL_PATH, "r", encoding="utf-8") as handle:
             "requests_per_cpu_second_ratio",
             "requests_per_total_cpu_second_ratio",
             "p99_chunk_gap_ms_ratio",
+            "max_chunk_gap_ms_ratio",
             "scheduler_queue_delay_us_per_transfer_ratio",
         ):
             if nested_number(record, "sample_spread", field) < 1.0:
                 fail(f"streaming performance record for {key} has an invalid {field}")
+        # The maximum chunk gap is a tail objective too, so its observed
+        # range must be present and agree with its published spread even
+        # before a spread breach asks the checker to judge by that range.
+        validated_extremes(record, "max_chunk_gap_ms")
         records[key] = record
 
 for read_mode in ("fast", "slow"):
@@ -417,6 +422,10 @@ fast_objective_noise = {
         fast_effective,
         nested_number(qpx_fast, "sample_spread", "p99_chunk_gap_ms_ratio"),
     ),
+    "maximum gap ratio": tail_band(
+        fast_effective,
+        nested_number(qpx_fast, "sample_spread", "max_chunk_gap_ms_ratio"),
+    ),
 }
 frontier_ratio = ratio_limit(stability_objectives, "competitive_frontier_total_ratio")
 stability_records = {
@@ -517,6 +526,10 @@ slow_objective_noise = {
         slow_effective,
         nested_number(qpx_slow, "sample_spread", "p99_chunk_gap_ms_ratio"),
     ),
+    "max_gap_ratio": tail_band(
+        slow_effective,
+        nested_number(qpx_slow, "sample_spread", "max_chunk_gap_ms_ratio"),
+    ),
 }
 metric_spread_cap = ratio_limit(
     stability_objectives, "max_qpx_metric_sample_spread_ratio"
@@ -553,6 +566,16 @@ tail_objectives = (
         False,
     ),
     (
+        "fast",
+        "maximum gap ratio",
+        "max_chunk_gap_ms",
+        qpx_fast,
+        leader,
+        ratio_limit(fast_objectives, "max_gap_ratio"),
+        fast_objective_noise["maximum gap ratio"],
+        False,
+    ),
+    (
         "slow",
         "max_p99_gap_ratio",
         "p99_chunk_gap_ms",
@@ -560,6 +583,16 @@ tail_objectives = (
         direct_slow,
         ratio_limit(slow_objectives, "max_p99_gap_ratio"),
         slow_objective_noise["max_p99_gap_ratio"],
+        False,
+    ),
+    (
+        "slow",
+        "max_gap_ratio",
+        "max_chunk_gap_ms",
+        qpx_slow,
+        direct_slow,
+        ratio_limit(slow_objectives, "max_gap_ratio"),
+        slow_objective_noise["max_gap_ratio"],
         False,
     ),
 )

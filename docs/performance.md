@@ -520,15 +520,15 @@ mandatory for qpx, direct backend, the winning external proxy, and every externa
 proxy within 25% of the leader. A distant unstable implementation remains visible
 in the artifact but cannot invalidate an otherwise stable competitive comparison.
 
-The p99 gap, scheduler queue-delay and CPU-rate spreads are judged against the
-observed range the lane publishes for them beside their spread: the
-`sample_extremes` field of the record, which the record schema version 7
-introduced and which version 8 extended with the CPU rate. Their objectives
-are ratios against a reference, so the movement only makes the measurement
-unjudgeable when it can change the verdict. The worst end of the objective -
-qpx's largest observed value against the reference's smallest, or qpx's
-smallest against the reference's largest for a ratio that is better when it is
-larger - is compared with the objective's decisive bar: the objective times
+The p99 gap, maximum chunk gap, scheduler queue-delay and CPU-rate spreads are
+judged against the observed range the lane publishes for them beside their
+spread: the `sample_extremes` field of the record, which the record schema
+version 7 introduced and which version 8 extended with the CPU rate. Their
+objectives are ratios against a reference, so the movement only makes the
+measurement unjudgeable when it can change the verdict. The worst end of the
+objective - qpx's largest observed value against the reference's smallest, or
+qpx's smallest against the reference's largest for a ratio that is better when
+it is larger - is compared with the objective's decisive bar: the objective times
 the band of that metric for a ratio that is better when it is smaller, and
 the objective divided by the band for a ratio that is better when it is
 larger. While the worst end stays inside the decisive bar, no observed end of
@@ -557,13 +557,14 @@ relative to the direct backend. This independently detects lost backpressure or
 event-loop starvation even when bulk throughput remains high.
 
 Every competitive objective is judged against a measurement band. The tail
-objective (p99 chunk gap) uses the spread of its own metric, because a tail
-statistic moves further between samples than a total does. The remaining
-objectives - the time, CPU-rate, first-byte, max-gap, dominance and
-resource-peak ones - use the lane's observed total-time and CPU-rate sample
-spread, because the benchmark publishes no per-sample spread for the metrics
-they measure. A miss inside that band is reported as a marginal objective and
-stays visible for trend review; a miss beyond it is a decisive failure.
+objectives (p99 chunk gap and maximum chunk gap) use the spread of their own
+published metrics, because a tail statistic moves further between samples than
+a total does. The remaining objectives - the time, CPU-rate, first-byte,
+dominance and resource-peak ones - use the lane's observed total-time and
+CPU-rate sample spread, because the benchmark publishes no per-sample spread
+for the metrics they measure. A miss inside that band is reported as a marginal
+objective and stays visible for trend review; a miss beyond it is a decisive
+failure.
 Reference spreads never widen the band, because competitor instability must not
 excuse a qpx miss. The qpx-vs-external scheduler queue-delay ratio is not an
 objective: it stays visible for trend review and never fails the gate. The

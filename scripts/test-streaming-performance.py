@@ -29,6 +29,7 @@ def with_extremes(record):
     extremes = {}
     for field in (
         "p99_chunk_gap_ms",
+        "max_chunk_gap_ms",
         "requests_per_total_cpu_second",
         "scheduler_queue_delay_us_per_transfer",
     ):
@@ -92,6 +93,7 @@ def build(proxy, mode, **overrides):
             "requests_per_cpu_second_ratio": 1.0,
             "requests_per_total_cpu_second_ratio": 1.0,
             "p99_chunk_gap_ms_ratio": 1.0,
+            "max_chunk_gap_ms_ratio": 1.0,
             "scheduler_queue_delay_us_per_transfer_ratio": 1.0,
         },
     }
@@ -1100,6 +1102,71 @@ class StreamingGateTest(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("slow streaming max_p99_gap_ratio", result.stderr)
         self.assertIn("decisive", result.stderr)
+
+    def test_slow_max_gap_uses_its_own_spread(self):
+        """A max-gap miss inside its own spread band is only marginal.
+
+        The lane spread is stable, but each round's maximum gap moved 3x, so
+        the 2.94 ratio is within the 1.5 tail band and cannot be called a
+        regression from this run.
+        """
+        result = self.run_gate(
+            slow=lane(
+                SLOW_LANE,
+                qpxd={
+                    "max_chunk_gap_ms": 4.0,
+                    "sample_spread": {"max_chunk_gap_ms_ratio": 3.0},
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("slow streaming max_gap_ratio marginal", result.stdout)
+        self.assertNotIn("decisive", result.stderr)
+
+    def test_observed_slow_max_gap_miss_is_within_its_measured_spread(self):
+        """The exact observed 3.30x miss with a 1.42x own spread is noise.
+
+        Three paired rounds measured qpx maximum gaps 4.084488, 3.010399 and
+        4.275375 ms against 1.162472, 1.236744 and 1.316714 ms for the direct
+        backend. The lane spread was stable, so the old lane-only band called
+        this decisive; the maximum gap's own spread makes it marginal.
+        """
+        result = self.run_gate(
+            slow=lane(
+                SLOW_LANE,
+                qpxd={
+                    "max_chunk_gap_ms": 3.302614 * 1.36,
+                    "sample_spread": {
+                        "max_chunk_gap_ms_ratio": 4.275375 / 3.010399,
+                    },
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("slow streaming max_gap_ratio marginal", result.stdout)
+        self.assertNotIn("decisive", result.stderr)
+
+    def test_slow_max_gap_miss_on_a_stable_measurement_fails(self):
+        """The same max-gap miss on a stable measurement is decisive."""
+        result = self.run_gate(slow=lane(SLOW_LANE, qpxd={"max_chunk_gap_ms": 4.0}))
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("slow streaming max_gap_ratio", result.stderr)
+        self.assertIn("decisive", result.stderr)
+
+    def test_unstable_slow_max_gap_spread_is_invalid(self):
+        """An over-cap max-gap spread that can reach the decisive bar fails."""
+        result = self.run_gate(
+            slow=lane(
+                SLOW_LANE,
+                qpxd={
+                    "max_chunk_gap_ms": 4.5,
+                    "sample_spread": {"max_chunk_gap_ms_ratio": 3.2},
+                },
+            )
+        )
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("max_chunk_gap_ms_ratio sample spread", result.stderr)
+        self.assertIn("unjudgeable", result.stderr)
 
 
 if __name__ == "__main__":
