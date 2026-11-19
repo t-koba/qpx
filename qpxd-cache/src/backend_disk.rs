@@ -1,9 +1,11 @@
 #[cfg(unix)]
 mod commit;
 
+#[cfg(unix)]
+use super::types::CommitLease;
 use super::types::{
     BodyStreamWriteOptions, CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate,
-    CachedResponseEnvelope, CommitLease, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
+    CachedResponseEnvelope, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
     cache_body_storage_key, decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
@@ -1038,10 +1040,12 @@ impl DiskCacheBackend {
 }
 
 /// OS advisory lock fd: dropping the file is the release, including on cancel.
+#[cfg(unix)]
 struct DiskCommitLease {
     _file: std::fs::File,
 }
 
+#[cfg(unix)]
 #[async_trait]
 impl CommitLease for DiskCommitLease {
     async fn release(&self) -> Result<()> {
