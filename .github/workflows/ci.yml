@@ -4,6 +4,8 @@ on:
   push:
     branches:
       - "**"
+      # mizu is the harness publication branch; its checks are dispatched by
+      # exact SHA through workflow_dispatch, so a push would duplicate CI.
       - "!mizu"
     tags:
       - "v*"
