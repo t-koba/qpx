@@ -1,11 +1,9 @@
 #[cfg(unix)]
 mod commit;
 
-#[cfg(unix)]
-use super::types::CommitLease;
 use super::types::{
     BodyStreamWriteOptions, CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate,
-    CachedResponseEnvelope, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
+    CachedResponseEnvelope, CommitLease, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
     cache_body_storage_key, decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
