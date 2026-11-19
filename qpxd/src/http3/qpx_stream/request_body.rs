@@ -347,3 +347,37 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
     };
     Ok((bytes_read as u64, summary))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::future::pending;
+
+    #[tokio::test(start_paused = true)]
+    async fn send_before_deadline_production_timer_binds_supplied_instant() {
+        let deadline = Instant::now() + Duration::from_secs(30);
+        let mut send = std::pin::pin!(send_before_deadline(
+            pending::<std::result::Result<(), BodyError>>(),
+            Some(deadline),
+            None,
+        ));
+
+        // A shorter paused-time timeout expires first, so its Elapsed result
+        // proves the deadline select is still pending before the Instant.
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut send)
+                .await
+                .is_err(),
+            "send completed before the supplied deadline"
+        );
+        assert!(Instant::now() < deadline);
+
+        // Crossing the supplied Instant fires the real sleep_until arm.
+        tokio::time::advance(deadline - Instant::now()).await;
+        let error = tokio::time::timeout(Duration::from_millis(1), &mut send)
+            .await
+            .expect("send deadline did not fire at the supplied Instant")
+            .expect_err("deadline must stop the pending send");
+        assert_eq!(error.to_string(), SEND_DEADLINE_ERROR);
+    }
+}
