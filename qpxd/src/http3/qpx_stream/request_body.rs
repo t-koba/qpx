@@ -18,6 +18,52 @@ pub(crate) enum RequestBodySendEvent {
 #[derive(Clone)]
 pub(crate) struct RequestBodySendProbe {
     pub(crate) events: tokio::sync::mpsc::UnboundedSender<RequestBodySendEvent>,
+    pub(crate) deadline_control: Option<RequestBodyDeadlineControl>,
+}
+
+// Test-only wake source for the send deadline. It never replaces the
+// configured Instant: the production sleep_until branch stays armed, and the
+// test can fire this control after observing backpressure.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct RequestBodyDeadlineControl {
+    recorded: std::sync::Arc<std::sync::Mutex<Vec<Option<Instant>>>>,
+    fired: std::sync::Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+impl RequestBodyDeadlineControl {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    fn record(&self, deadline: Option<Instant>) {
+        self.recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .push(deadline);
+    }
+
+    pub(crate) fn assert_recorded(&self, expected: Option<Instant>) {
+        let recorded = self
+            .recorded
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        assert!(
+            !recorded.is_empty() && recorded.iter().all(|deadline| *deadline == expected),
+            "send deadline records {recorded:?}, expected {expected:?}"
+        );
+    }
+
+    async fn fired(&self) {
+        self.fired.notified().await;
+    }
+
+    pub(crate) fn fire(&self) {
+        // notify_one keeps the wake even if the test fires before the select
+        // has polled its control branch.
+        self.fired.notify_one();
+    }
 }
 
 // Test-only observation of a send's first poll outcome. It reports state
@@ -67,19 +113,38 @@ pub(crate) struct QpxRequestBodyRelayOptions<'a> {
     pub(crate) send_probe: Option<RequestBodySendProbe>,
 }
 
+const SEND_DEADLINE_ERROR: &str = "qpx-h3 request body duration exceeded configured limit";
+
+// In production this branch never wakes; cfg(test) supplies an in-memory
+// trigger while the configured Instant is still slept on in the same select.
+async fn deadline_wake(#[cfg(test)] control: Option<&RequestBodyDeadlineControl>) {
+    #[cfg(test)]
+    if let Some(control) = control {
+        control.fired().await;
+    } else {
+        std::future::pending::<()>().await;
+    }
+    #[cfg(not(test))]
+    std::future::pending::<()>().await;
+}
+
 async fn send_before_deadline<F>(
     future: F,
     deadline: Option<Instant>,
+    #[cfg(test)] deadline_control: Option<&RequestBodyDeadlineControl>,
 ) -> Result<std::result::Result<(), BodyError>>
 where
     F: Future<Output = std::result::Result<(), BodyError>>,
 {
+    #[cfg(test)]
+    if let Some(control) = deadline_control {
+        control.record(deadline);
+    }
     let mut future = std::pin::pin!(future);
     match deadline {
         Some(deadline) => tokio::select! {
-            _ = sleep_until(deadline) => Err(anyhow!(
-                "qpx-h3 request body duration exceeded configured limit"
-            )),
+            _ = sleep_until(deadline) => Err(anyhow!(SEND_DEADLINE_ERROR)),
+            _ = deadline_wake(#[cfg(test)] deadline_control) => Err(anyhow!(SEND_DEADLINE_ERROR)),
             result = &mut future => Ok(result),
         },
         None => Ok(future.await),
@@ -174,7 +239,16 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::DataSendPending,
                 Some(RequestBodySendEvent::DataAccepted),
             );
-            let send_result = send_before_deadline(send, options.request_body_deadline).await;
+            let send_result = send_before_deadline(
+                send,
+                options.request_body_deadline,
+                #[cfg(test)]
+                options
+                    .send_probe
+                    .as_ref()
+                    .and_then(|probe| probe.deadline_control.as_ref()),
+            )
+            .await;
             match send_result {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => receiver_open = false,
@@ -229,7 +303,16 @@ pub(crate) async fn relay_qpx_request_body_observed_from_recv(
                 RequestBodySendEvent::TrailerSendPending,
                 None,
             );
-            let send_result = send_before_deadline(send, options.request_body_deadline).await;
+            let send_result = send_before_deadline(
+                send,
+                options.request_body_deadline,
+                #[cfg(test)]
+                options
+                    .send_probe
+                    .as_ref()
+                    .and_then(|probe| probe.deadline_control.as_ref()),
+            )
+            .await;
             if let Err(err) = send_result {
                 sender.abort();
                 req_stream.abort_message_stream();

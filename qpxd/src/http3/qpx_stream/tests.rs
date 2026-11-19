@@ -7,7 +7,7 @@ use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use tokio::sync::{mpsc, oneshot};
 
-use super::request_body::{RequestBodySendEvent, RequestBodySendProbe};
+use super::request_body::{RequestBodyDeadlineControl, RequestBodySendEvent, RequestBodySendProbe};
 
 use super::test_support::qpx_loopback;
 
@@ -277,10 +277,14 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
         // first forwarded DATA frame fills the channel and the second blocks
         // in sender.send_data, so only the configured request-body deadline
         // can end the relay; the read-side idle/deadline path is not waiting
-        // here.
+        // here. Keep the real Instant far out of reach: the test fires an
+        // in-memory control after observing backpressure instead of racing a
+        // wall-clock deadline.
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        let control = RequestBodyDeadlineControl::new();
+        let control_for_relay = control.clone();
         let relay = tokio::spawn(async move {
             relay_qpx_request_body_observed_from_recv(
                 &mut local,
@@ -294,7 +298,10 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
                     grpc_stream_deadline: None,
                     request_body_deadline: Some(deadline),
                     observe_grpc_messages: false,
-                    send_probe: Some(RequestBodySendProbe { events: probe_tx }),
+                    send_probe: Some(RequestBodySendProbe {
+                        events: probe_tx,
+                        deadline_control: Some(control_for_relay),
+                    }),
                 },
             )
             .await
@@ -321,6 +328,9 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
             "relay finished before the blocked-send deadline fired"
         );
 
+        // The blocked send is observed and still running; fire the deadline
+        // control now, without waiting for the far-future Instant.
+        control.fire();
         let error = timeout(Duration::from_secs(3), relay)
             .await??
             .expect_err("absolute deadline must stop a blocked body send");
@@ -328,6 +338,7 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
             error.to_string(),
             "qpx-h3 request body duration exceeded configured limit"
         );
+        control.assert_recorded(Some(deadline));
         assert_eq!(
             remote.stopped().await?.map(u64::from),
             Some(::h3::error::Code::H3_MESSAGE_ERROR.value())
@@ -358,7 +369,11 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
         let trailers = b"\x00\x00\x25x-end\x04done";
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
-        let deadline = Instant::now() + Duration::from_secs(2);
+        // Far-future real deadline: only the in-memory control can release the
+        // blocked trailer send in this test.
+        let deadline = Instant::now() + Duration::from_secs(3600);
+        let control = RequestBodyDeadlineControl::new();
+        let control_for_relay = control.clone();
         let relay = tokio::spawn(async move {
             relay_qpx_request_body_observed_from_recv(
                 &mut local,
@@ -372,7 +387,10 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
                     grpc_stream_deadline: None,
                     request_body_deadline: Some(deadline),
                     observe_grpc_messages: false,
-                    send_probe: Some(RequestBodySendProbe { events: probe_tx }),
+                    send_probe: Some(RequestBodySendProbe {
+                        events: probe_tx,
+                        deadline_control: Some(control_for_relay),
+                    }),
                 },
             )
             .await
@@ -402,6 +420,7 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
             "relay finished before the blocked-trailer deadline fired"
         );
 
+        control.fire();
         let error = timeout(Duration::from_secs(3), relay)
             .await??
             .expect_err("absolute deadline must stop a blocked trailer send");
@@ -409,6 +428,7 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
             error.to_string(),
             "qpx-h3 request body duration exceeded configured limit"
         );
+        control.assert_recorded(Some(deadline));
         // The client has already FIN'd this stream, so STOP_SENDING is not
         // observable here; the blocked-send deadline error is the assertion.
         Ok::<_, anyhow::Error>(())
@@ -432,11 +452,13 @@ async fn request_body_relay_without_deadline_stays_blocked_on_full_channel() -> 
         let local = rx.recv().await.expect("captured QPX request stream");
         let (_response_send, mut local) = local.split();
         // Same undrained body channel and backpressure as the positive
-        // blocked-send test, but neither deadline is configured. Nothing may
-        // release the blocked send, so the relay must still be running after
-        // the interval that ends it in the positive test.
+        // blocked-send test, but neither deadline is configured. Driving the
+        // same in-memory control must not release the blocked send: with no
+        // deadline there is no wake branch to fire.
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
+        let control = RequestBodyDeadlineControl::new();
+        let control_for_relay = control.clone();
         let relay = tokio::spawn(async move {
             relay_qpx_request_body_observed_from_recv(
                 &mut local,
@@ -450,7 +472,10 @@ async fn request_body_relay_without_deadline_stays_blocked_on_full_channel() -> 
                     grpc_stream_deadline: None,
                     request_body_deadline: None,
                     observe_grpc_messages: false,
-                    send_probe: Some(RequestBodySendProbe { events: probe_tx }),
+                    send_probe: Some(RequestBodySendProbe {
+                        events: probe_tx,
+                        deadline_control: Some(control_for_relay),
+                    }),
                 },
             )
             .await
@@ -470,11 +495,13 @@ async fn request_body_relay_without_deadline_stays_blocked_on_full_channel() -> 
                 .expect("send probe alive"),
             RequestBodySendEvent::DataSendPending
         );
-        tokio::time::sleep(Duration::from_millis(2200)).await;
+        control.fire();
+        tokio::task::yield_now().await;
         assert!(
             !relay.is_finished(),
-            "relay finished with no deadline configured and a blocked send"
+            "firing the control released a send with no deadline configured"
         );
+        control.assert_recorded(None);
         relay.abort();
         let _ = relay.await;
         Ok::<_, anyhow::Error>(())
