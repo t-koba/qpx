@@ -518,7 +518,10 @@ async fn http_backend_without_writer_lease_fails_closed_by_default() {
         .await
         .err()
         .expect("no lease endpoint and no opt-in must fail closed");
-    assert!(err.to_string().contains("no writer lease endpoint"), "{err}");
+    assert!(
+        err.to_string().contains("no writer lease endpoint"),
+        "{err}"
+    );
     server.abort();
 }
 
@@ -560,7 +563,10 @@ async fn http_local_only_coordination_is_explicitly_opt_in() {
         .lock_commit("ns", "primary")
         .await
         .expect("opt-in legacy gateway is accepted");
-    assert!(lease.is_none(), "only process-local coordination is claimed");
+    assert!(
+        lease.is_none(),
+        "only process-local coordination is claimed"
+    );
     server.abort();
 }
 
@@ -734,7 +740,10 @@ async fn http_validate_rejects_a_lease_whose_heartbeat_was_revoked() {
     held.stop.notify_one();
     held.revoked
         .store(true, std::sync::atomic::Ordering::Release);
-    let err = held.validate().await.expect_err("revoked lease cannot publish");
+    let err = held
+        .validate()
+        .await
+        .expect_err("revoked lease cannot publish");
     assert!(err.to_string().contains("was not renewed"), "{err}");
     drop(held);
 }

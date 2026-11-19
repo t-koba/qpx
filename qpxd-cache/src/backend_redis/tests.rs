@@ -596,7 +596,10 @@ async fn redis_validate_rejects_a_lease_whose_heartbeat_was_revoked() {
     held.stop.notify_one();
     held.revoked
         .store(true, std::sync::atomic::Ordering::Release);
-    let err = held.validate().await.expect_err("revoked lease cannot publish");
+    let err = held
+        .validate()
+        .await
+        .expect_err("revoked lease cannot publish");
     assert!(err.to_string().contains("was not renewed"), "{err}");
     drop(held);
 }
