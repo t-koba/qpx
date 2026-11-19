@@ -13,6 +13,8 @@ import argparse
 import json
 import os
 import sys
+import time
+import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
@@ -35,10 +37,26 @@ RUNS_PER_PAGE = 100
 JOBS_PER_PAGE = 100
 MAX_PAGES = 10
 MAX_RUNS = 100
+API_ATTEMPTS = 3
+API_BACKOFF_SECONDS = 0.5
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 
 
-def api_get(path, token):
-    """Reads one API resource. The token never reaches the output."""
+def api_get(
+    path,
+    token,
+    *,
+    urlopen=urllib.request.urlopen,
+    sleep=time.sleep,
+    attempts=API_ATTEMPTS,
+    backoff=API_BACKOFF_SECONDS,
+):
+    """Reads one API resource, retrying transient errors.
+
+    A single transient GitHub API 5xx/429 or network failure must not fail the
+    whole collection. Permanent responses and a persistent failure still raise
+    so a real outage is reported. The token never reaches the output.
+    """
     request = urllib.request.Request(
         f"{API_ROOT}{path}",
         headers={
@@ -48,8 +66,17 @@ def api_get(path, token):
             "User-Agent": "qpx-ci-runner-minutes",
         },
     )
-    with urllib.request.urlopen(request, timeout=30) as response:
-        return json.loads(response.read().decode("utf-8"))
+    for attempt in range(1, attempts + 1):
+        try:
+            with urlopen(request, timeout=30) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            if exc.code not in RETRYABLE_STATUS or attempt == attempts:
+                raise
+        except urllib.error.URLError:
+            if attempt == attempts:
+                raise
+        sleep(backoff * (2 ** (attempt - 1)))
 
 
 def run_record(payload):

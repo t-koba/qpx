@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -434,6 +435,103 @@ class Command(unittest.TestCase):
             self.assertEqual(payload["run"]["runner_minutes"], 5.0)
             self.assertEqual(payload["captured_at"], "2026-10-20T12:00:00Z")
             self.assertIn("runner minutes 5.00", result.stdout)
+
+
+
+
+class _Response:
+    """A minimal urlopen response for injected api_get calls."""
+
+    def __init__(self, payload):
+        self._payload = json.dumps(payload).encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        return self._payload
+
+
+def _http_error(code):
+    return urllib.error.HTTPError("https://api.github.com/x", code, "error", {}, None)
+
+
+class TransientApi(unittest.TestCase):
+    def test_a_transient_server_error_is_retried(self):
+        outcomes = [_http_error(502), _Response({"ok": True})]
+        calls = []
+        sleeps = []
+
+        def fake_urlopen(request, timeout=30):
+            calls.append(timeout)
+            value = outcomes.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        result = DRIVER.api_get(
+            "/x", "token", urlopen=fake_urlopen, sleep=sleeps.append
+        )
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [DRIVER.API_BACKOFF_SECONDS])
+
+    def test_a_rate_limit_is_retried(self):
+        outcomes = [_http_error(429), _Response({"ok": True})]
+
+        def fake_urlopen(request, timeout=30):
+            value = outcomes.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        self.assertEqual(
+            DRIVER.api_get("/x", "token", urlopen=fake_urlopen, sleep=lambda _: None),
+            {"ok": True},
+        )
+
+    def test_a_network_error_is_retried(self):
+        outcomes = [urllib.error.URLError("reset"), _Response({"ok": True})]
+
+        def fake_urlopen(request, timeout=30):
+            value = outcomes.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        self.assertEqual(
+            DRIVER.api_get("/x", "token", urlopen=fake_urlopen, sleep=lambda _: None),
+            {"ok": True},
+        )
+
+    def test_a_permanent_client_error_is_not_retried(self):
+        calls = []
+
+        def fake_urlopen(request, timeout=30):
+            calls.append(1)
+            raise _http_error(404)
+
+        with self.assertRaises(urllib.error.HTTPError):
+            DRIVER.api_get("/x", "token", urlopen=fake_urlopen, sleep=lambda _: None)
+        self.assertEqual(len(calls), 1)
+
+    def test_retries_are_bounded(self):
+        calls = []
+        sleeps = []
+
+        def fake_urlopen(request, timeout=30):
+            calls.append(1)
+            raise _http_error(502)
+
+        with self.assertRaises(urllib.error.HTTPError):
+            DRIVER.api_get(
+                "/x", "token", urlopen=fake_urlopen, sleep=sleeps.append, attempts=3
+            )
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(sleeps), 2)
 
 
 if __name__ == "__main__":
