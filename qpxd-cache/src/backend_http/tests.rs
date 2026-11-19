@@ -317,10 +317,22 @@ async fn spawn_lease_gateway_with(
                             headers.insert(name.to_ascii_lowercase(), value.trim().to_string());
                         }
                     }
-                    let content_len: usize = headers
-                        .get("content-length")
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(0);
+                    // Read the declaration through its owner, exactly as the
+                    // production gateway would, instead of parsing it again.
+                    let mut owner_headers = http::HeaderMap::new();
+                    for (name, value) in &headers {
+                        if let (Ok(name), Ok(value)) = (
+                            http::HeaderName::from_bytes(name.as_bytes()),
+                            http::HeaderValue::from_str(value),
+                        ) {
+                            owner_headers.insert(name, value);
+                        }
+                    }
+                    let content_len =
+                        qpx_core::http_content_length::declared_content_length(&owner_headers)
+                            .ok()
+                            .flatten()
+                            .unwrap_or(0) as usize;
                     let mut body = vec![0_u8; content_len];
                     let _ = stream.read_exact(&mut body).await;
                     let mut parts = request_line.split_whitespace();
