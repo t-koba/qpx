@@ -76,9 +76,13 @@ long enough to tolerate normal backend latency between renewals.
   responses fail the commit closed with a clear error. Conditional
   create/delete must be atomic across clients; a gateway that merely accepts
   every PUT must not be used for cache writes. A gateway that returns `404` or
-  `405` for the lease PUT is treated as a legacy backend: writes continue with
-  process-local coordination only, a warning is logged, and cross-instance
-  exclusivity is not claimed.
+  `405` for the lease PUT is treated as a legacy backend only when
+  `allow_local_only_remote_coordination` is explicitly set to `true` on that
+  backend (default `false`): writes then continue with process-local
+  coordination only, a warning is logged, and cross-instance exclusivity is
+  not claimed. With the default, such a gateway fails the commit closed with
+  a clear error. Enable the opt-in only when the namespace is written by a
+  single process.
 
 Both leases are namespace-wide, so differently named backends still contend for
 the same remote namespace. Staged body I/O happens before the lease is taken.

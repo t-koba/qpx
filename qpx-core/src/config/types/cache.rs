@@ -30,6 +30,12 @@ pub struct CacheBackendConfig {
     pub timeout_ms: u64,
     #[serde(default = "default_cache_writer_lease_ttl_ms")]
     pub writer_lease_ttl_ms: u64,
+    /// Permit an HTTP cache gateway without the writer-lease endpoints to
+    /// proceed with process-local coordination only. Off by default because
+    /// it does not protect against a second qpx instance writing the same
+    /// namespace.
+    #[serde(default)]
+    pub allow_local_only_remote_coordination: bool,
     #[serde(default = "default_cache_max_object_bytes")]
     pub max_object_bytes: usize,
     #[serde(default)]

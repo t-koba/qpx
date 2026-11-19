@@ -31,6 +31,7 @@ async fn http_response_stream_error_does_not_complete_put_or_write_metadata() {
             sweep_interval_secs: 60,
             timeout_ms: 2000,
             writer_lease_ttl_ms: 5_000,
+            allow_local_only_remote_coordination: false,
             max_object_bytes: 1024,
             auth_header_env: None,
         },
@@ -121,6 +122,7 @@ async fn backend_serving(
             sweep_interval_secs: 60,
             timeout_ms: 2000,
             writer_lease_ttl_ms: 5_000,
+            allow_local_only_remote_coordination: false,
             max_object_bytes,
             auth_header_env: None,
         },
@@ -217,6 +219,7 @@ fn backend_at_with_ttl(
             sweep_interval_secs: 60,
             timeout_ms,
             writer_lease_ttl_ms,
+            allow_local_only_remote_coordination: false,
             max_object_bytes: 1024,
             auth_header_env: None,
         },
@@ -495,7 +498,7 @@ async fn independent_http_clients_get_one_namespace_writer() {
 }
 
 #[tokio::test]
-async fn http_backend_without_writer_lease_keeps_local_only_coordination() {
+async fn http_backend_without_writer_lease_fails_closed_by_default() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("listen");
@@ -510,14 +513,54 @@ async fn http_backend_without_writer_lease_keeps_local_only_coordination() {
             .expect("reply");
     });
     let backend = backend_at(endpoint, 500, "http");
+    let err = backend
+        .lock_commit("ns", "primary")
+        .await
+        .err()
+        .expect("no lease endpoint and no opt-in must fail closed");
+    assert!(err.to_string().contains("no writer lease endpoint"), "{err}");
+    server.abort();
+}
+
+#[tokio::test]
+async fn http_local_only_coordination_is_explicitly_opt_in() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let endpoint = format!("http://{}", listener.local_addr().expect("address"));
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let mut buf = [0_u8; 1024];
+        let _ = stream.read(&mut buf).await;
+        stream
+            .write_all(b"HTTP/1.1 405 Method Not Allowed\r\ncontent-length: 0\r\n\r\n")
+            .await
+            .expect("reply");
+    });
+    let backend = HttpCacheBackend::new(
+        CacheBackendConfig {
+            writer_mode: Default::default(),
+            commit_lock_stripes: 64,
+            name: "http-local-only".to_string(),
+            kind: "http".to_string(),
+            endpoint,
+            path: None,
+            max_bytes: None,
+            sweep_interval_secs: 60,
+            timeout_ms: 500,
+            writer_lease_ttl_ms: 5_000,
+            allow_local_only_remote_coordination: true,
+            max_object_bytes: 1024,
+            auth_header_env: None,
+        },
+        None,
+    )
+    .expect("backend");
     let lease = backend
         .lock_commit("ns", "primary")
         .await
-        .expect("legacy gateway must not fail cache writes");
-    assert!(
-        lease.is_none(),
-        "a gateway without the lease endpoint only has process-local coordination"
-    );
+        .expect("opt-in legacy gateway is accepted");
+    assert!(lease.is_none(), "only process-local coordination is claimed");
     server.abort();
 }
 

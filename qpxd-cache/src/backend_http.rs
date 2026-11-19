@@ -36,6 +36,7 @@ pub struct HttpCacheBackend {
     endpoint: String,
     timeout: Duration,
     writer_lease_ttl: Duration,
+    allow_local_only_remote_coordination: bool,
     max_object_bytes: usize,
     auth_header: Option<(http::HeaderName, http::HeaderValue)>,
     user_agent: Option<http::HeaderValue>,
@@ -83,6 +84,7 @@ impl HttpCacheBackend {
             endpoint,
             timeout: Duration::from_millis(cfg.timeout_ms),
             writer_lease_ttl: Duration::from_millis(cfg.writer_lease_ttl_ms),
+            allow_local_only_remote_coordination: cfg.allow_local_only_remote_coordination,
             max_object_bytes: cfg.max_object_bytes,
             auth_header,
             user_agent,
@@ -396,9 +398,18 @@ impl HttpCommitLease {
                 }
                 StatusCode::PRECONDITION_FAILED => {}
                 StatusCode::NOT_FOUND | StatusCode::METHOD_NOT_ALLOWED => {
+                    if !backend.allow_local_only_remote_coordination {
+                        let err = anyhow!(
+                            "http cache gateway at {} has no writer lease endpoint (PUT returned {}); refusing to write without exclusive coordination. Set allow_local_only_remote_coordination=true only if this namespace is written by a single process",
+                            backend.endpoint,
+                            status
+                        );
+                        let _ = candidate.release().await;
+                        return Err(err);
+                    }
                     tracing::warn!(
                         uri = %candidate.uri,
-                        "http cache gateway has no writer lease endpoint; using process-local coordination only"
+                        "http cache gateway has no writer lease endpoint; allow_local_only_remote_coordination is enabled, so cross-instance exclusivity is not enforced"
                     );
                     return Ok(None);
                 }

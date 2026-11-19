@@ -26,6 +26,7 @@ fn cfg_with_ttl(endpoint: &str, writer_lease_ttl_ms: u64) -> CacheBackendConfig 
         sweep_interval_secs: 60,
         timeout_ms: 500,
         writer_lease_ttl_ms,
+        allow_local_only_remote_coordination: false,
         max_object_bytes: 1024,
         auth_header_env: None,
     }
