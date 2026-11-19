@@ -277,9 +277,9 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
         // first forwarded DATA frame fills the channel and the second blocks
         // in sender.send_data, so only the configured request-body deadline
         // can end the relay; the read-side idle/deadline path is not waiting
-        // here. Keep the real Instant far out of reach: the test fires an
-        // in-memory control after observing backpressure instead of racing a
-        // wall-clock deadline.
+        // here. The test drives the injected timer in the production deadline
+        // arm after observing backpressure, and asserts the recorded Instant
+        // below instead of racing a wall-clock deadline.
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
         let deadline = Instant::now() + Duration::from_secs(3600);
@@ -328,8 +328,8 @@ async fn request_body_relay_deadline_stops_blocked_send() -> Result<()> {
             "relay finished before the blocked-send deadline fired"
         );
 
-        // The blocked send is observed and still running; fire the deadline
-        // control now, without waiting for the far-future Instant.
+        // The blocked send is observed and still running; fire the injected
+        // production deadline-arm timer now, without waiting for the far-future Instant.
         control.fire();
         let error = timeout(Duration::from_secs(3), relay)
             .await??
@@ -369,8 +369,8 @@ async fn request_body_relay_deadline_stops_blocked_trailer_send() -> Result<()> 
         let trailers = b"\x00\x00\x25x-end\x04done";
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
-        // Far-future real deadline: only the in-memory control can release the
-        // blocked trailer send in this test.
+        // Far-future real deadline: only the injected production deadline-arm
+        // timer can release the blocked trailer send in this test.
         let deadline = Instant::now() + Duration::from_secs(3600);
         let control = RequestBodyDeadlineControl::new();
         let control_for_relay = control.clone();
@@ -454,7 +454,7 @@ async fn request_body_relay_without_deadline_stays_blocked_on_full_channel() -> 
         // Same undrained body channel and backpressure as the positive
         // blocked-send test, but neither deadline is configured. Driving the
         // same in-memory control must not release the blocked send: with no
-        // deadline there is no wake branch to fire.
+        // deadline there is no production deadline arm to drive.
         let (body_sender, _undrained_body) = Body::channel_with_capacity(1);
         let (probe_tx, mut events) = mpsc::unbounded_channel();
         let control = RequestBodyDeadlineControl::new();

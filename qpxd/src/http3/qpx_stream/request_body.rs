@@ -21,9 +21,9 @@ pub(crate) struct RequestBodySendProbe {
     pub(crate) deadline_control: Option<RequestBodyDeadlineControl>,
 }
 
-// Test-only wake source for the send deadline. It never replaces the
-// configured Instant: the production sleep_until branch stays armed, and the
-// test can fire this control after observing backpressure.
+// Test-only timer for the send deadline. It replaces only the timer future in
+// the production select arm, records the exact Instant the production arm
+// would sleep to, and lets the test fire it after observing backpressure.
 #[cfg(test)]
 #[derive(Clone, Default)]
 pub(crate) struct RequestBodyDeadlineControl {
@@ -115,17 +115,19 @@ pub(crate) struct QpxRequestBodyRelayOptions<'a> {
 
 const SEND_DEADLINE_ERROR: &str = "qpx-h3 request body duration exceeded configured limit";
 
-// In production this branch never wakes; cfg(test) supplies an in-memory
-// trigger while the configured Instant is still slept on in the same select.
-async fn deadline_wake(#[cfg(test)] control: Option<&RequestBodyDeadlineControl>) {
+// The timer for the deadline arm of the production select. Production always
+// sleeps until the configured Instant; a test with a control drives that same
+// arm deterministically and asserts the recorded Instant separately.
+async fn deadline_sleep(
+    deadline: Instant,
+    #[cfg(test)] control: Option<&RequestBodyDeadlineControl>,
+) {
     #[cfg(test)]
     if let Some(control) = control {
         control.fired().await;
-    } else {
-        std::future::pending::<()>().await;
+        return;
     }
-    #[cfg(not(test))]
-    std::future::pending::<()>().await;
+    sleep_until(deadline).await;
 }
 
 async fn send_before_deadline<F>(
@@ -143,8 +145,7 @@ where
     let mut future = std::pin::pin!(future);
     match deadline {
         Some(deadline) => tokio::select! {
-            _ = sleep_until(deadline) => Err(anyhow!(SEND_DEADLINE_ERROR)),
-            _ = deadline_wake(#[cfg(test)] deadline_control) => Err(anyhow!(SEND_DEADLINE_ERROR)),
+            _ = deadline_sleep(deadline, #[cfg(test)] deadline_control) => Err(anyhow!(SEND_DEADLINE_ERROR)),
             result = &mut future => Ok(result),
         },
         None => Ok(future.await),
