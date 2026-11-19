@@ -43,11 +43,28 @@ Cache backends support `redis`, `http`, and `disk` kinds. `disk` backends use
 `path`, `max_bytes`, and optional `sweep_interval_secs`; the path is created as
 owner-only directories, symlinked path components are rejected, and objects are
 stored under sharded SHA-256 filenames with atomic same-directory renames.
-`writer_mode` is typed: `single_instance` (default) is a deployment requirement,
-not a runtime singleton lock. qpx does not detect or prevent another process from
-writing the same namespace; the operator must ensure there is only one writer.
-Process-local locking is not cross-process safety. HTTP and Redis remain
-single-writer only: `writer_mode: shared` is rejected.
+`writer_mode` is typed. `single_instance` is the default; process-local locking
+alone is never treated as cross-process safety. Remote backends enforce one
+writer per namespace with a backend lease during publication, independently of
+that setting; `writer_mode: shared` stays rejected for them.
+
+- `redis`: the lease is a namespace-wide key `qpx:writer-lock:<namespace>` created
+  with `SET NX` and released with a token-checked Lua compare-and-delete. It has
+  no expiry: a crashed writer fails closed until an operator confirms no writer
+  is alive and deletes that key. A competing writer waits for the configured
+  `timeout_ms` (at least 250 ms) and then fails the commit rather than writing
+  unguarded. Redis `SET` must support `NX`.
+- `http`: the gateway must implement `PUT /v1/cache/<namespace>/_writer_lock`
+  with `If-None-Match: *`, a plain-text lease token body, `201 Created` on
+  creation and `412 Precondition Failed` when held; and
+  `DELETE /v1/cache/<namespace>/_writer_lock` with `If-Match: "<token>"`,
+  returning `204 No Content` (or `200 OK`) only when the token matches. Other
+  responses fail the commit closed with a clear error. Conditional
+  create/delete must be atomic across clients; a gateway that merely accepts
+  every PUT must not be used for cache writes.
+
+Both leases are namespace-wide, so differently named backends still contend for
+the same remote namespace. Staged body I/O happens before the lease is taken.
 
 Disk alone supports opt-in `writer_mode: shared` on Unix, provided the filesystem
 honors process-shared advisory OS file locks. Other platforms reject shared mode;

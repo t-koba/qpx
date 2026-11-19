@@ -1,5 +1,5 @@
 use super::types::bounded_cache_body_stream;
-use super::{CacheBackend, CachedBody};
+use super::{CacheBackend, CachedBody, CommitLease};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use base64::Engine;
@@ -12,7 +12,8 @@ use qpx_http::protocol::common::Http1SendRequest;
 use qpx_http::tls::builder::connect_client_http1;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 use tokio::sync::{Mutex as AsyncMutex, Semaphore};
 use tokio::time::timeout;
 
@@ -325,6 +326,109 @@ impl HttpCacheBackend {
     }
 }
 
+/// Namespace-wide writer lease implemented with HTTP conditional requests:
+/// `PUT ... If-None-Match: *` creates the lease only when absent, and
+/// `DELETE ... If-Match: "<token>"` releases only the holder's own lease.
+/// A gateway that does not implement these semantics fails closed.
+struct HttpCommitLease {
+    backend: HttpCacheBackend,
+    uri: Uri,
+    token: String,
+    released: AtomicBool,
+}
+
+impl HttpCommitLease {
+    async fn acquire(backend: &HttpCacheBackend, namespace: &str) -> Result<Self> {
+        let token = uuid::Uuid::new_v4().to_string();
+        let uri =
+            format!("{}/v1/cache/{}/_writer_lock", backend.endpoint, namespace).parse::<Uri>()?;
+        let deadline = Instant::now() + backend.timeout.max(Duration::from_millis(250));
+        loop {
+            let mut req = owner_request(Method::PUT, uri.clone(), Body::from(token.clone()));
+            req.headers_mut()
+                .insert(ord("if-none-match"), http::HeaderValue::from_static("*"));
+            req.headers_mut().set_content_length(token.len() as u64);
+            backend.apply_common_headers(&mut req);
+            match backend.send_status(req).await? {
+                StatusCode::CREATED => {
+                    return Ok(Self {
+                        backend: backend.clone(),
+                        uri,
+                        token,
+                        released: AtomicBool::new(false),
+                    });
+                }
+                StatusCode::PRECONDITION_FAILED => {}
+                status => {
+                    return Err(anyhow!(
+                        "http cache backend does not implement the writer lease at {} (PUT returned {}); refusing to write without exclusive coordination",
+                        uri,
+                        status
+                    ));
+                }
+            }
+            if Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "http cache namespace {} already has an active writer (lease {})",
+                    namespace,
+                    uri
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    async fn release_request(&self) -> Result<()> {
+        let mut req = owner_request(Method::DELETE, self.uri.clone(), Body::empty());
+        req.headers_mut().insert(
+            ord("if-match"),
+            http::HeaderValue::from_str(&format!("\"{}\"", self.token))?,
+        );
+        self.backend.apply_common_headers(&mut req);
+        match self.backend.send_status(req).await? {
+            StatusCode::NO_CONTENT | StatusCode::OK => Ok(()),
+            status => Err(anyhow!(
+                "http cache writer lease {} was not released (DELETE returned {})",
+                self.uri,
+                status
+            )),
+        }
+    }
+}
+
+#[async_trait]
+impl CommitLease for HttpCommitLease {
+    async fn release(&self) -> Result<()> {
+        self.release_request().await?;
+        self.released.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Drop for HttpCommitLease {
+    fn drop(&mut self) {
+        if self.released.load(Ordering::Acquire) {
+            return;
+        }
+        // Cancellation cannot block on the network. The conditional delete is
+        // idempotent, so a detached best-effort release is safe.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let lease = self.backend.clone();
+            let uri = self.uri.clone();
+            let token = self.token.clone();
+            handle.spawn(async move {
+                let lease = HttpCommitLease {
+                    backend: lease,
+                    uri,
+                    token,
+                    released: AtomicBool::new(true),
+                };
+                let _ = lease.release_request().await;
+            });
+        }
+    }
+}
+
 #[derive(Serialize)]
 struct BatchGetRequest<'a> {
     keys: &'a [String],
@@ -362,6 +466,17 @@ async fn recycle_sender(idle: Arc<AsyncMutex<Vec<Http1SendRequest>>>, sender: Ht
 
 #[async_trait]
 impl CacheBackend for HttpCacheBackend {
+    async fn lock_commit(
+        &self,
+        namespace: &str,
+        _primary: &str,
+    ) -> Result<Option<Arc<dyn CommitLease>>> {
+        // Namespace-wide: distinct backends/paths must not bypass coordination.
+        Ok(Some(Arc::new(
+            HttpCommitLease::acquire(self, namespace).await?,
+        )))
+    }
+
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<bytes::Bytes>> {
         let uri = self.object_uri(namespace, key)?;
         let mut req = owner_request(Method::GET, uri, Body::empty());

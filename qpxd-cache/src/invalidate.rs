@@ -77,9 +77,10 @@ pub async fn invalidate_primary(
     // Retire the canonical fallback and remove the index while coordinated
     // with writeback/migration. Expensive per-object cleanup can run afterward:
     // no new lookup can discover the retired fallback or an unindexed variant.
-    // Shared disk supplies an OS lease; other backends remain single-instance.
+    // Shared disk supplies an OS lease and remote backends a protocol lease;
+    // local single-instance backends use only the process-local registry.
     let (variants, default_variant) = {
-        let _commit = crate::store::commit::lock(backend, namespace, primary).await?;
+        let commit = crate::store::commit::lock(backend, namespace, primary).await?;
         let index = load_variant_index(backend, namespace, primary).await?;
         let default_variant = variant_storage_key(primary, &[]);
         // Do not claim invalidation if the canonical fallback could not be
@@ -92,7 +93,7 @@ pub async fn invalidate_primary(
         let deleted = backend
             .delete(namespace, index_storage_key(primary).as_str())
             .await;
-        if _commit.is_shared() {
+        if commit.has_backend_lease() {
             deleted?;
         }
         (index.variants, default_variant)

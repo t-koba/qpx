@@ -1,10 +1,12 @@
+use crate::types::CacheBackend;
 use bytes::BytesMut;
 use qpx_core::config::CacheBackendConfig;
+use std::sync::Arc;
 use tokio::io::AsyncWriteExt;
 use tokio::time::Duration;
 
 use super::protocol::{read_bulk_string, read_integer};
-use super::{RedisCacheBackend, RedisConnection, RedisTransport};
+use super::{RedisCacheBackend, RedisConnection, RedisTransport, release_redis_lease};
 
 fn cfg(endpoint: &str) -> CacheBackendConfig {
     CacheBackendConfig {
@@ -25,17 +27,23 @@ fn cfg(endpoint: &str) -> CacheBackendConfig {
 #[test]
 fn parse_plain_redis_tcp() {
     let backend = RedisCacheBackend::new(cfg("redis://cache.internal:6380/2")).expect("backend");
-    assert!(matches!(backend.transport, RedisTransport::Tcp { .. }));
-    assert_eq!(backend.db, Some(2));
-    assert!(backend.tls_domain.is_none());
+    assert!(matches!(
+        backend.client.transport,
+        RedisTransport::Tcp { .. }
+    ));
+    assert_eq!(backend.client.db, Some(2));
+    assert!(backend.client.tls_domain.is_none());
 }
 
 #[test]
 fn parse_rediss_enables_tls() {
     let backend = RedisCacheBackend::new(cfg("rediss://cache.internal:6380/5")).expect("backend");
-    assert!(matches!(backend.transport, RedisTransport::Tcp { .. }));
-    assert_eq!(backend.db, Some(5));
-    assert!(backend.tls_domain.is_some());
+    assert!(matches!(
+        backend.client.transport,
+        RedisTransport::Tcp { .. }
+    ));
+    assert_eq!(backend.client.db, Some(5));
+    assert!(backend.client.tls_domain.is_some());
 }
 
 #[cfg(unix)]
@@ -43,9 +51,12 @@ fn parse_rediss_enables_tls() {
 fn parse_redis_unix_socket_endpoint() {
     let backend =
         RedisCacheBackend::new(cfg("redis+unix:///tmp/redis.sock?db=1")).expect("backend");
-    assert!(matches!(backend.transport, RedisTransport::Unix { .. }));
-    assert_eq!(backend.db, Some(1));
-    assert!(backend.tls_domain.is_none());
+    assert!(matches!(
+        backend.client.transport,
+        RedisTransport::Unix { .. }
+    ));
+    assert_eq!(backend.client.db, Some(1));
+    assert!(backend.client.tls_domain.is_none());
 }
 
 #[tokio::test]
@@ -113,7 +124,7 @@ async fn redis_response_stream_error_never_renames_staged_body() {
 
     let backend = RedisCacheBackend::new(cfg("redis://unused.invalid")).expect("backend");
     let (client, server) = tokio::io::duplex(4096);
-    backend.idle.lock().await.push(RedisConnection {
+    backend.client.idle.lock().await.push(RedisConnection {
         stream: Box::new(client),
         read_buf: BytesMut::new(),
     });
@@ -175,4 +186,118 @@ async fn redis_response_stream_error_never_renames_staged_body() {
         .await
         .expect("server completes")
         .expect("server");
+}
+
+/// Minimal RESP server whose SET NX and compare-and-delete are the only
+/// atomic operations used by the writer lease. Each connection is independent,
+/// like a separate qpx process.
+async fn spawn_writer_lease_server() -> (
+    String,
+    Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>>,
+    tokio::task::JoinHandle<()>,
+) {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+
+    async fn command(reader: &mut BufReader<tokio::net::TcpStream>) -> Option<Vec<String>> {
+        let mut head = String::new();
+        if reader.read_line(&mut head).await.ok()? == 0 {
+            return None;
+        }
+        let count: usize = head.trim().strip_prefix('*')?.parse().ok()?;
+        let mut out = Vec::with_capacity(count);
+        for _ in 0..count {
+            let mut len_line = String::new();
+            reader.read_line(&mut len_line).await.ok()?;
+            let len: usize = len_line.trim().strip_prefix('$')?.parse().ok()?;
+            let mut arg = vec![0_u8; len + 2];
+            reader.read_exact(&mut arg).await.ok()?;
+            out.push(String::from_utf8(arg[..len].to_vec()).ok()?);
+        }
+        Some(out)
+    }
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listen");
+    let addr = listener.local_addr().expect("address");
+    let locks: Arc<tokio::sync::Mutex<std::collections::HashMap<String, String>>> =
+        Arc::new(Default::default());
+    let server_locks = locks.clone();
+    let server = tokio::spawn(async move {
+        while let Ok((stream, _)) = listener.accept().await {
+            let locks = server_locks.clone();
+            tokio::spawn(async move {
+                let mut reader = BufReader::new(stream);
+                while let Some(parts) = command(&mut reader).await {
+                    let reply = match parts.first().map(String::as_str) {
+                        Some("SET") if parts.get(3).map(String::as_str) == Some("NX") => {
+                            let mut locks = locks.lock().await;
+                            match locks.entry(parts[1].clone()) {
+                                std::collections::hash_map::Entry::Vacant(entry) => {
+                                    entry.insert(parts[2].clone());
+                                    "+OK\r\n".to_string()
+                                }
+                                std::collections::hash_map::Entry::Occupied(_) => {
+                                    "$-1\r\n".to_string()
+                                }
+                            }
+                        }
+                        Some("SELECT") => "+OK\r\n".to_string(),
+                        Some("EVAL") => {
+                            // The lease script is compare-and-delete on KEYS[1]/ARGV[1].
+                            let mut locks = locks.lock().await;
+                            let held = locks.get(&parts[3]).map(String::as_str) == Some(&parts[4]);
+                            if held {
+                                locks.remove(&parts[3]);
+                            }
+                            format!(":{}\r\n", u8::from(held))
+                        }
+                        _ => "-ERR unsupported test command\r\n".to_string(),
+                    };
+                    if reader.write_all(reply.as_bytes()).await.is_err() {
+                        break;
+                    }
+                }
+            });
+        }
+    });
+    (format!("redis://{addr}/0"), locks, server)
+}
+
+#[tokio::test]
+async fn independent_redis_clients_get_one_namespace_writer() {
+    let (endpoint, _locks, server) = spawn_writer_lease_server().await;
+    let first = RedisCacheBackend::new(cfg(&endpoint)).expect("first backend");
+    let mut second_config = cfg(&endpoint);
+    second_config.name = "cache-b".to_string();
+    let second = RedisCacheBackend::new(second_config).expect("second backend");
+
+    let held = first.lock_commit("ns", "primary-a").await.unwrap().unwrap();
+    let denied = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .err()
+        .expect("second independent client cannot acquire the namespace");
+    assert!(denied.to_string().contains("already has an active writer"));
+
+    // A stale token cannot release another client's lease.
+    release_redis_lease(
+        first.client.clone(),
+        "qpx:writer-lock:ns".to_string(),
+        "stale-token".to_string(),
+    )
+    .await
+    .unwrap();
+    assert!(second.lock_commit("ns", "primary-b").await.is_err());
+
+    held.release().await.unwrap();
+    let acquired = second
+        .lock_commit("ns", "primary-b")
+        .await
+        .expect("lock available after release")
+        .unwrap();
+    acquired.release().await.unwrap();
+    drop(second);
+    drop(first);
+    server.abort();
 }

@@ -3,7 +3,7 @@ mod commit;
 
 use super::types::{
     BodyStreamWriteOptions, CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate,
-    CachedResponseEnvelope, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
+    CachedResponseEnvelope, CommitLease, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
     cache_body_storage_key, decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
@@ -1037,16 +1037,30 @@ impl DiskCacheBackend {
     }
 }
 
+/// OS advisory lock fd: dropping the file is the release, including on cancel.
+struct DiskCommitLease {
+    _file: std::fs::File,
+}
+
+#[async_trait]
+impl CommitLease for DiskCommitLease {
+    async fn release(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
 #[async_trait]
 impl CacheBackend for DiskCacheBackend {
     async fn lock_commit(
         &self,
         namespace: &str,
         primary: &str,
-    ) -> Result<Option<Box<dyn Send + Sync>>> {
+    ) -> Result<Option<std::sync::Arc<dyn CommitLease>>> {
         #[cfg(unix)]
         if let Some(locks) = &self.commit_locks {
-            return Ok(Some(Box::new(locks.lock(namespace, primary).await?)));
+            return Ok(Some(std::sync::Arc::new(DiskCommitLease {
+                _file: locks.lock(namespace, primary).await?,
+            })));
         }
         let _ = (namespace, primary);
         Ok(None)

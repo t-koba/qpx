@@ -1,4 +1,5 @@
 use super::*;
+use crate::types::CommitLease;
 use crate::types::{BodyStreamWriteOptions, MetadataEncoder};
 use tokio::sync::mpsc;
 
@@ -17,7 +18,7 @@ struct ObservedBackend {
 
 #[async_trait]
 impl CacheBackend for ObservedBackend {
-    async fn lock_commit(&self, ns: &str, primary: &str) -> Result<Option<Box<dyn Send + Sync>>> {
+    async fn lock_commit(&self, ns: &str, primary: &str) -> Result<Option<Arc<dyn CommitLease>>> {
         self.inner.lock_commit(ns, primary).await
     }
 
@@ -1008,7 +1009,7 @@ struct StalledLegacyBackend {
 
 #[async_trait]
 impl CacheBackend for StalledLegacyBackend {
-    async fn lock_commit(&self, ns: &str, primary: &str) -> Result<Option<Box<dyn Send + Sync>>> {
+    async fn lock_commit(&self, ns: &str, primary: &str) -> Result<Option<Arc<dyn CommitLease>>> {
         self.inner.lock_commit(ns, primary).await
     }
 

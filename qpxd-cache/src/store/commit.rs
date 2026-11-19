@@ -1,8 +1,9 @@
 //! Publication coordination; body I/O never holds this lock.
-//! Single-instance backends use the process-local registry. Shared disk also
-//! holds a backend OS lease, coordinating distinct backend objects/processes.
-//! HTTP/Redis do not provide shared-writer coordination.
+//! Single-instance backends use the process-local registry. Shared disk and
+//! remote backends additionally hold a backend-enforced lease, coordinating
+//! distinct backend objects/processes.
 use super::CacheBackend;
+use crate::types::CommitLease;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::{Mutex as AsyncMutex, OwnedMutexGuard};
@@ -32,13 +33,23 @@ impl Drop for Lease {
 pub(crate) struct CommitGuard {
     // Drop the owned lock before the lease removes the registry entry.
     _guard: OwnedMutexGuard<()>,
-    _backend: Option<Box<dyn Send + Sync>>,
+    backend_lease: Option<Arc<dyn CommitLease>>,
     _lease: Lease,
 }
 
 impl CommitGuard {
-    pub(crate) fn is_shared(&self) -> bool {
-        self._backend.is_some()
+    pub(crate) fn has_backend_lease(&self) -> bool {
+        self.backend_lease.is_some()
+    }
+
+    /// Releases the backend-enforced half of the lease before the process-local
+    /// guard. The lease implementation also releases on drop, so cancellation
+    /// never strands remote coordination.
+    pub(crate) async fn release(mut self) -> anyhow::Result<()> {
+        if let Some(lease) = self.backend_lease.take() {
+            lease.release().await?;
+        }
+        Ok(())
     }
 }
 
@@ -47,7 +58,7 @@ pub(crate) async fn lock(
     namespace: &str,
     primary: &str,
 ) -> anyhow::Result<CommitGuard> {
-    let backend_guard = backend.lock_commit(namespace, primary).await?;
+    let backend_lease = backend.lock_commit(namespace, primary).await?;
     let key = (
         backend as *const dyn CacheBackend as *const () as usize,
         namespace.to_owned(),
@@ -61,7 +72,7 @@ pub(crate) async fn lock(
     let guard = lease.lock.clone().lock_owned().await;
     Ok(CommitGuard {
         _guard: guard,
-        _backend: backend_guard,
+        backend_lease,
         _lease: lease,
     })
 }

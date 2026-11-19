@@ -1,5 +1,5 @@
 use super::types::CachedBodyStream;
-use super::{CacheBackend, CachedBody};
+use super::{CacheBackend, CachedBody, CommitLease};
 use anyhow::{Result, anyhow};
 use async_trait::async_trait;
 use bytes::{Bytes, BytesMut};
@@ -9,7 +9,7 @@ use qpx_http::protocol::address::format_authority_host_port;
 use qpx_http::tls::builder::connect_client_http1;
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 #[cfg(unix)]
 use std::{path::PathBuf, str::FromStr};
 use tokio::io::AsyncWriteExt;
@@ -50,15 +50,20 @@ struct RedisEndpointSpec {
     password: Option<String>,
 }
 
-pub struct RedisCacheBackend {
+/// Shared connection/config state used by both data operations and leases.
+pub(super) struct RedisClient {
     transport: RedisTransport,
     tls_domain: Option<String>,
     db: Option<u32>,
     password: Option<String>,
     timeout: Duration,
+    idle: Arc<AsyncMutex<Vec<RedisConnection>>>,
+}
+
+pub struct RedisCacheBackend {
+    client: Arc<RedisClient>,
     key_prefix: String,
     max_object_bytes: usize,
-    idle: Arc<AsyncMutex<Vec<RedisConnection>>>,
     active: Arc<Semaphore>,
 }
 
@@ -73,14 +78,16 @@ impl RedisCacheBackend {
         let spec = parse_endpoint(endpoint)?;
 
         Ok(Self {
-            transport: spec.transport,
-            tls_domain: spec.tls_domain,
-            db: spec.db,
-            password: spec.password,
-            timeout: Duration::from_millis(cfg.timeout_ms),
+            client: Arc::new(RedisClient {
+                transport: spec.transport,
+                tls_domain: spec.tls_domain,
+                db: spec.db,
+                password: spec.password,
+                timeout: Duration::from_millis(cfg.timeout_ms),
+                idle: Arc::new(AsyncMutex::new(Vec::new())),
+            }),
             key_prefix: cfg.name,
             max_object_bytes: cfg.max_object_bytes,
-            idle: Arc::new(AsyncMutex::new(Vec::new())),
             active: Arc::new(Semaphore::new(REDIS_CACHE_MAX_ACTIVE_OPERATIONS)),
         })
     }
@@ -88,7 +95,9 @@ impl RedisCacheBackend {
     fn full_key(&self, namespace: &str, key: &str) -> String {
         format!("qpx:{}:{}:{}", self.key_prefix, namespace, key)
     }
+}
 
+impl RedisClient {
     async fn open(&self) -> Result<RedisConnection> {
         let stream: DynStream = match &self.transport {
             RedisTransport::Tcp { addr } => {
@@ -140,8 +149,125 @@ impl RedisCacheBackend {
     }
 }
 
+/// A namespace-wide writer lease backed by Redis `SET NX` and an atomic
+/// compare-and-delete. There is deliberately no expiry: a lost client fails
+/// closed until an operator removes the lock key, rather than allowing a second
+/// writer in while the first may still be committing.
+struct RedisCommitLease {
+    client: Arc<RedisClient>,
+    key: String,
+    token: String,
+    released: AtomicBool,
+}
+
+impl RedisCommitLease {
+    async fn acquire(client: Arc<RedisClient>, namespace: &str) -> Result<Self> {
+        let token = format!("{}:{}", std::process::id(), uuid::Uuid::new_v4());
+        let key = format!("qpx:writer-lock:{}", namespace);
+        // Process-local commits are already serialized by commit::lock. Only a
+        // genuinely held cross-client lease should make an operation wait.
+        let deadline = std::time::Instant::now() + client.timeout.max(Duration::from_millis(250));
+        loop {
+            let mut stream = client.checkout().await?;
+            let cmd = encode_command(&[
+                b"SET".to_vec(),
+                key.clone().into_bytes(),
+                token.clone().into_bytes(),
+                b"NX".to_vec(),
+            ]);
+            let result = async {
+                timeout(client.timeout, stream.stream.write_all(&cmd)).await??;
+                read_set_nx(&mut stream, client.timeout).await
+            }
+            .await;
+            if result.is_ok() {
+                client.recycle(stream).await;
+            }
+            if result? {
+                return Ok(Self {
+                    client,
+                    key,
+                    token,
+                    released: AtomicBool::new(false),
+                });
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "redis cache namespace {} already has an active writer (lock key {})",
+                    namespace,
+                    key
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+}
+
+async fn release_redis_lease(client: Arc<RedisClient>, key: String, token: String) -> Result<()> {
+    // Ownership is checked inside Redis: an expired/replaced token can never
+    // release a lease belonging to a different client.
+    const RELEASE: &[u8] = b"if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) else return 0 end";
+    let cmd = encode_command(&[
+        b"EVAL".to_vec(),
+        RELEASE.to_vec(),
+        b"1".to_vec(),
+        key.into_bytes(),
+        token.into_bytes(),
+    ]);
+    let mut stream = client.checkout().await?;
+    let result = async {
+        timeout(client.timeout, stream.stream.write_all(&cmd)).await??;
+        read_integer(&mut stream, client.timeout).await?;
+        Ok(())
+    }
+    .await;
+    if result.is_ok() {
+        client.recycle(stream).await;
+    }
+    result
+}
+
+#[async_trait]
+impl CommitLease for RedisCommitLease {
+    async fn release(&self) -> Result<()> {
+        release_redis_lease(self.client.clone(), self.key.clone(), self.token.clone()).await?;
+        self.released.store(true, Ordering::Release);
+        Ok(())
+    }
+}
+
+impl Drop for RedisCommitLease {
+    fn drop(&mut self) {
+        if self.released.load(Ordering::Acquire) {
+            return;
+        }
+        // Cancellation happens in an async context, so cannot block on I/O.
+        // A detached compare-and-delete is safe and idempotent.
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let client = self.client.clone();
+            let key = self.key.clone();
+            let token = self.token.clone();
+            handle.spawn(async move {
+                let _ = release_redis_lease(client, key, token).await;
+            });
+        }
+    }
+}
+
 #[async_trait]
 impl CacheBackend for RedisCacheBackend {
+    async fn lock_commit(
+        &self,
+        namespace: &str,
+        _primary: &str,
+    ) -> Result<Option<Arc<dyn CommitLease>>> {
+        // The lease is namespace-wide: every writer of the same remote
+        // namespace, including a differently named backend, must contend.
+        Ok(Some(Arc::new(
+            RedisCommitLease::acquire(self.client.clone(), namespace).await?,
+        )))
+    }
+
     async fn get(&self, namespace: &str, key: &str) -> Result<Option<Bytes>> {
         let _permit = self
             .active
@@ -149,16 +275,16 @@ impl CacheBackend for RedisCacheBackend {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let cmd = encode_command(&[b"GET".to_vec(), full_key.into_bytes()]);
         let result = async {
-            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
-            read_bulk_string(&mut stream, self.timeout, self.max_object_bytes).await
+            timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
+            read_bulk_string(&mut stream, self.client.timeout, self.max_object_bytes).await
         }
         .await;
         if result.is_ok() {
-            self.recycle(stream).await;
+            self.client.recycle(stream).await;
         }
         result
     }
@@ -173,7 +299,7 @@ impl CacheBackend for RedisCacheBackend {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let mut parts = Vec::with_capacity(keys.len() + 1);
         parts.push(b"MGET".to_vec());
         parts.extend(
@@ -182,13 +308,18 @@ impl CacheBackend for RedisCacheBackend {
         );
         let cmd = encode_command(&parts);
         let result = async {
-            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
-            read_bulk_string_array(&mut stream, self.timeout, keys.len(), self.max_object_bytes)
-                .await
+            timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
+            read_bulk_string_array(
+                &mut stream,
+                self.client.timeout,
+                keys.len(),
+                self.max_object_bytes,
+            )
+            .await
         }
         .await;
         if result.is_ok() {
-            self.recycle(stream).await;
+            self.client.recycle(stream).await;
         }
         result
     }
@@ -200,16 +331,16 @@ impl CacheBackend for RedisCacheBackend {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let cmd = encode_command(&[b"GET".to_vec(), full_key.into_bytes()]);
         let result = async {
-            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
-            read_bulk_cached_body(&mut stream, self.timeout, self.max_object_bytes).await
+            timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
+            read_bulk_cached_body(&mut stream, self.client.timeout, self.max_object_bytes).await
         }
         .await;
         if result.is_ok() {
-            self.recycle(stream).await;
+            self.client.recycle(stream).await;
         }
         result
     }
@@ -227,7 +358,7 @@ impl CacheBackend for RedisCacheBackend {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let full_key = self.full_key(namespace, key);
         match range {
             Some((start, end)) => {
@@ -239,15 +370,16 @@ impl CacheBackend for RedisCacheBackend {
                     start_arg.into_bytes(),
                     end_arg.into_bytes(),
                 ]);
-                timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+                timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
             }
             None => {
                 let cmd = encode_command(&[b"GET".to_vec(), full_key.into_bytes()]);
-                timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
+                timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
             }
         }
 
-        let Some(len) = read_bulk_len(&mut stream, self.timeout, self.max_object_bytes).await?
+        let Some(len) =
+            read_bulk_len(&mut stream, self.client.timeout, self.max_object_bytes).await?
         else {
             return Ok(None);
         };
@@ -259,8 +391,8 @@ impl CacheBackend for RedisCacheBackend {
         }
 
         let (tx, body) = Body::channel_with_capacity(16);
-        let idle = self.idle.clone();
-        let timeout_dur = self.timeout;
+        let idle = self.client.idle.clone();
+        let timeout_dur = self.client.timeout;
         let (done, producer_done) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let result = stream_redis_bulk_to_body(stream, timeout_dur, len, tx).await;
@@ -292,7 +424,7 @@ impl CacheBackend for RedisCacheBackend {
                 self.max_object_bytes
             ));
         }
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let cmd = encode_command(&[
             b"SET".to_vec(),
@@ -302,12 +434,12 @@ impl CacheBackend for RedisCacheBackend {
             ttl_secs.to_string().into_bytes(),
         ]);
         let result = async {
-            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
-            read_simple_ok(&mut stream, self.timeout).await
+            timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
+            read_simple_ok(&mut stream, self.client.timeout).await
         }
         .await;
         if result.is_ok() {
-            self.recycle(stream).await;
+            self.client.recycle(stream).await;
         }
         result
     }
@@ -332,22 +464,22 @@ impl CacheBackend for RedisCacheBackend {
                 self.max_object_bytes
             ));
         }
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let result = async {
             write_set_cached_body(
                 &mut stream,
-                self.timeout,
+                self.client.timeout,
                 full_key.as_bytes(),
                 body,
                 ttl_secs,
             )
             .await?;
-            read_simple_ok(&mut stream, self.timeout).await
+            read_simple_ok(&mut stream, self.client.timeout).await
         }
         .await;
         if result.is_ok() {
-            self.recycle(stream).await;
+            self.client.recycle(stream).await;
         }
         result
     }
@@ -368,7 +500,7 @@ impl CacheBackend for RedisCacheBackend {
             .await
             .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
         let max_body_bytes = max_body_bytes.min(self.max_object_bytes);
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let tmp_id = REDIS_STREAM_PUT_COUNTER.fetch_add(1, Ordering::Relaxed);
         let tmp_key = format!("{full_key}:tmp:{tmp_id}");
@@ -380,8 +512,8 @@ impl CacheBackend for RedisCacheBackend {
                 b"EX".to_vec(),
                 ttl_secs.to_string().into_bytes(),
             ]);
-            timeout(self.timeout, stream.stream.write_all(&init)).await??;
-            read_simple_ok(&mut stream, self.timeout).await?;
+            timeout(self.client.timeout, stream.stream.write_all(&init)).await??;
+            read_simple_ok(&mut stream, self.client.timeout).await?;
 
             let mut size = 0usize;
             let mut pending_appends = VecDeque::new();
@@ -403,7 +535,7 @@ impl CacheBackend for RedisCacheBackend {
                 if !chunk.is_empty() {
                     write_command3(
                         &mut stream,
-                        self.timeout,
+                        self.client.timeout,
                         b"APPEND",
                         tmp_key.as_bytes(),
                         chunk.as_ref(),
@@ -411,13 +543,18 @@ impl CacheBackend for RedisCacheBackend {
                     .await?;
                     pending_appends.push_back(size);
                     if pending_appends.len() >= REDIS_APPEND_PIPELINE_WINDOW {
-                        validate_next_append_reply(&mut stream, self.timeout, &mut pending_appends)
-                            .await?;
+                        validate_next_append_reply(
+                            &mut stream,
+                            self.client.timeout,
+                            &mut pending_appends,
+                        )
+                        .await?;
                     }
                 }
             }
             while !pending_appends.is_empty() {
-                validate_next_append_reply(&mut stream, self.timeout, &mut pending_appends).await?;
+                validate_next_append_reply(&mut stream, self.client.timeout, &mut pending_appends)
+                    .await?;
             }
 
             let rename = encode_command(&[
@@ -425,13 +562,13 @@ impl CacheBackend for RedisCacheBackend {
                 tmp_key.as_bytes().to_vec(),
                 full_key.as_bytes().to_vec(),
             ]);
-            timeout(self.timeout, stream.stream.write_all(&rename)).await??;
-            read_simple_ok(&mut stream, self.timeout).await?;
+            timeout(self.client.timeout, stream.stream.write_all(&rename)).await??;
+            read_simple_ok(&mut stream, self.client.timeout).await?;
             Ok(size as u64)
         }
         .await;
         if result.is_ok() {
-            self.recycle(stream).await;
+            self.client.recycle(stream).await;
         }
         result
     }
@@ -443,17 +580,17 @@ impl CacheBackend for RedisCacheBackend {
             .acquire_owned()
             .await
             .map_err(|_| anyhow!("redis cache backend operation limiter closed"))?;
-        let mut stream = self.checkout().await?;
+        let mut stream = self.client.checkout().await?;
         let full_key = self.full_key(namespace, key);
         let cmd = encode_command(&[b"DEL".to_vec(), full_key.into_bytes()]);
         let result = async {
-            timeout(self.timeout, stream.stream.write_all(&cmd)).await??;
-            read_integer(&mut stream, self.timeout).await?;
+            timeout(self.client.timeout, stream.stream.write_all(&cmd)).await??;
+            read_integer(&mut stream, self.client.timeout).await?;
             Ok(())
         }
         .await;
         if result.is_ok() {
-            self.recycle(stream).await;
+            self.client.recycle(stream).await;
         }
         result
     }

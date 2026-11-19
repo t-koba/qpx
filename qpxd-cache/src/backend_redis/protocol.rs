@@ -126,6 +126,24 @@ pub async fn read_simple_ok(conn: &mut RedisConnection, timeout_dur: Duration) -
     ))
 }
 
+/// `SET key value NX` is `+OK` when acquired and null when already held.
+pub async fn read_set_nx(conn: &mut RedisConnection, timeout_dur: Duration) -> Result<bool> {
+    let line = read_line(conn, timeout_dur).await?;
+    if line == b"+OK" {
+        return Ok(true);
+    }
+    if line == b"$-1" || line == b"*-1" {
+        return Ok(false);
+    }
+    if let Some(err) = line.strip_prefix(b"-") {
+        return Err(anyhow!("redis error: {}", String::from_utf8_lossy(err)));
+    }
+    Err(anyhow!(
+        "unexpected redis SET NX response: {}",
+        String::from_utf8_lossy(&line)
+    ))
+}
+
 pub async fn read_bulk_len(
     conn: &mut RedisConnection,
     timeout_dur: Duration,

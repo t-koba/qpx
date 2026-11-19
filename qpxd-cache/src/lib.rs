@@ -27,7 +27,8 @@ pub use lookup_ops::{
 pub use metrics::register_writeback_admission_rejections;
 pub use store::{CacheStoreContext, CacheStoreTiming, maybe_store, revalidate_not_modified};
 pub use types::{
-    CacheBackend, CacheRequestKey, CacheWritebackAdmission, LookupOutcome, RevalidationState,
+    CacheBackend, CacheRequestKey, CacheWritebackAdmission, CommitLease, LookupOutcome,
+    RevalidationState,
 };
 pub use types::{
     CachedBody, CachedBodyStream, InFlightLookups, InFlightRevalidations, RequestCollapseGuard,

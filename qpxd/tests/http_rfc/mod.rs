@@ -612,9 +612,12 @@ async fn start_http_cache_backend() -> Result<(SocketAddr, oneshot::Sender<()>, 
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
     let service_store = store.clone();
+    let leases: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let service_leases = leases.clone();
     let service = service_fn(move |req: Request<hyper::body::Incoming>| {
         let store = service_store.clone();
-        async move { Ok::<_, std::convert::Infallible>(handle_cache_backend(req, store).await) }
+        let leases = service_leases.clone();
+        async move { Ok::<_, std::convert::Infallible>(handle_cache_backend(req, store, leases).await) }
     });
     let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
     spawn_http1_service_with_shutdown(listener, service, shutdown_rx);
@@ -637,9 +640,64 @@ async fn wait_for_cache_store_entries(store: TestCacheStore, min_entries: usize)
 async fn handle_cache_backend(
     req: Request<hyper::body::Incoming>,
     store: Arc<Mutex<HashMap<String, Vec<u8>>>>,
+    leases: Arc<Mutex<HashMap<String, String>>>,
 ) -> Response<TestBody> {
     let path = req.uri().path().to_string();
     let key = path.strip_prefix("/v1/cache/").unwrap_or("").to_string();
+    if key.ends_with("/_writer_lock") {
+        return match *req.method() {
+            Method::PUT
+                if req.headers().get("if-none-match").map(|v| v.as_bytes()) == Some(b"*") =>
+            {
+                let token = String::from_utf8(
+                    collect_body(req.into_body())
+                        .await
+                        .unwrap_or_default()
+                        .to_vec(),
+                )
+                .unwrap_or_default();
+                let mut leases = leases.lock().await;
+                match leases.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(token);
+                        Response::builder()
+                            .status(StatusCode::CREATED)
+                            .body(empty_body())
+                            .unwrap()
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => Response::builder()
+                        .status(StatusCode::PRECONDITION_FAILED)
+                        .body(empty_body())
+                        .unwrap(),
+                }
+            }
+            Method::DELETE => {
+                let expected = leases
+                    .lock()
+                    .await
+                    .get(&key)
+                    .map(|token| format!("\"{token}\""));
+                let matched = expected.is_some()
+                    && req.headers().get("if-match").map(|v| v.as_bytes())
+                        == expected.as_deref().map(str::as_bytes);
+                if matched {
+                    leases.lock().await.remove(&key);
+                }
+                Response::builder()
+                    .status(if matched {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::PRECONDITION_FAILED
+                    })
+                    .body(empty_body())
+                    .unwrap()
+            }
+            _ => Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .body(empty_body())
+                .unwrap(),
+        };
+    }
     match *req.method() {
         Method::POST if key.ends_with("/_batch_get") => {
             let namespace = key.trim_end_matches("/_batch_get");

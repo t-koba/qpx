@@ -282,39 +282,44 @@ impl CacheWriteback {
         let committed: Result<()> = async {
             staged?;
             let obsolete = {
-                let _commit = commit::lock(
+                let commit = commit::lock(
                     self.backend.as_ref(),
                     &self.namespace,
                     &self.storage_primary,
                 )
                 .await?;
-                let mut index = load_variant_index(
-                    self.backend.as_ref(),
-                    &self.namespace,
-                    &self.storage_primary,
-                )
-                .await?;
-                let legacy_key = variant_storage_key(&self.storage_primary, &[]);
-                if legacy_key != self.variant_key {
-                    self.backend
-                        .retire_response_metadata(&self.namespace, &legacy_key)
-                        .await?;
-                }
-                let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key)
-                    .into_iter()
-                    // Retirement must preserve a historical body's active readers
-                    // even when that canonical key was listed in an old index.
-                    .filter(|key| key != &legacy_key)
-                    .collect::<Vec<_>>();
-                self.backend
-                    .put(
+                let result = async {
+                    let mut index = load_variant_index(
+                        self.backend.as_ref(),
                         &self.namespace,
-                        &index_storage_key(&self.storage_primary),
-                        &serde_json::to_vec(&index)?,
-                        self.ttl.max(INDEX_TTL_SECS),
+                        &self.storage_primary,
                     )
                     .await?;
-                obsolete
+                    let legacy_key = variant_storage_key(&self.storage_primary, &[]);
+                    if legacy_key != self.variant_key {
+                        self.backend
+                            .retire_response_metadata(&self.namespace, &legacy_key)
+                            .await?;
+                    }
+                    let obsolete = upsert_variant_with_cap(&mut index, &self.variant_key)
+                        .into_iter()
+                        // Retirement must preserve a historical body's active readers
+                        // even when that canonical key was listed in an old index.
+                        .filter(|key| key != &legacy_key)
+                        .collect::<Vec<_>>();
+                    self.backend
+                        .put(
+                            &self.namespace,
+                            &index_storage_key(&self.storage_primary),
+                            &serde_json::to_vec(&index)?,
+                            self.ttl.max(INDEX_TTL_SECS),
+                        )
+                        .await?;
+                    Ok::<_, anyhow::Error>(obsolete)
+                }
+                .await;
+                commit.release().await?;
+                result?
             };
             // Delete I/O must not hold the primary commit lock: the index
             // already excludes these variants, and invalidation coordinates
@@ -654,29 +659,34 @@ async fn migrate_revalidated_legacy(
     let committed = async {
         staged?;
         let committed_pair: (bool, Vec<String>) = {
-            let _commit = commit::lock(backend, namespace, primary).await?;
-            if let Some(mut index) =
-                legacy_refresh_index(backend, namespace, variant_key, primary, &legacy.original)
-                    .await?
-            {
-                backend
-                    .retire_response_metadata(namespace, variant_key)
-                    .await?;
-                // No newer generation can appear between this check and
-                // publication: invalidation holds the same per-primary lock.
-                let obsolete = upsert_variant_with_cap(&mut index, &generation);
-                backend
-                    .put(
-                        namespace,
-                        &index_storage_key(primary),
-                        &serde_json::to_vec(&index)?,
-                        ttl.max(INDEX_TTL_SECS),
-                    )
-                    .await?;
-                (true, obsolete)
-            } else {
-                (false, Vec::new())
+            let commit = commit::lock(backend, namespace, primary).await?;
+            let result = async {
+                if let Some(mut index) =
+                    legacy_refresh_index(backend, namespace, variant_key, primary, &legacy.original)
+                        .await?
+                {
+                    backend
+                        .retire_response_metadata(namespace, variant_key)
+                        .await?;
+                    // No newer generation can appear between this check and
+                    // publication: invalidation holds the same per-primary lock.
+                    let obsolete = upsert_variant_with_cap(&mut index, &generation);
+                    backend
+                        .put(
+                            namespace,
+                            &index_storage_key(primary),
+                            &serde_json::to_vec(&index)?,
+                            ttl.max(INDEX_TTL_SECS),
+                        )
+                        .await?;
+                    Ok::<_, anyhow::Error>((true, obsolete))
+                } else {
+                    Ok((false, Vec::new()))
+                }
             }
+            .await;
+            commit.release().await?;
+            result?
         };
         let (published, evicted) = committed_pair;
         if !published {

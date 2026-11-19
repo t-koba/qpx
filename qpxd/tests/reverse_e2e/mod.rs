@@ -101,10 +101,13 @@ async fn start_http_cache_backend(
     let listener = StdTcpListener::bind(("127.0.0.1", 0)).context("bind cache backend")?;
     listener.set_nonblocking(true)?;
     let addr = listener.local_addr()?;
+    let leases: Arc<Mutex<HashMap<String, String>>> = Arc::new(Mutex::new(HashMap::new()));
+    let service_leases = leases.clone();
     let service = service_fn(move |req| {
         let state = state.clone();
         let ops = ops.clone();
-        async move { handle_cache_backend(req, state, ops).await }
+        let leases = service_leases.clone();
+        async move { handle_cache_backend(req, state, ops, leases).await }
     });
     spawn_http1_service(listener, service).await;
     Ok(addr)
@@ -114,9 +117,64 @@ async fn handle_cache_backend(
     req: Request<hyper::body::Incoming>,
     state: Arc<Mutex<HashMap<String, Vec<u8>>>>,
     ops: Arc<AtomicUsize>,
+    leases: Arc<Mutex<HashMap<String, String>>>,
 ) -> Result<Response<TestBody>, Infallible> {
-    ops.fetch_add(1, Ordering::Relaxed);
     let key = req.uri().path().to_string();
+    if key.ends_with("/_writer_lock") {
+        return Ok(match *req.method() {
+            hyper::Method::PUT
+                if req.headers().get("if-none-match").map(|v| v.as_bytes()) == Some(b"*") =>
+            {
+                let token = String::from_utf8(
+                    collect_body(req.into_body())
+                        .await
+                        .expect("lease body")
+                        .to_vec(),
+                )
+                .expect("lease token");
+                let mut leases = leases.lock().await;
+                match leases.entry(key) {
+                    std::collections::hash_map::Entry::Vacant(entry) => {
+                        entry.insert(token);
+                        Response::builder()
+                            .status(StatusCode::CREATED)
+                            .body(empty_body())
+                            .unwrap()
+                    }
+                    std::collections::hash_map::Entry::Occupied(_) => Response::builder()
+                        .status(StatusCode::PRECONDITION_FAILED)
+                        .body(empty_body())
+                        .unwrap(),
+                }
+            }
+            hyper::Method::DELETE => {
+                let expected = leases
+                    .lock()
+                    .await
+                    .get(&key)
+                    .map(|token| format!("\"{token}\""));
+                let matched = expected.is_some()
+                    && req.headers().get("if-match").map(|v| v.as_bytes())
+                        == expected.as_deref().map(str::as_bytes);
+                if matched {
+                    leases.lock().await.remove(&key);
+                }
+                Response::builder()
+                    .status(if matched {
+                        StatusCode::NO_CONTENT
+                    } else {
+                        StatusCode::PRECONDITION_FAILED
+                    })
+                    .body(empty_body())
+                    .unwrap()
+            }
+            _ => Response::builder()
+                .status(StatusCode::METHOD_NOT_ALLOWED)
+                .body(empty_body())
+                .unwrap(),
+        });
+    }
+    ops.fetch_add(1, Ordering::Relaxed);
     let response = match *req.method() {
         hyper::Method::POST if key.ends_with("/_batch_get") => {
             let body = collect_body(req.into_body()).await.expect("batch body");

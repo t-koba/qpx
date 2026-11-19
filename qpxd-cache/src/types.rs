@@ -32,6 +32,17 @@ const BACKGROUND_REVALIDATIONS_SHARDS: usize = 64;
 const REQUEST_COLLAPSE_SHARDS: usize = 64;
 const CACHE_WRITEBACK_CONCURRENCY: usize = 16;
 
+/// Cross-client publication lease owned by a backend.
+///
+/// `release` is the normal, awaited path; implementations must also make a
+/// dropped lease best-effort releasable so a cancelled commit cannot strand
+/// coordination. Releasing twice must be harmless.
+#[allow(clippy::double_must_use)]
+#[async_trait]
+pub trait CommitLease: Send + Sync {
+    async fn release(&self) -> Result<()>;
+}
+
 /// Bounds cache writeback work so slow durable backends cannot exhaust runtime
 /// tasks, memory, or file descriptors while origin responses keep flowing.
 pub struct CacheWritebackAdmission {
@@ -145,14 +156,15 @@ impl InFlightRevalidations {
 #[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait CacheBackend: Send + Sync {
-    /// Owned backend publication lease; dropping it (including cancellation)
-    /// releases coordination. None means single-instance only; shared disk
-    /// supplies an OS lock. Wrappers must delegate this capability.
+    /// Backend-enforced publication lease. `None` means coordination is only
+    /// process-local (the default for local backends); remote backends must
+    /// return a lease their own protocol enforces across independent clients.
+    /// Wrappers must delegate this capability.
     async fn lock_commit(
         &self,
         _namespace: &str,
         _primary: &str,
-    ) -> Result<Option<Box<dyn Send + Sync>>> {
+    ) -> Result<Option<Arc<dyn CommitLease>>> {
         Ok(None)
     }
 
