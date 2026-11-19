@@ -66,7 +66,7 @@ The acceptance rule is not “old YAML still parses”. The rule is:
 - `forward-redis-unix.yaml`: Redis UNIX-socket forward cache.
 - `forward-redis-public-cookie.yaml`: public cookie-bearing shared-cache policy.
 - `reverse-disk-backend.yaml`: local disk reverse cache backend.
-- `reverse-http-backend.yaml`: HTTP object-store reverse cache backend.
+- `reverse-http-backend.yaml`: HTTP object-store reverse cache backend (requires writer-lease endpoints for cache writes).
 - `reverse-rediss-remote.yaml`: TLS Redis reverse cache backend.
 
 ## 06-local-response

@@ -113,7 +113,7 @@ HTTP/3 backend selection is a build-time `qpxd` feature choice. YAML does not se
 - `forward-redis-unix.yaml`: forward cache with Redis UNIX socket (`redis+unix://`).
 - `forward-redis-public-cookie.yaml`: shared-cache profile that explicitly allows public cookie-bearing objects.
 - `reverse-disk-backend.yaml`: reverse cache with a local private disk backend; optional shared writes require Unix filesystem OS locks (see [writer modes](../docs/config-schema.md)).
-- `reverse-http-backend.yaml`: reverse cache with HTTP object gateway backend.
+- `reverse-http-backend.yaml`: reverse cache with HTTP object gateway backend. The gateway must implement the writer-lease endpoints or writes fail closed; see [writer leases](../docs/config-schema.md).
 - `reverse-rediss-remote.yaml`: reverse cache with remote Redis TLS (`rediss://`).
 
 ### 06-local-response (`config/usecases/06-local-response`)
