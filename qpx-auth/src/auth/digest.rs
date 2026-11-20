@@ -294,7 +294,7 @@ impl Default for NonceStoreInner {
 
 #[cfg(feature = "digest-auth")]
 fn parse_nc(nc_hex: &str) -> Option<u32> {
-    if nc_hex.len() != 8 {
+    if nc_hex.len() != 8 || !nc_hex.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     u32::from_str_radix(nc_hex, 16).ok()
@@ -453,4 +453,19 @@ pub(super) fn constant_time_eq_hex_lower(expected_lower: &str, actual: &str) -> 
         diff |= expected ^ lower;
     }
     diff == 0
+}
+
+#[cfg(all(test, feature = "digest-auth"))]
+mod tests {
+    use super::parse_nc;
+
+    #[test]
+    fn nonce_count_rejects_leading_plus() {
+        assert_eq!(parse_nc("+0000001"), None);
+    }
+
+    #[test]
+    fn nonce_count_accepts_eight_hex_digits() {
+        assert_eq!(parse_nc("0000000f"), Some(15));
+    }
 }
