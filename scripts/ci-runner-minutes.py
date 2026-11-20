@@ -76,6 +76,10 @@ def api_get(
         except urllib.error.URLError:
             if attempt == attempts:
                 raise
+        except TimeoutError:
+            # A socket read timeout is a bare TimeoutError, not a URLError.
+            if attempt == attempts:
+                raise
         sleep(backoff * (2 ** (attempt - 1)))
 
 

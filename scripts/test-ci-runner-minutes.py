@@ -459,6 +459,19 @@ def _http_error(code):
     return urllib.error.HTTPError("https://api.github.com/x", code, "error", {}, None)
 
 
+class _ReadTimeout:
+    """A response whose body read times out (a bare TimeoutError)."""
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def read(self):
+        raise TimeoutError("read timed out")
+
+
 class TransientApi(unittest.TestCase):
     def test_a_transient_server_error_is_retried(self):
         outcomes = [_http_error(502), _Response({"ok": True})]
@@ -527,6 +540,40 @@ class TransientApi(unittest.TestCase):
             raise _http_error(502)
 
         with self.assertRaises(urllib.error.HTTPError):
+            DRIVER.api_get(
+                "/x", "token", urlopen=fake_urlopen, sleep=sleeps.append, attempts=3
+            )
+        self.assertEqual(len(calls), 3)
+        self.assertEqual(len(sleeps), 2)
+
+    def test_a_read_timeout_is_retried(self):
+        outcomes = [_ReadTimeout(), _Response({"ok": True})]
+        calls = []
+        sleeps = []
+
+        def fake_urlopen(request, timeout=30):
+            calls.append(timeout)
+            value = outcomes.pop(0)
+            if isinstance(value, Exception):
+                raise value
+            return value
+
+        result = DRIVER.api_get(
+            "/x", "token", urlopen=fake_urlopen, sleep=sleeps.append
+        )
+        self.assertEqual(result, {"ok": True})
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sleeps, [DRIVER.API_BACKOFF_SECONDS])
+
+    def test_read_timeouts_are_bounded(self):
+        calls = []
+        sleeps = []
+
+        def fake_urlopen(request, timeout=30):
+            calls.append(1)
+            return _ReadTimeout()
+
+        with self.assertRaises(TimeoutError):
             DRIVER.api_get(
                 "/x", "token", urlopen=fake_urlopen, sleep=sleeps.append, attempts=3
             )
