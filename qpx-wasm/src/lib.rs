@@ -96,13 +96,12 @@ pub struct WasmExecutorConfig {
     pub max_stdout_bytes: usize,
     /// Maximum stderr bytes accepted per execution.
     pub max_stderr_bytes: usize,
-    /// Maximum idle pre-instantiated instances.
+    /// Maximum idle stores prepared for upcoming requests.
     pub idle_instances: usize,
 }
 
-struct PreparedInstance {
+struct PreparedStore {
     store: Store<WasmStoreData>,
-    instance: Instance,
 }
 
 pub use qpx_core::execution::{RequestHeaders, WasmRequest};
@@ -349,14 +348,14 @@ impl Drop for EpochTicker {
     }
 }
 
-/// WASM executor with module cache and optional idle instances.
+/// WASM executor with module cache and optional idle stores.
 pub struct WasmExecutor {
     engine: Engine,
     module_path: PathBuf,
     module: Arc<OnceCell<Module>>,
     linker: Arc<Linker<WasmStoreData>>,
     instance_pre: Arc<OnceCell<InstancePre<WasmStoreData>>>,
-    idle_instances: Arc<Mutex<Vec<PreparedInstance>>>,
+    idle_instances: Arc<Mutex<Vec<PreparedStore>>>,
     max_idle_instances: usize,
     max_module_bytes: u64,
     max_memory_bytes: u64,
@@ -521,15 +520,12 @@ impl WasmExecutor {
                     })
                     .await?;
 
-                let mut prepared = idle_instances.lock().await.pop();
-                let (mut store, instance) = match prepared.take() {
+                let prepared = idle_instances.lock().await.pop();
+                let mut store = match prepared {
                     Some(mut prepared) => {
                         prepared.store.data_mut().wasi = wasi_ctx;
                         prepared.store.data_mut().limiter.max_memory = max_memory_bytes as usize;
-                        prepared
-                            .store
-                            .set_epoch_deadline(std::cmp::max(1, timeout_ms / 10));
-                        (prepared.store, prepared.instance)
+                        prepared.store
                     }
                     None => {
                         let store_data = WasmStoreData {
@@ -540,15 +536,17 @@ impl WasmExecutor {
                         };
                         let mut store = Store::new(&engine, store_data);
                         store.limiter(|data| &mut data.limiter);
-                        store.set_epoch_deadline(std::cmp::max(1, timeout_ms / 10));
-
-                        let instance = instance_template
-                            .instantiate_async(&mut store)
-                            .await
-                            .map_err(|e| anyhow!("WASM instantiate failed: {e}"))?;
-                        (store, instance)
+                        store
                     }
                 };
+                store.set_epoch_deadline(std::cmp::max(1, timeout_ms / 10));
+                // Instantiate only after the request WASI context is installed:
+                // a core start section runs here and must see the request's
+                // environment whether the store came from the idle pool or not.
+                let instance = instance_template
+                    .instantiate_async(&mut store)
+                    .await
+                    .map_err(|e| anyhow!("WASM instantiate failed: {e}"))?;
                 schedule_idle_replenish(
                     Arc::clone(&idle_instances),
                     max_idle_instances,
@@ -591,7 +589,7 @@ impl WasmExecutor {
 }
 
 fn schedule_idle_replenish(
-    idle_instances: Arc<Mutex<Vec<PreparedInstance>>>,
+    idle_instances: Arc<Mutex<Vec<PreparedStore>>>,
     max_idle_instances: usize,
     engine: Engine,
     epoch_ticker: Arc<EpochTicker>,
@@ -611,7 +609,7 @@ fn schedule_idle_replenish(
                     break;
                 }
             }
-            match prepare_idle_instance(
+            match prepare_idle_store(
                 &engine,
                 &instance_pre,
                 max_memory_bytes as usize,
@@ -627,7 +625,7 @@ fn schedule_idle_replenish(
                     idle.push(instance);
                 }
                 Err(err) => {
-                    tracing::warn!(error = ?err, "WASM idle instance prewarm failed");
+                    tracing::warn!(error = ?err, "WASM idle store prewarm failed");
                     break;
                 }
             }
@@ -635,15 +633,15 @@ fn schedule_idle_replenish(
     });
 }
 
-async fn prepare_idle_instance(
+async fn prepare_idle_store(
     engine: &Engine,
     instance_pre: &OnceCell<InstancePre<WasmStoreData>>,
     max_memory_bytes: usize,
     timeout_ms: u64,
-) -> Result<PreparedInstance> {
-    let instance_pre = instance_pre
-        .get()
-        .ok_or_else(|| anyhow!("WASM instance template missing"))?;
+) -> Result<PreparedStore> {
+    if instance_pre.get().is_none() {
+        return Err(anyhow!("WASM instance template missing").into());
+    }
     let store_data = WasmStoreData {
         wasi: WasiCtxBuilder::new().build_p1(),
         limiter: MemoryLimiter {
@@ -653,11 +651,7 @@ async fn prepare_idle_instance(
     let mut store = Store::new(engine, store_data);
     store.limiter(|data| &mut data.limiter);
     store.set_epoch_deadline(std::cmp::max(1, timeout_ms / 10));
-    let instance = instance_pre
-        .instantiate_async(&mut store)
-        .await
-        .map_err(|e| anyhow!("WASM idle instantiate failed: {e}"))?;
-    Ok(PreparedInstance { store, instance })
+    Ok(PreparedStore { store })
 }
 
 fn enforce_module_size(module: &PathBuf, max_module_bytes: u64) -> Result<()> {
@@ -907,6 +901,53 @@ mod tests {
                 .any(|cause| cause.to_string().contains("WASM compile failed")),
             "unexpected error chain: {err:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn idle_instance_initializes_with_request_environment() {
+        // A core start section runs at instantiation time. Prewarming must
+        // not run it with an empty WASI environment, because a pooled
+        // request cannot rerun it after installing its own context.
+        let module = temp_file(
+            "start-env.wat",
+            br#"(module
+                (import "wasi_snapshot_preview1" "environ_sizes_get"
+                    (func $sizes (param i32 i32) (result i32)))
+                (memory (export "memory") 1)
+                (func $init
+                    (drop (call $sizes (i32.const 0) (i32.const 4))))
+                (start $init)
+                (func (export "_start")
+                    (if (i32.eqz (i32.load (i32.const 0)))
+                        (then unreachable))))"#,
+        );
+        let executor = WasmExecutor::new(test_config(module, true)).expect("create executor");
+        wait_for_idle(&executor, 1).await;
+
+        let execution = executor
+            .start(WasmRequest {
+                script_name: "/test".into(),
+                path_info: String::new(),
+                query_string: String::new(),
+                request_method: "GET".into(),
+                content_type: String::new(),
+                content_length: 0,
+                server_protocol: "HTTP/1.1".into(),
+                server_name: "localhost".into(),
+                server_port: 80,
+                remote_addr: None,
+                remote_port: None,
+                http_headers: RequestHeaders::default(),
+                identity_env: HashMap::new(),
+            })
+            .await
+            .expect("start execution");
+        drop(execution.stdin);
+        execution
+            .done
+            .await
+            .expect("join start-env wasm")
+            .expect("guest start should see the request WASI environment");
     }
 
     #[tokio::test]
