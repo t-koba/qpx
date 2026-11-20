@@ -230,12 +230,17 @@ async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -
             continue;
         }
         let challenge_type = configured_challenge_type(state)?;
-        let mut challenge = authz.challenge(challenge_type).ok_or_else(|| {
-            anyhow!(
-                "no {} challenge for authorization",
-                configured_challenge_name(state)
-            )
-        })?;
+        let mut challenge = match authz.challenge(challenge_type) {
+            Some(challenge) => challenge,
+            None => {
+                let err = anyhow!(
+                    "no {} challenge for authorization",
+                    configured_challenge_name(state)
+                );
+                cleanup_challenges(state, cleanups).await;
+                return Err(err);
+            }
+        };
         if let Err(err) = prepare_challenge(state, &challenge, &mut cleanups).await {
             cleanup_challenges(state, cleanups).await;
             return Err(err);
@@ -944,6 +949,176 @@ mod tests {
         let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
         params.not_after = rcgen::date_time_ymd(4096, 1, 1);
         (params.self_signed(&key).unwrap(), key)
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn missing_http01_challenge_leaks_provisioned_token() {
+        use rcgen::{BasicConstraints, ExtendedKeyUsagePurpose, IsCa, KeyUsagePurpose};
+        use rustls::ServerConfig;
+        use rustls::server::ServerConnection;
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+
+        qpx_core::tls::init_rustls_crypto_provider().unwrap();
+        let mut fixture = CertFixture::new();
+        let ca_key = KeyPair::generate().unwrap();
+        let mut ca_params = CertificateParams::new(vec![]).unwrap();
+        ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
+        ca_params.key_usages = vec![KeyUsagePurpose::KeyCertSign];
+        let ca_cert = ca_params.self_signed(&ca_key).unwrap();
+        let root = fixture.0.certs_dir.join("root.pem");
+        fs::write(&root, ca_cert.pem()).unwrap();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec!["127.0.0.1".to_string()]).unwrap();
+        params.key_usages = vec![
+            KeyUsagePurpose::DigitalSignature,
+            KeyUsagePurpose::KeyEncipherment,
+        ];
+        params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
+        let cert = params
+            .signed_by(&key, &rcgen::Issuer::from_params(&ca_params, &ca_key))
+            .unwrap();
+        let tls = Arc::new(
+            ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::aws_lc_rs::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(
+                vec![cert.der().clone(), ca_cert.der().clone()],
+                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(key.serialize_der())),
+            )
+            .unwrap(),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("https://{}", listener.local_addr().unwrap());
+        let directory_url = format!("{base}/dir");
+        let (tx, rx) = mpsc::channel();
+        tx.send(directory_url.clone()).unwrap();
+        let ca = std::thread::spawn(move || {
+            let mut nonce = 0u64;
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                let Ok(mut conn) = ServerConnection::new(tls.clone()) else {
+                    break;
+                };
+                let mut request = Vec::new();
+                loop {
+                    if conn.read_tls(&mut stream).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if conn.process_new_packets().is_err() {
+                        break;
+                    }
+                    while conn.wants_write() {
+                        conn.write_tls(&mut stream).unwrap();
+                    }
+                    let mut buf = [0u8; 4096];
+                    loop {
+                        match conn.reader().read(&mut buf) {
+                            Ok(0) | Err(_) => break,
+                            Ok(n) => request.extend_from_slice(&buf[..n]),
+                        }
+                    }
+                    if request.windows(4).any(|w| w == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let head = String::from_utf8_lossy(&request);
+                let request_line = head.lines().next().unwrap_or("");
+                let (method, target) = request_line.split_once(' ').unwrap_or(("", ""));
+                let path = target.split_whitespace().next().unwrap_or("");
+                nonce += 1;
+                let (status, body, location) = match (method, path) {
+                    ("GET", "/dir") => (
+                        "200 OK",
+                        format!(
+                            r#"{{"newNonce":"{base}/nonce","newAccount":"{base}/account","newOrder":"{base}/new-order"}}"#
+                        ),
+                        None,
+                    ),
+                    ("HEAD", "/nonce") => ("200 OK", String::new(), None),
+                    ("POST", "/account") => {
+                        ("201 Created", String::new(), Some(format!("{base}/acct")))
+                    }
+                    ("POST", "/new-order") => (
+                        "201 Created",
+                        format!(
+                            r#"{{"status":"pending","authorizations":["{base}/auth/1","{base}/auth/2"],"finalize":"{base}/finalize","error":null}}"#
+                        ),
+                        Some(format!("{base}/order")),
+                    ),
+                    ("POST", "/auth/1") => (
+                        "200 OK",
+                        format!(
+                            r#"{{"identifier":{{"type":"dns","value":"{TEST_SNI}"}},"status":"pending","challenges":[{{"type":"http-01","url":"{base}/challenge/1","token":"MDEyMzQ1Njc4OWFiY2RlZg","status":"pending","error":null}}]}}"#
+                        ),
+                        Some(format!("{base}/auth/1")),
+                    ),
+                    ("POST", "/challenge/1") => (
+                        "200 OK",
+                        format!(
+                            r#"{{"type":"http-01","url":"{base}/challenge/1","token":"MDEyMzQ1Njc4OWFiY2RlZg","status":"processing","error":null}}"#
+                        ),
+                        Some(format!("{base}/challenge/1")),
+                    ),
+                    ("POST", "/auth/2") => (
+                        "200 OK",
+                        format!(
+                            r#"{{"identifier":{{"type":"dns","value":"{TEST_SNI}"}},"status":"pending","challenges":[{{"type":"dns-01","url":"{base}/challenge/2","token":"MDEyMzQ1Njc4OWFiY2RlZg","status":"pending","error":null}}]}}"#
+                        ),
+                        Some(format!("{base}/auth/2")),
+                    ),
+                    _ => ("404 Not Found", String::new(), None),
+                };
+                let location = location
+                    .map(|v| format!("Location: {v}\r\n"))
+                    .unwrap_or_default();
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nReplay-Nonce: n{nonce}\r\nContent-Length: {}\r\nConnection: close\r\n{location}\r\n{body}",
+                    body.len()
+                );
+                conn.writer().write_all(response.as_bytes()).unwrap();
+                conn.send_close_notify();
+                while conn.wants_write() {
+                    conn.write_tls(&mut stream).unwrap();
+                }
+                if path == "/auth/2" {
+                    break;
+                }
+            }
+        });
+
+        fixture.0.directory_url = rx.recv().unwrap();
+        fixture.0.challenge = "http-01".to_string();
+        let (account, _) = Account::builder_with_root(&root)
+            .unwrap()
+            .create(
+                &NewAccount {
+                    contact: &[],
+                    terms_of_service_agreed: true,
+                    only_return_existing: false,
+                },
+                fixture.0.directory_url.clone(),
+                None,
+            )
+            .await
+            .unwrap();
+        let err = ensure_certificate(&fixture.0, &account, TEST_SNI)
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("no http-01 challenge for authorization"),
+            "unexpected error: {err:#}"
+        );
+        assert!(
+            fixture.0.tokens.get("MDEyMzQ1Njc4OWFiY2RlZg").is_none(),
+            "http-01 token was not cleaned up after the missing-challenge error"
+        );
+        ca.join().unwrap();
     }
 
     #[cfg(unix)]
