@@ -2,6 +2,7 @@ use super::types::{
     ByteRangeSpec, CachedResponseEnvelope, IfRangeCondition, RequestDirectives, ResponseDirectives,
 };
 use http::header::{AGE, DATE, EXPIRES};
+use hyper::StatusCode;
 use qpx_core::config::CachePolicyConfig;
 use qpx_core::http_message::{Headers as OwnedHeaders, OrdinaryHeaderName};
 
@@ -172,6 +173,12 @@ pub fn active_range<'a>(
     req: &'a RequestDirectives,
     envelope: &CachedResponseEnvelope,
 ) -> Option<&'a ByteRangeSpec> {
+    // RFC 9110 §14.2: a Range header must be ignored unless the response
+    // without it would be 200 OK. This guard also keeps the body consistent:
+    // callers slice the body only when they see an active range.
+    if envelope.status != StatusCode::OK.as_u16() {
+        return None;
+    }
     let range = req.range.as_ref()?;
     if let Some(if_range) = req.if_range.as_ref()
         && !if_range_matches(if_range, envelope)

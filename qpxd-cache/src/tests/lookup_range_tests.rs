@@ -57,6 +57,55 @@ async fn lookup_serves_single_range_from_cache() {
     assert_eq!(body.as_ref(), b"world");
 }
 
+/// RFC 9110 §14.2: Range applies only when the response without Range would
+/// be 200 OK. A cached 404 must stay a 404 with its full body, not become a
+/// 206 carrying a slice of the error page.
+#[tokio::test]
+async fn lookup_ignores_range_for_cached_not_found() {
+    let req = make_get_request("/cached-404-range");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let response = make_response(StatusCode::NOT_FOUND, "public, max-age=60", "missing");
+    let backends = backend_map();
+    let _ = store_and_drain(
+        &req,
+        &key,
+        &policy(),
+        response,
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    let mut ranged = make_get_request("/cached-404-range");
+    ranged
+        .headers_mut()
+        .insert(ord("range"), http::HeaderValue::from_static("bytes=0-1"));
+    let out = lookup(&ranged, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
+    let response = match out {
+        LookupOutcome::Hit(response) => response,
+        _ => panic!("expected cache hit"),
+    };
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert!(
+        crate::tests::wire_headers(response.headers())
+            .get(CONTENT_RANGE)
+            .is_none()
+    );
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
+    assert_eq!(body.as_ref(), b"missing");
+}
+
 #[tokio::test]
 async fn lookup_ignores_range_for_head_requests() {
     let req = make_get_request("/head-range");
