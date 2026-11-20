@@ -10,10 +10,10 @@ pub struct ResourceId(Arc<str>);
 
 impl ResourceId {
     pub fn parse(path: &str) -> Result<Self> {
-        let decoded = percent_decode_str(path)
+        let (path, _) = path.split_once(['?', '#']).unwrap_or((path, ""));
+        let path = percent_decode_str(path)
             .decode_utf8()
             .map_err(|_| anyhow!("WebDAV resource path is not valid UTF-8"))?;
-        let path = decoded.split(['?', '#']).next().unwrap_or_default();
         let mut canonical = String::with_capacity(path.len().saturating_add(1));
         canonical.push('/');
         let mut has_segment = false;
@@ -22,7 +22,7 @@ impl ResourceId {
                 "" | "." => {}
                 ".." => return Err(anyhow!("WebDAV resource path traversal is forbidden")),
                 value
-                    if value.contains('\\')
+                    if value.contains(['\\', '?', '#'])
                         || value.contains('\0')
                         || value.chars().any(char::is_control) =>
                 {
@@ -246,5 +246,23 @@ mod tests {
         assert!(ResourceId::parse("/a/%2e%2e/secret").is_err());
         assert!(ResourceId::parse("/a%2fb/../secret").is_err());
         assert!(ResourceId::parse("/a\\b").is_err());
+    }
+
+    #[test]
+    fn parse_rejects_encoded_url_delimiters() {
+        assert!(ResourceId::parse("/report%23draft.txt").is_err());
+        assert!(ResourceId::parse("/report%3Fdraft.txt").is_err());
+    }
+
+    #[test]
+    fn parse_strips_raw_query_and_fragment_delimiters() {
+        assert_eq!(
+            ResourceId::parse("/report.txt?version=1").unwrap().as_str(),
+            "/report.txt"
+        );
+        assert_eq!(
+            ResourceId::parse("/report.txt#section").unwrap().as_str(),
+            "/report.txt"
+        );
     }
 }
