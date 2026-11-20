@@ -18,9 +18,13 @@ conformance.
   gates.
 - `not-applicable`: the specification assigns a responsibility to a user agent,
   identity provider, authorization server, or another component outside qpx.
+- `not-enabled`: qpx deliberately refuses the mechanism on every applicable
+  path; the refusal is implemented and release-gated, while the capability
+  itself is neither advertised nor enabled.
 
-There is no public `partial` status. A capability that has not passed every
-applicable release gate is not advertised or enabled in a release build.
+The status vocabulary above is exhaustive: there is no public `partial` status.
+A capability that has not passed every applicable release gate is not advertised
+or enabled in a release build.
 
 ## Classification
 
@@ -60,7 +64,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 |---|---|---|---|
 | HTTP semantics and versions | 9110, 9111, 9112, 9113, 9114 | complete / transport-library-with-contract | semantics, cache, HTTP/1.1, HTTP/2, HTTP/3 |
 | Methods and status codes | 5789, 6585, 7725, 8297, 10008 | complete | PATCH, additional status codes, Early Hints, QUERY |
-| Early data | 8470 | partial: inbound 0-RTT refused | all listeners disable 0-RTT; no Early-Data/425 relay or replay-safety classification |
+| Early data | 8470 | not-enabled | all listeners pin `max_early_data_size = 0`; no Early-Data/425 relay or replay-safety classification |
 | Fields and metadata | 6265, 6266, 7239, 7240, 7838, 8288, 8594, 8942, 9209, 9440, 9651, 9745, 9842 | complete | cookies, disposition, forwarding, preferences, links, Client Hints, client certificates, proxy metadata, structured fields, dictionary compression |
 | Cache extensions | 5861, 8246, 9211, 9213 | complete | stale controls, immutable, Cache-Status, targeted controls |
 | Authentication and integrity | 6750, 6797, 7616, 7617, 9421, 9449, 9530, 9931 | complete / external-authority | resource-server Bearer and DPoP handling, HSTS, Basic/Digest, signatures, digests, optimistic-data safety |
