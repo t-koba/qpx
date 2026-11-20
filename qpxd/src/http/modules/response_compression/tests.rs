@@ -436,6 +436,33 @@ fn identity_response_carries_vary_when_compression_negotiable() {
     );
 }
 
+#[test]
+fn uppercase_accept_encoding_weight_rejects_gzip() {
+    // ABNF literals such as "q=" are case-insensitive; gzip;Q=0 must not be
+    // treated as gzip at full quality.
+    let config = identity_test_config();
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
+    let select = |accept: &str| {
+        let request = hyper::Request::builder()
+            .method(Method::GET)
+            .header(http::header::ACCEPT_ENCODING, accept)
+            .body(Body::empty())
+            .expect("request");
+        select_response_encoding(request.method(), request.headers(), &config, &response)
+            .expect("select encoding")
+    };
+    assert_eq!(select("gzip"), Some(ContentEncoding::Gzip));
+    assert_eq!(select("gzip;q=0"), None);
+    assert_eq!(select("gzip;Q=0"), None, "uppercase Q must reject gzip");
+}
+
 #[tokio::test]
 async fn absent_accept_encoding_identity_response_marks_downstream_cache_variant() {
     let module = ResponseCompressionModule::new(identity_test_config()).expect("module");

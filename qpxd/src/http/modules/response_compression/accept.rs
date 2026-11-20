@@ -17,7 +17,9 @@ pub(super) fn parse_accept_encoding(headers: &impl OrdinaryHeaderMut) -> Vec<(St
             .to_ascii_lowercase();
         let mut q = 1000i32;
         for segment in segments {
-            if let Some(raw) = segment.trim().strip_prefix("q=") {
+            if let Some((name, raw)) = segment.trim().split_once('=')
+                && name.trim().eq_ignore_ascii_case("q")
+            {
                 q = parse_quality(raw);
             }
         }
