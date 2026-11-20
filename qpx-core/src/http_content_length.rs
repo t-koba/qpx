@@ -155,12 +155,6 @@ fn merge_value(value: &str, declared: &mut Option<u64>) -> Result<(), ContentLen
 ///
 /// The Content-Length that a sequence of named header values declares.
 ///
-/// The field's sending half belongs to the owner as well: the grammar a
-/// sender writes is one decimal, so the value the owner writes for a
-/// resolved length is a single instance of that decimal, and a writer
-/// that replaces the declaration it received with it emits one field
-/// line whose value is the resolved decimal.
-///
 /// A site that reads raw header lines has no header map to hand the
 /// owner, so it hands the lines themselves: the owner finds the field's
 /// own values by their name, matched case-insensitively as HTTP requires,
