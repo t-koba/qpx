@@ -206,17 +206,15 @@ impl<S> AccessLogService<S> {
         let direct_snapshot =
             (should_log && direct_combined).then(|| self.combined_request_template(&req));
         let snapshot = if should_log && !direct_combined {
-            let referer = req
-                .headers()
-                .get(http::header::REFERER)
-                .and_then(|v| v.to_str().ok())
-                .map(|s| {
-                    if self.header_is_redacted("referer") {
-                        "<redacted>".to_string()
-                    } else {
-                        redact_uri_query_keys(s, &self.redact_query_keys)
-                    }
-                });
+            let referer = req.headers().get(http::header::REFERER).and_then(|v| {
+                if self.header_is_redacted("referer") {
+                    Some("<redacted>".to_string())
+                } else {
+                    v.to_str()
+                        .ok()
+                        .map(|s| redact_uri_query_keys(s, &self.redact_query_keys))
+                }
+            });
             Some(AccessLogSnapshot {
                 remote_addr: self.remote_addr,
                 kind: self.context.kind,
@@ -1391,6 +1389,48 @@ mod userinfo_output_tests {
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_redacts_opaque_referer() {
+        let output = Output::default();
+        let writer = output.clone();
+        let _guard = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(Level::TRACE)
+            .with_writer(move || writer.clone())
+            .set_default();
+
+        let mut config = AccessLogConfig::default();
+        config.output.enabled = true;
+        config.output.format = "json".into();
+        config.redact.headers = vec!["referer".into()];
+        let service = AccessLogService::new(
+            crate::handler_fn(|_: Request<()>| async {
+                Ok::<_, ()>(Response::from_http(http::Response::new(())))
+            }),
+            "127.0.0.1:8080".parse().unwrap(),
+            AccessLogContext {
+                kind: "test",
+                name: Arc::from("test"),
+            },
+            &config,
+        );
+        let referer = http::HeaderValue::from_bytes(b"https://example.test/\xE9").unwrap();
+        let request = Request::builder()
+            .header(http::header::REFERER, referer)
+            .body(())
+            .unwrap();
+        service
+            .call_with_otel_enabled(request, false)
+            .await
+            .unwrap();
+
+        let bytes = output.0.lock().unwrap();
+        let log = std::str::from_utf8(&bytes).unwrap();
+        assert!(log.contains(r#""referer":"<redacted>""#), "{log}");
     }
 
     #[tokio::test(flavor = "current_thread")]
