@@ -49,15 +49,33 @@ pub(super) fn append_vary_accept_encoding(headers: &mut impl OrdinaryHeaderMut) 
 }
 
 fn parse_quality(raw: &str) -> i32 {
+    // RFC 9110 section 12.4.2: a qvalue has at most three decimal places.
+    // Read those places as decimal digits: a float cannot represent 0.251
+    // exactly, and truncating its scaled value would rank it equal to 0.250.
     let raw = raw.trim();
-    if raw.eq("1") || raw.eq("1.0") || raw.eq("1.00") || raw.eq("1.000") {
-        return 1000;
-    }
-    if raw.eq("0") || raw.eq("0.0") || raw.eq("0.00") || raw.eq("0.000") {
-        return 0;
-    }
-    let Ok(value) = raw.parse::<f32>() else {
+    let (whole, fraction) = match raw.split_once('.') {
+        Some((whole, fraction)) => (whole, Some(fraction)),
+        None => (raw, None),
+    };
+    let Ok(whole) = whole.parse::<u64>() else {
         return 0;
     };
-    (value.clamp(0.0, 1.0) * 1000.0) as i32
+    let mut thousandths = whole.saturating_mul(1000);
+    if let Some(fraction) = fraction {
+        if !fraction.bytes().all(|digit| digit.is_ascii_digit()) {
+            return 0;
+        }
+        let digits = fraction.len().min(3);
+        let scale = match digits {
+            1 => 100,
+            2 => 10,
+            3 => 1,
+            _ => 0,
+        };
+        let Ok(part) = fraction[..digits].parse::<u64>() else {
+            return 0;
+        };
+        thousandths = thousandths.saturating_add(part.saturating_mul(scale));
+    }
+    thousandths.min(1000) as i32
 }

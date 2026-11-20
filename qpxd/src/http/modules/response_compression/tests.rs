@@ -29,6 +29,24 @@ fn accept_encoding_parses_shared_members_across_repeated_fields() {
 }
 
 #[test]
+fn accept_encoding_quality_preserves_thousandths() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip;q=0.251, br;q=0.250, zstd;q=0.29"),
+    );
+
+    assert_eq!(
+        parse_accept_encoding(&headers),
+        vec![
+            ("gzip".to_string(), 251),
+            ("br".to_string(), 250),
+            ("zstd".to_string(), 290),
+        ]
+    );
+}
+
+#[test]
 fn append_vary_accept_encoding_preserves_repeated_mixed_case_fields() {
     let mut headers = HeaderMap::new();
     headers.append(VARY, HeaderValue::from_static("Origin"));
@@ -461,6 +479,33 @@ fn uppercase_accept_encoding_weight_rejects_gzip() {
     assert_eq!(select("gzip"), Some(ContentEncoding::Gzip));
     assert_eq!(select("gzip;q=0"), None);
     assert_eq!(select("gzip;Q=0"), None, "uppercase Q must reject gzip");
+}
+
+#[test]
+fn prefers_the_coding_with_one_thousandth_more_quality() {
+    let config = ResponseCompressionModuleConfig {
+        brotli: true,
+        ..identity_test_config()
+    };
+    let response = Response::from_http(
+        HttpResponse::builder()
+            .status(StatusCode::OK)
+            .header(CONTENT_TYPE, "text/plain")
+            .header(CONTENT_LENGTH, "12")
+            .body(Body::empty())
+            .expect("response"),
+    );
+    let request = hyper::Request::builder()
+        .method(Method::GET)
+        .header(ACCEPT_ENCODING, "gzip;q=0.251, br;q=0.250")
+        .body(Body::empty())
+        .expect("request");
+
+    assert_eq!(
+        select_response_encoding(request.method(), request.headers(), &config, &response)
+            .expect("select encoding"),
+        Some(ContentEncoding::Gzip)
+    );
 }
 
 #[tokio::test]
