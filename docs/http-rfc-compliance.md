@@ -59,7 +59,8 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | Area | RFCs | qpx status | Detailed scope |
 |---|---|---|---|
 | HTTP semantics and versions | 9110, 9111, 9112, 9113, 9114 | complete / transport-library-with-contract | semantics, cache, HTTP/1.1, HTTP/2, HTTP/3 |
-| Methods and status codes | 5789, 6585, 7725, 8297, 8470, 10008 | complete | PATCH, additional status codes, Early Hints, early data, QUERY |
+| Methods and status codes | 5789, 6585, 7725, 8297, 10008 | complete | PATCH, additional status codes, Early Hints, QUERY |
+| Early data | 8470 | partial: inbound 0-RTT refused | all listeners disable 0-RTT; no Early-Data/425 relay or replay-safety classification |
 | Fields and metadata | 6265, 6266, 7239, 7240, 7838, 8288, 8594, 8942, 9209, 9440, 9651, 9745, 9842 | complete | cookies, disposition, forwarding, preferences, links, Client Hints, client certificates, proxy metadata, structured fields, dictionary compression |
 | Cache extensions | 5861, 8246, 9211, 9213 | complete | stale controls, immutable, Cache-Status, targeted controls |
 | Authentication and integrity | 6750, 6797, 7616, 7617, 9421, 9449, 9530, 9931 | complete / external-authority | resource-server Bearer and DPoP handling, HSTS, Basic/Digest, signatures, digests, optimistic-data safety |
@@ -90,7 +91,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | 6585 | native | 428 policy, 429, 431, CAPPORT-only 511 | qpxd protocol/config tests and RFC contract suite |
 | 7725 | native | policy-generated 451 with legal-information `Link` | API metadata and local-response contract tests |
 | 8297 | native | generation and relay of 103 across supported HTTP paths; raw reverse HTTP/1 emits hints before waiting for the final head | informational-response RFC scenarios and downstream/origin handshake regression |
-| 8470 | native | replay-safety classification; early data disabled by default (TCP explicit, QUIC explicit); 425/Early-Data gateway relay not yet enabled | method-registry and TLS early-data-disabled tests |
+| 8470 | native | inbound 0-RTT is refused: all TCP, MITM, reverse, and QUIC listeners pin `max_early_data_size = 0`. The Early-Data/425 gateway relay and replay-safety classification are NOT implemented (enabling them needs a replay/retry-authority contract and transport wiring across TLS and QUIC) | TLS early-data-disabled tests in `qpx-core/src/tls/tests.rs` and all four listener configs |
 | 6265 | native | strict Cookie and Set-Cookie codec/policy; no cookie jar or session authority | `cookie_policy::tests` |
 | 6266 | native | strict Content-Disposition parser/serializer and extended filename handling | `content_disposition::tests` |
 | 7239 | native | strict Forwarded codec and configured trusted-chain handling | `forwarded::tests`, qpxd forwarded tests |
