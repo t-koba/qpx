@@ -61,7 +61,8 @@ fn parse_quality(raw: &str) -> i32 {
         return 0;
     };
     let mut thousandths = whole.saturating_mul(1000);
-    if let Some(fraction) = fraction {
+    // A dot with no digits (q=1.) is the same weight as no dot.
+    if let Some(fraction) = fraction.filter(|fraction| !fraction.is_empty()) {
         if !fraction.bytes().all(|digit| digit.is_ascii_digit()) {
             return 0;
         }

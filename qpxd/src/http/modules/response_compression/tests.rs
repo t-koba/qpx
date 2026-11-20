@@ -482,6 +482,24 @@ fn uppercase_accept_encoding_weight_rejects_gzip() {
 }
 
 #[test]
+fn accept_encoding_accepts_qvalue_without_fractional_digits() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static("gzip;q=1., br;q=0., zstd;q=0.5"),
+    );
+
+    assert_eq!(
+        parse_accept_encoding(&headers),
+        vec![
+            ("gzip".to_string(), 1000),
+            ("br".to_string(), 0),
+            ("zstd".to_string(), 500),
+        ]
+    );
+}
+
+#[test]
 fn prefers_the_coding_with_one_thousandth_more_quality() {
     let config = ResponseCompressionModuleConfig {
         brotli: true,
