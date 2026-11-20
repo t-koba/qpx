@@ -708,3 +708,56 @@ async fn if_range_equal_date_with_earlier_date_falls_back_to_full_response() {
         .expect("body");
     assert_eq!(body.as_ref(), b"hello");
 }
+
+/// RFC 9110 §13.2.1: preconditions are ignored when the response without
+/// them would be neither 2xx nor 412. A cached 404 must keep its status and
+/// body even when the client sends `If-None-Match: *`.
+#[tokio::test]
+async fn lookup_ignores_if_none_match_for_cached_not_found() {
+    let mut req = make_get_request("/cached-404-condition");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("some key");
+    let backends = backend_map();
+    let _ = store_and_drain(
+        &req,
+        &key,
+        &policy(),
+        make_response(StatusCode::NOT_FOUND, "public, max-age=60", "missing"),
+        CacheStoreTiming {
+            response_delay_secs: 0,
+            body_read_timeout: Duration::from_secs(1),
+            request_collapse_guard: None,
+        },
+        &backends,
+    )
+    .await
+    .expect("store");
+
+    req.headers_mut()
+        .insert(ord("if-none-match"), http::HeaderValue::from_static("*"));
+    let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
+    let LookupOutcome::Hit(response) = out else {
+        panic!("expected cache hit");
+    };
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
+    assert_eq!(body.as_ref(), b"missing");
+
+    // The same status guard applies to state-changing preconditions: a
+    // cached 404 must not be replaced by a synthetic 412 either.
+    req.headers_mut().remove(&ord("if-none-match"));
+    req.headers_mut()
+        .insert(ord("if-match"), http::HeaderValue::from_static("\"nope\""));
+    let out = lookup(&req, &key, &policy(), &backends, &test_revalidations())
+        .await
+        .expect("lookup");
+    let LookupOutcome::Hit(response) = out else {
+        panic!("expected cache hit");
+    };
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}

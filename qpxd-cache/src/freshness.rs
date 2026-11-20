@@ -114,11 +114,18 @@ pub fn freshness_lifetime_secs(
     policy.default_ttl_secs
 }
 
+/// RFC 9110 §13.2.1: preconditions are ignored unless the response without
+/// them would be 2xx or 412. A cached 404, for example, must keep its own
+/// status and body instead of becoming a synthetic 304 or 412.
+fn preconditions_apply(envelope: &CachedResponseEnvelope) -> bool {
+    (200..300).contains(&envelope.status) || envelope.status == 412
+}
+
 pub fn conditional_not_modified(
     req: &RequestDirectives,
     envelope: &CachedResponseEnvelope,
 ) -> bool {
-    if !req.has_conditional {
+    if !req.has_conditional || !preconditions_apply(envelope) {
         return false;
     }
 
@@ -150,6 +157,9 @@ pub fn conditional_not_modified(
 }
 
 pub fn precondition_failed(req: &RequestDirectives, envelope: &CachedResponseEnvelope) -> bool {
+    if !preconditions_apply(envelope) {
+        return false;
+    }
     // RFC 9110 §13.1.4: If-Match takes precedence over If-Unmodified-Since.
     if !req.if_match.is_empty() {
         return !if_match_succeeds(req, envelope);
