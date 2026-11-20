@@ -26,7 +26,16 @@ enum H2ConnectionEvent {
     ConcurrentStreamCompleted,
     PrimaryStreamCompleted,
     Accepted,
+    ConnectionClosed,
     IdleTimeout,
+}
+
+type AcceptedH2Stream =
+    std::result::Result<(Request<h2::RecvStream>, h2::server::SendResponse<Bytes>), h2::Error>;
+
+enum H2ConnectionDrive {
+    Accepted(Box<AcceptedH2Stream>),
+    Closed(std::result::Result<(), h2::Error>),
 }
 
 fn prioritize_h2_admission(completions_since_admission: usize) -> bool {
@@ -83,44 +92,55 @@ where
     let mut reusable_primary_stream: Option<ReusableBoxFuture<'_, ()>> = None;
     let mut primary_stream = None;
     let mut concurrent_streams = FuturesUnordered::new();
-    let mut accepting_streams = true;
+    let mut connection_closed = false;
     let mut completions_since_admission = 0usize;
     let idle_timer = tokio::time::sleep(idle_timeout);
     tokio::pin!(idle_timer);
     loop {
         let accept_backlog_available = concurrent_streams.len() < accept_backlog;
-        if accepting_streams && !accept_backlog_available {
-            let progress = poll_fn(|cx| {
-                Poll::Ready(match conn.poll_closed(cx) {
-                    Poll::Ready(result) => Some(result),
-                    Poll::Pending => None,
-                })
-            })
-            .await;
-            if let Some(result) = progress {
-                match result {
-                    Ok(()) => {
-                        accepting_streams = false;
-                        if primary_stream.is_none() && concurrent_streams.is_empty() {
-                            break;
-                        }
+        let drive_accepts = !connection_closed && accept_backlog_available;
+        // Keep the connection driven across the await below. h2's poll_accept calls
+        // poll_closed internally, so one future both admits work when there is room
+        // and keeps stream DATA, flow control and resets moving when the handler
+        // backlog is full. A one-shot poll here would miss socket wakes while the
+        // select! waits only on handlers and the idle timer.
+        let mut connection_drive = poll_fn(|cx| {
+            if drive_accepts {
+                match conn.poll_accept(cx) {
+                    Poll::Ready(Some(result)) => {
+                        Poll::Ready(H2ConnectionDrive::Accepted(Box::new(result)))
                     }
-                    Err(error) => return Err(error.into()),
+                    Poll::Ready(None) => {
+                        Poll::Ready(H2ConnectionDrive::Closed(std::result::Result::Ok(())))
+                    }
+                    Poll::Pending => Poll::Pending,
                 }
+            } else {
+                Poll::Ready(H2ConnectionDrive::Closed(match conn.poll_closed(cx) {
+                    Poll::Ready(result) => result,
+                    Poll::Pending => return Poll::Pending,
+                }))
             }
-        }
+        });
         // Reap completed streams first to release response buffers. The reusable primary
         // future sits outside FuturesUnordered, so poll it before the concurrent completion
         // queue to give it the same bounded progress guarantee. After a bounded completion
         // burst, prefer a ready admission so multiplexed requests cannot starve.
         let mut accepted_stream = None;
+        let mut closed_result = None;
         let event = if prioritize_h2_admission(completions_since_admission) {
             tokio::select! {
                 biased;
-                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
-                    accepted_stream = Some(accepted);
-                    H2ConnectionEvent::Accepted
-                }
+                driven = &mut connection_drive, if !connection_closed => match driven {
+                    H2ConnectionDrive::Accepted(result) => {
+                        accepted_stream = Some(*result);
+                        H2ConnectionEvent::Accepted
+                    }
+                    H2ConnectionDrive::Closed(result) => {
+                        closed_result = Some(result);
+                        H2ConnectionEvent::ConnectionClosed
+                    }
+                },
                 completed = poll_optional_h2_stream(&mut primary_stream), if primary_stream.is_some() => {
                     let () = completed;
                     H2ConnectionEvent::PrimaryStreamCompleted
@@ -140,10 +160,16 @@ where
                 Some(()) = concurrent_streams.next(), if !concurrent_streams.is_empty() => {
                     H2ConnectionEvent::ConcurrentStreamCompleted
                 }
-                accepted = conn.accept(), if accepting_streams && accept_backlog_available => {
-                    accepted_stream = Some(accepted);
-                    H2ConnectionEvent::Accepted
-                }
+                driven = &mut connection_drive, if !connection_closed => match driven {
+                    H2ConnectionDrive::Accepted(result) => {
+                        accepted_stream = Some(*result);
+                        H2ConnectionEvent::Accepted
+                    }
+                    H2ConnectionDrive::Closed(result) => {
+                        closed_result = Some(result);
+                        H2ConnectionEvent::ConnectionClosed
+                    }
+                },
                 () = idle_timer.as_mut() => H2ConnectionEvent::IdleTimeout,
             }
         };
@@ -152,7 +178,7 @@ where
                 completions_since_admission = completions_since_admission.saturating_add(1);
                 drive_h2_connection_now(&mut conn).await?;
                 if primary_stream.is_none() && concurrent_streams.is_empty() {
-                    if !accepting_streams {
+                    if connection_closed {
                         break;
                     }
                     idle_timer
@@ -164,7 +190,7 @@ where
                 completions_since_admission = completions_since_admission.saturating_add(1);
                 reusable_primary_stream = primary_stream.take();
                 drive_h2_connection_now(&mut conn).await?;
-                if !accepting_streams && concurrent_streams.is_empty() {
+                if connection_closed && concurrent_streams.is_empty() {
                     break;
                 }
                 if concurrent_streams.is_empty() {
@@ -174,16 +200,9 @@ where
                 }
             }
             H2ConnectionEvent::Accepted => {
-                let accepted = accepted_stream.ok_or_else(|| {
+                let result = accepted_stream.ok_or_else(|| {
                     anyhow::anyhow!("accepted stream event is missing its result")
                 })?;
-                let Some(result) = accepted else {
-                    accepting_streams = false;
-                    if primary_stream.is_none() && concurrent_streams.is_empty() {
-                        break;
-                    }
-                    continue;
-                };
                 completions_since_admission = 0;
                 let (request, respond) = result?;
                 let active_stream = ActiveH2Stream::new(&active_streams);
@@ -204,6 +223,16 @@ where
                     primary_stream = Some(reusable);
                 } else {
                     concurrent_streams.push(stream);
+                }
+            }
+            H2ConnectionEvent::ConnectionClosed => {
+                let result = closed_result.ok_or_else(|| {
+                    anyhow::anyhow!("connection closed event is missing its result")
+                })?;
+                connection_closed = true;
+                result?;
+                if primary_stream.is_none() && concurrent_streams.is_empty() {
+                    break;
                 }
             }
             H2ConnectionEvent::IdleTimeout => {
@@ -784,6 +813,112 @@ mod tests {
         release_first.notify_one();
         let first_response = first_response.await.expect("first response");
         assert_eq!(first_response.status(), ::http::StatusCode::OK);
+    }
+
+    /// With the handler backlog full, the connection must still be driven so
+    /// a queued handler waiting for request DATA can complete. The idle timer
+    /// (5s here) must not be what unblocks it.
+    #[tokio::test]
+    async fn h2_full_backlog_still_processes_incoming_body_data() {
+        let primary_started = Arc::new(Notify::new());
+        let release_primary = Arc::new(Notify::new());
+        let parked_started = Arc::new(Notify::new());
+        let data_started = Arc::new(Notify::new());
+        let (server_primary, server_release, server_parked, server_data) = (
+            primary_started.clone(),
+            release_primary.clone(),
+            parked_started.clone(),
+            data_started.clone(),
+        );
+        let service = handler_fn(move |req: Request<Body>| {
+            let primary_started = server_primary.clone();
+            let release_primary = server_release.clone();
+            let parked_started = server_parked.clone();
+            let data_started = server_data.clone();
+            async move {
+                match req.uri().path() {
+                    "/primary" => {
+                        primary_started.notify_one();
+                        release_primary.notified().await;
+                        Ok::<_, Infallible>(OwnerResponse::new(Body::empty()))
+                    }
+                    "/parked" => {
+                        parked_started.notify_one();
+                        pending::<Result<OwnerResponse<Body>, Infallible>>().await
+                    }
+                    "/data" => {
+                        data_started.notify_one();
+                        let body = qpx_http::body::to_bytes(req.into_body())
+                            .await
+                            .expect("request body");
+                        Ok::<_, Infallible>(OwnerResponse::new(Body::from(body)))
+                    }
+                    other => panic!("unexpected path: {other}"),
+                }
+            }
+        });
+        let (client_io, server_io) = duplex(1024 * 1024);
+        let server = tokio::spawn(async move {
+            super::serve_h2_with_interim_and_capacity_and_tuning(
+                server_io,
+                service,
+                false,
+                Duration::from_secs(5),
+                super::H2ServerTuning {
+                    max_concurrent_streams: 2,
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("serve h2");
+        });
+        let (mut client, connection) = h2::client::handshake(client_io).await.expect("handshake");
+        tokio::spawn(async move {
+            let _ = connection.await;
+        });
+
+        let send = |client: &mut h2::client::SendRequest<bytes::Bytes>, path: &str, end| {
+            let request = ::http::Request::builder()
+                .method(if path == "/data" {
+                    ::http::Method::POST
+                } else {
+                    ::http::Method::GET
+                })
+                .uri(format!("https://reverse_edges.test{path}"))
+                .body(())
+                .expect("request");
+            client.send_request(request, end).expect("send request")
+        };
+
+        client = client.ready().await.expect("primary ready");
+        let (primary_response, _) = send(&mut client, "/primary", true);
+        primary_started.notified().await;
+
+        client = client.ready().await.expect("parked ready");
+        let (_parked_response, _) = send(&mut client, "/parked", true);
+        parked_started.notified().await;
+
+        // Free the primary so the parked handler is the only queued worker;
+        // the data stream then fills the backlog to exactly two.
+        release_primary.notify_one();
+        let primary_response = timeout(Duration::from_secs(1), primary_response)
+            .await
+            .expect("primary response")
+            .expect("primary response");
+        assert_eq!(primary_response.status(), ::http::StatusCode::OK);
+
+        client = client.ready().await.expect("data ready");
+        let (data_response, mut data_stream) = send(&mut client, "/data", false);
+        data_started.notified().await;
+        data_stream
+            .send_data(bytes::Bytes::from_static(b"payload"), true)
+            .expect("send data");
+        let data_response = timeout(Duration::from_secs(1), data_response)
+            .await
+            .expect("body data must be processed with a full handler backlog")
+            .expect("data response");
+        assert_eq!(data_response.status(), ::http::StatusCode::OK);
+        server.abort();
     }
 
     #[tokio::test]
