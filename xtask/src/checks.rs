@@ -4412,6 +4412,9 @@ mod tests {
             r#"http::HeaderName::from_lowercase(b"content-length").unwrap()"#,
             r#"http::HeaderName::from_bytes(b"content-length")?"#,
             r#"http::HeaderName::from_static("Content-Length").expect("name")"#,
+            r#"CONTENT_LENGTH.to_owned()"#,
+            r#""content-length".to_owned()"#,
+            r#"http::HeaderName::from_static("content-length").to_owned()"#,
         ] {
             for read in [
                 format!("h.get({key})"),
