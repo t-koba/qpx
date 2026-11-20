@@ -16,7 +16,13 @@ workspace root; a pattern member or a member without a directory fails the
 gates closed instead of being skipped. The declared Content-Length has a
 structural single owner: `Headers` keeps its `HeaderMap` private, ordinary
 access excludes Content-Length, and compile-fail doctests block raw
-CONTENT_LENGTH mutation. Only a small syntactic backstop remains in
+CONTENT_LENGTH mutation. At HTTP/3 response decode boundaries the converted
+head is imported whole with `from_http`, and body-length policy resolves the
+declaration through the owner after import, so qpx production code does not
+select Content-Length from a raw header map. This owner covers the owned
+in-domain head; independent raw-H1/interim head owners and lossless
+`into_http_for_library` exports remain outside it. Only a small syntactic
+backstop remains in
 `cargo xtask structure`: it flags explicit production `.get`/`.get_all`/index
 reads keyed by `CONTENT_LENGTH`, a case-insensitive `"content-length"` string or
 byte literal, or a `HeaderName` constructor (`from_static`, `from_bytes`,

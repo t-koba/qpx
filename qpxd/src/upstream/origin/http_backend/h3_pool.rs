@@ -500,6 +500,7 @@ mod tests {
     };
     use crate::upstream::origin::http_backend::h3_pool::*;
     use hyper::StatusCode;
+    use qpx_core::http_message::Response as OwnerResponse;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use tokio::sync::{mpsc, oneshot};
     use tokio::time::Duration;
@@ -766,21 +767,30 @@ mod tests {
         assert!(err.to_string().contains("length mismatch"));
     }
 
+    fn owned_h3_response_head(status: StatusCode, headers: &http::HeaderMap) -> OwnerResponse<()> {
+        let mut response = ::http::Response::new(());
+        *response.status_mut() = status;
+        *response.headers_mut() = headers.clone();
+        OwnerResponse::from_http(response)
+    }
+
     #[test]
     fn h3_upstream_response_head_and_no_body_statuses_expect_zero_data() {
         let mut headers = http::HeaderMap::new();
         headers.insert(http::header::CONTENT_LENGTH, "10".parse().unwrap());
 
         assert_eq!(
-            declared_h3_response_body_length(&http::Method::HEAD, StatusCode::OK, &headers)
-                .expect("declared"),
+            declared_h3_response_body_length(
+                &http::Method::HEAD,
+                &owned_h3_response_head(StatusCode::OK, &headers),
+            )
+            .expect("declared"),
             Some(0)
         );
         assert_eq!(
             declared_h3_response_body_length(
                 &http::Method::GET,
-                StatusCode::NOT_MODIFIED,
-                &headers,
+                &owned_h3_response_head(StatusCode::NOT_MODIFIED, &headers),
             )
             .expect("declared"),
             Some(0)
@@ -793,8 +803,7 @@ mod tests {
         assert_eq!(
             declared_h3_response_body_length(
                 &http::Method::GET,
-                StatusCode::RESET_CONTENT,
-                &reset_content_headers,
+                &owned_h3_response_head(StatusCode::RESET_CONTENT, &reset_content_headers),
             )
             .expect("zero-length 205"),
             Some(0)
@@ -802,14 +811,16 @@ mod tests {
 
         let err = declared_h3_response_body_length(
             &http::Method::GET,
-            StatusCode::RESET_CONTENT,
-            &headers,
+            &owned_h3_response_head(StatusCode::RESET_CONTENT, &headers),
         )
         .expect_err("nonzero 205 Content-Length must be rejected");
         assert!(err.to_string().contains("nonzero Content-Length"));
         assert_eq!(
-            declared_h3_response_body_length(&http::Method::GET, StatusCode::OK, &headers)
-                .expect("declared"),
+            declared_h3_response_body_length(
+                &http::Method::GET,
+                &owned_h3_response_head(StatusCode::OK, &headers),
+            )
+            .expect("declared"),
             Some(10)
         );
     }

@@ -9,10 +9,7 @@ use crate::http3::quic::{build_h3_client_config, enforce_h3_connection_trust};
 use crate::upstream::raw_http1::InterimResponseHead;
 use anyhow::{Result, anyhow};
 use bytes::Bytes;
-use qpx_core::{
-    http_message::{OrdinaryHeaderName, Response as OwnerResponse},
-    rules::CompiledHeaderControl,
-};
+use qpx_core::{http_message::Response as OwnerResponse, rules::CompiledHeaderControl};
 use qpx_http::body::Body;
 use std::sync::Arc;
 use tokio::net::lookup_host;
@@ -242,19 +239,10 @@ fn owner_h3_connect_error_response(
     headers: &::http::HeaderMap,
     body: Body,
 ) -> Result<OwnerResponse<Body>> {
-    let mut response = OwnerResponse::new(body);
-    *response.status_mut() = status;
-    for (name, value) in headers {
-        if name == ::http::header::CONTENT_LENGTH {
-            response
-                .headers_mut()
-                .append_content_length_value(value.clone());
-        } else {
-            let name = OrdinaryHeaderName::try_from(name.clone())?;
-            response.headers_mut().append(name, value.clone());
-        }
-    }
-    Ok(response)
+    let mut raw_response = ::http::Response::new(body);
+    *raw_response.status_mut() = status;
+    *raw_response.headers_mut() = headers.clone();
+    Ok(OwnerResponse::from_http(raw_response))
 }
 
 define_upstream_error_response_body!(

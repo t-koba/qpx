@@ -1,5 +1,4 @@
 use super::{H3ClientRecvStream, H3PooledConnection, H3RequestRelayJoin};
-use crate::http::codec::h2::parse_declared_content_length;
 use crate::http3::codec::h1_headers_to_http;
 use crate::http3::h3_buf_to_bytes;
 use crate::upstream::raw_http1::InterimResponseHead;
@@ -68,26 +67,27 @@ fn own_h3_response_head(
         "HTTP/3 response",
     )?;
     let headers = h1_headers_to_http(response.headers())?;
-    let declared_length = declared_h3_response_body_length(request_method, status, &headers)?;
     *response.status_mut() = status;
     *response.headers_mut() = headers;
     *response.version_mut() = http::Version::HTTP_3;
     // The former reconstructed response did not retain library extensions.
     response.extensions_mut().clear();
-    Ok((OwnerResponse::from_http(response), declared_length))
+    let head = OwnerResponse::from_http(response);
+    let declared_length = declared_h3_response_body_length(request_method, &head)?;
+    Ok((head, declared_length))
 }
 
 pub(super) fn declared_h3_response_body_length(
     request_method: &Method,
-    status: StatusCode,
-    headers: &http::HeaderMap,
+    head: &OwnerResponse<()>,
 ) -> Result<Option<u64>> {
+    let status = head.status();
     if *request_method == Method::CONNECT && status.is_success() {
         // RFC 9110 §9.3.6: ignore Content-Length for every successful
         // CONNECT response, including when its status is 205.
         return Ok(Some(0));
     }
-    let declared = parse_declared_content_length(headers)?;
+    let declared = head.headers().declared_content_length()?;
     if status == StatusCode::RESET_CONTENT {
         // 205 forbids content, but unlike HEAD/204/304 its Content-Length
         // describes this message's (empty) content, not a representation.
