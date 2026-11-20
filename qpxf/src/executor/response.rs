@@ -133,6 +133,7 @@ impl CgiResponse {
     }
 
     /// Parse the CGI response header block without materializing the body.
+    /// A non-empty Location with no explicit Status defaults to 302 per RFC 3875.
     pub fn parse_cgi_head(data: &[u8]) -> Result<CgiResponseHead> {
         let header_end = find_header_end(data)
             .ok_or_else(|| anyhow::anyhow!("CGI output missing header terminator"))?;
@@ -146,6 +147,7 @@ impl CgiResponse {
         };
 
         let mut status = 200u16;
+        let mut status_explicit = false;
         let mut headers = Vec::new();
         for line in header_section.lines() {
             let line = line.trim();
@@ -159,6 +161,7 @@ impl CgiResponse {
                     return Err(anyhow::anyhow!("CGI output contains invalid header name"));
                 }
                 if key.eq_ignore_ascii_case("Status") {
+                    status_explicit = true;
                     if let Some(code) = value.split_whitespace().next() {
                         status = code.parse()?;
                         if !(100..=599).contains(&status) {
@@ -173,6 +176,13 @@ impl CgiResponse {
             } else {
                 return Err(anyhow::anyhow!("CGI output contains malformed header line"));
             }
+        }
+        if !status_explicit
+            && headers
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case("Location") && !value.is_empty())
+        {
+            status = 302;
         }
         Ok(CgiResponseHead {
             status,
@@ -216,5 +226,23 @@ mod tests {
         let err = CgiResponse::parse_cgi_output(b"Status: 700 Weird\r\n\r\nbody")
             .expect_err("non-HTTP status class must fail");
         assert!(err.to_string().contains("out of range"));
+    }
+
+    #[test]
+    fn cgi_client_redirect_defaults_to_302() {
+        let (meta, _) = CgiResponse::parse_cgi_head(b"Location: https://example.com/next\n\n")
+            .expect("parse redirect")
+            .into_ipc_response();
+        assert_eq!(meta.status, 302);
+    }
+
+    #[test]
+    fn explicit_status_overrides_location_default() {
+        let (meta, _) = CgiResponse::parse_cgi_head(
+            b"Status: 201 Created\r\nLocation: https://example.com/next\r\n\r\n",
+        )
+        .expect("parse redirect with status")
+        .into_ipc_response();
+        assert_eq!(meta.status, 201);
     }
 }
