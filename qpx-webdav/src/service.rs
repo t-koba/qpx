@@ -1935,7 +1935,7 @@ fn parse_binding_request(body: &[u8], expected_root: &str) -> Result<BindingRequ
 }
 
 fn binding_child(collection: &ResourceId, segment: &str) -> Result<ResourceId> {
-    ResourceId::parse(&format!(
+    ResourceId::from_literal(&format!(
         "{}/{}",
         collection.as_str().trim_end_matches('/'),
         segment

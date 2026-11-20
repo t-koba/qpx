@@ -620,7 +620,7 @@ impl WebDavDataStore for FileSystemDataStore {
             let name = name
                 .into_string()
                 .map_err(|_| anyhow!("WebDAV resource name is not valid UTF-8"))?;
-            children.push(ResourceId::parse(&format!("{resource}/{name}"))?);
+            children.push(ResourceId::from_literal(&format!("{resource}/{name}"))?);
         }
         children.sort();
         Ok(children)
@@ -1342,5 +1342,17 @@ mod tests {
         assert!(FileSystemDataStore::open(&link).is_err());
         // Direct directory roots keep working.
         assert!(FileSystemDataStore::open(target.path()).is_ok());
+    }
+
+    #[test]
+    fn children_preserve_literal_delimiter_names() {
+        let directory = tempdir().unwrap();
+        let store = FileSystemDataStore::open(directory.path()).unwrap();
+        for name in ["a%23b.txt", "a#b.txt", "normal.txt"] {
+            fs::write(store.root().join(name), b"payload").unwrap();
+        }
+        let children = store.children(&id("/")).unwrap();
+        let names: Vec<&str> = children.iter().map(|child| child.as_str()).collect();
+        assert_eq!(names, ["/a#b.txt", "/a%23b.txt", "/normal.txt"]);
     }
 }

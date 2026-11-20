@@ -537,7 +537,7 @@ fn resolve_with_bindings(
             .as_str()
             .strip_prefix(alias.as_str())
             .expect("matched binding prefix");
-        current = ResourceId::parse(&format!("{}{suffix}", target.as_str()))?;
+        current = ResourceId::from_literal(&format!("{}{suffix}", target.as_str()))?;
     }
     anyhow::bail!("WebDAV binding resolution exceeds 32 hops")
 }

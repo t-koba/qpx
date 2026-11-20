@@ -14,6 +14,18 @@ impl ResourceId {
         let path = percent_decode_str(path)
             .decode_utf8()
             .map_err(|_| anyhow!("WebDAV resource path is not valid UTF-8"))?;
+        if path.contains(['?', '#']) {
+            return Err(anyhow!(
+                "WebDAV resource path contains a forbidden character"
+            ));
+        }
+        Self::from_literal(&path)
+    }
+
+    /// Build an identifier from literal path data, without URL decoding or
+    /// delimiter interpretation. Used for on-disk names and other assembled
+    /// canonical paths that are not URL path components.
+    pub(crate) fn from_literal(path: &str) -> Result<Self> {
         let mut canonical = String::with_capacity(path.len().saturating_add(1));
         canonical.push('/');
         let mut has_segment = false;
@@ -22,7 +34,7 @@ impl ResourceId {
                 "" | "." => {}
                 ".." => return Err(anyhow!("WebDAV resource path traversal is forbidden")),
                 value
-                    if value.contains(['\\', '?', '#'])
+                    if value.contains('\\')
                         || value.contains('\0')
                         || value.chars().any(char::is_control) =>
                 {
@@ -56,7 +68,7 @@ impl ResourceId {
         {
             return Err(anyhow!("WebDAV resource path is not canonical"));
         }
-        if path.contains(['?', '#', '\\']) || path.chars().any(char::is_control) {
+        if path.contains('\\') || path.chars().any(char::is_control) {
             return Err(anyhow!(
                 "WebDAV resource path contains a forbidden character"
             ));
@@ -154,8 +166,6 @@ mod tests {
             "/.",
             "/a/./b",
             "/a/..",
-            "/a?query",
-            "/a#fragment",
             "/a\\b",
             "/a\0b",
             "/a\nb",
@@ -264,5 +274,14 @@ mod tests {
             ResourceId::parse("/report.txt#section").unwrap().as_str(),
             "/report.txt"
         );
+    }
+
+    #[test]
+    fn literal_delimiter_names_roundtrip_through_serialization() {
+        let resource = ResourceId::from_literal("/a#b/c?d").unwrap();
+        assert_eq!(resource.as_str(), "/a#b/c?d");
+        let json = serde_json::to_string(&resource).unwrap();
+        let restored: ResourceId = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored, resource);
     }
 }
