@@ -95,11 +95,8 @@ pub fn freshness_lifetime_secs(
     if let Some(ttl) = directives.max_age {
         return Some(ttl);
     }
-    if let Some(expires_raw) = headers
-        .get(&ord(EXPIRES.as_str()))
-        .and_then(|v| v.to_str().ok())
-    {
-        let Some(expires_secs) = parse_http_date_secs(expires_raw) else {
+    if let Some(expires) = headers.get(&ord(EXPIRES.as_str())) {
+        let Some(expires_secs) = expires.to_str().ok().and_then(parse_http_date_secs) else {
             // RFC 9111: invalid Expires must be treated as already expired (stale), not a
             // reason to fall back to heuristic/default freshness.
             return Some(0);

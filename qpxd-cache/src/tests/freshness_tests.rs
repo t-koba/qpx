@@ -920,3 +920,37 @@ fn envelope_with_hydrated_headers(headers: http::HeaderMap) -> CachedResponseEnv
         response_header_values: Default::default(),
     }
 }
+
+#[test]
+fn obs_text_expires_is_already_expired() {
+    use crate::freshness::freshness_lifetime_secs;
+    use crate::types::ResponseDirectives;
+    use qpx_core::http_message::Headers as OwnedHeaders;
+
+    let policy = CachePolicyConfig {
+        enabled: true,
+        backend: "memory".to_string(),
+        namespace: None,
+        default_ttl_secs: Some(30),
+        max_object_bytes: 1024 * 1024,
+        allow_set_cookie_store: false,
+        allow_authorization_without_vary_store: false,
+    };
+    let directives = ResponseDirectives::default();
+    let mut headers = OwnedHeaders::new();
+    assert_eq!(
+        freshness_lifetime_secs(&headers, &policy, 0, &directives),
+        Some(30)
+    );
+
+    // A present but non-UTF-8 Expires is an invalid date, not an absent one:
+    // RFC 9111 §5.3 requires the response to be treated as already expired.
+    headers.insert(
+        OrdinaryHeaderName::try_from("expires").expect("expires name"),
+        http::HeaderValue::from_bytes(&[0xff]).expect("obs-text expires"),
+    );
+    assert_eq!(
+        freshness_lifetime_secs(&headers, &policy, 0, &directives),
+        Some(0)
+    );
+}
