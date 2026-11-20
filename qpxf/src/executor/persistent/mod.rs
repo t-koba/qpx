@@ -37,6 +37,7 @@ impl FastCgiExecutor {
                 config.address.clone(),
                 config.pool.max_concurrency,
                 config.pool.max_idle,
+                config.pool.keep_conn,
             )?),
             script_name_prefixes: Arc::from(config.script_name_prefixes.clone()),
             max_stdin_bytes: config.max_stdin_bytes,
@@ -66,6 +67,7 @@ impl Executor for FastCgiExecutor {
             let declared_len = req.declared_content_length;
             let env = build_gateway_env(&req, declared_len);
             let future = pool.execute_streaming_stdin(FastCgiStreamingStdin {
+                keep_conn: pool.keep_conn(),
                 env,
                 stdin_rx,
                 expected_stdin_bytes: declared_len,

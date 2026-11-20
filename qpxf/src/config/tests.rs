@@ -174,3 +174,38 @@ fn load_config_expands_env_variables() {
     let _ = fs::remove_file(&path);
     assert_eq!(cfg.listen, "unix:///tmp/qpxf-runtime/qpxf.sock");
 }
+
+fn fastcgi_yaml(pool: &str) -> String {
+    format!(
+        "listen: \"unix:///tmp/qpxf-test.sock\"\nhandlers:\n- match:\n    path_prefix: /app\n  backend:\n    type: fastcgi\n    address: \"127.0.0.1:9000\"\n{pool}"
+    )
+}
+
+fn parse_fastcgi_pool(pool: &str) -> Result<FastCgiPoolConfig, serde_yaml::Error> {
+    let cfg: QpxfConfig = serde_yaml::from_str(&fastcgi_yaml(pool))?;
+    let BackendConfig::FastCgi(backend) = &cfg.handlers[0].backend else {
+        panic!("expected fastcgi backend");
+    };
+    Ok(backend.pool.clone())
+}
+
+#[test]
+fn fastcgi_pool_keep_conn_defaults_to_true() {
+    let pool = parse_fastcgi_pool("").expect("config");
+    assert!(pool.keep_conn);
+    assert_eq!(pool.max_idle, 16);
+    assert!(FastCgiPoolConfig::default().keep_conn);
+}
+
+#[test]
+fn fastcgi_pool_keep_conn_false_parses() {
+    let pool = parse_fastcgi_pool("    pool:\n      keep_conn: false\n").expect("config");
+    assert!(!pool.keep_conn);
+}
+
+#[test]
+fn fastcgi_pool_rejects_unknown_fields() {
+    let err = parse_fastcgi_pool("    pool:\n      keep_conn: false\n      keep_alive: true\n")
+        .expect_err("unknown pool field should be rejected");
+    assert!(err.to_string().contains("keep_alive"));
+}

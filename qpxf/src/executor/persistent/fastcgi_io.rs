@@ -37,6 +37,7 @@ pub(super) struct FastCgiOutputChannels {
 }
 
 pub(super) struct FastCgiStreamingStdin {
+    pub(super) keep_conn: bool,
     pub(super) env: Vec<(String, String)>,
     pub(super) stdin_rx: mpsc::Receiver<Bytes>,
     pub(super) expected_stdin_bytes: Option<usize>,
@@ -52,8 +53,9 @@ pub(super) async fn run_fastcgi_on_stream(
     body: Bytes,
     max_stdout_bytes: usize,
     max_stderr_bytes: usize,
+    keep_conn: bool,
 ) -> Result<(Bytes, Bytes)> {
-    write_fastcgi_begin(stream).await?;
+    write_fastcgi_begin(stream, keep_conn).await?;
     let params = encode_fastcgi_params(env)?;
     for chunk in params.chunks(u16::MAX as usize) {
         write_fastcgi_record(stream, FCGI_PARAMS, chunk).await?;
@@ -100,7 +102,7 @@ pub(super) async fn run_fastcgi_on_stream_streaming_stdin(
     stream: &mut BoxedIo,
     request: FastCgiStreamingStdin,
 ) -> Result<()> {
-    write_fastcgi_begin(stream).await?;
+    write_fastcgi_begin(stream, request.keep_conn).await?;
     let params = encode_fastcgi_params(request.env)?;
     for chunk in params.chunks(u16::MAX as usize) {
         write_fastcgi_record(stream, FCGI_PARAMS, chunk).await?;
@@ -162,10 +164,10 @@ async fn write_fastcgi_stdin_rx(
     Ok(())
 }
 
-async fn write_fastcgi_begin(stream: &mut BoxedIo) -> Result<()> {
+pub(super) async fn write_fastcgi_begin(stream: &mut BoxedIo, keep_conn: bool) -> Result<()> {
     let mut content = [0u8; 8];
     content[0..2].copy_from_slice(&FCGI_RESPONDER.to_be_bytes());
-    content[2] = 1;
+    content[2] = u8::from(keep_conn);
     write_fastcgi_record(stream, FCGI_BEGIN_REQUEST, &content).await
 }
 

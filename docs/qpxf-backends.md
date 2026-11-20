@@ -12,7 +12,7 @@ incomplete pooled connections to service.
 | FastCGI | missing `END_REQUEST` | fail request and discard connection |
 | FastCGI | slow backend timeout | fail request and do not reuse connection |
 | FastCGI | incomplete response | never return connection to idle pool |
-| FastCGI | complete responder `END_REQUEST` | return connection to idle pool when `pool.max_idle` allows |
+| FastCGI | complete responder `END_REQUEST` | return connection to idle pool when `pool.keep_conn` is true and `pool.max_idle` allows |
 | SCGI | invalid or missing non-empty `Content-Length` | reject before collecting stdin |
 | SCGI | backend closes mid-response | fail request |
 | SCGI | backend does not read body | timeout or write failure cleans up worker |
@@ -23,6 +23,41 @@ FastCGI pooling is intentionally conservative: a connection is reusable only
 after a complete responder `END_REQUEST`. SCGI uses per-request connections and
 requires a valid `Content-Length` for non-empty stdin so qpxf does not buffer
 the full upload to construct the SCGI netstring.
+
+## FastCGI connection reuse
+
+By default qpxf sets the FastCGI `FCGI_KEEP_CONN` flag on every
+`BEGIN_REQUEST` and reuses idle backend connections: `pool.keep_conn` defaults
+to `true` and `pool.max_idle` defaults to 16. This is today's behavior.
+
+### PHP-FPM risk and mitigation
+
+Advisory GHSA-qc49-hpvq-g2w6 / CVE-2026-129289 describes a risk where PHP-FPM
+can parse leftover unread request-body bytes as a forged FastCGI request when a
+front end reuses backend connections and an application opens `php://input`
+without fully reading it. This is a documented risk for operators targeting
+PHP-FPM, not a confirmed qpx exploit; no vulnerable PHP-FPM fixture was run.
+Operators targeting PHP-FPM must run patched PHP: 8.2.36, 8.3.37, 8.4.28 or
+8.5.13 (or later in the same branch).
+
+As defense in depth, a backend can opt out of FastCGI connection reuse:
+
+```yaml
+handlers:
+  - match:
+      path_prefix: /app/
+    backend:
+      type: fastcgi
+      address: "unix:///run/php/php-fpm.sock"
+      pool:
+        keep_conn: false
+```
+
+With `pool.keep_conn: false`, qpxf clears `FCGI_KEEP_CONN` on every
+`BEGIN_REQUEST`, never returns a socket to the idle pool after a successful
+request, and always opens a fresh connection. With `pool.keep_conn: true`, the
+flag and pooling behavior are preserved. `pool.max_idle` must still be at least
+1 in either mode; it is not the mitigation.
 
 A CGI script is executed through a file descriptor instead of by path, so the
 script that runs is the one that was validated. The descriptor is opened

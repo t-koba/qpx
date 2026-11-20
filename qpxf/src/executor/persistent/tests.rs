@@ -1,8 +1,8 @@
 use super::fastcgi_io::{
-    FCGI_END_REQUEST, FCGI_OVERLOADED, FCGI_STDIN, FCGI_STDOUT, encode_fastcgi_params,
-    validate_fastcgi_end_request,
+    FCGI_BEGIN_REQUEST, FCGI_END_REQUEST, FCGI_OVERLOADED, FCGI_STDIN, FCGI_STDOUT,
+    encode_fastcgi_params, validate_fastcgi_end_request, write_fastcgi_begin,
 };
-use super::pool::FastCgiConnectionPool;
+use super::pool::{BoxedIo, FastCgiConnectionPool};
 use super::*;
 use std::collections::HashMap;
 use std::io::{Cursor, Read};
@@ -93,6 +93,7 @@ async fn fastcgi_pool_reuses_idle_connection() {
         let (mut stream, _) = listener.accept().await.expect("accept");
         accepted_task.fetch_add(1, Ordering::SeqCst);
         for _ in 0..2 {
+            assert_eq!(read_fastcgi_begin_from_tcp(&mut stream).await, 1);
             read_fastcgi_request_from_tcp(&mut stream).await;
             write_fastcgi_record_to_tcp(&mut stream, FCGI_STDOUT, b"Status: 200 OK\r\n\r\nok")
                 .await;
@@ -100,7 +101,7 @@ async fn fastcgi_pool_reuses_idle_connection() {
         }
     });
 
-    let pool = FastCgiConnectionPool::new(address, 1, 1).expect("pool");
+    let pool = FastCgiConnectionPool::new(address, 1, 1, true).expect("pool");
     for _ in 0..2 {
         let (stdout, stderr) = pool
             .execute(Vec::new(), Bytes::new(), 1024, 1024)
@@ -111,6 +112,101 @@ async fn fastcgi_pool_reuses_idle_connection() {
     }
     server.await.expect("server");
     assert_eq!(accepted.load(Ordering::SeqCst), 1);
+    assert_eq!(pool.idle_len(), 1);
+}
+
+#[tokio::test]
+async fn fastcgi_begin_request_keep_conn_byte_follows_flag() {
+    for keep_conn in [false, true] {
+        let (stream, mut peer) = tokio::io::duplex(64);
+        let mut stream: BoxedIo = Box::pin(stream);
+        write_fastcgi_begin(&mut stream, keep_conn)
+            .await
+            .expect("begin request");
+        let mut header = [0u8; 8];
+        peer.read_exact(&mut header).await.expect("record header");
+        assert_eq!(header[1], FCGI_BEGIN_REQUEST);
+        let mut content = [0u8; 8];
+        peer.read_exact(&mut content).await.expect("record content");
+        assert_eq!(content[2], u8::from(keep_conn));
+    }
+}
+
+#[tokio::test]
+async fn fastcgi_pool_without_keep_conn_opens_fresh_connection() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr").to_string();
+    let server = tokio::spawn(async move {
+        let mut flags = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            flags.push(read_fastcgi_begin_from_tcp(&mut stream).await);
+            read_fastcgi_request_from_tcp(&mut stream).await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_STDOUT, b"Status: 200 OK\r\n\r\nok")
+                .await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
+        }
+        flags
+    });
+
+    let pool = FastCgiConnectionPool::new(address, 1, 1, false).expect("pool");
+    for _ in 0..2 {
+        let (stdout, stderr) = pool
+            .execute(Vec::new(), Bytes::new(), 1024, 1024)
+            .await
+            .expect("execute");
+        assert!(stderr.is_empty());
+        assert_eq!(stdout, Bytes::from_static(b"Status: 200 OK\r\n\r\nok"));
+    }
+    assert_eq!(pool.idle_len(), 0);
+    assert_eq!(server.await.expect("server"), vec![0, 0]);
+}
+
+#[tokio::test]
+async fn fastcgi_executor_without_keep_conn_uses_fresh_streaming_connections() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr").to_string();
+    let server = tokio::spawn(async move {
+        let mut flags = Vec::new();
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().await.expect("accept");
+            flags.push(read_fastcgi_begin_from_tcp(&mut stream).await);
+            read_fastcgi_request_from_tcp(&mut stream).await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_STDOUT, b"Status: 200 OK\r\n\r\nok")
+                .await;
+            write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
+        }
+        flags
+    });
+
+    let executor = FastCgiExecutor::new(&crate::config::FastCgiBackendConfig {
+        address,
+        timeout_ms: 1000,
+        script_name_prefixes: Vec::new(),
+        pool: crate::config::FastCgiPoolConfig {
+            max_concurrency: 1,
+            max_idle: 1,
+            keep_conn: false,
+        },
+        max_stdin_bytes: 1024,
+        max_stdout_bytes: 1024,
+        max_stderr_bytes: 1024,
+    })
+    .expect("executor");
+    for _ in 0..2 {
+        let mut execution = executor.start(test_cgi_request()).await.expect("start");
+        drop(execution.stdin);
+        let mut stdout = BytesMut::new();
+        while let Some(chunk) = execution.stdout.recv().await {
+            stdout.extend_from_slice(&chunk);
+        }
+        execution.done.await.expect("join").expect("done");
+        assert_eq!(
+            stdout.freeze(),
+            Bytes::from_static(b"Status: 200 OK\r\n\r\nok")
+        );
+    }
+    assert_eq!(server.await.expect("server"), vec![0, 0]);
 }
 
 #[tokio::test]
@@ -132,7 +228,7 @@ async fn fastcgi_pool_discards_broken_connection() {
         write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
     });
 
-    let pool = FastCgiConnectionPool::new(address, 1, 1).expect("pool");
+    let pool = FastCgiConnectionPool::new(address, 1, 1, true).expect("pool");
     let err = pool
         .execute(Vec::new(), Bytes::new(), 1024, 1024)
         .await
@@ -170,7 +266,7 @@ async fn fastcgi_pool_discards_missing_end_request() {
         write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
     });
 
-    let pool = FastCgiConnectionPool::new(address, 1, 1).expect("pool");
+    let pool = FastCgiConnectionPool::new(address, 1, 1, true).expect("pool");
     let err = pool
         .execute(Vec::new(), Bytes::new(), 1024, 1024)
         .await
@@ -204,6 +300,7 @@ async fn fastcgi_executor_times_out_slow_backend() {
         pool: crate::config::FastCgiPoolConfig {
             max_concurrency: 1,
             max_idle: 1,
+            keep_conn: true,
         },
         max_stdin_bytes: 1024,
         max_stdout_bytes: 1024,
@@ -238,7 +335,7 @@ async fn fastcgi_pool_respects_max_concurrency() {
         write_fastcgi_record_to_tcp(&mut stream, FCGI_END_REQUEST, &[0; 8]).await;
     });
 
-    let pool = Arc::new(FastCgiConnectionPool::new(address, 1, 1).expect("pool"));
+    let pool = Arc::new(FastCgiConnectionPool::new(address, 1, 1, true).expect("pool"));
     let first_pool = pool.clone();
     let first = tokio::spawn(async move {
         first_pool
@@ -658,6 +755,14 @@ fn test_cgi_request_with_path(script_name: &str, path_info: &str) -> CgiRequest 
         matched_prefix: None,
         identity_env: HashMap::new(),
     }
+}
+
+async fn read_fastcgi_begin_from_tcp(stream: &mut TcpStream) -> u8 {
+    let Some((record_type, content)) = read_fastcgi_record_from_tcp(stream).await else {
+        panic!("unexpected eof");
+    };
+    assert_eq!(record_type, FCGI_BEGIN_REQUEST);
+    content[2]
 }
 
 async fn read_fastcgi_request_from_tcp(stream: &mut TcpStream) {

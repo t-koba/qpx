@@ -21,10 +21,16 @@ pub(super) struct FastCgiConnectionPool {
     idle: Mutex<Vec<BoxedIo>>,
     semaphore: Arc<Semaphore>,
     max_idle: usize,
+    keep_conn: bool,
 }
 
 impl FastCgiConnectionPool {
-    pub(super) fn new(address: String, max_concurrency: usize, max_idle: usize) -> Result<Self> {
+    pub(super) fn new(
+        address: String,
+        max_concurrency: usize,
+        max_idle: usize,
+        keep_conn: bool,
+    ) -> Result<Self> {
         if address.trim().is_empty() {
             return Err(anyhow!("fastcgi backend address must not be empty"));
         }
@@ -33,6 +39,7 @@ impl FastCgiConnectionPool {
             idle: Mutex::new(Vec::new()),
             semaphore: Arc::new(Semaphore::new(max_concurrency)),
             max_idle,
+            keep_conn,
         })
     }
 
@@ -50,9 +57,16 @@ impl FastCgiConnectionPool {
             .await
             .map_err(|_| anyhow!("fastcgi backend semaphore closed"))?;
         let mut stream = self.take().await?;
-        let result =
-            run_fastcgi_on_stream(&mut stream, env, body, max_stdout_bytes, max_stderr_bytes).await;
-        if result.is_ok() {
+        let result = run_fastcgi_on_stream(
+            &mut stream,
+            env,
+            body,
+            max_stdout_bytes,
+            max_stderr_bytes,
+            self.keep_conn,
+        )
+        .await;
+        if self.keep_conn && result.is_ok() {
             self.put(stream).await;
         }
         result
@@ -72,7 +86,9 @@ impl FastCgiConnectionPool {
         let mut stream = self.take().await?;
         let result = run_fastcgi_on_stream_streaming_stdin(&mut stream, request).await;
         if result.is_ok() {
-            self.put(stream).await;
+            if self.keep_conn {
+                self.put(stream).await;
+            }
             crate::metrics::backend_request("fastcgi", "ok");
         }
         if result.is_err() {
@@ -84,8 +100,19 @@ impl FastCgiConnectionPool {
         result
     }
 
+    pub(super) fn keep_conn(&self) -> bool {
+        self.keep_conn
+    }
+
+    #[cfg(test)]
+    pub(super) fn idle_len(&self) -> usize {
+        self.idle.try_lock().expect("idle mutex not held").len()
+    }
+
     async fn take(&self) -> Result<BoxedIo> {
-        if let Some(stream) = self.idle.lock().await.pop() {
+        if self.keep_conn
+            && let Some(stream) = self.idle.lock().await.pop()
+        {
             crate::metrics::pool_reuse("fastcgi");
             return Ok(stream);
         }

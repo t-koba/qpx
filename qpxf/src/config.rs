@@ -180,6 +180,10 @@ pub struct FastCgiPoolConfig {
     pub max_concurrency: usize,
     #[serde(default = "default_fastcgi_pool_max_idle")]
     pub max_idle: usize,
+    /// Set the FCGI_KEEP_CONN flag and reuse idle backend connections.
+    /// Disable for a fresh backend connection per request.
+    #[serde(default = "default_fastcgi_pool_keep_conn")]
+    pub keep_conn: bool,
 }
 
 impl Default for FastCgiPoolConfig {
@@ -187,6 +191,7 @@ impl Default for FastCgiPoolConfig {
         Self {
             max_concurrency: default_persistent_backend_max_concurrency(),
             max_idle: default_fastcgi_pool_max_idle(),
+            keep_conn: default_fastcgi_pool_keep_conn(),
         }
     }
 }
@@ -270,6 +275,10 @@ fn default_persistent_backend_max_concurrency() -> usize {
 
 fn default_fastcgi_pool_max_idle() -> usize {
     16
+}
+
+fn default_fastcgi_pool_keep_conn() -> bool {
+    true
 }
 
 fn default_max_params_bytes() -> usize {
