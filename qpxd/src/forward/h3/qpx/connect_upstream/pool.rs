@@ -134,11 +134,11 @@ impl QpxH3UpstreamSessionPool {
             }
 
             match self.shard_for(&key).connecting.join(&key).await {
-                crate::pool::FlightRole::Follower(notify) => {
+                crate::pool::FlightRole::Follower(notified) => {
                     // Bounded wait (normalized with the HTTP/3 origin pool): wake on the
                     // leader's completion or the connect timeout, then retry the lookup.
                     let deadline = Instant::now() + timeout_dur;
-                    timeout_at(deadline, notify.notified()).await.map_err(|_| {
+                    timeout_at(deadline, notified).await.map_err(|_| {
                         anyhow!(
                             "qpx-h3 upstream session pool connect wait timed out for {}:{}",
                             key.connect_host,

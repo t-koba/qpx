@@ -8,13 +8,19 @@
 //!
 //! The leader's guard removes the key and wakes all waiters when it is finished
 //! (explicitly via [`FlightGuard::finish`] or implicitly on drop), so a leader
-//! that errors or panics cannot strand followers. Followers should always apply
-//! their own timeout to the wait and re-run the pool lookup on wake-up, because
-//! [`Notify::notify_waiters`] only wakes callers already parked on the notify.
+//! that errors or panics cannot strand followers.
+//!
+//! A leader can finish in the gap between `join` returning and the caller first
+//! awaiting its wait. To close that gap, `join` returns a pre-constructed owned
+//! notification future whose construction snapshots the current `notify_waiters`
+//! count; a wakeup after `join` is therefore still observed on the first poll.
+//! Followers should always apply their own timeout to the wait and re-run the
+//! pool lookup on wake-up.
 
 use std::collections::HashMap;
 use std::hash::Hash;
 use std::sync::Arc;
+use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Mutex, Notify};
 
 type InflightMap<K> = Arc<Mutex<HashMap<K, Arc<Notify>>>>;
@@ -46,12 +52,13 @@ where
     ///
     /// Returns [`FlightRole::Leader`] for the first caller (which must perform the
     /// establishment and keep the returned guard until done), or
-    /// [`FlightRole::Follower`] with a [`Notify`] the caller should await before
-    /// retrying the pool lookup.
+    /// [`FlightRole::Follower`] with an owned notification future the caller
+    /// should await before retrying the pool lookup. The future is created
+    /// here under the map lock so it cannot miss the leader's wakeup.
     pub(crate) async fn join(&self, key: &K) -> FlightRole<K> {
         let mut map = self.inflight.lock().await;
         if let Some(notify) = map.get(key) {
-            FlightRole::Follower(notify.clone())
+            FlightRole::Follower(Arc::clone(notify).notified_owned())
         } else {
             map.insert(key.clone(), Arc::new(Notify::new()));
             FlightRole::Leader(FlightGuard {
@@ -71,9 +78,9 @@ where
     /// This caller won the race and must perform the work, holding the guard until
     /// the work completes (success or failure).
     Leader(FlightGuard<K>),
-    /// Another caller is already establishing for this key. Await the [`Notify`]
-    /// (with the caller's own timeout) and then retry the pool lookup.
-    Follower(Arc<Notify>),
+    /// Another caller is already establishing for this key. Await this owned
+    /// notification (with the caller's own timeout), then retry the lookup.
+    Follower(OwnedNotified),
 }
 
 /// RAII leader guard. Removes the key and wakes all waiters on [`finish`] or drop.
@@ -150,9 +157,8 @@ mod tests {
                         tokio::time::sleep(Duration::from_millis(20)).await;
                         guard.finish().await;
                     }
-                    FlightRole::Follower(notify) => {
-                        let _ =
-                            tokio::time::timeout(Duration::from_secs(1), notify.notified()).await;
+                    FlightRole::Follower(notified) => {
+                        let _ = tokio::time::timeout(Duration::from_secs(1), notified).await;
                     }
                 }
             }));
@@ -187,6 +193,34 @@ mod tests {
         tokio::task::yield_now().await;
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert!(matches!(flight.join(&7).await, FlightRole::Leader(_)));
+    }
+
+    /// A follower must observe the leader's completion even when the leader
+    /// finishes before the follower starts awaiting its wait — the race that
+    /// occurred when callers constructed `notified()` after `join` returned.
+    #[tokio::test]
+    async fn followers_woken_when_leader_finishes_before_they_wait() {
+        let flight = SingleFlight::<u32>::new();
+        let guard = match flight.join(&1).await {
+            FlightRole::Leader(g) => g,
+            FlightRole::Follower(_) => panic!("first caller must be leader"),
+        };
+        let f1 = match flight.join(&1).await {
+            FlightRole::Follower(n) => n,
+            FlightRole::Leader(_) => panic!("expected follower"),
+        };
+        let f2 = match flight.join(&1).await {
+            FlightRole::Follower(n) => n,
+            FlightRole::Leader(_) => panic!("expected follower"),
+        };
+        // Leader broadcasts after join returned the followers' wait futures.
+        guard.finish().await;
+        tokio::time::timeout(Duration::from_millis(100), f1)
+            .await
+            .expect("first follower missed the wakeup");
+        tokio::time::timeout(Duration::from_millis(100), f2)
+            .await
+            .expect("second follower missed the wakeup");
     }
 
     #[tokio::test]

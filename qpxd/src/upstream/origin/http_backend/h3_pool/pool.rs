@@ -83,9 +83,9 @@ impl H3OriginPool {
             }
 
             match self.shard_for(&key).connecting.join(&key).await {
-                crate::pool::FlightRole::Follower(notify) => {
+                crate::pool::FlightRole::Follower(notified) => {
                     let deadline = Instant::now() + timeout_dur;
-                    timeout_at(deadline, notify.notified()).await.map_err(|_| {
+                    timeout_at(deadline, notified).await.map_err(|_| {
                         anyhow!(
                             "HTTP/3 origin pool connect wait timed out for {}",
                             key.connect_authority
