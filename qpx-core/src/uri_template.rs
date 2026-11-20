@@ -150,6 +150,7 @@ struct CaptureBinding {
     name: String,
     prefix: Option<usize>,
     decode_mode: DecodeMode,
+    strip_leading_equals: bool,
 }
 
 impl UriTemplate {
@@ -220,6 +221,11 @@ impl UriTemplate {
         for (idx, binding) in self.bindings.iter().enumerate() {
             let Some(raw) = captures.get(idx + 1).map(|m| m.as_str()) else {
                 continue;
+            };
+            let raw = if binding.strip_leading_equals {
+                raw.strip_prefix('=').unwrap_or(raw)
+            } else {
+                raw
             };
             let decoded = decode_capture(raw, binding.decode_mode)?;
             if let Some(prefix) = binding.prefix {
@@ -367,11 +373,12 @@ fn append_expression_regex(
             for var in &expr.vars {
                 pattern.push(';');
                 pattern.push_str(regex::escape(var.name.as_str()).as_str());
-                pattern.push_str("(?:=([^;/?#]*))?");
+                pattern.push_str("((?:=[^;/?#]*)?)");
                 bindings.push(CaptureBinding {
                     name: var.name.clone(),
                     prefix: var.prefix,
                     decode_mode: DecodeMode::PercentDecoded,
+                    strip_leading_equals: true,
                 });
             }
         }
@@ -394,6 +401,7 @@ fn append_expression_regex(
                     name: var.name.clone(),
                     prefix: var.prefix,
                     decode_mode: DecodeMode::PercentDecoded,
+                    strip_leading_equals: false,
                 });
             }
         }
@@ -420,6 +428,7 @@ fn append_delimited_captures(
             name: var.name.clone(),
             prefix: var.prefix,
             decode_mode: DecodeMode::PercentDecoded,
+            strip_leading_equals: false,
         });
     }
 }
@@ -737,5 +746,18 @@ mod tests {
             })
             .expect("expand");
         assert_eq!(expanded, "?keys=semi,%3B,dot,.&count=one,two,three");
+    }
+
+    #[test]
+    fn reverse_match_recovers_empty_path_parameter() {
+        let template = UriTemplate::parse("/items{;tag}").expect("template");
+        let matched = template.match_scalars("/items;tag").expect("match");
+        assert_eq!(matched.get("tag").map(String::as_str), Some(""));
+    }
+
+    #[test]
+    fn reverse_match_rejects_unseparated_path_parameter_value() {
+        let template = UriTemplate::parse("/items{;tag}").expect("template");
+        assert!(template.match_scalars("/items;tagfoo").is_err());
     }
 }
