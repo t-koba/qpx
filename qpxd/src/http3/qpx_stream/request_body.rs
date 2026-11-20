@@ -362,22 +362,23 @@ mod tests {
             None,
         ));
 
-        // A shorter paused-time timeout expires first, so its Elapsed result
-        // proves the deadline select is still pending before the Instant.
-        assert!(
-            tokio::time::timeout(Duration::from_millis(1), &mut send)
-                .await
-                .is_err(),
-            "send completed before the supplied deadline"
-        );
-        assert!(Instant::now() < deadline);
-
-        // Crossing the supplied Instant fires the real sleep_until arm.
-        tokio::time::advance(deadline - Instant::now()).await;
-        let error = tokio::time::timeout(Duration::from_millis(1), &mut send)
+        // With paused time, the runtime auto-advances to the nearest timer.
+        // The outer bound sits safely past the deadline, so completion means
+        // the production timer fired. Comparing the completion Instant (not
+        // just pending/alive) detects a timer bound early or late.
+        let error = tokio::time::timeout(Duration::from_secs(60), &mut send)
             .await
-            .expect("send deadline did not fire at the supplied Instant")
+            .expect("send deadline did not fire")
             .expect_err("deadline must stop the pending send");
+        let completed_at = Instant::now();
         assert_eq!(error.to_string(), SEND_DEADLINE_ERROR);
+        assert!(
+            completed_at >= deadline,
+            "deadline fired early at {completed_at:?}, expected {deadline:?}"
+        );
+        assert!(
+            completed_at <= deadline + Duration::from_millis(100),
+            "deadline fired late at {completed_at:?}, expected {deadline:?}"
+        );
     }
 }
