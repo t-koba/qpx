@@ -102,7 +102,7 @@ fn load_properties(database: &Database) -> Result<HashMap<ResourceId, Vec<DeadPr
     for entry in table.iter()? {
         let (resource, encoded) = entry?;
         properties.insert(
-            ResourceId::parse(resource.value())?,
+            ResourceId::from_canonical(resource.value())?,
             serde_json::from_slice(encoded.value())?,
         );
     }
@@ -116,7 +116,7 @@ fn load_content_types(database: &Database) -> Result<HashMap<ResourceId, String>
     for entry in table.iter()? {
         let (resource, content_type) = entry?;
         content_types.insert(
-            ResourceId::parse(resource.value())?,
+            ResourceId::from_canonical(resource.value())?,
             content_type.value().to_owned(),
         );
     }
@@ -130,8 +130,8 @@ fn load_bindings(database: &Database) -> Result<BTreeMap<ResourceId, ResourceId>
     for entry in table.iter()? {
         let (alias, target) = entry?;
         bindings.insert(
-            ResourceId::parse(alias.value())?,
-            ResourceId::parse(target.value())?,
+            ResourceId::from_canonical(alias.value())?,
+            ResourceId::from_canonical(target.value())?,
         );
     }
     Ok(bindings)
@@ -588,5 +588,43 @@ mod tests {
                 .as_str(),
             "/target/child"
         );
+    }
+
+    #[test]
+    fn literal_identifier_metadata_and_bindings_survive_reopen() {
+        let directory = tempdir().unwrap();
+        let path = directory.path().join("metadata.redb");
+        let alias = ResourceId::from_literal("/alias#x").unwrap();
+        let target = ResourceId::from_literal("/target%23y").unwrap();
+        let documented = ResourceId::from_literal("/a?b.txt").unwrap();
+        {
+            let store = RedbMetadataStore::open(&path).unwrap();
+            store.put_binding(&alias, &target, false).unwrap();
+            store
+                .set_content_type(&documented, Some("text/plain"))
+                .unwrap();
+            store
+                .set_properties(
+                    &documented,
+                    &[DeadProperty {
+                        namespace: "urn:test".to_string(),
+                        name: "classification".to_string(),
+                        value_xml: "<x>internal</x>".to_string(),
+                    }],
+                )
+                .unwrap();
+        }
+
+        let reopened = RedbMetadataStore::open(&path).unwrap();
+        let resolved = reopened
+            .resolve_binding_if_present(&ResourceId::from_literal("/alias#x/child").unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(resolved.as_str(), "/target%23y/child");
+        assert_eq!(
+            reopened.content_type(&documented).unwrap().as_deref(),
+            Some("text/plain")
+        );
+        assert_eq!(reopened.properties(&documented).unwrap().len(), 1);
     }
 }

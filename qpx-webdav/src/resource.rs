@@ -57,7 +57,7 @@ impl ResourceId {
     /// Validate the representation emitted by Serialize, not a URL path.
     /// Percent sequences are literal here: decoding again would change valid
     /// identifiers such as `/%2e`, originally parsed from `/%252e`.
-    fn from_canonical(path: String) -> Result<Self> {
+    pub(crate) fn from_canonical(path: &str) -> Result<Self> {
         let relative = path
             .strip_prefix('/')
             .ok_or_else(|| anyhow!("WebDAV resource path must be root-relative"))?;
@@ -73,7 +73,7 @@ impl ResourceId {
                 "WebDAV resource path contains a forbidden character"
             ));
         }
-        Ok(Self(path.into()))
+        Ok(Self(Arc::from(path)))
     }
 
     pub fn root() -> Self {
@@ -138,7 +138,7 @@ impl<'de> Deserialize<'de> for ResourceId {
         D: Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        Self::from_canonical(value).map_err(serde::de::Error::custom)
+        Self::from_canonical(&value).map_err(serde::de::Error::custom)
     }
 }
 
