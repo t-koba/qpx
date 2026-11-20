@@ -264,7 +264,12 @@ async fn stream_and_record_body(
 impl SpooledTemplateFile {
     fn body(self: &Arc<Self>) -> Body {
         let (mut sender, body) = Body::channel_with_capacity(16);
-        let path = self.guard.path().to_path_buf();
+        // This reader is detached and outlives the borrow of `self`. Keep the
+        // owning guard with it so the spool file is not unlinked before the
+        // reader opens it. Release the guard before the sender closes, so the
+        // file is removed by the time the body reports completion.
+        let guard = Arc::clone(self);
+        let path = guard.guard.path().to_path_buf();
         tokio::spawn(async move {
             let result = async {
                 let mut file = TokioFile::open(path).await?;
@@ -285,6 +290,8 @@ impl SpooledTemplateFile {
             if result.is_err() {
                 sender.abort();
             }
+            drop(guard);
+            drop(sender);
         });
         body
     }
@@ -633,6 +640,86 @@ mod tests {
 
         drop(template);
         assert!(!path.exists());
+    }
+
+    /// A detached replay reader must keep the spool guard alive even when the
+    /// last template reference is released before the reader is first polled.
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    async fn file_backed_replay_survives_template_drop_before_reader_runs() {
+        let payload = vec![b'y'; RETRY_TEMPLATE_MEMORY_BYTES + 1];
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, payload.len().to_string())
+                .body(Body::from(payload.clone()))
+                .expect("request"),
+        );
+        let template =
+            ReverseRequestTemplate::from_request(req, payload.len(), Duration::from_secs(1))
+                .await
+                .expect("template");
+        let path = match &template.body {
+            ReverseRequestTemplateBody::File { file } => file.guard.path().to_path_buf(),
+            ReverseRequestTemplateBody::Memory { .. } => panic!("large template should spool"),
+        };
+
+        // build() spawns the reader; on a current-thread runtime it has not
+        // been polled yet, so releasing the template here removes the only
+        // guard keeping the spool file alive on the buggy implementation.
+        let replay = template.build().expect("build");
+        drop(template);
+        tokio::task::yield_now().await;
+
+        let body = qpx_http::body::to_bytes(replay.into_head_and_body().1)
+            .await
+            .expect("replay body after template drop");
+        assert_eq!(body.as_ref(), payload.as_slice());
+        assert!(
+            !path.exists(),
+            "spool file should be unlinked after the reader finishes"
+        );
+    }
+
+    /// Dropping the replay receiver must let the detached reader exit and
+    /// release its guard, so the spool file is not leaked.
+    #[tokio::test(flavor = "current_thread")]
+    #[cfg(unix)]
+    async fn dropped_replay_receiver_releases_spool_guard() {
+        let payload = vec![b'z'; RETRY_TEMPLATE_MEMORY_BYTES + 1];
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, payload.len().to_string())
+                .body(Body::from(payload.clone()))
+                .expect("request"),
+        );
+        let template =
+            ReverseRequestTemplate::from_request(req, payload.len(), Duration::from_secs(1))
+                .await
+                .expect("template");
+        let path = match &template.body {
+            ReverseRequestTemplateBody::File { file } => file.guard.path().to_path_buf(),
+            ReverseRequestTemplateBody::Memory { .. } => panic!("large template should spool"),
+        };
+
+        let replay = template.build().expect("build");
+        drop(template);
+        drop(replay);
+        // tokio::fs open/read run on the blocking pool, so a few yields are
+        // not enough time for the reader to observe the closed receiver.
+        for _ in 0..50 {
+            if !path.exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            !path.exists(),
+            "spool file leaked after dropping the replay receiver"
+        );
     }
 
     #[tokio::test]
