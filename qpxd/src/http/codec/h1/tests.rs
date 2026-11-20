@@ -565,9 +565,7 @@ async fn static_response_recycles_header_storage() {
     let keep_alive = send_static_http1_response(
         &mut server,
         &Method::GET,
-        StatusCode::OK,
-        headers,
-        Bytes::from_static(b"OK"),
+        owned_static_response(StatusCode::OK, headers, Bytes::from_static(b"OK")),
         true,
         &mut head_buf,
     )
@@ -585,6 +583,18 @@ async fn static_response_recycles_header_storage() {
     let mut raw = vec![0; head_buf.len() + 2];
     client.read_exact(&mut raw).await.expect("read response");
     assert!(raw.ends_with(b"OK"));
+}
+
+/// Wrap the legacy head/body arguments in the owner the static writer takes.
+fn owned_static_response(
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+) -> OwnerResponse<Bytes> {
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    OwnerResponse::from_http(response)
 }
 
 /// The content-length field lines of a response head.
@@ -619,9 +629,7 @@ async fn static_response_writes_one_canonical_content_length_line() {
         send_static_http1_response(
             &mut server,
             &Method::GET,
-            StatusCode::OK,
-            headers,
-            Bytes::from_static(&[b'x'; 42]),
+            owned_static_response(StatusCode::OK, headers, Bytes::from_static(&[b'x'; 42])),
             true,
             &mut head_buf,
         )
@@ -1209,9 +1217,11 @@ async fn static_205_sanitizes_length_and_zero_frames_persistent_response() {
     let keep_alive = send_static_http1_response(
         &mut server,
         &Method::GET,
-        StatusCode::RESET_CONTENT,
-        headers,
-        Bytes::from_static(b"must not be sent"),
+        owned_static_response(
+            StatusCode::RESET_CONTENT,
+            headers,
+            Bytes::from_static(b"must not be sent"),
+        ),
         true,
         &mut head_buf,
     )
@@ -1248,9 +1258,7 @@ async fn static_successful_connect_205_omits_content_length() {
     let keep_alive = send_static_http1_response(
         &mut server,
         &Method::CONNECT,
-        StatusCode::RESET_CONTENT,
-        headers,
-        Bytes::new(),
+        owned_static_response(StatusCode::RESET_CONTENT, headers, Bytes::new()),
         true,
         &mut head_buf,
     )
@@ -1285,9 +1293,7 @@ async fn static_finalized_head_omits_204_length_and_preserves_304_length() {
         send_static_http1_response(
             &mut server,
             &Method::HEAD,
-            parts.status,
-            parts.headers,
-            Bytes::new(),
+            owned_static_response(parts.status, parts.headers, Bytes::new()),
             true,
             &mut head_buf,
         )
@@ -1357,9 +1363,7 @@ async fn static_finalized_get_304_preserves_content_length() {
     send_static_http1_response(
         &mut server,
         &Method::GET,
-        parts.status,
-        parts.headers,
-        Bytes::new(),
+        owned_static_response(parts.status, parts.headers, Bytes::new()),
         true,
         &mut head_buf,
     )

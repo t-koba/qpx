@@ -226,8 +226,8 @@ pub(super) async fn serve_raw_or_fallback(
                             // when the raw head was parsed.
                             (response.status(), response.content_length().unwrap_or(0))
                         }
-                        PreparedRawHttp1Response::InMemory { status, body, .. } => {
-                            (*status, body.len() as u64)
+                        PreparedRawHttp1Response::InMemory(response) => {
+                            (response.status(), response.body().len() as u64)
                         }
                         PreparedRawHttp1Response::Generic(_, response) => {
                             (response.status(), declared_response_bytes(response))
@@ -242,13 +242,13 @@ pub(super) async fn serve_raw_or_fallback(
                         fast_log_started,
                     )
                 {
-                    let PreparedRawHttp1Response::InMemory { status, body, .. } = &response else {
+                    let PreparedRawHttp1Response::InMemory(response) = &response else {
                         unreachable!("fast cache-hit responses are always in-memory");
                     };
                     service.record_direct_combined_status(
                         log_request,
-                        *status,
-                        body.len() as u64,
+                        response.status(),
+                        response.body().len() as u64,
                         started,
                     );
                 }
@@ -268,17 +268,11 @@ pub(super) async fn serve_raw_or_fallback(
                         }
                         keep_alive
                     }
-                    PreparedRawHttp1Response::InMemory {
-                        status,
-                        headers,
-                        body,
-                    } => {
+                    PreparedRawHttp1Response::InMemory(response) => {
                         send_static_http1_response(
                             &mut stream,
                             request_method,
-                            status,
-                            headers,
-                            body,
+                            response,
                             request_keep_alive,
                             &mut response_head,
                         )
@@ -468,14 +462,14 @@ async fn send_generic_response(
     if interim.is_empty()
         && let Some(body) = response.body_mut().take_single_frame_without_trailers()
     {
-        // Actual network serialization boundary, after the unchanged fast-path decision.
-        let (parts, _) = response.into_http_for_codec()?.into_parts();
+        // The codec export used to happen here also rejected an invalid
+        // declaration before the body was removed. Keep that rejection at the
+        // same point, then let the static writer own the head until the wire.
+        response.headers().declared_content_length()?;
         send_static_http1_response(
             stream,
             request_method,
-            parts.status,
-            parts.headers,
-            body,
+            response.map_body(|_| body),
             request_keep_alive,
             response_head,
         )
@@ -697,17 +691,13 @@ mod tests {
                     .unwrap()
                 } else {
                     let (parts, _) = response.into_parts();
-                    send_static_http1_response(
-                        &mut server,
-                        &method,
-                        parts.status,
-                        parts.headers,
+                    let response = OwnerResponse::from_http(Response::from_parts(
+                        parts,
                         Bytes::from_static(b"OK"),
-                        true,
-                        &mut head,
-                    )
-                    .await
-                    .unwrap()
+                    ));
+                    send_static_http1_response(&mut server, &method, response, true, &mut head)
+                        .await
+                        .unwrap()
                 };
                 server.shutdown().await.unwrap();
                 let mut wire = Vec::new();

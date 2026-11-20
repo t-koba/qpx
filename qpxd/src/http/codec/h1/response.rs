@@ -20,6 +20,7 @@ use qpx_core::http_message::Response as OwnerResponse;
 use qpx_http::body::Body;
 use qpx_http::protocol::semantics::{
     response_status_forbids_content_length, response_status_has_no_body,
+    strip_message_body_framing_headers,
 };
 #[cfg(not(target_os = "linux"))]
 use std::future::{Future, poll_fn};
@@ -84,52 +85,45 @@ where
 pub(crate) async fn send_static_http1_response(
     writer: &mut TcpStream,
     request_method: &Method,
-    response_status: StatusCode,
-    mut headers: HeaderMap,
-    body: Bytes,
+    mut response: OwnerResponse<Bytes>,
     request_keep_alive: bool,
     head_buf: &mut BytesMut,
 ) -> Result<bool> {
+    let response_status = response.status();
     let status_has_no_body = response_status_has_no_body(response_status, false)
         || (request_method == Method::CONNECT && response_status.is_success());
     let no_body = request_method == Method::HEAD || status_has_no_body;
-    let body_len = body.len() as u64;
-    let declared_length = match parse_declared_content_length(&headers) {
+    let body_len = response.body().len() as u64;
+    let declared_length = match response.headers().declared_content_length() {
         Ok(length) => length,
         Err(_) if no_body => {
-            headers.remove(CONTENT_LENGTH);
+            response.headers_mut().remove_content_length();
             None
         }
         Err(error) => return Err(error.into()),
     };
+    let headers = response.headers_mut();
     if status_has_no_body {
         if request_method == Method::CONNECT && response_status.is_success() {
             // Every 2xx CONNECT response establishes a tunnel, including 205.
             // CONNECT framing takes precedence over ordinary 205 empty framing.
-            headers.remove(CONTENT_LENGTH);
+            headers.remove_content_length();
         } else if response_status == StatusCode::RESET_CONTENT {
             // 205 responses cannot contain content, but unlike 1xx/204/304
             // they are not self-delimiting in HTTP/1. Keep persistent
             // connections usable by explicitly framing their empty content.
-            headers.insert(
-                CONTENT_LENGTH,
-                qpx_core::http_content_length::canonical_content_length_value(0),
-            );
+            headers.set_content_length(0);
         } else if response_status_forbids_content_length(response_status)
             || (request_method != Method::HEAD && response_status != StatusCode::NOT_MODIFIED)
         {
-            headers.remove(CONTENT_LENGTH);
+            headers.remove_content_length();
         } else if let Some(length) = declared_length {
             // RFC 9110 section 8.6: the value a sender writes is one
             // decimal, so the length a HEAD response carries leaves in
             // the field's canonical form.
-            headers.insert(
-                CONTENT_LENGTH,
-                qpx_core::http_content_length::canonical_content_length_value(length),
-            );
+            headers.set_content_length(length);
         }
-        headers.remove(TRANSFER_ENCODING);
-        headers.remove(TRAILER);
+        strip_message_body_framing_headers(headers);
     } else {
         if let Some(declared_length) = declared_length
             && declared_length != body_len
@@ -141,11 +135,7 @@ pub(crate) async fn send_static_http1_response(
             ));
         }
         if declared_length.is_none() {
-            headers.insert(
-                CONTENT_LENGTH,
-                HeaderValue::from_str(&body_len.to_string())
-                    .map_err(|error| anyhow!("invalid static response content length: {error}"))?,
-            );
+            headers.set_content_length(body_len);
         }
         if let Some(length) = declared_length {
             // RFC 9110 section 8.6: the value a sender writes is one
@@ -153,14 +143,15 @@ pub(crate) async fn send_static_http1_response(
             // in the field's canonical form - one field whose value is
             // the resolved decimal - instead of the value it was
             // received with.
-            headers.insert(
-                CONTENT_LENGTH,
-                qpx_core::http_content_length::canonical_content_length_value(length),
-            );
+            headers.set_content_length(length);
         }
-        headers.remove(TRANSFER_ENCODING);
-        headers.remove(TRAILER);
+        strip_message_body_framing_headers(headers);
     }
+    // The owner keeps the response head until this actual wire serializer.
+    // Export resolves and canonicalizes its declaration; all framing policy
+    // above has already been applied through the owned APIs.
+    let (parts, body) = response.into_http_for_codec()?.into_parts();
+    let response_status = parts.status;
     let keep_alive = request_keep_alive
         && request_method != Method::CONNECT
         && !response_status.is_informational()
@@ -169,17 +160,17 @@ pub(crate) async fn send_static_http1_response(
         Version::HTTP_11,
         request_method,
         response_status,
-        &headers,
+        &parts.headers,
         keep_alive,
     );
     serialize_status_and_headers(
         head_buf,
         Version::HTTP_11,
         response_status,
-        &headers,
+        &parts.headers,
         connection_mode,
     );
-    qpx_http::header_pool::recycle(headers);
+    qpx_http::header_pool::recycle(parts.headers);
     let body = if no_body { Bytes::new() } else { body };
     if body.is_empty() {
         write_all_with_timeout(writer, head_buf).await?;

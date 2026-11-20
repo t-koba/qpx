@@ -15,8 +15,10 @@ use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
 #[cfg(test)]
 use http::Response;
+#[cfg(test)]
+use http::StatusCode;
 use http::uri::{Authority, Uri};
-use http::{HeaderMap, Method, Request, StatusCode, Version};
+use http::{Method, Request, Version};
 use qpx_core::http_message::Response as OwnerResponse;
 use qpx_core::rules::RuleMatchContext;
 use qpx_http::body::Body;
@@ -62,11 +64,7 @@ enum PreparedRawHttp1Target {
 
 pub(in crate::reverse) enum PreparedRawHttp1Response {
     Direct(crate::upstream::raw_http1::RawHttp1ResponseRelay<tokio::net::TcpStream>),
-    InMemory {
-        status: StatusCode,
-        headers: HeaderMap,
-        body: Bytes,
-    },
+    InMemory(OwnerResponse<Bytes>),
     Generic(InterimList, OwnerResponse<Body>),
 }
 
@@ -106,12 +104,9 @@ impl PreparedRawHttp1Request {
     pub(in crate::reverse) fn try_serving_cache_hit(&self) -> Option<PreparedRawHttp1Response> {
         let mut response = try_raw_cache_hit_response(self.cache_hit.as_ref()?)?;
         let body = take_in_memory_body(&[], &mut response)?;
-        let (parts, _) = response.into_http_for_library().into_parts();
-        Some(PreparedRawHttp1Response::InMemory {
-            status: parts.status,
-            headers: parts.headers,
-            body,
-        })
+        Some(PreparedRawHttp1Response::InMemory(
+            response.map_body(|_| body),
+        ))
     }
 }
 
@@ -524,12 +519,9 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         .await?;
         let mut response = response;
         if let Some(body) = take_in_memory_body(&interim, &mut response) {
-            let (parts, _) = response.into_http_for_library().into_parts();
-            return Ok(PreparedRawHttp1Response::InMemory {
-                status: parts.status,
-                headers: parts.headers,
-                body,
-            });
+            return Ok(PreparedRawHttp1Response::InMemory(
+                response.map_body(|_| body),
+            ));
         }
         return Ok(PreparedRawHttp1Response::Generic(interim, response));
     }
@@ -553,12 +545,9 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         )?;
         super::dispatch::apply_reverse_route_metadata(route, false, &mut response)?;
         if let Some(body) = take_in_memory_body(&[], &mut response) {
-            let (parts, _) = response.into_http_for_library().into_parts();
-            return Ok(PreparedRawHttp1Response::InMemory {
-                status: parts.status,
-                headers: parts.headers,
-                body,
-            });
+            return Ok(PreparedRawHttp1Response::InMemory(
+                response.map_body(|_| body),
+            ));
         }
         return Ok(PreparedRawHttp1Response::Generic(Vec::new(), response));
     }
@@ -638,12 +627,9 @@ pub(in crate::reverse) async fn dispatch_prepared_raw_http1_request(
         false,
     );
     if let Some(body) = take_in_memory_body(&interim, &mut response) {
-        let (parts, _) = response.into_http_for_library().into_parts();
-        return Ok(PreparedRawHttp1Response::InMemory {
-            status: parts.status,
-            headers: parts.headers,
-            body,
-        });
+        return Ok(PreparedRawHttp1Response::InMemory(
+            response.map_body(|_| body),
+        ));
     }
     Ok(PreparedRawHttp1Response::Generic(interim, response))
 }
@@ -774,6 +760,7 @@ fn request_has_upgrade(headers: &[httparse::Header<'_>]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use qpx_core::http_message::OrdinaryHeaderMut;
 
     #[test]
     fn raw_cache_hit_headers_reject_authorization_case_insensitively() {
@@ -1521,9 +1508,10 @@ mod tests {
         )
         .await;
         let (miss_status, miss_body) = match miss {
-            PreparedRawHttp1Response::InMemory { status, body, .. } => {
-                (status, Bytes::copy_from_slice(body.as_ref()))
-            }
+            PreparedRawHttp1Response::InMemory(response) => (
+                response.status(),
+                Bytes::copy_from_slice(response.body().as_ref()),
+            ),
             PreparedRawHttp1Response::Generic(_, response) => {
                 let status = response.status();
                 let (_, body) = response.into_head_and_body();
@@ -1600,28 +1588,19 @@ mod tests {
         let in_memory = prepared
             .try_serving_cache_hit()
             .expect("hot InMemory response");
-        let PreparedRawHttp1Response::InMemory {
-            status,
-            headers,
-            body,
-        } = in_memory
-        else {
+        let PreparedRawHttp1Response::InMemory(response) = in_memory else {
             panic!("hot single-frame response should serialize InMemory");
         };
-        assert_eq!(status, hit_status);
-        assert_eq!(body, hit_body);
+        assert_eq!(response.status(), hit_status);
+        assert_eq!(response.body(), &hit_body);
+        let headers = response.headers();
         assert_eq!(
-            headers[http::header::CONTENT_LENGTH],
-            BODY.len().to_string()
-        );
-        assert_eq!(
-            headers.get_all(http::header::CONTENT_LENGTH).iter().count(),
-            1
+            headers.declared_content_length().expect("declaration"),
+            Some(BODY.len() as u64)
         );
         assert_eq!(
             headers
-                .get_all("x-duplicate")
-                .iter()
+                .ordinary_values(&"x-duplicate".try_into().expect("ordinary name"))
                 .map(|v| v.to_str().unwrap())
                 .collect::<Vec<_>>(),
             vec!["one", "two"]
@@ -1758,6 +1737,99 @@ mod tests {
             prepared.cache_hit.is_none(),
             "Authorization must use the generic lookup chain"
         );
+    }
+
+    /// The cache-hit promotion must carry the owner head into the static
+    /// writer: a declared Content-Length has to reach the wire through the
+    /// owner, not be dropped when the body is moved into the fast path.
+    #[tokio::test]
+    async fn cache_hit_in_memory_response_writes_declared_content_length() {
+        use tokio::io::AsyncReadExt;
+
+        const BODY: &str = "fast-path-payload";
+        let upstream_addr = crate::test_util::spawn_static_http_server(
+            "200 OK",
+            vec![("Cache-Control", "max-age=600".to_string())],
+            BODY.to_string(),
+            2,
+        )
+        .await;
+        let cache_dir = tempfile::tempdir().expect("cache dir");
+        let cache_path = std::fs::canonicalize(cache_dir.path()).expect("canonicalize cache dir");
+        let reverse = build_cache_hit_reverse_fixture(upstream_addr, &cache_path);
+        let conn = ReverseConnInfo::plain(([127, 0, 0, 1], 4242).into(), 18080);
+        let mut connection_cache = RawHttp1ConnectionCache::default();
+        let prepared = prepared_raw_request(&reverse, &conn, &mut connection_cache);
+
+        // Populate the cache through the generic miss path.
+        let pending_timer = tokio::time::sleep(std::time::Duration::ZERO);
+        tokio::pin!(pending_timer);
+        let mut pending_timeout = ReusablePendingTimeout::new(pending_timer.as_mut());
+        let mut session = crate::upstream::origin::PreparedPlainHttp1Session::default();
+        let _miss = dispatch_prepared(
+            prepared,
+            &reverse,
+            &conn,
+            &mut session,
+            &mut pending_timeout,
+        )
+        .await;
+        let fast = prepared.cache_hit.as_ref().expect("fast path data");
+        let mut published = false;
+        for _ in 0..300 {
+            if try_raw_cache_hit_response(fast).is_some() {
+                published = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(
+            published,
+            "background writeback never published the hot entry"
+        );
+
+        let PreparedRawHttp1Response::InMemory(response) =
+            prepared.try_serving_cache_hit().expect("hot in-memory hit")
+        else {
+            panic!("hot cache hit must take the in-memory fast path");
+        };
+        assert_eq!(
+            response
+                .headers()
+                .declared_content_length()
+                .expect("declaration"),
+            Some(BODY.len() as u64)
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let address = listener.local_addr().expect("listener address");
+        let (client, accepted) =
+            tokio::join!(tokio::net::TcpStream::connect(address), listener.accept());
+        let mut client = client.expect("connect");
+        let (mut server, _) = accepted.expect("accept");
+        let mut head_buf = bytes::BytesMut::new();
+        let keep_alive = crate::http::codec::h1::send_static_http1_response(
+            &mut server,
+            &http::Method::GET,
+            response,
+            true,
+            &mut head_buf,
+        )
+        .await
+        .expect("serialize in-memory response");
+        assert!(keep_alive);
+
+        drop(server);
+        let mut wire = Vec::new();
+        client.read_to_end(&mut wire).await.expect("read wire");
+        let wire = String::from_utf8(wire).expect("ASCII wire");
+        assert_eq!(
+            content_length_lines(&wire),
+            vec![format!("content-length: {}", BODY.len())]
+        );
+        assert!(wire.ends_with(BODY));
     }
 
     /// Conditional and HEAD requests must keep using the generic chain.
