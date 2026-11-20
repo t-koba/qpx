@@ -18,8 +18,11 @@ structural single owner: `Headers` keeps its `HeaderMap` private, ordinary
 access excludes Content-Length, and compile-fail doctests block raw
 CONTENT_LENGTH mutation. Only a small syntactic backstop remains in
 `cargo xtask structure`: it flags explicit production `.get`/`.get_all`/index
-reads keyed by `CONTENT_LENGTH` or a case-insensitive `"content-length"`
-literal, excluding test-only cfg. It does not follow aliases or dataflow.
+reads keyed by `CONTENT_LENGTH`, a case-insensitive `"content-length"` string or
+byte literal, or a `HeaderName` constructor (`from_static`, `from_bytes`,
+`from_lowercase`, `try_from`) taking such a literal, optionally wrapped in
+transparent `unwrap`/`expect`/`clone`/`to_owned` calls or `?`. Test-only cfg is
+excluded. It does not follow aliases or dataflow.
 
 ## Architecture overview
 

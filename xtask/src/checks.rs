@@ -1474,7 +1474,30 @@ impl Visit<'_> for ContentLengthDirectReads {
     }
 }
 
+/// Unwraps syntactic forms that preserve the value they contain. Aliases and
+/// dataflow are deliberately not followed.
+fn transparent_key_inner(expr: &syn::Expr) -> Option<&syn::Expr> {
+    match expr {
+        syn::Expr::MethodCall(call)
+            if matches!(
+                call.method.to_string().as_str(),
+                "unwrap" | "expect" | "clone" | "to_owned"
+            ) =>
+        {
+            Some(&call.receiver)
+        }
+        syn::Expr::Try(try_expr) => Some(&try_expr.expr),
+        syn::Expr::Reference(reference) => Some(&reference.expr),
+        syn::Expr::Paren(paren) => Some(&paren.expr),
+        syn::Expr::Group(group) => Some(&group.expr),
+        _ => None,
+    }
+}
+
 fn is_explicit_content_length(expr: &syn::Expr) -> bool {
+    if let Some(inner) = transparent_key_inner(expr) {
+        return is_explicit_content_length(inner);
+    }
     match expr {
         syn::Expr::Path(path) => path
             .path
@@ -1482,13 +1505,13 @@ fn is_explicit_content_length(expr: &syn::Expr) -> bool {
             .last()
             .is_some_and(|segment| segment.ident == "CONTENT_LENGTH"),
         syn::Expr::Lit(literal) => is_content_length_literal(&literal.lit),
-        syn::Expr::Reference(reference) => is_explicit_content_length(&reference.expr),
-        syn::Expr::Paren(paren) => is_explicit_content_length(&paren.expr),
-        syn::Expr::Group(group) => is_explicit_content_length(&group.expr),
         syn::Expr::Call(call) => {
             let field_name_constructor = match &*call.func {
                 syn::Expr::Path(path) => path.path.segments.last().is_some_and(|segment| {
-                    segment.ident == "from_static" || segment.ident == "from_bytes"
+                    segment.ident == "from_static"
+                        || segment.ident == "from_bytes"
+                        || segment.ident == "from_lowercase"
+                        || segment.ident == "try_from"
                 }),
                 _ => false,
             };
@@ -1503,11 +1526,11 @@ fn is_explicit_content_length(expr: &syn::Expr) -> bool {
 }
 
 fn is_content_length_literal_expr(expr: &syn::Expr) -> bool {
+    if let Some(inner) = transparent_key_inner(expr) {
+        return is_content_length_literal_expr(inner);
+    }
     match expr {
         syn::Expr::Lit(literal) => is_content_length_literal(&literal.lit),
-        syn::Expr::Reference(reference) => is_content_length_literal_expr(&reference.expr),
-        syn::Expr::Paren(paren) => is_content_length_literal_expr(&paren.expr),
-        syn::Expr::Group(group) => is_content_length_literal_expr(&group.expr),
         _ => false,
     }
 }
@@ -4383,7 +4406,12 @@ mod tests {
             r#""Content-Length""#,
             r#"r"cOnTeNt-LeNgTh""#,
             r#"http::HeaderName::from_static("Content-Length")"#,
-            r#"http::HeaderName::from_bytes(b"content-length")"#,
+            r#"http::HeaderName::from_bytes(b"content-length").unwrap()"#,
+            r#"http::HeaderName::from_static("content-length").clone()"#,
+            r#"http::HeaderName::try_from("content-length").unwrap()"#,
+            r#"http::HeaderName::from_lowercase(b"content-length").unwrap()"#,
+            r#"http::HeaderName::from_bytes(b"content-length")?"#,
+            r#"http::HeaderName::from_static("Content-Length").expect("name")"#,
         ] {
             for read in [
                 format!("h.get({key})"),
@@ -4408,6 +4436,36 @@ mod tests {
             }
         }
         assert!(content_length_direct_read_violations("qpx-http/src/codec.rs", "fn {").is_err());
+    }
+
+    #[test]
+    fn content_length_backstop_ignores_dynamic_and_unrelated_keys() {
+        for key in [
+            "name",
+            "name.unwrap()",
+            "compute_header_name()",
+            "compute_header_name(runtime)",
+            r#"http::HeaderName::from_bytes(runtime_bytes).unwrap()"#,
+            r#"http::HeaderName::from_static(runtime_str)"#,
+            r#"http::HeaderName::try_from(runtime_str)?"#,
+            r#""content-type""#,
+            r#"b"content-length-extra""#,
+            r#"http::HeaderName::from_static("content-type").unwrap()"#,
+        ] {
+            for read in [
+                format!("h.get({key})"),
+                format!("h.get_all({key})"),
+                format!("h[{key}]"),
+            ] {
+                let source = format!("fn reader() {{ let _ = {read}; }}");
+                assert!(
+                    content_length_direct_read_violations("qpx-http/src/codec.rs", &source)
+                        .unwrap()
+                        .is_empty(),
+                    "{read}"
+                );
+            }
+        }
     }
 
     #[test]
