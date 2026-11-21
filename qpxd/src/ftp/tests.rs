@@ -330,6 +330,95 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
 }
 
 #[tokio::test]
+async fn failed_ftp_listing_final_reply_aborts_response_body() {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::net::TcpListener;
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = control.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let (stream, _) = control.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        stream
+            .get_mut()
+            .write_all(b"220 synthetic FTP server\r\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "USER test\r\n");
+        stream
+            .get_mut()
+            .write_all(b"331 password required\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "PASS pass\r\n");
+        stream
+            .get_mut()
+            .write_all(b"230 logged in\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "EPSV\r\n");
+        let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let reply = format!(
+            "229 Entering Extended Passive Mode (|||{}|)\r\n",
+            data.local_addr().unwrap().port()
+        );
+        stream.get_mut().write_all(reply.as_bytes()).await.unwrap();
+        let (mut data, _) = data.accept().await.unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "LIST\r\n");
+        stream
+            .get_mut()
+            .write_all(b"150 data follows\r\n")
+            .await
+            .unwrap();
+        data.write_all(b"-rw-r--r-- 1 user user 1 Jan 01 00:00 file\r\n")
+            .await
+            .unwrap();
+        data.shutdown().await.unwrap();
+        stream
+            .get_mut()
+            .write_all(b"426 Transfer aborted\r\n")
+            .await
+            .unwrap();
+    });
+    let runtime = ftp_forward_test_runtime();
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .uri(format!("ftp://test:pass@{addr}/"))
+            .header("host", addr.to_string())
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let response = timeout(
+        StdDuration::from_secs(5),
+        crate::forward::handle_request_inner(
+            req,
+            runtime,
+            "ftp-test",
+            "127.0.0.1:12345".parse().unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = timeout(
+        StdDuration::from_secs(5),
+        qpx_http::body::to_bytes(response.into_head_and_body().1),
+    )
+    .await
+    .unwrap();
+    assert!(body.is_err(), "failed transfer must abort the body");
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn forward_ftp_active_mode_negotiates_binary_representation() {
     use tokio::io::AsyncBufReadExt;
     use tokio::net::TcpListener;

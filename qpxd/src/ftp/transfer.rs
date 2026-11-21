@@ -50,13 +50,14 @@ pub(super) fn spawn_ftp_response_body(
     max_download_bytes: usize,
     permit: OwnedSemaphorePermit,
 ) -> Result<Body> {
-    let (sender, body) = Body::channel_with_capacity(FTP_RESPONSE_STREAM_CHANNEL_CAPACITY);
+    let (mut sender, body) = Body::channel_with_capacity(FTP_RESPONSE_STREAM_CHANNEL_CAPACITY);
     tokio::spawn(async move {
         // Hold the FTP concurrency permit until the response body has finished streaming.
         let _permit = permit;
         if let Err(err) =
-            stream_ftp_response_body(transfer, transform, max_download_bytes, sender).await
+            stream_ftp_response_body(transfer, transform, max_download_bytes, &mut sender).await
         {
+            sender.abort();
             warn!(error = ?err, "FTP response streaming failed");
         }
     });
@@ -67,7 +68,7 @@ async fn stream_ftp_response_body(
     transfer: FtpDataTransfer,
     transform: FtpResponseTransform,
     max_download_bytes: usize,
-    mut sender: qpx_http::body::Sender,
+    sender: &mut qpx_http::body::Sender,
 ) -> Result<()> {
     let FtpDataTransfer {
         mut client,
@@ -76,10 +77,10 @@ async fn stream_ftp_response_body(
     } = transfer;
     let result = match transform {
         FtpResponseTransform::Raw => {
-            stream_raw_ftp_data(&mut data, max_download_bytes, client.deadline, &mut sender).await
+            stream_raw_ftp_data(&mut data, max_download_bytes, client.deadline, &mut *sender).await
         }
         FtpResponseTransform::Listing => {
-            stream_listing_ftp_data(&mut data, max_download_bytes, client.deadline, &mut sender)
+            stream_listing_ftp_data(&mut data, max_download_bytes, client.deadline, &mut *sender)
                 .await
         }
     };
