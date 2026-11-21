@@ -8,7 +8,7 @@ use qpx_core::config::{AcmeConfig, Config};
 use qpx_core::tls::{load_cert_chain, load_private_key};
 use rcgen::{CertificateParams, CustomExtension, DistinguishedName, DnType, KeyPair};
 use rustls::crypto::aws_lc_rs::sign::any_supported_type;
-use rustls::pki_types::{PrivateKeyDer, PrivatePkcs8KeyDer};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 use rustls::sign::CertifiedKey;
 use std::collections::HashSet;
 use std::fs;
@@ -18,7 +18,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{info, warn};
-use x509_parser::pem::Pem;
 
 /// Runs the ACME account and certificate renewal manager.
 pub async fn run_manager(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
@@ -113,7 +112,16 @@ fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<bool> {
         return Ok(false);
     }
     let chain = load_cert_chain(&cert_path)?;
-    let (not_before, not_after) = read_leaf_validity(&cert_path)?;
+    load_cert_into_store_from_chain(state, sni, chain)
+}
+
+fn load_cert_into_store_from_chain(
+    state: &AcmeRuntime,
+    sni: &str,
+    chain: Vec<CertificateDer<'static>>,
+) -> Result<bool> {
+    let (_, key_path) = cert_paths_for_sni(state, sni);
+    let (not_before, not_after) = leaf_validity(&chain, sni)?;
     let now = SystemTime::now();
     if now < not_before {
         return Err(anyhow!("ACME certificate for {sni} is not yet valid"));
@@ -722,26 +730,28 @@ fn should_renew(not_after: SystemTime, renew_before_days: u64) -> Result<bool> {
 }
 
 fn read_leaf_validity(cert_path: &Path) -> Result<(SystemTime, SystemTime)> {
-    let data = fs::read(cert_path)?;
-    for pem in Pem::iter_from_buffer(&data) {
-        let pem = pem.map_err(|e| anyhow!("invalid PEM in {}: {e}", cert_path.display()))?;
-        if pem.label != "CERTIFICATE" {
-            continue;
-        }
-        let cert = pem
-            .parse_x509()
-            .map_err(|e| anyhow!("invalid x509 in {}: {e:?}", cert_path.display()))?;
-        let not_before = cert.validity().not_before.to_datetime().unix_timestamp();
-        let not_after = cert.validity().not_after.to_datetime().unix_timestamp();
-        if not_before < 0 || not_after < 0 {
-            return Err(anyhow!("invalid x509 validity in {}", cert_path.display()));
-        }
-        return Ok((
-            UNIX_EPOCH + Duration::from_secs(not_before as u64),
-            UNIX_EPOCH + Duration::from_secs(not_after as u64),
-        ));
+    let chain = load_cert_chain(cert_path)?;
+    leaf_validity(&chain, &cert_path.display().to_string())
+}
+
+fn leaf_validity(
+    chain: &[CertificateDer<'static>],
+    context: &str,
+) -> Result<(SystemTime, SystemTime)> {
+    let der = chain
+        .first()
+        .ok_or_else(|| anyhow!("no certificate found for {context}"))?;
+    let (_, cert) = x509_parser::parse_x509_certificate(der.as_ref())
+        .map_err(|e| anyhow!("invalid x509 for {context}: {e:?}"))?;
+    let not_before = cert.validity().not_before.to_datetime().unix_timestamp();
+    let not_after = cert.validity().not_after.to_datetime().unix_timestamp();
+    if not_before < 0 || not_after < 0 {
+        return Err(anyhow!("invalid x509 validity for {context}"));
     }
-    Err(anyhow!("no certificate found in {}", cert_path.display()))
+    Ok((
+        UNIX_EPOCH + Duration::from_secs(not_before as u64),
+        UNIX_EPOCH + Duration::from_secs(not_after as u64),
+    ))
 }
 
 fn sanitize_sni(sni: &str) -> String {
@@ -1263,6 +1273,28 @@ mod tests {
         fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
         assert!(!matches!(
             load_cert_into_store(&fixture.0, TEST_SNI),
+            Ok(true)
+        ));
+        fixture.assert_empty();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn installed_chain_controls_certificate_validity() {
+        let fixture = CertFixture::new();
+        let key = KeyPair::generate().unwrap();
+        let mut valid_params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        valid_params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+        fixture.write_pair(&valid_params.self_signed(&key).unwrap(), &key);
+
+        let mut future_params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        future_params.not_before = rcgen::date_time_ymd(2099, 1, 1);
+        future_params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+        let future = future_params.self_signed(&key).unwrap();
+        let chain = vec![CertificateDer::from(future.der().to_vec())];
+
+        assert!(!matches!(
+            load_cert_into_store_from_chain(&fixture.0, TEST_SNI, chain),
             Ok(true)
         ));
         fixture.assert_empty();
