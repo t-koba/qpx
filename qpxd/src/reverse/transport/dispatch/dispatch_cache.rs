@@ -440,7 +440,7 @@ async fn reverse_cache_collapse(
             revalidation_state,
             Some(guard),
         )),
-        qpxd_cache::RequestCollapseJoin::Follower(waiter) => {
+        qpxd_cache::RequestCollapseJoin::Follower(mut waiter) => {
             if !waiter.wait(route_timeout).await {
                 return Ok(dispatch_cache_collapse_continue(revalidation_state, None));
             }

@@ -8,8 +8,10 @@ use qpx_core::http_message::Response;
 use qpx_http::body::Body;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
+use tokio::sync::futures::OwnedNotified;
 use tokio::sync::{Notify, OwnedSemaphorePermit, Semaphore};
 
 pub const CACHE_HEADER: &str = "cache-status";
@@ -699,9 +701,11 @@ impl InFlightLookups {
         let shard = qpx_http::sharding::masked(key.as_ref(), self.mask);
         let mut entries = self.shards[shard].lock().unwrap_or_else(|p| p.into_inner());
         if let Some(notify) = entries.get(key.as_ref()) {
-            return RequestCollapseJoin::Follower(RequestCollapseWaiter {
-                notify: notify.clone(),
-            });
+            let mut notified = Box::pin(notify.clone().notified_owned());
+            // Register now: notify_waiters() in the leader's drop only wakes
+            // waiters that are already attached to the notification.
+            let _ = notified.as_mut().enable();
+            return RequestCollapseJoin::Follower(RequestCollapseWaiter { notified });
         }
         let notify = Arc::new(Notify::new());
         entries.insert(key.clone(), notify.clone());
@@ -731,7 +735,7 @@ pub struct RequestCollapseGuard {
 }
 
 pub struct RequestCollapseWaiter {
-    notify: Arc<Notify>,
+    notified: Pin<Box<OwnedNotified>>,
 }
 
 impl Drop for BackgroundRevalidationGuard {
@@ -741,8 +745,8 @@ impl Drop for BackgroundRevalidationGuard {
 }
 
 impl RequestCollapseWaiter {
-    pub async fn wait(&self, timeout_dur: std::time::Duration) -> bool {
-        tokio::time::timeout(timeout_dur, self.notify.notified())
+    pub async fn wait(&mut self, timeout_dur: std::time::Duration) -> bool {
+        tokio::time::timeout(timeout_dur, self.notified.as_mut())
             .await
             .is_ok()
     }

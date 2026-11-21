@@ -95,7 +95,7 @@ async fn cache_owned_304_refreshes_metadata_without_storing_again() {
             let RequestCollapseJoin::Leader(leader) = collapse.begin(&key) else {
                 panic!("expected collapse leader");
             };
-            let RequestCollapseJoin::Follower(waiter) = collapse.begin(&key) else {
+            let RequestCollapseJoin::Follower(mut waiter) = collapse.begin(&key) else {
                 panic!("expected collapse follower");
             };
             let (settled, ()) = tokio::join!(waiter.wait(timeout), async {

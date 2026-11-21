@@ -311,7 +311,7 @@ async fn publish(
     let RequestCollapseJoin::Leader(leader) = collapse.begin(key) else {
         panic!("leader")
     };
-    let RequestCollapseJoin::Follower(waiter) = collapse.begin(key) else {
+    let RequestCollapseJoin::Follower(mut waiter) = collapse.begin(key) else {
         panic!("follower")
     };
     let mut response = make_response(StatusCode::OK, control, body);
@@ -373,7 +373,7 @@ async fn writeback_keeps_published_generation_when_lease_release_fails() {
         let RequestCollapseJoin::Leader(leader) = collapse.begin(&key) else {
             panic!("leader")
         };
-        let RequestCollapseJoin::Follower(waiter) = collapse.begin(&key) else {
+        let RequestCollapseJoin::Follower(mut waiter) = collapse.begin(&key) else {
             panic!("follower")
         };
         let admission = test_writeback_admission();

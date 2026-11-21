@@ -209,7 +209,7 @@ pub(super) async fn try_forward_cache_collapse(
     };
     match input.context.state.cache.begin_request_collapse(lookup_key) {
         qpxd_cache::RequestCollapseJoin::Leader(leader) => guard = Some(leader),
-        qpxd_cache::RequestCollapseJoin::Follower(waiter) => {
+        qpxd_cache::RequestCollapseJoin::Follower(mut waiter) => {
             if waiter.wait(input.context.upstream_timeout).await {
                 let (lookup_decision, next_revalidation_state) = lookup_with_revalidation(
                     input.req,

@@ -258,7 +258,7 @@ edges:
                 else {
                     panic!("cache leader");
                 };
-                let qpxd_cache::RequestCollapseJoin::Follower(waiter) =
+                let qpxd_cache::RequestCollapseJoin::Follower(mut waiter) =
                     state.cache.begin_request_collapse(&key)
                 else {
                     panic!("cache follower");

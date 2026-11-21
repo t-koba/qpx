@@ -80,7 +80,7 @@ async fn request_collapse_notifies_followers() {
         RequestCollapseJoin::Leader(guard) => guard,
         RequestCollapseJoin::Follower(_) => panic!("expected leader"),
     };
-    let waiter = match collapse.begin(&key) {
+    let mut waiter = match collapse.begin(&key) {
         RequestCollapseJoin::Leader(_) => panic!("expected follower"),
         RequestCollapseJoin::Follower(waiter) => waiter,
     };
@@ -88,6 +88,31 @@ async fn request_collapse_notifies_followers() {
     tokio::task::yield_now().await;
     drop(leader);
     assert!(wait_task.await.expect("wait task"));
+}
+
+#[tokio::test]
+async fn request_collapse_wakes_followers_that_join_before_waiting() {
+    let req = make_get_request("/collapse-lost-wakeup");
+    let key = CacheRequestKey::for_lookup(&req, "http")
+        .expect("key")
+        .expect("lookup key");
+    let collapse = test_request_collapse();
+    let leader = match collapse.begin(&key) {
+        RequestCollapseJoin::Leader(guard) => guard,
+        RequestCollapseJoin::Follower(_) => panic!("expected leader"),
+    };
+    let mut first = match collapse.begin(&key) {
+        RequestCollapseJoin::Leader(_) => panic!("expected follower"),
+        RequestCollapseJoin::Follower(waiter) => waiter,
+    };
+    let mut second = match collapse.begin(&key) {
+        RequestCollapseJoin::Leader(_) => panic!("expected follower"),
+        RequestCollapseJoin::Follower(waiter) => waiter,
+    };
+
+    drop(leader);
+    assert!(first.wait(Duration::from_millis(100)).await);
+    assert!(second.wait(Duration::from_millis(100)).await);
 }
 
 #[tokio::test]
@@ -101,7 +126,7 @@ async fn request_collapse_guard_waits_for_cache_writeback() {
         RequestCollapseJoin::Leader(guard) => guard,
         RequestCollapseJoin::Follower(_) => panic!("expected leader"),
     };
-    let waiter = match collapse.begin(&key) {
+    let mut waiter = match collapse.begin(&key) {
         RequestCollapseJoin::Leader(_) => panic!("expected follower"),
         RequestCollapseJoin::Follower(waiter) => waiter,
     };
