@@ -522,6 +522,9 @@ impl<S: WebDavStore> WebDavService<S> {
             return response(StatusCode::BAD_REQUEST, Vec::new());
         }
         let depth = parse_depth(headers, self.max_depth)?;
+        if self.store.metadata(resource)?.is_none() {
+            return response(StatusCode::NOT_FOUND, Vec::new());
+        }
         let mut resources = vec![resource.clone()];
         self.collect_descendants(resource, depth, &mut resources)?;
         if resources.len() > self.max_multistatus_entries {
@@ -2347,6 +2350,25 @@ mod tests {
                 .value_xml,
             "internal"
         );
+    }
+
+    #[test]
+    fn propfind_missing_target_returns_not_found() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+
+        let request = http::Request::builder()
+            .method("PROPFIND")
+            .uri("/missing.txt")
+            .header("depth", "0")
+            .body(Vec::new())
+            .map(Request::from_http)
+            .unwrap();
+
+        assert_eq!(service.handle(request, &context).unwrap().status(), 404);
     }
 
     #[test]
