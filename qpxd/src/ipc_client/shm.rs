@@ -95,20 +95,15 @@ pub(super) async fn read_shm_response_meta_after_body_writer<S>(
 where
     S: AsyncRead + Unpin,
 {
-    let pending_meta = tokio::select! {
-        res = read_frame(stream) => Some(res?),
-        body_result = body_writer => {
-            let ring = finish_shm_body_writer_result(body_result)?;
-            let meta = read_frame(stream).await?;
-            return Ok((meta, Some(ring)));
-        }
+    let mut read_future = Box::pin(read_frame::<_, IpcResponseMeta>(stream));
+    let body_result = tokio::select! {
+        res = &mut read_future => return Ok((res?, None)),
+        body_result = body_writer => body_result,
     };
 
-    if let Some(meta) = pending_meta {
-        Ok((meta, None))
-    } else {
-        unreachable!("tokio::select! always yields one branch")
-    }
+    let ring = finish_shm_body_writer_result(body_result)?;
+    let meta = read_future.await?;
+    Ok((meta, Some(ring)))
 }
 
 async fn finish_shm_request_writer(

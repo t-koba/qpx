@@ -107,6 +107,82 @@ async fn shm_response_meta_returns_before_body_writer_after_fast_response() {
 }
 
 #[tokio::test]
+#[cfg(unix)]
+async fn shm_response_meta_survives_writer_completion_mid_frame() {
+    use std::future::poll_fn;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::task::{Context, Poll, Waker};
+    use tokio::io::AsyncWriteExt;
+
+    let (mut client, mut server) = tokio::io::duplex(4096);
+    let shm_path = temp_shm_path("ipc-response-meta-mid-frame");
+    let ring = ShmRingBuffer::create_or_open(&shm_path, 64 * 1024).unwrap();
+
+    let response_meta = IpcResponseMeta {
+        status: 200,
+        headers: qpx_core::ipc::meta::IpcResponseHeaders::from_pairs(vec![(
+            "content-type".to_string(),
+            "text/plain".to_string(),
+        )]),
+    };
+    let mut frame = Vec::new();
+    write_frame(&mut frame, &response_meta).await.unwrap();
+    assert!(frame.len() > 9, "frame must have a payload past its header");
+
+    let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+    let (finish_tx, finish_rx) = tokio::sync::oneshot::channel::<()>();
+    let writer_done = Arc::new(AtomicBool::new(false));
+    let observed_done = Arc::clone(&writer_done);
+    let mut body_writer = tokio::spawn(async move {
+        gate_rx.await.expect("writer gate");
+        let result: Result<ShmRingBuffer> = Ok(ring);
+        observed_done.store(true, Ordering::SeqCst);
+        let _ = finish_tx.send(());
+        result
+    });
+
+    server.write_all(&frame[..9]).await.unwrap();
+
+    let mut read = Box::pin(read_shm_response_meta_after_body_writer(
+        &mut client,
+        &mut body_writer,
+    ));
+    let mut context = Context::from_waker(Waker::noop());
+    let mut once = Box::pin(poll_fn(|cx| read.as_mut().poll(cx)));
+    assert!(
+        matches!(once.as_mut().poll(&mut context), Poll::Pending),
+        "header read should be pending"
+    );
+
+    gate_tx.send(()).expect("release writer gate");
+    timeout(Duration::from_secs(2), async {
+        while !writer_done.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("writer done flag");
+    finish_rx.await.expect("body writer completion");
+
+    let mut after_writer = Box::pin(poll_fn(|cx| read.as_mut().poll(cx)));
+    assert!(
+        matches!(after_writer.as_mut().poll(&mut context), Poll::Pending),
+        "writer completion should leave frame payload pending"
+    );
+
+    server.write_all(&frame[9..]).await.unwrap();
+    let (meta, response_ring) = timeout(Duration::from_secs(2), read)
+        .await
+        .expect("read response meta after writer completion")
+        .expect("response meta result");
+    assert_eq!(meta.status, 200);
+    assert!(response_ring.is_some(), "writer ring must be returned");
+
+    remove_ipc_shm_path(shm_path);
+}
+
+#[tokio::test]
 async fn downstream_body_closed_reports_dropped_receiver() {
     let (sender, body) = Body::channel_with_capacity(16);
     drop(body);
