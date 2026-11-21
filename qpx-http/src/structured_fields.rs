@@ -73,10 +73,12 @@ fn combine_field_lines(headers: &http::HeaderMap, name: &http::HeaderName) -> Op
 
 fn combine_values<'a>(values: impl Iterator<Item = &'a http::HeaderValue>) -> Option<Vec<u8>> {
     let mut combined = Vec::new();
+    let mut seen_first = false;
     for value in values {
-        if !combined.is_empty() {
+        if seen_first {
             combined.extend_from_slice(b", ");
         }
+        seen_first = true;
         combined.extend_from_slice(value.as_bytes());
     }
     (!combined.is_empty()).then_some(combined)
@@ -93,6 +95,28 @@ mod tests {
             .expect("RFC 9651 dictionary");
         assert!(dictionary.contains_key("created"));
         assert!(dictionary.contains_key("title"));
+    }
+
+    #[test]
+    fn empty_dictionary_field_line_is_absent() {
+        let name = HeaderName::from_static("example-dictionary");
+        let mut headers = HeaderMap::new();
+        headers.append(name.clone(), HeaderValue::from_static(""));
+        assert!(
+            parse_dictionary_fields(&headers, &name)
+                .expect("empty dictionary")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_dictionary_with_leading_empty_field_line() {
+        let name = HeaderName::from_static("example-dictionary");
+        let mut headers = HeaderMap::new();
+        headers.append(name.clone(), HeaderValue::from_static(""));
+        headers.append(name.clone(), HeaderValue::from_static("a=1"));
+
+        assert!(parse_dictionary_fields(&headers, &name).is_err());
     }
 
     #[test]
