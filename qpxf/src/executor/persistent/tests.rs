@@ -426,15 +426,87 @@ async fn scgi_executor_respects_max_concurrency() {
 }
 
 #[tokio::test]
+async fn scgi_known_length_sends_mandatory_headers_first() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("addr").to_string();
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.expect("accept");
+        let request = read_scgi_request_from_tcp(&mut stream).await;
+        let pairs = scgi_env_pairs(&request);
+        assert_eq!(
+            pairs.first().map(|(name, _)| *name),
+            Some(b"CONTENT_LENGTH".as_slice())
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .find(|(name, _)| *name == b"CONTENT_LENGTH")
+                .map(|(_, value)| *value),
+            Some(b"3".as_slice())
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(name, value)| *name == b"SCGI" && *value == b"1")
+                .count(),
+            1
+        );
+        let mut body = [0u8; 3];
+        stream.read_exact(&mut body).await.expect("body");
+        assert_eq!(&body, b"abc");
+        stream
+            .write_all(b"Status: 200 OK\r\n\r\nposted")
+            .await
+            .expect("response");
+    });
+    let executor = Arc::new(
+        PersistentExecutor::new(address, 1000, 1, Vec::new(), 1024, 1024, 1024).expect("executor"),
+    );
+    let mut req = test_cgi_request();
+    req.request_method = "POST".to_string();
+    req.declared_content_length = Some(3);
+    req.content_length = 3;
+    let mut execution = executor.start(req).await.expect("start");
+    execution
+        .stdin
+        .send(Bytes::from_static(b"abc"))
+        .await
+        .expect("send stdin");
+    drop(execution.stdin);
+    let mut stdout = BytesMut::new();
+    while let Some(chunk) = execution.stdout.recv().await {
+        stdout.extend_from_slice(&chunk);
+    }
+    execution.done.await.expect("join").expect("done");
+    assert_eq!(
+        stdout.freeze(),
+        Bytes::from_static(b"Status: 200 OK\r\n\r\nposted")
+    );
+    server.await.expect("server");
+}
+
+#[tokio::test]
 async fn scgi_unknown_length_empty_stdin_is_sent_as_zero_length() {
     let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
     let address = listener.local_addr().expect("addr").to_string();
     let server = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.expect("accept");
         let request = read_scgi_request_from_tcp(&mut stream).await;
+        let pairs = scgi_env_pairs(&request);
+        assert_eq!(
+            pairs.first().map(|(name, _)| *name),
+            Some(b"CONTENT_LENGTH".as_slice())
+        );
         assert_eq!(
             scgi_env_value(&request, "CONTENT_LENGTH"),
             Some(b"0".as_slice())
+        );
+        assert_eq!(
+            pairs
+                .iter()
+                .filter(|(name, value)| *name == b"SCGI" && *value == b"1")
+                .count(),
+            1
         );
         stream
             .write_all(b"Status: 200 OK\r\n\r\nempty")
@@ -839,6 +911,18 @@ async fn read_scgi_request_from_tcp(stream: &mut TcpStream) -> Bytes {
     stream.read_exact(&mut comma).await.expect("comma");
     assert_eq!(comma[0], b',');
     Bytes::from(headers)
+}
+
+fn scgi_env_pairs(payload: &[u8]) -> Vec<(&[u8], &[u8])> {
+    let mut fields = payload.split(|byte| *byte == 0);
+    let mut pairs = Vec::new();
+    while let Some(name) = fields.next() {
+        if name.is_empty() {
+            continue;
+        }
+        pairs.push((name, fields.next().unwrap_or_default()));
+    }
+    pairs
 }
 
 fn scgi_env_value<'a>(payload: &'a [u8], key: &str) -> Option<&'a [u8]> {

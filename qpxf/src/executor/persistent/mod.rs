@@ -229,8 +229,14 @@ impl PersistentExecutor {
                         }
                         let body = PersistentStdinBody::Memory(Bytes::new());
                         let env = build_gateway_env(&req, Some(0));
-                        let future =
-                            run_scgi_streaming(address.as_str(), env, body, max_stdout, stdout_tx);
+                        let future = run_scgi_streaming(
+                            address.as_str(),
+                            env,
+                            0,
+                            body,
+                            max_stdout,
+                            stdout_tx,
+                        );
                         match timeout(timeout_dur, future).await {
                             Ok(Ok(())) => {
                                 crate::metrics::backend_request("scgi", "ok");
