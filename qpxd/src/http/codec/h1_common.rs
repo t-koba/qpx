@@ -26,13 +26,26 @@ pub(crate) fn serialize_status_line(head: &mut BytesMut, version: Version, statu
     head.extend_from_slice(b"\r\n");
 }
 
-pub(crate) fn http1_keep_alive(version: Version, headers: &HeaderMap) -> bool {
-    match version {
-        Version::HTTP_10 => {
-            qpx_core::http_token::header_values_contain_token(headers, &CONNECTION, "keep-alive")
-        }
-        _ => !qpx_core::http_token::header_values_contain_token(headers, &CONNECTION, "close"),
+/// Shared HTTP/1 persistence rule for parsed and raw `Connection` tokens.
+///
+/// RFC 9112 section 9.6 gives `close` precedence at every HTTP/1 version;
+/// HTTP/1.0 persists only when `keep-alive` is explicitly present. The caller
+/// supplies its own token lookup so each header representation keeps its
+/// existing parsing and validation.
+pub(crate) fn http1_keep_alive_from_tokens(
+    version: Version,
+    mut has_connection_token: impl FnMut(&str) -> bool,
+) -> bool {
+    if has_connection_token("close") {
+        return false;
     }
+    version != Version::HTTP_10 || has_connection_token("keep-alive")
+}
+
+pub(crate) fn http1_keep_alive(version: Version, headers: &HeaderMap) -> bool {
+    http1_keep_alive_from_tokens(version, |token| {
+        qpx_core::http_token::header_values_contain_token(headers, &CONNECTION, token)
+    })
 }
 
 /// Whether the unparsed headers carry the Connection token.
@@ -312,6 +325,17 @@ mod tests {
 
         assert!(take_crlf_line(&mut buf).is_none());
         assert_eq!(&buf[..], b"line\r");
+    }
+
+    #[test]
+    fn http_10_close_overrides_keep_alive_in_parsed_connection() {
+        let mut headers = HeaderMap::new();
+        headers.append(CONNECTION, HeaderValue::from_static("keep-alive, close"));
+        assert!(!http1_keep_alive(Version::HTTP_10, &headers));
+
+        let mut keep_alive_only = HeaderMap::new();
+        keep_alive_only.append(CONNECTION, HeaderValue::from_static("keep-alive"));
+        assert!(http1_keep_alive(Version::HTTP_10, &keep_alive_only));
     }
 
     #[test]

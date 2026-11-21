@@ -1,7 +1,7 @@
 use crate::http::codec::h1_common::{
     TransferEncodingClassificationError, append_header_line,
-    has_only_chunked_transfer_encoding_values, is_sanitized_hop_header, raw_has_connection_token,
-    serialize_status_line,
+    has_only_chunked_transfer_encoding_values, http1_keep_alive_from_tokens,
+    is_sanitized_hop_header, raw_has_connection_token, serialize_status_line,
 };
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
@@ -156,10 +156,9 @@ impl RawHttp1ResponseHead {
             } else {
                 RawHttp1BodyFraming::CloseDelimited
             };
-        let upstream_keep_alive = match version {
-            Version::HTTP_10 => raw_has_connection_token(headers, b"keep-alive"),
-            _ => !raw_has_connection_token(headers, b"close"),
-        } && reset_content_upstream_reusable
+        let upstream_keep_alive = http1_keep_alive_from_tokens(version, |token| {
+            raw_has_connection_token(headers, token.as_bytes())
+        }) && reset_content_upstream_reusable
             && !conflicting_framing;
         let strip_content_length = response_status_forbids_content_length(status)
             || (no_body && request_method != Method::HEAD && status != StatusCode::NOT_MODIFIED)
@@ -445,6 +444,51 @@ mod tests {
         assert!(!materialized.contains_key("connection"));
         assert!(!materialized.contains_key("x-hop"));
         assert_eq!(raw.framing(), RawHttp1BodyFraming::ContentLength(4));
+        assert!(raw.upstream_keep_alive());
+    }
+
+    #[test]
+    fn raw_http_10_close_overrides_keep_alive() {
+        let headers = [
+            httparse::Header {
+                name: "Content-Length",
+                value: b"0",
+            },
+            httparse::Header {
+                name: "Connection",
+                value: b"keep-alive",
+            },
+            httparse::Header {
+                name: "Connection",
+                value: b"close",
+            },
+        ];
+        let raw = RawHttp1ResponseHead::from_parsed(
+            &headers,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_10,
+        )
+        .expect("raw head");
+        assert!(!raw.upstream_keep_alive());
+
+        let keep_alive_only = [
+            httparse::Header {
+                name: "Content-Length",
+                value: b"0",
+            },
+            httparse::Header {
+                name: "Connection",
+                value: b"keep-alive",
+            },
+        ];
+        let raw = RawHttp1ResponseHead::from_parsed(
+            &keep_alive_only,
+            &Method::GET,
+            StatusCode::OK,
+            Version::HTTP_10,
+        )
+        .expect("raw head");
         assert!(raw.upstream_keep_alive());
     }
 
