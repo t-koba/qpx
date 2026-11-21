@@ -2,6 +2,7 @@
 
 use crate::structured_fields::{BareItem, List, ListEntry, ListSerializer, parse_list_fields};
 use http::{HeaderMap, HeaderName, HeaderValue};
+use qpx_core::http_token::is_http_token;
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -86,23 +87,12 @@ fn validate_media_range(value: &str) -> Result<(), AcceptQueryError> {
         || kind.is_empty()
         || subtype.is_empty()
         || (kind == "*" && subtype != "*")
-        || (kind != "*" && !is_media_token(kind))
-        || (subtype != "*" && !is_media_token(subtype))
+        || (kind != "*" && !is_http_token(kind))
+        || (subtype != "*" && !is_http_token(subtype))
     {
         return Err(AcceptQueryError::InvalidMediaRange(value.to_string()));
     }
     Ok(())
-}
-
-fn is_media_token(value: &str) -> bool {
-    !value.is_empty()
-        && value.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric()
-                || matches!(
-                    byte,
-                    b'!' | b'#' | b'$' | b'&' | b'^' | b'_' | b'.' | b'+' | b'-'
-                )
-        })
 }
 
 #[cfg(test)]
@@ -127,6 +117,18 @@ mod tests {
             parsed.to_header_value().expect("serialize"),
             "\"application/jsonpath\", application/sql;charset=\"UTF-8\""
         );
+    }
+
+    #[test]
+    fn round_trips_media_range_with_http_token_punctuation() {
+        let range = "application/x-query~example";
+        let mut headers = HeaderMap::new();
+        headers.insert("accept-query", HeaderValue::from_static(range));
+        let parsed = parse_accept_query(&headers)
+            .expect("valid Accept-Query")
+            .expect("present");
+        assert_eq!(parsed.media_ranges().collect::<Vec<_>>(), [range]);
+        assert_eq!(parsed.to_header_value().expect("serialize"), range);
     }
 
     #[test]
