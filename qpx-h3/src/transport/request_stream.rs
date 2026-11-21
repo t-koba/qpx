@@ -175,7 +175,7 @@ impl RequestStream {
                 self.enforce_received_content_length_complete()?;
                 return Ok(None);
             };
-            if self.pending_trailers.is_some() {
+            if self.pending_trailers.is_some() && matches!(ty, FRAME_DATA | FRAME_HEADERS) {
                 abort_bidi_stream(&mut self.send, &mut self.recv, H3_FRAME_UNEXPECTED);
                 return Err(anyhow!("received HTTP/3 frame after trailers").into());
             }

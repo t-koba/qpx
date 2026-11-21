@@ -84,6 +84,168 @@ async fn unknown_frame_before_request_headers_is_ignored() -> Result<()> {
     Ok(())
 }
 
+type TrailerObservation = std::result::Result<(Vec<u8>, String), String>;
+
+enum TrailerRecv<'a> {
+    Combined(&'a mut RequestStream),
+    Split(&'a mut qpx_h3::RequestRecvStream),
+}
+
+impl TrailerRecv<'_> {
+    async fn recv_data(&mut self) -> H3Result<Option<Bytes>> {
+        match self {
+            Self::Combined(stream) => stream.recv_data().await,
+            Self::Split(recv) => recv.recv_data().await,
+        }
+    }
+
+    async fn recv_trailers(&mut self) -> H3Result<Option<http::HeaderMap>> {
+        match self {
+            Self::Combined(stream) => stream.recv_trailers().await,
+            Self::Split(recv) => recv.recv_trailers().await,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct TrailerBodyHandler {
+    split: bool,
+    observed: Arc<Mutex<Option<oneshot::Sender<TrailerObservation>>>>,
+}
+
+async fn drain_body_and_read_trailers(
+    mut recv: TrailerRecv<'_>,
+    observed: &Arc<Mutex<Option<oneshot::Sender<TrailerObservation>>>>,
+) -> H3Result<()> {
+    let outcome: anyhow::Result<(Vec<u8>, String)> = async {
+        let mut body = Vec::new();
+        while body.len() < 3 {
+            match recv
+                .recv_data()
+                .await
+                .map_err(|err| anyhow!(err.to_string()))?
+            {
+                Some(chunk) => body.extend_from_slice(&chunk),
+                None => break,
+            }
+        }
+        let trailers = recv
+            .recv_trailers()
+            .await
+            .map_err(|err| anyhow!(err.to_string()))?
+            .ok_or_else(|| anyhow!("missing trailing HEADERS"))?;
+        let value = trailers
+            .get("x-end")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| anyhow!("missing x-end trailer"))?;
+        if body.as_slice() != b"abc" {
+            return Err(anyhow!("unexpected request body: {body:?}"));
+        }
+        if value != "ok" {
+            return Err(anyhow!("unexpected x-end trailer: {value}"));
+        }
+        Ok((body, value.to_string()))
+    }
+    .await;
+
+    if let Some(tx) = observed.lock().await.take() {
+        let _ = tx.send(
+            outcome
+                .as_ref()
+                .map(|(body, value)| (body.clone(), value.clone()))
+                .map_err(|err| err.to_string()),
+        );
+    }
+    outcome.map(|_| ()).map_err(Into::into)
+}
+
+impl RequestHandler for TrailerBodyHandler {
+    fn settings(&self) -> Settings {
+        Settings {
+            read_timeout: TEST_TIMEOUT,
+            ..Default::default()
+        }
+    }
+
+    async fn handle_request(
+        &self,
+        request: Request,
+        _conn: ConnectionInfo,
+        mut stream: RequestStream,
+    ) -> H3Result<()> {
+        assert_eq!(request.head.method(), http::Method::POST);
+        assert_eq!(request.head.uri().path(), "/");
+        let response = http::Response::builder().status(204).body(())?;
+        if self.split {
+            let (mut send, mut recv) = stream.split();
+            drain_body_and_read_trailers(TrailerRecv::Split(&mut recv), &self.observed).await?;
+            send.send_response_head(&response).await?;
+            send.finish().await
+        } else {
+            drain_body_and_read_trailers(TrailerRecv::Combined(&mut stream), &self.observed)
+                .await?;
+            stream.send_response_head(&response).await?;
+            stream.finish().await
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn unknown_frame_after_request_trailers_is_ignored() -> Result<()> {
+    for split in [false, true] {
+        let (observed_tx, observed_rx) = oneshot::channel();
+        let handler = TrailerBodyHandler {
+            split,
+            observed: Arc::new(Mutex::new(Some(observed_tx))),
+        };
+        let (addr, client_config, server_task) = start_server(handler).await?;
+        let (_client_endpoint, connection) = connect_client(addr, client_config).await?;
+        open_client_control_stream(&connection).await?;
+        open_client_qpack_streams(&connection).await?;
+
+        let authority = format!("localhost:{}", addr.port());
+        let mut headers = Vec::new();
+        encode_prefixed_int(&mut headers, 8, 0, 0);
+        encode_prefixed_int(&mut headers, 7, 0, 0);
+        encode_prefixed_int(&mut headers, 6, 0b11, 20); // Static :method POST.
+        headers.extend_from_slice(&build_head_request_headers(&authority)[3..]);
+        encode_prefixed_int(&mut headers, 4, 0b0101, 4); // Static content-length name.
+        encode_string(&mut headers, 8, 0, b"3");
+
+        let mut trailers = Vec::new();
+        encode_prefixed_int(&mut trailers, 8, 0, 0);
+        encode_prefixed_int(&mut trailers, 7, 0, 0);
+        encode_string(&mut trailers, 4, 0b0010, b"x-end");
+        encode_string(&mut trailers, 8, 0, b"ok");
+
+        let (mut send, mut recv) = connection.open_bi().await?;
+        write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
+        write_frame_raw(&mut send, FRAME_DATA, b"abc").await?;
+        write_frame_raw(&mut send, FRAME_HEADERS, &trailers).await?;
+        write_frame_raw(&mut send, 0x21, b"grease").await?;
+        send.finish()?;
+
+        let (body, trailer) = timeout(TEST_TIMEOUT, observed_rx)
+            .await
+            .map_err(|_| anyhow!("timed out waiting for trailer handler (split={split})"))?
+            .map_err(|_| anyhow!("trailer handler dropped its result (split={split})"))?
+            .map_err(|err| anyhow!("trailer handler failed (split={split}): {err}"))?;
+        assert_eq!(body.as_slice(), b"abc");
+        assert_eq!(trailer, "ok");
+
+        let (frame_type, _) = read_frame_raw(&mut recv, "response after request trailers").await?;
+        assert_eq!(frame_type, FRAME_HEADERS);
+        let end = timeout(TEST_TIMEOUT, recv.read_chunk(4096, true))
+            .await
+            .map_err(|_| anyhow!("timed out waiting for clean response end"))?;
+        assert!(end?.is_none(), "unexpected response bytes after HEADERS");
+
+        server_task.abort();
+        let _ = server_task.await;
+    }
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dynamic_qpack_request_reaches_handler() -> Result<()> {
     let (seen_tx, seen_rx) = oneshot::channel();

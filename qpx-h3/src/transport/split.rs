@@ -120,7 +120,7 @@ impl RequestRecvStream {
                 self.enforce_received_content_length_complete()?;
                 return Ok(None);
             };
-            if self.pending_trailers.is_some() {
+            if self.pending_trailers.is_some() && matches!(ty, FRAME_DATA | FRAME_HEADERS) {
                 stop_recv_stream(&mut self.recv, H3_FRAME_UNEXPECTED);
                 return Err(anyhow!("received HTTP/3 frame after trailers").into());
             }
