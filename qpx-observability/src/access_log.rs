@@ -116,6 +116,12 @@ fn joined_or_empty(values: &[String]) -> Cow<'_, str> {
     }
 }
 
+fn header_utf8_or_empty(value: Option<&http::HeaderValue>) -> &str {
+    value
+        .and_then(|value| std::str::from_utf8(value.as_bytes()).ok())
+        .unwrap_or("")
+}
+
 /// Request handler wrapper that emits access logs and tracing spans.
 #[derive(Debug, Clone)]
 pub struct AccessLogService<S> {
@@ -186,7 +192,7 @@ impl<S> AccessLogService<S> {
                 "proxy.kind" = self.context.kind,
                 "proxy.name" = %self.context.name,
                 "http.request.header.host" = host.as_ref().and_then(|value| value.to_str().ok()).unwrap_or(""),
-                "user_agent.original" = user_agent.as_ref().and_then(|value| value.to_str().ok()).unwrap_or(""),
+                "user_agent.original" = header_utf8_or_empty(user_agent.as_ref()),
                 "enduser.id" = tracing::field::Empty,
                 "qpx.device_id" = tracing::field::Empty,
                 "qpx.matched_rule" = tracing::field::Empty,
@@ -765,11 +771,7 @@ where
                             latency_ms = latency_ms,
                             bytes_out = bytes_out,
                             referer = snapshot.referer.as_deref().unwrap_or(""),
-                            user_agent = snapshot
-                                .user_agent
-                                .as_ref()
-                                .and_then(|value| value.to_str().ok())
-                                .unwrap_or(""),
+                            user_agent = header_utf8_or_empty(snapshot.user_agent.as_ref()),
                         );
                     } else if !this.combined {
                         let req_ctx = resp.extensions().get::<RequestLogContext>().cloned();
@@ -822,11 +824,7 @@ where
                                 .and_then(|value| value.to_str().ok())
                                 .unwrap_or(""),
                             referer = snapshot.referer.as_deref().unwrap_or(""),
-                            user_agent = snapshot
-                                .user_agent
-                                .as_ref()
-                                .and_then(|value| value.to_str().ok())
-                                .unwrap_or(""),
+                            user_agent = header_utf8_or_empty(snapshot.user_agent.as_ref()),
                             subject = req_ctx
                                 .as_ref()
                                 .and_then(|ctx| ctx.subject.as_deref())
@@ -1431,6 +1429,49 @@ mod userinfo_output_tests {
         let bytes = output.0.lock().unwrap();
         let log = std::str::from_utf8(&bytes).unwrap();
         assert!(log.contains(r#""referer":"<redacted>""#), "{log}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_preserves_utf8_user_agent() {
+        let output = Output::default();
+        let writer = output.clone();
+        let _guard = tracing_subscriber::fmt()
+            .json()
+            .with_ansi(false)
+            .without_time()
+            .with_max_level(Level::TRACE)
+            .with_writer(move || writer.clone())
+            .set_default();
+
+        let mut config = AccessLogConfig::default();
+        config.output.enabled = true;
+        config.output.format = "json".into();
+        let service = AccessLogService::new(
+            crate::handler_fn(|_: Request<()>| async {
+                Ok::<_, ()>(Response::from_http(http::Response::new(())))
+            }),
+            "127.0.0.1:8080".parse().unwrap(),
+            AccessLogContext {
+                kind: "test",
+                name: Arc::from("test"),
+            },
+            &config,
+        );
+        let request = Request::builder()
+            .header(
+                http::header::USER_AGENT,
+                http::HeaderValue::from_bytes(b"Probe/1.0 (caf\xC3\xA9)").unwrap(),
+            )
+            .body(())
+            .unwrap();
+        service
+            .call_with_otel_enabled(request, false)
+            .await
+            .unwrap();
+
+        let bytes = output.0.lock().unwrap();
+        let log = std::str::from_utf8(&bytes).unwrap();
+        assert!(log.contains(r#""user_agent":"Probe/1.0 (café)""#), "{log}");
     }
 
     #[tokio::test(flavor = "current_thread")]
