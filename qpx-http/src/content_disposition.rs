@@ -2,7 +2,7 @@
 
 use http::HeaderValue;
 use qpx_core::http_token::is_http_token;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,9 +74,14 @@ impl ContentDisposition {
             return Err(ContentDispositionError::InvalidDisposition);
         }
         let mut output = self.disposition.to_ascii_lowercase();
+        let mut seen = HashSet::new();
         for (name, value) in &self.parameters {
             if !is_http_token(name) || name.ends_with('*') {
                 return Err(ContentDispositionError::InvalidParameter);
+            }
+            let normalized = name.to_ascii_lowercase();
+            if !seen.insert(normalized.clone()) {
+                return Err(ContentDispositionError::DuplicateParameter(normalized));
             }
             output.push_str("; ");
             output.push_str(name);
@@ -205,6 +210,22 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(parsed.filename(), Some("résumé.txt"));
+    }
+
+    #[test]
+    fn serializer_rejects_case_insensitive_duplicate_parameters() {
+        let disposition = ContentDisposition {
+            disposition: "attachment".into(),
+            parameters: BTreeMap::from([
+                ("Filename".into(), "a.txt".into()),
+                ("filename".into(), "b.txt".into()),
+            ]),
+        };
+
+        assert!(matches!(
+            disposition.to_header_value(),
+            Err(ContentDispositionError::DuplicateParameter(name)) if name == "filename"
+        ));
     }
 
     #[test]
