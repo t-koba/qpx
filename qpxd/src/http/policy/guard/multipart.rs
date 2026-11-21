@@ -79,17 +79,18 @@ pub(super) async fn validate_multipart_limits_reader(
     };
     body.with_blocking_reader(move |reader| {
         let marker = format!("--{boundary}");
+        let disposition = b"content-disposition:";
         let mut reader = std::io::BufReader::new(reader);
-        let mut line = String::new();
+        let mut line = Vec::new();
         let mut parts = 0usize;
         loop {
             line.clear();
-            if reader.read_line(&mut line)? == 0 {
+            if reader.read_until(b'\n', &mut line)? == 0 {
                 return Ok(None);
             }
-            let trimmed = line.trim();
-            if trimmed.starts_with(marker.as_str()) {
-                if trimmed.ends_with("--") {
+            let trimmed = line.trim_ascii();
+            if trimmed.starts_with(marker.as_bytes()) {
+                if trimmed.ends_with(b"--") {
                     return Ok(None);
                 }
                 parts += 1;
@@ -103,11 +104,12 @@ pub(super) async fn validate_multipart_limits_reader(
                 continue;
             }
             if !line
-                .to_ascii_lowercase()
-                .starts_with("content-disposition:")
+                .get(..disposition.len())
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(disposition))
             {
                 continue;
             }
+            let line = String::from_utf8_lossy(&line);
             if let Some(name) = semicolon_parameter(&line, "name")
                 && let Some(limit) = profile.multipart.max_name_bytes
                 && name.len() > limit

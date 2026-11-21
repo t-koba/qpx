@@ -308,45 +308,74 @@ async fn guard_streams_observed_json_without_full_bytes_materialization() {
 
 #[tokio::test]
 async fn guard_streams_observed_multipart_without_full_bytes_materialization() {
-    let profile = CompiledHttpGuardProfile {
-        profile: HttpGuardProfileConfig {
-            name: "multipart".to_string(),
-            normalize: Default::default(),
-            protocol_safety: Default::default(),
-            limits: Default::default(),
-            json: Default::default(),
-            multipart: qpx_core::config::HttpGuardMultipartConfig {
-                max_parts: Some(1),
-                max_name_bytes: None,
-                max_filename_bytes: None,
-            },
-        },
+    let mut fixture =
+        b"--x\r\nCoNtEnT-DiSpOsItIoN: form-data; NAME=\"upload\"; FILENAME=\"a.bin\"\r\n\r\n"
+            .to_vec();
+    fixture.push(0xff);
+    fixture.extend_from_slice(
+        b"\r\n--x\r\nContent-Disposition: form-data; name=\"b\"\r\n\r\n2\r\n--x--\r\n",
+    );
+    let body = bytes::Bytes::from(fixture);
+    let multipart = |max_parts, max_name_bytes, max_filename_bytes| {
+        qpx_core::config::HttpGuardMultipartConfig {
+            max_parts,
+            max_name_bytes,
+            max_filename_bytes,
+        }
     };
-    let req = http::Request::builder()
-        .uri("http://example.com/")
-        .header(
-            http::header::CONTENT_TYPE,
-            "multipart/form-data; boundary=x",
-        )
-        .body(Body::from(
-            "--x\r\ncontent-disposition: form-data; name=\"a\"\r\n\r\n1\r\n--x\r\ncontent-disposition: form-data; name=\"b\"\r\n\r\n2\r\n--x--\r\n",
-        ))
-        .expect("request");
-    let req = crate::http::body::size::buffer_request_body_with_reason(
-        Request::from_http(req),
-        1024,
-        std::time::Duration::from_secs(1),
-        "test",
-    )
-    .await
-    .expect("buffer");
 
-    let reject = profile
-        .evaluate_request_async(&req)
+    for (limits, expected) in [
+        (
+            multipart(Some(1), None, None),
+            Some("multipart part count exceeds http_guard limit"),
+        ),
+        (multipart(Some(2), None, None), None),
+        (
+            multipart(Some(2), Some(5), None),
+            Some("multipart field name exceeds http_guard limit"),
+        ),
+        (
+            multipart(Some(2), None, Some(4)),
+            Some("multipart filename exceeds http_guard limit"),
+        ),
+    ] {
+        let profile = CompiledHttpGuardProfile {
+            profile: HttpGuardProfileConfig {
+                name: "multipart".to_string(),
+                normalize: Default::default(),
+                protocol_safety: Default::default(),
+                limits: Default::default(),
+                json: Default::default(),
+                multipart: limits,
+            },
+        };
+        let req = http::Request::builder()
+            .uri("http://example.com/")
+            .header(
+                http::header::CONTENT_TYPE,
+                "multipart/form-data; BOUNDARY=x",
+            )
+            .body(Body::from(body.clone()))
+            .expect("request");
+        let req = crate::http::body::size::buffer_request_body_with_reason(
+            Request::from_http(req),
+            1024,
+            std::time::Duration::from_secs(1),
+            "test",
+        )
         .await
-        .expect("guard")
-        .expect("reject");
-    assert_eq!(reject.status, StatusCode::PAYLOAD_TOO_LARGE);
+        .expect("buffer");
+
+        let reject = profile.evaluate_request_async(&req).await.expect("guard");
+        match expected {
+            Some(message) => {
+                let reject = reject.expect("reject");
+                assert_eq!(reject.status, StatusCode::PAYLOAD_TOO_LARGE);
+                assert_eq!(reject.body, message);
+            }
+            None => assert!(reject.is_none()),
+        }
+    }
 }
 
 #[test]
