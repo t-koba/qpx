@@ -1313,3 +1313,52 @@ fn rpc_protocol_from_content_type_rejects_unknown_inputs_without_normalizing() {
     assert_eq!(rpc_protocol_from_content_type("Application/grpc"), None);
     assert_eq!(rpc_protocol_from_content_type("APPLICATION/GRPC-WEB"), None);
 }
+
+#[test]
+fn rpc_protocol_from_content_type_requires_media_type_boundary() {
+    use super::protocol::rpc_protocol_from_content_type;
+
+    // The base media type and a `+codec` suffix are the only valid shapes.
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc"),
+        Some("grpc")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc+proto"),
+        Some("grpc")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web"),
+        Some("grpc_web")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web+proto"),
+        Some("grpc_web")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web-text"),
+        Some("grpc_web")
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web-text+proto"),
+        Some("grpc_web")
+    );
+
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-example"),
+        None
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web-example"),
+        None
+    );
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc-web-textual"),
+        None
+    );
+    assert_eq!(rpc_protocol_from_content_type("application/grpc+"), None);
+    assert_eq!(
+        rpc_protocol_from_content_type("application/grpc+proto,json"),
+        None
+    );
+}

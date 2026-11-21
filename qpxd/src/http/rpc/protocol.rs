@@ -43,10 +43,24 @@ pub(super) fn request_rpc_protocol(headers: &Headers) -> Option<String> {
         })
 }
 
+/// Whether `raw` is the exact media type or a `+codec` structured-suffix form.
+fn matches_rpc_media_type(raw: &str, base: &str) -> bool {
+    raw.strip_prefix(base).is_some_and(|suffix| {
+        suffix.is_empty()
+            || suffix
+                .strip_prefix('+')
+                .is_some_and(qpx_core::http_token::is_http_token)
+    })
+}
+
 pub(super) fn rpc_protocol_from_content_type(raw: &str) -> Option<&'static str> {
-    if raw.starts_with("application/grpc-web") {
+    // Web types stay ahead of the native type; `grpc-web-text` is a separate
+    // web base whose `+codec` forms must not fall through to `grpc`.
+    if matches_rpc_media_type(raw, "application/grpc-web")
+        || matches_rpc_media_type(raw, "application/grpc-web-text")
+    {
         Some("grpc_web")
-    } else if raw.starts_with("application/grpc") {
+    } else if matches_rpc_media_type(raw, "application/grpc") {
         Some("grpc")
     } else if raw.starts_with("application/connect+") {
         Some("connect")
@@ -56,7 +70,7 @@ pub(super) fn rpc_protocol_from_content_type(raw: &str) -> Option<&'static str> 
 }
 
 pub(super) fn is_grpc_web_text_content_type(raw: &str) -> bool {
-    raw.starts_with("application/grpc-web-text")
+    matches_rpc_media_type(raw, "application/grpc-web-text")
 }
 
 pub(super) fn detect_rpc_protocol(
@@ -407,6 +421,21 @@ mod tests {
         );
         headers.remove(&OrdinaryHeaderName::try_from("connect-protocol-version").unwrap());
         assert_eq!(super::request_rpc_protocol(&headers), None);
+    }
+
+    #[test]
+    fn grpc_web_text_content_type_requires_media_type_boundary() {
+        assert!(is_grpc_web_text_content_type("application/grpc-web-text"));
+        assert!(is_grpc_web_text_content_type(
+            "application/grpc-web-text+proto"
+        ));
+        assert!(!is_grpc_web_text_content_type(
+            "application/grpc-web-textual"
+        ));
+        assert!(!is_grpc_web_text_content_type("application/grpc-web-text+"));
+        assert!(!is_grpc_web_text_content_type(
+            "application/grpc-web-text+proto,json"
+        ));
     }
 
     #[test]
