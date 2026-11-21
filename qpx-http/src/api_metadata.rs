@@ -216,14 +216,15 @@ fn unix_seconds(value: SystemTime) -> Result<i64, ApiMetadataError> {
 }
 
 fn valid_relation_type(value: &str) -> bool {
-    !value.is_empty()
+    (!value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
                     b'!' | b'#' | b'$' | b'&' | b'.' | b'+' | b'-' | b'^' | b'_'
                 )
-        })
+        }))
+        || url::Url::parse(value).is_ok()
 }
 
 fn quote(value: &str) -> String {
@@ -501,6 +502,34 @@ mod tests {
         assert_eq!(
             metadata.apply(&mut HeaderMap::new()),
             Err(ApiMetadataError::SunsetBeforeDeprecation)
+        );
+    }
+
+    #[test]
+    fn accepts_uri_extension_relation_type() {
+        let link = LinkValue::new("/v2", "https://rels.example/Successor").expect("URI relation");
+        assert_eq!(
+            link.serialize().expect("serialize"),
+            "</v2>; rel=\"https://rels.example/Successor\""
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_uri_relation_type() {
+        assert_eq!(
+            LinkValue::new("/v2", "https://").err(),
+            Some(ApiMetadataError::InvalidLinkRelation)
+        );
+        assert!(!valid_relation_type("not a uri: just words"));
+        assert!(!valid_relation_type(":"));
+    }
+
+    #[test]
+    fn keeps_token_relation_type_behavior() {
+        let link = LinkValue::new("/v2", "deprecation").expect("token relation");
+        assert_eq!(
+            link.serialize().expect("serialize"),
+            "</v2>; rel=\"deprecation\""
         );
     }
 }
