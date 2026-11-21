@@ -1,4 +1,8 @@
 use super::*;
+use std::future::Future;
+use std::io;
+use std::net::IpAddr;
+use std::pin::Pin;
 
 #[tokio::test]
 async fn dns_discovery_resolves_connect_authority_and_refresh_delay() -> Result<()> {
@@ -265,5 +269,77 @@ async fn dns_discovery_errors_when_both_families_fail() -> Result<()> {
     let _ = server.await;
 
     assert!(result.is_err());
+    Ok(())
+}
+
+fn ipv6_bind_failure(
+    ipv6: bool,
+) -> Pin<Box<dyn Future<Output = io::Result<tokio::net::UdpSocket>> + Send>> {
+    Box::pin(async move {
+        if ipv6 {
+            Err(io::Error::new(
+                io::ErrorKind::AddrNotAvailable,
+                "forced bind failure",
+            ))
+        } else {
+            tokio::net::UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await
+        }
+    })
+}
+
+#[tokio::test]
+async fn dns_query_isolates_ipv6_bind_failure() -> Result<()> {
+    let mut answers = HashMap::new();
+    answers.insert(
+        ("service.example".to_string(), DNS_TYPE_A),
+        vec![TestDnsRecord::A {
+            addr: Ipv4Addr::new(127, 0, 0, 13),
+            ttl_secs: 9,
+        }],
+    );
+    answers.insert(("service.example".to_string(), DNS_TYPE_AAAA), Vec::new());
+    let (nameserver, server) = spawn_fake_dns_server(answers).await?;
+    let unavailable_v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 53);
+    let response = query_raw_dns_with_binder(
+        "service.example",
+        DNS_TYPE_A,
+        &[unavailable_v6, nameserver],
+        ipv6_bind_failure as DnsSocketBinder,
+    )
+    .await;
+
+    server.abort();
+    let _ = server.await;
+
+    assert!(!response?.is_empty());
+    Ok(())
+}
+
+fn all_bind_failure(
+    ipv6: bool,
+) -> Pin<Box<dyn Future<Output = io::Result<tokio::net::UdpSocket>> + Send>> {
+    Box::pin(async move {
+        let message = if ipv6 {
+            "forced IPv6 bind failure"
+        } else {
+            "forced IPv4 bind failure"
+        };
+        Err(io::Error::new(io::ErrorKind::AddrNotAvailable, message))
+    })
+}
+
+#[tokio::test]
+async fn dns_query_reports_last_bind_failure_when_no_nameserver_is_usable() -> Result<()> {
+    let v4 = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 53);
+    let v6 = SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 53);
+    let err = query_raw_dns_with_binder(
+        "service.example",
+        DNS_TYPE_A,
+        &[v4, v6],
+        all_bind_failure as DnsSocketBinder,
+    )
+    .await
+    .expect_err("no nameserver socket can be bound");
+    assert_eq!(format!("{err:#}"), "forced IPv6 bind failure");
     Ok(())
 }

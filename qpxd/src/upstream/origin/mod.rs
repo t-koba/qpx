@@ -31,9 +31,9 @@ pub(crate) use ws_backend::proxy_websocket;
 
 #[cfg(test)]
 use dns::{
-    DNS_TYPE_A, DNS_TYPE_AAAA, DNS_TYPE_HTTPS, DNS_TYPE_SRV,
+    DNS_TYPE_A, DNS_TYPE_AAAA, DNS_TYPE_HTTPS, DNS_TYPE_SRV, DnsSocketBinder,
     discover_origin_endpoints_with_nameservers, dns_response_matches_query, encode_dns_name,
-    parse_dns_name,
+    parse_dns_name, query_raw_dns_with_binder,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]

@@ -2,7 +2,9 @@ use anyhow::{Result, anyhow};
 use qpx_core::config::{UpstreamDiscoveryConfig, UpstreamDiscoveryKind};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashSet;
+use std::future::Future;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::pin::Pin;
 use std::sync::{Mutex, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "http3")]
@@ -370,7 +372,39 @@ async fn query_dns_https_records(
     parse_https_records(response.as_slice())
 }
 
+pub(crate) type DnsSocketBinder =
+    fn(bool) -> Pin<Box<dyn Future<Output = std::io::Result<UdpSocket>> + Send>>;
+
+fn bind_dns_socket(ipv6: bool) -> Pin<Box<dyn Future<Output = std::io::Result<UdpSocket>> + Send>> {
+    Box::pin(async move {
+        if ipv6 {
+            UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await
+        } else {
+            UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await
+        }
+    })
+}
+
 async fn query_raw_dns(name: &str, qtype: u16, nameservers: &[SocketAddr]) -> Result<Vec<u8>> {
+    query_raw_dns_with(name, qtype, nameservers, bind_dns_socket).await
+}
+
+#[cfg(test)]
+pub(crate) async fn query_raw_dns_with_binder(
+    name: &str,
+    qtype: u16,
+    nameservers: &[SocketAddr],
+    bind_socket: DnsSocketBinder,
+) -> Result<Vec<u8>> {
+    query_raw_dns_with(name, qtype, nameservers, bind_socket).await
+}
+
+async fn query_raw_dns_with(
+    name: &str,
+    qtype: u16,
+    nameservers: &[SocketAddr],
+    bind_socket: DnsSocketBinder,
+) -> Result<Vec<u8>> {
     let mut request = Vec::with_capacity(256);
     let id = random_dns_query_id()?;
     request.extend_from_slice(&id.to_be_bytes());
@@ -394,12 +428,24 @@ async fn query_raw_dns(name: &str, qtype: u16, nameservers: &[SocketAddr]) -> Re
     for nameserver in nameservers.iter().copied() {
         let socket = if nameserver.is_ipv4() {
             if ipv4_socket.is_none() {
-                ipv4_socket = Some(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?);
+                match bind_socket(false).await {
+                    Ok(socket) => ipv4_socket = Some(socket),
+                    Err(err) => {
+                        last_send_err = Some(err);
+                        continue;
+                    }
+                }
             }
             ipv4_socket.as_ref()
         } else {
             if ipv6_socket.is_none() {
-                ipv6_socket = Some(UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await?);
+                match bind_socket(true).await {
+                    Ok(socket) => ipv6_socket = Some(socket),
+                    Err(err) => {
+                        last_send_err = Some(err);
+                        continue;
+                    }
+                }
             }
             ipv6_socket.as_ref()
         }
