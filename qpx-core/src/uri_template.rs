@@ -631,12 +631,32 @@ fn decode_capture(raw: &str, _mode: DecodeMode) -> Result<String> {
 }
 
 fn encode_value(value: &str, allow_reserved: bool) -> String {
-    let set = if allow_reserved {
-        RESERVED_ENCODE_SET
-    } else {
-        SIMPLE_ENCODE_SET
-    };
-    utf8_percent_encode(value, set).to_string()
+    if !allow_reserved {
+        return utf8_percent_encode(value, SIMPLE_ENCODE_SET).to_string();
+    }
+
+    // RFC 6570 §3.2.1: reserved expansion preserves valid pct-encoded triplets.
+    let mut encoded = String::with_capacity(value.len());
+    let mut chars = value.char_indices().peekable();
+    while let Some((index, character)) = chars.next() {
+        if character == '%' {
+            let remainder = &value.as_bytes()[index + 1..];
+            if remainder.len() >= 2
+                && remainder[0].is_ascii_hexdigit()
+                && remainder[1].is_ascii_hexdigit()
+            {
+                encoded.push('%');
+                encoded.push(remainder[0] as char);
+                encoded.push(remainder[1] as char);
+                chars.next();
+                chars.next();
+                continue;
+            }
+        }
+        let slice = &value[index..index + character.len_utf8()];
+        encoded.push_str(&utf8_percent_encode(slice, RESERVED_ENCODE_SET).to_string());
+    }
+    encoded
 }
 
 fn truncate_chars(value: &str, prefix: usize) -> String {
@@ -671,6 +691,34 @@ mod tests {
             .expand(|_| Some("a b".to_string()))
             .expect("expand");
         assert_eq!(expanded, "/items?q=a%20b");
+    }
+
+    #[test]
+    fn reserved_expansions_preserve_valid_percent_triplets() {
+        let values = |name: &str| match name {
+            "value" => Some("hello%20world".to_string()),
+            "bare" => Some("50%off".to_string()),
+            "malformed" => Some("bad%zz".to_string()),
+            _ => None,
+        };
+
+        let reserved = UriTemplate::parse("{+value}{+bare}{+malformed}")
+            .expect("template")
+            .expand(values)
+            .expect("expand");
+        assert_eq!(reserved, "hello%20world50%25offbad%25zz");
+
+        let fragment = UriTemplate::parse("{#value}")
+            .expect("template")
+            .expand(values)
+            .expect("expand");
+        assert_eq!(fragment, "#hello%20world");
+
+        let simple = UriTemplate::parse("{value}")
+            .expect("template")
+            .expand(values)
+            .expect("expand");
+        assert_eq!(simple, "hello%2520world");
     }
 
     #[test]
