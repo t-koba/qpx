@@ -961,7 +961,6 @@ impl DiskCacheBackend {
         })
         .await
         .context("disk cache writer task failed")??;
-        self.release_decoded_records(namespace, key);
         self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
             .await?;
         self.hot_insert(
@@ -973,6 +972,7 @@ impl DiskCacheBackend {
             write.body_offset,
         )
         .await;
+        self.release_decoded_records(namespace, key);
         Ok(())
     }
 
@@ -2553,6 +2553,79 @@ mod tests {
             .flatten()
             .expect("repeated metadata");
         assert!(std::sync::Arc::ptr_eq(&first, &repeated));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_write_invalidates_decoded_records_after_hot_replacement() {
+        let dir = temp_dir("decoded-invalidation-order");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let old = serde_json::to_vec(&VariantIndex {
+            variants: vec!["v1".to_string()],
+        })
+        .expect("encode old index");
+        let replacement = serde_json::to_vec(&VariantIndex {
+            variants: vec!["v2".to_string()],
+        })
+        .expect("encode replacement index");
+        backend
+            .put("ns", "index", &old, 60)
+            .await
+            .expect("put old index");
+        let old_raw = backend
+            .get("ns", "index")
+            .await
+            .expect("get old index")
+            .expect("old index");
+        let path = backend.path_for("ns", "index");
+
+        // Keep the writer from replacing the hot raw value while a reader
+        // observes the old one. The on-disk rename is the last step before
+        // the writer reaches the state lock, so it is a stable wake-up point.
+        let state = backend.state.lock().await;
+        let writer = tokio::spawn({
+            let backend = backend.clone();
+            let replacement = replacement.clone();
+            async move { backend.put("ns", "index", &replacement, 60).await }
+        });
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fs::read(&path).is_ok_and(|bytes| {
+                bytes
+                    .windows(replacement.len())
+                    .any(|window| window == replacement)
+            }) {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            // Let the writer run up to the state lock before decoding.
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        })
+        .await
+        .expect("writer reached the state lock");
+
+        let decoded = backend
+            .get_decoded_variant_index("ns", "index")
+            .await
+            .expect("decode old index while write is in flight")
+            .expect("old index");
+        assert_eq!(decoded.variants, vec!["v1"]);
+        drop(decoded);
+        drop(state);
+        writer.await.expect("writer task").expect("replace index");
+
+        let slot = qpx_http::sharding::modulo(&("ns", "index"), backend.decoded_variants.len());
+        let retained = backend.decoded_variants[slot].load_full();
+        assert!(
+            retained
+                .as_ref()
+                .is_none_or(|entry| !same_bytes_allocation(&entry.raw, &old_raw)),
+            "decoded slot still retains the superseded raw allocation"
+        );
+        let latest = backend
+            .get_decoded_variant_index("ns", "index")
+            .await
+            .expect("decode replacement index")
+            .expect("replacement index");
+        assert_eq!(latest.variants, vec!["v2"]);
         let _ = fs::remove_dir_all(dir);
     }
 
