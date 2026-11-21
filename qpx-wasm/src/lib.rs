@@ -1024,15 +1024,54 @@ mod tests {
 
     #[tokio::test]
     async fn idle_pool_prepares_instances_without_core_start_sections() {
-        let module = temp_file("prepared.wat", br#"(module (func (export "_start")))"#);
+        const SENTINEL: i32 = 0x515058;
+        let module = temp_file(
+            "prepared.wat",
+            br#"(module
+                (global $sentinel (export "sentinel") (mut i32) (i32.const 0))
+                (func (export "_start")
+                    (if (i32.ne (global.get $sentinel) (i32.const 0x515058))
+                        (then unreachable))))"#,
+        );
         let executor = WasmExecutor::new(test_config(module, true)).expect("create executor");
         wait_for_idle(&executor, 1).await;
 
-        let idle = executor.idle_instances.lock().await;
-        assert!(
-            idle[0].instance.is_some(),
-            "start-free module should have a prepared instance"
-        );
+        let mut idle = executor.idle_instances.lock().await;
+        let prepared = idle
+            .first_mut()
+            .expect("start-free module should have a prepared instance");
+        let instance = prepared.instance.as_ref().expect("prepared instance");
+        instance
+            .get_global(&mut prepared.store, "sentinel")
+            .expect("exported sentinel global")
+            .set(&mut prepared.store, Val::I32(SENTINEL))
+            .expect("set sentinel global");
+        drop(idle);
+
+        let execution = executor
+            .start(WasmRequest {
+                script_name: "/test".into(),
+                path_info: String::new(),
+                query_string: String::new(),
+                request_method: "GET".into(),
+                content_type: String::new(),
+                content_length: 0,
+                server_protocol: "HTTP/1.1".into(),
+                server_name: "localhost".into(),
+                server_port: 80,
+                remote_addr: None,
+                remote_port: None,
+                http_headers: RequestHeaders::default(),
+                identity_env: HashMap::new(),
+            })
+            .await
+            .expect("start execution");
+        drop(execution.stdin);
+        execution
+            .done
+            .await
+            .expect("join prepared-instance wasm")
+            .expect("request should reuse the prepared instance with its sentinel set");
     }
 
     #[tokio::test]
