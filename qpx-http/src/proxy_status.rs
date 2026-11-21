@@ -44,13 +44,7 @@ pub fn append_proxy_status(
             return Err(ProxyStatusError::InvalidMember);
         }
     }
-    let bare_item = match Token::try_from(proxy_identifier.to_string()) {
-        Ok(token) => BareItem::Token(token),
-        Err(_) => BareItem::String(
-            SfvString::try_from(proxy_identifier.to_string())
-                .map_err(|_| ProxyStatusError::InvalidProxyIdentifier)?,
-        ),
-    };
+    let bare_item = proxy_identifier_bare_item(proxy_identifier)?;
     list.push(ListEntry::Item(Item::new(bare_item)));
     let mut serializer = ListSerializer::new();
     serializer.members(&list);
@@ -63,6 +57,15 @@ pub fn append_proxy_status(
         HeaderValue::from_str(&value).map_err(|_| ProxyStatusError::InvalidHeaderValue)?,
     );
     Ok(())
+}
+
+fn proxy_identifier_bare_item(identifier: &str) -> Result<BareItem, ProxyStatusError> {
+    match Token::try_from(identifier.to_string()) {
+        Ok(token) => Ok(BareItem::Token(token)),
+        Err(_) => SfvString::try_from(identifier.to_string())
+            .map(BareItem::String)
+            .map_err(|_| ProxyStatusError::InvalidProxyIdentifier),
+    }
 }
 
 const MAX_CACHED_PROXY_IDENTIFIERS: usize = 16;
@@ -91,11 +94,19 @@ pub fn proxy_identifier_value(identifier: &str) -> Result<HeaderValue, ProxyStat
             }
             return Ok(value);
         }
-        if !is_sfv_token(identifier.as_bytes()) {
-            return Err(ProxyStatusError::InvalidProxyIdentifier);
-        }
+        let serialized = if is_sfv_token(identifier.as_bytes()) {
+            identifier.to_string()
+        } else {
+            let bare_item = proxy_identifier_bare_item(identifier)?;
+            let list = [ListEntry::Item(Item::new(bare_item))];
+            let mut serializer = ListSerializer::new();
+            serializer.members(&list);
+            serializer
+                .finish()
+                .ok_or(ProxyStatusError::InvalidHeaderValue)?
+        };
         let value =
-            HeaderValue::from_str(identifier).map_err(|_| ProxyStatusError::InvalidHeaderValue)?;
+            HeaderValue::from_str(&serialized).map_err(|_| ProxyStatusError::InvalidHeaderValue)?;
         if cached.len() == MAX_CACHED_PROXY_IDENTIFIERS {
             cached.remove(0);
         }
@@ -153,6 +164,12 @@ mod tests {
             headers.get("proxy-status").expect("field"),
             "origin-gateway;received-status=200, edge.example"
         );
+    }
+
+    #[test]
+    fn proxy_identifier_value_quotes_non_token_identifier() {
+        let value = proxy_identifier_value("qpx edge").expect("valid proxy identifier");
+        assert_eq!(value.as_bytes(), b"\"qpx edge\"");
     }
 
     #[test]
