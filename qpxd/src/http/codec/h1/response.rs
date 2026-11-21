@@ -2,7 +2,9 @@ use super::RESPONSE_WRITE_TIMEOUT;
 use super::write::{chunk_size_header, write_vectored_all};
 use super::zero_copy::ZeroCopySocket;
 use crate::http::body::{poll_body_data_now, poll_body_trailers_now};
-use crate::http::codec::h1_common::{has_only_chunked_transfer_encoding, serialize_headers};
+use crate::http::codec::h1_common::{
+    has_only_chunked_transfer_encoding, serialize_headers, serialize_status_line,
+};
 use crate::http::codec::h2::parse_declared_content_length;
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::{
@@ -790,22 +792,6 @@ fn serialize_status_and_raw_headers(
     head.extend_from_slice(b"\r\n");
 }
 
-fn serialize_status_line(head: &mut BytesMut, version: Version, status: StatusCode) {
-    let version = match version {
-        Version::HTTP_10 => "HTTP/1.0",
-        _ => "HTTP/1.1",
-    };
-    let reason = status.canonical_reason().unwrap_or("");
-    head.extend_from_slice(version.as_bytes());
-    head.extend_from_slice(b" ");
-    head.extend_from_slice(status.as_str().as_bytes());
-    if !reason.is_empty() {
-        head.extend_from_slice(b" ");
-        head.extend_from_slice(reason.as_bytes());
-    }
-    head.extend_from_slice(b"\r\n");
-}
-
 fn serialize_connection_headers(
     head: &mut BytesMut,
     headers: &HeaderMap,
@@ -1124,7 +1110,8 @@ fn serialize_trailer_field_names(trailers: &HeaderMap) -> Option<HeaderValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionHeaderMode, serialize_connection_headers, serialize_status_line};
+    use super::{ConnectionHeaderMode, serialize_connection_headers};
+    use crate::http::codec::h1_common::serialize_status_line;
     use bytes::BytesMut;
     use http::header::{CONNECTION, HeaderMap, HeaderValue};
 
@@ -1156,6 +1143,28 @@ mod tests {
     }
 
     #[test]
+    fn status_line_keeps_separator_for_empty_reason() {
+        use crate::upstream::raw_http1::RawHttp1ResponseHead;
+        use http::{Method, StatusCode, Version};
+
+        let unknown = StatusCode::from_u16(299).expect("valid status");
+        let mut head = BytesMut::new();
+        serialize_status_line(&mut head, Version::HTTP_11, unknown);
+        assert_eq!(head.as_ref(), b"HTTP/1.1 299 \r\n");
+
+        let mut raw =
+            RawHttp1ResponseHead::from_parsed(&[], &Method::GET, unknown, Version::HTTP_11)
+                .expect("raw head");
+        raw.finalize("qpx");
+        let encoded = raw.serialized_http11_head();
+        assert!(
+            encoded.starts_with(b"HTTP/1.1 299 \r\n"),
+            "raw head status line: {:?}",
+            encoded.split(|byte| *byte == b'\r').next()
+        );
+    }
+
+    #[test]
     fn status_line_preserves_version_reason_and_missing_reason_behavior() {
         let mut head = BytesMut::new();
         serialize_status_line(&mut head, http::Version::HTTP_10, http::StatusCode::OK);
@@ -1164,6 +1173,6 @@ mod tests {
         head.clear();
         let unknown_status = http::StatusCode::from_u16(299).expect("valid status");
         serialize_status_line(&mut head, http::Version::HTTP_11, unknown_status);
-        assert_eq!(head.as_ref(), b"HTTP/1.1 299\r\n");
+        assert_eq!(head.as_ref(), b"HTTP/1.1 299 \r\n");
     }
 }

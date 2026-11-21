@@ -1,6 +1,7 @@
 use crate::http::codec::h1_common::{
     TransferEncodingClassificationError, append_header_line,
     has_only_chunked_transfer_encoding_values, is_sanitized_hop_header, raw_has_connection_token,
+    serialize_status_line,
 };
 use anyhow::{Result, anyhow};
 use bytes::{Bytes, BytesMut};
@@ -356,15 +357,8 @@ impl RawHttp1ResponseHead {
         debug_assert!(self.finalized);
         self.serialized_http11_head
             .get_or_init(|| {
-                let reason = self.status.canonical_reason().unwrap_or("");
                 let mut head = BytesMut::with_capacity(self.header_lines.len() + 32);
-                head.extend_from_slice(b"HTTP/1.1 ");
-                head.extend_from_slice(self.status.as_str().as_bytes());
-                if !reason.is_empty() {
-                    head.extend_from_slice(b" ");
-                    head.extend_from_slice(reason.as_bytes());
-                }
-                head.extend_from_slice(b"\r\n");
+                serialize_status_line(&mut head, Version::HTTP_11, self.status);
                 head.extend_from_slice(&self.header_lines);
                 head.extend_from_slice(b"\r\n");
                 head.freeze()

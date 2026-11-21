@@ -1,15 +1,30 @@
 use anyhow::{Result, anyhow};
 use bytes::{BufMut, BytesMut};
-use hyper::Version;
 use hyper::header::{
     ACCEPT_RANGES, CACHE_CONTROL, CONNECTION, CONTENT_ENCODING, CONTENT_LANGUAGE, CONTENT_LENGTH,
     CONTENT_TYPE, COOKIE, DATE, ETAG, EXPECT, EXPIRES, FORWARDED, HOST, HeaderMap, HeaderName,
     HeaderValue, LAST_MODIFIED, SERVER, SET_COOKIE, TRAILER, TRANSFER_ENCODING, UPGRADE, VARY, VIA,
 };
+use hyper::{StatusCode, Version};
 use memchr::memchr;
 use std::cell::RefCell;
 
 pub(crate) const MAX_HEADER_BYTES: usize = 128 * 1024;
+
+pub(crate) fn serialize_status_line(head: &mut BytesMut, version: Version, status: StatusCode) {
+    let version = match version {
+        Version::HTTP_10 => "HTTP/1.0",
+        _ => "HTTP/1.1",
+    };
+    head.extend_from_slice(version.as_bytes());
+    head.extend_from_slice(b" ");
+    head.extend_from_slice(status.as_str().as_bytes());
+    head.extend_from_slice(b" ");
+    if let Some(reason) = status.canonical_reason() {
+        head.extend_from_slice(reason.as_bytes());
+    }
+    head.extend_from_slice(b"\r\n");
+}
 
 pub(crate) fn http1_keep_alive(version: Version, headers: &HeaderMap) -> bool {
     match version {
