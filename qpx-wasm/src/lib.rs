@@ -700,7 +700,7 @@ fn load_compiled_module(
     }
     let wasm = wat::parse_bytes(&bytes).map_err(|e| anyhow!("WASM module parse failed: {e}"))?;
     let mut has_core_start = false;
-    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+    for payload in wasmtime::wasmparser::Parser::new(0).parse_all(&wasm) {
         if let Payload::StartSection { .. } =
             payload.map_err(|e| anyhow!("WASM module scan failed: {e}"))?
         {
