@@ -145,7 +145,10 @@ fn load_value(path: &Path, stack: &mut Vec<PathBuf>, sources: &mut Vec<PathBuf>)
     if let Value::Mapping(map) = &mut value
         && let Some(includes) = map.remove(Value::String("include".to_string()))
     {
-        let include_list = includes.as_sequence().cloned().unwrap_or_default();
+        let include_list = includes
+            .as_sequence()
+            .cloned()
+            .ok_or_else(|| anyhow!("include in {} must be a list of paths", path.display()))?;
         for inc in include_list {
             let inc_path = match inc {
                 Value::String(s) => canonical.parent().unwrap_or(Path::new(".")).join(s),

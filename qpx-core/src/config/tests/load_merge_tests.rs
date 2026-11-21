@@ -206,3 +206,30 @@ state_dir: ${QPX_TEST_STATE_DIR:-/tmp/qpx-state}"#,
     assert_eq!(loaded.ingress_edge_configs().len(), 1);
     assert_eq!(loaded.ingress_edge_configs()[0].name, "forward");
 }
+
+#[test]
+fn load_config_rejects_non_sequence_include() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let base = dir.join("base.yaml");
+    write_config(
+        &base,
+        r#"include: fragment.yaml
+edges:
+- kind: forward
+  name: forward
+  listen: 127.0.0.1:18080
+  default_action:
+    type: direct"#,
+    )
+    .expect("write base");
+
+    let error = load_config(&base).expect_err("scalar include must be rejected");
+    let message = error.to_string();
+    assert!(message.contains("include"), "unexpected error: {message}");
+    assert!(
+        message.contains(&base.display().to_string()),
+        "error must name the source file: {message}"
+    );
+    fs::remove_dir_all(&dir).ok();
+}
