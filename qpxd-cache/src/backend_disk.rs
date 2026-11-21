@@ -65,6 +65,8 @@ pub struct DiskCacheBackend {
     hot_recent: std::sync::Arc<ArcSwap<RecentHotCache>>,
     hot_recent_update: std::sync::Arc<std::sync::Mutex<()>>,
     hot_recent_generation: std::sync::Arc<AtomicU64>,
+    decoded_generation: std::sync::Arc<AtomicU64>,
+    decoded_lifecycle: std::sync::Arc<std::sync::Mutex<()>>,
     decoded_variants: std::sync::Arc<Vec<ArcSwapOption<DecodedVariantIndexEntry>>>,
     decoded_metadata: std::sync::Arc<Vec<ArcSwapOption<DecodedMetadataEntry>>>,
     hot_responses: std::sync::Arc<Vec<ArcSwapOption<HotResponseEntry>>>,
@@ -307,6 +309,8 @@ impl DiskCacheBackend {
             hot_recent: std::sync::Arc::new(ArcSwap::from_pointee(RecentHotCache::default())),
             hot_recent_update: std::sync::Arc::new(std::sync::Mutex::new(())),
             hot_recent_generation: std::sync::Arc::new(AtomicU64::new(0)),
+            decoded_generation: std::sync::Arc::new(AtomicU64::new(0)),
+            decoded_lifecycle: std::sync::Arc::new(std::sync::Mutex::new(())),
             decoded_variants: std::sync::Arc::new(decoded_slots()),
             decoded_metadata: std::sync::Arc::new(decoded_slots()),
             hot_responses: std::sync::Arc::new(decoded_slots()),
@@ -523,11 +527,16 @@ impl DiskCacheBackend {
         HotCacheLookup::Miss(path)
     }
 
+    fn decoded_generation(&self) -> u64 {
+        self.decoded_generation.load(Ordering::Acquire)
+    }
+
     fn decode_variant_index(
         &self,
         namespace: &str,
         key: &str,
         raw: Bytes,
+        source_generation: u64,
     ) -> Result<std::sync::Arc<VariantIndex>> {
         if self.shared {
             return Ok(std::sync::Arc::new(serde_json::from_slice(&raw)?));
@@ -549,7 +558,7 @@ impl DiskCacheBackend {
             raw,
             value: value.clone(),
         });
-        self.publish_decoded_variant(slot, observed, entry);
+        self.publish_decoded_variant(slot, observed, entry, source_generation);
         Ok(value)
     }
 
@@ -558,7 +567,15 @@ impl DiskCacheBackend {
         slot: usize,
         observed: Option<std::sync::Arc<DecodedVariantIndexEntry>>,
         entry: std::sync::Arc<DecodedVariantIndexEntry>,
+        source_generation: u64,
     ) {
+        let _guard = self
+            .decoded_lifecycle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if self.decoded_generation.load(Ordering::Acquire) != source_generation {
+            return;
+        }
         self.decoded_variants[slot].rcu(|current| {
             if same_arc_option(observed.as_ref(), current) {
                 Some(entry.clone())
@@ -573,7 +590,15 @@ impl DiskCacheBackend {
         slot: usize,
         observed: Option<std::sync::Arc<DecodedMetadataEntry>>,
         entry: std::sync::Arc<DecodedMetadataEntry>,
+        source_generation: u64,
     ) {
+        let _guard = self
+            .decoded_lifecycle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        if self.decoded_generation.load(Ordering::Acquire) != source_generation {
+            return;
+        }
         self.decoded_metadata[slot].rcu(|current| {
             if same_arc_option(observed.as_ref(), current) {
                 Some(entry.clone())
@@ -587,6 +612,11 @@ impl DiskCacheBackend {
         if self.shared {
             return;
         }
+        let _guard = self
+            .decoded_lifecycle
+            .lock()
+            .unwrap_or_else(|err| err.into_inner());
+        self.decoded_generation.fetch_add(1, Ordering::AcqRel);
         let variant_slot =
             qpx_http::sharding::modulo(&(namespace, key), self.decoded_variants.len());
         self.decoded_variants[variant_slot].rcu(|current| {
@@ -616,6 +646,7 @@ impl DiskCacheBackend {
         namespace: &str,
         key: &str,
         raw: Bytes,
+        source_generation: u64,
     ) -> Result<std::sync::Arc<CachedResponseEnvelope>> {
         if self.shared {
             return Ok(std::sync::Arc::new(decode_cached_response_metadata(raw)?));
@@ -636,7 +667,7 @@ impl DiskCacheBackend {
             raw,
             value: value.clone(),
         });
-        self.publish_decoded_metadata(slot, observed, entry);
+        self.publish_decoded_metadata(slot, observed, entry, source_generation);
         Ok(value)
     }
 
@@ -1197,10 +1228,12 @@ impl CacheBackend for DiskCacheBackend {
         namespace: &str,
         key: &str,
     ) -> Result<Option<std::sync::Arc<VariantIndex>>> {
+        let source_generation = self.decoded_generation();
         let Some(raw) = self.get(namespace, key).await? else {
             return Ok(None);
         };
-        self.decode_variant_index(namespace, key, raw).map(Some)
+        self.decode_variant_index(namespace, key, raw, source_generation)
+            .map(Some)
     }
 
     async fn get_decoded_response_metadata_many(
@@ -1209,10 +1242,13 @@ impl CacheBackend for DiskCacheBackend {
         keys: &[String],
     ) -> Result<Vec<Option<std::sync::Arc<CachedResponseEnvelope>>>> {
         let mut out = Vec::with_capacity(keys.len());
+        let source_generation = self.decoded_generation();
         for key in keys {
             let raw = self.read_response_metadata(namespace, key).await?;
             let decoded = match raw {
-                Some(raw) => Some(self.decode_response_metadata(namespace, key, raw)?),
+                Some(raw) => {
+                    Some(self.decode_response_metadata(namespace, key, raw, source_generation)?)
+                }
                 None => None,
             };
             out.push(decoded);
@@ -1232,6 +1268,7 @@ impl CacheBackend for DiskCacheBackend {
         }
         let slot_index = hot_slot(namespace, index_key);
         let slot = &self.hot_responses[slot_index];
+        let decoded_generation = self.decoded_generation();
         let generation = self.hot_recent_generation.load(Ordering::Acquire);
         if generation & 1 != 0 {
             return Ok(None);
@@ -1261,8 +1298,12 @@ impl CacheBackend for DiskCacheBackend {
         let Some(index_entry) = recent_hot_entry(&recent, namespace, index_key, now) else {
             return Ok(None);
         };
-        let variants =
-            self.decode_variant_index(namespace, index_key, index_entry.value.clone())?;
+        let variants = self.decode_variant_index(
+            namespace,
+            index_key,
+            index_entry.value.clone(),
+            decoded_generation,
+        )?;
         let [variant_key] = variants.variants.as_slice() else {
             return Ok(None);
         };
@@ -1275,6 +1316,7 @@ impl CacheBackend for DiskCacheBackend {
             namespace,
             variant_key.as_str(),
             metadata_entry.value.clone(),
+            decoded_generation,
         )?;
         let body_key = cache_body_storage_key(variant_key.as_str());
         let Some(body_entry) = recent_hot_entry(&recent, namespace, body_key.as_str(), now) else {
@@ -3027,10 +3069,10 @@ mod tests {
             qpx_http::sharding::modulo(&("ns", "v1"), backend.decoded_metadata.len());
 
         backend
-            .decode_variant_index("ns", "index", variant_raw())
+            .decode_variant_index("ns", "index", variant_raw(), backend.decoded_generation())
             .expect("decode index");
         backend
-            .decode_response_metadata("ns", "v1", metadata_raw(4))
+            .decode_response_metadata("ns", "v1", metadata_raw(4), backend.decoded_generation())
             .expect("decode metadata");
         let observed_variant = backend.decoded_variants[variant_slot].load_full().unwrap();
         let observed_metadata = backend.decoded_metadata[metadata_slot].load_full().unwrap();
@@ -3041,11 +3083,13 @@ mod tests {
             variant_slot,
             Some(observed_variant.clone()),
             observed_variant,
+            backend.decoded_generation(),
         );
         backend.publish_decoded_metadata(
             metadata_slot,
             Some(observed_metadata.clone()),
             observed_metadata,
+            backend.decoded_generation(),
         );
 
         assert!(backend.decoded_variants[variant_slot].load_full().is_none());
@@ -3106,6 +3150,85 @@ mod tests {
             &backend.decoded_metadata[metadata_slot].load_full().unwrap(),
             &colliding_metadata
         ));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_decoded_reader_does_not_publish_after_replacement() {
+        let dir = temp_dir("decoded-stale-reader-empty-slot");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let variant_slot =
+            qpx_http::sharding::modulo(&("ns", "index"), backend.decoded_variants.len());
+        let metadata_slot =
+            qpx_http::sharding::modulo(&("ns", "v1"), backend.decoded_metadata.len());
+        let source_generation = backend.decoded_generation();
+
+        backend.release_decoded_records("ns", "index");
+        backend.release_decoded_records("ns", "v1");
+        backend
+            .decode_variant_index("ns", "index", variant_raw(), source_generation)
+            .expect("decode index");
+        backend
+            .decode_response_metadata("ns", "v1", metadata_raw(4), source_generation)
+            .expect("decode metadata");
+
+        assert!(backend.decoded_variants[variant_slot].load_full().is_none());
+        assert!(
+            backend.decoded_metadata[metadata_slot]
+                .load_full()
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_decoded_publication_is_rejected_after_replacement() {
+        let dir = temp_dir("decoded-stale-publication");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let variant_slot =
+            qpx_http::sharding::modulo(&("ns", "index"), backend.decoded_variants.len());
+        let metadata_slot =
+            qpx_http::sharding::modulo(&("ns", "v1"), backend.decoded_metadata.len());
+        let stale_generation = backend.decoded_generation();
+        let variant = Arc::new(DecodedVariantIndexEntry {
+            namespace: Arc::from("ns"),
+            key: Arc::from("index"),
+            raw: variant_raw(),
+            value: Arc::new(VariantIndex {
+                variants: Vec::new(),
+            }),
+        });
+        let metadata = Arc::new(DecodedMetadataEntry {
+            namespace: Arc::from("ns"),
+            key: Arc::from("v1"),
+            raw: metadata_raw(4),
+            value: Arc::new(CachedResponseEnvelope {
+                status: 204,
+                headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
+                body: CachedBody::default(),
+                body_len: 4,
+                stored_at_ms: 1,
+                initial_age_secs: 0,
+                response_delay_secs: 0,
+                freshness_lifetime_secs: 60,
+                vary_headers: Vec::new(),
+                vary_values: Vec::new(),
+                response_directives: Default::default(),
+                response_header_values: Default::default(),
+            }),
+        });
+
+        backend.release_decoded_records("ns", "index");
+        backend.release_decoded_records("ns", "v1");
+        backend.publish_decoded_variant(variant_slot, None, variant, stale_generation);
+        backend.publish_decoded_metadata(metadata_slot, None, metadata, stale_generation);
+
+        assert!(backend.decoded_variants[variant_slot].load_full().is_none());
+        assert!(
+            backend.decoded_metadata[metadata_slot]
+                .load_full()
+                .is_none()
+        );
         let _ = fs::remove_dir_all(dir);
     }
 }
