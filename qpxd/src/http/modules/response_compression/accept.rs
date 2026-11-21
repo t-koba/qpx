@@ -49,34 +49,33 @@ pub(super) fn append_vary_accept_encoding(headers: &mut impl OrdinaryHeaderMut) 
 }
 
 fn parse_quality(raw: &str) -> i32 {
-    // RFC 9110 section 12.4.2: a qvalue has at most three decimal places.
-    // Read those places as decimal digits: a float cannot represent 0.251
+    // RFC 9110 section 12.4.2: qvalue is `0[.0*3DIGIT]` or `1[.0*3("0")]`.
+    // Read the fraction as decimal digits: a float cannot represent 0.251
     // exactly, and truncating its scaled value would rank it equal to 0.250.
     let raw = raw.trim();
     let (whole, fraction) = match raw.split_once('.') {
         Some((whole, fraction)) => (whole, Some(fraction)),
         None => (raw, None),
     };
-    let Ok(whole) = whole.parse::<u64>() else {
-        return 0;
+    let whole = match whole {
+        "0" => 0u64,
+        "1" => 1u64,
+        _ => return 0,
     };
-    let mut thousandths = whole.saturating_mul(1000);
-    // A dot with no digits (q=1.) is the same weight as no dot.
-    if let Some(fraction) = fraction.filter(|fraction| !fraction.is_empty()) {
-        if !fraction.bytes().all(|digit| digit.is_ascii_digit()) {
-            return 0;
-        }
-        let digits = fraction.len().min(3);
-        let scale = match digits {
-            1 => 100,
-            2 => 10,
-            3 => 1,
-            _ => 0,
-        };
-        let Ok(part) = fraction[..digits].parse::<u64>() else {
-            return 0;
-        };
-        thousandths = thousandths.saturating_add(part.saturating_mul(scale));
+    let Some(fraction) = fraction.filter(|fraction| !fraction.is_empty()) else {
+        return (whole * 1000) as i32;
+    };
+    if fraction.len() > 3 || !fraction.bytes().all(|digit| digit.is_ascii_digit()) {
+        return 0;
     }
-    thousandths.min(1000) as i32
+    if whole == 1 && fraction.bytes().any(|digit| digit != b'0') {
+        return 0;
+    }
+    let part = fraction.parse::<u64>().expect("ASCII digits");
+    let scale = match fraction.len() {
+        1 => 100,
+        2 => 10,
+        _ => 1,
+    };
+    (whole * 1000 + part * scale) as i32
 }

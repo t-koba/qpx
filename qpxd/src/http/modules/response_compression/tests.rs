@@ -47,6 +47,31 @@ fn accept_encoding_quality_preserves_thousandths() {
 }
 
 #[test]
+fn accept_encoding_rejects_malformed_quality_values() {
+    let mut headers = HeaderMap::new();
+    headers.append(
+        ACCEPT_ENCODING,
+        HeaderValue::from_static(
+            "a;q=+1, b;q=01, c;q=2, d;q=1.001, e;q=0.1234, f;q=0.25x, g;q=1., h;q=0.",
+        ),
+    );
+
+    assert_eq!(
+        parse_accept_encoding(&headers),
+        vec![
+            ("a".to_string(), 0),
+            ("b".to_string(), 0),
+            ("c".to_string(), 0),
+            ("d".to_string(), 0),
+            ("e".to_string(), 0),
+            ("f".to_string(), 0),
+            ("g".to_string(), 1000),
+            ("h".to_string(), 0),
+        ]
+    );
+}
+
+#[test]
 fn append_vary_accept_encoding_preserves_repeated_mixed_case_fields() {
     let mut headers = HeaderMap::new();
     headers.append(VARY, HeaderValue::from_static("Origin"));
