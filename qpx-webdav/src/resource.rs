@@ -11,14 +11,12 @@ pub struct ResourceId(Arc<str>);
 impl ResourceId {
     pub fn parse(path: &str) -> Result<Self> {
         let (path, _) = path.split_once(['?', '#']).unwrap_or((path, ""));
+        // Only raw delimiters separate a URI path from query or fragment.
+        // After decoding, `?` and `#` are ordinary literal path data: an href
+        // produced by `as_uri_path` must resolve to the same resource.
         let path = percent_decode_str(path)
             .decode_utf8()
             .map_err(|_| anyhow!("WebDAV resource path is not valid UTF-8"))?;
-        if path.contains(['?', '#']) {
-            return Err(anyhow!(
-                "WebDAV resource path contains a forbidden character"
-            ));
-        }
         Self::from_literal(&path)
     }
 
@@ -172,6 +170,14 @@ mod tests {
     use super::*;
 
     #[test]
+    fn raw_delimiters_are_distinct_from_decoded_path_data() {
+        assert_eq!(ResourceId::parse("/a?b").unwrap().as_str(), "/a");
+        assert_eq!(ResourceId::parse("/a#b").unwrap().as_str(), "/a");
+        assert_eq!(ResourceId::parse("/a%3Fb").unwrap().as_str(), "/a?b");
+        assert_eq!(ResourceId::parse("/a%23b").unwrap().as_str(), "/a#b");
+    }
+
+    #[test]
     fn deserialize_rejects_noncanonical_resource_paths() {
         for path in [
             "/../outside.txt",
@@ -278,9 +284,15 @@ mod tests {
     }
 
     #[test]
-    fn parse_rejects_encoded_url_delimiters() {
-        assert!(ResourceId::parse("/report%23draft.txt").is_err());
-        assert!(ResourceId::parse("/report%3Fdraft.txt").is_err());
+    fn parse_keeps_encoded_url_delimiters_as_literal_path_data() {
+        assert_eq!(
+            ResourceId::parse("/report%23draft.txt").unwrap().as_str(),
+            "/report#draft.txt"
+        );
+        assert_eq!(
+            ResourceId::parse("/report%3Fdraft.txt").unwrap().as_str(),
+            "/report?draft.txt"
+        );
     }
 
     #[test]

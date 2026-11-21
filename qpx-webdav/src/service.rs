@@ -2400,6 +2400,58 @@ mod tests {
     }
 
     #[test]
+    fn propfind_href_round_trips_for_literal_uri_delimiters() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+
+        let mkcol = http::Request::builder()
+            .method("MKCOL")
+            .uri("/docs")
+            .body(Vec::new())
+            .map(Request::from_http)
+            .unwrap();
+        assert_eq!(service.handle(mkcol, &context).unwrap().status(), 201);
+        for (name, body) in [
+            ("review#draft.txt", "hash"),
+            ("question?draft.txt", "question"),
+        ] {
+            let resource =
+                ResourceId::from_literal(&format!("/docs/{name}")).expect("literal name");
+            assert!(service.store.put(&resource, body.as_bytes(), None).unwrap());
+        }
+
+        let propfind = http::Request::builder()
+            .method("PROPFIND")
+            .uri("/docs")
+            .header("depth", "1")
+            .body(Vec::new())
+            .map(Request::from_http)
+            .unwrap();
+        let response = service.handle(propfind, &context).unwrap();
+        let body = String::from_utf8(response.into_head_and_body().1).unwrap();
+        assert!(body.contains("<D:href>/docs/review%23draft.txt</D:href>"));
+        assert!(body.contains("<D:href>/docs/question%3Fdraft.txt</D:href>"));
+
+        for (href, body) in [
+            ("/docs/review%23draft.txt", "hash"),
+            ("/docs/question%3Fdraft.txt", "question"),
+        ] {
+            let get = http::Request::builder()
+                .method("GET")
+                .uri(href)
+                .body(Vec::new())
+                .map(Request::from_http)
+                .unwrap();
+            let response = service.handle(get, &context).unwrap();
+            assert_eq!(response.status(), 200, "GET {href}");
+            assert_eq!(response.body(), &Bytes::from(body.to_string()));
+        }
+    }
+
+    #[test]
     fn owned_request_headers_preserve_first_value_and_xml_body_limit() {
         let directory = tempdir().unwrap();
         let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
