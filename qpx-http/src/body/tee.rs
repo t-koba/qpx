@@ -116,7 +116,16 @@ async fn copy_tee_body(
     backpressure: MirrorBackpressure,
     drop_metric_label: Option<&'static str>,
 ) {
-    while let Some(chunk) = source.data().await {
+    loop {
+        let chunk = tokio::select! {
+            biased;
+            chunk = source.data() => chunk,
+            _ = primary_sender.closed() => {
+                abort_mirrors(&mut mirror_senders, drop_metric_label, "primary_closed");
+                return;
+            }
+        };
+        let Some(chunk) = chunk else { break };
         let chunk = match chunk {
             Ok(chunk) => chunk,
             Err(_) => {
@@ -271,6 +280,41 @@ mod tests {
             .expect("primary");
         assert_eq!(primary_bytes.as_ref(), b"abcdef");
         assert!(to_bytes(&mut mirror).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn lossy_tee_releases_idle_source_when_primary_drops() {
+        let (mut source_sender, source) = Body::channel_with_capacity(1);
+        let (mut primary, mut mirrors) = tee_body_lossy(source, vec![None], 1);
+        let mut mirror = mirrors.pop().expect("mirror");
+
+        source_sender
+            .send_data(Bytes::from_static(b"x"))
+            .await
+            .expect("source data");
+        assert_eq!(
+            primary
+                .data()
+                .await
+                .expect("primary data")
+                .expect("primary chunk"),
+            Bytes::from_static(b"x")
+        );
+        assert_eq!(
+            mirror
+                .data()
+                .await
+                .expect("mirror data")
+                .expect("mirror chunk"),
+            Bytes::from_static(b"x")
+        );
+
+        drop(primary);
+
+        timeout(Duration::from_secs(1), source_sender.closed())
+            .await
+            .expect("tee task should release idle source after primary drop");
+        assert!(mirror.data().await.expect("mirror error").is_err());
     }
 
     #[tokio::test]
