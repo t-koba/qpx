@@ -1474,25 +1474,12 @@ mod userinfo_output_tests {
         assert!(log.contains(r#""user_agent":"Probe/1.0 (café)""#), "{log}");
     }
 
-    #[derive(Debug, Clone, Default)]
-    struct CapturedSpans(Arc<Mutex<Vec<opentelemetry_sdk::trace::SpanData>>>);
-
-    impl opentelemetry_sdk::trace::SpanExporter for CapturedSpans {
-        async fn export(
-            &self,
-            batch: Vec<opentelemetry_sdk::trace::SpanData>,
-        ) -> opentelemetry_sdk::error::OTelSdkResult {
-            self.0.lock().unwrap().extend(batch);
-            Ok(())
-        }
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn utf8_user_agent_is_pinned_at_every_emission_site() {
         use opentelemetry::trace::TracerProvider as _;
         use tracing_subscriber::prelude::*;
 
-        let spans = CapturedSpans::default();
+        let spans = Spans::default();
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_simple_exporter(spans.clone())
             .build();
