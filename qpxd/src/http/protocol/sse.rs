@@ -1,4 +1,6 @@
 use qpx_core::config::SseStreamingPolicy;
+
+const UTF8_BOM: [u8; 3] = [0xEF, 0xBB, 0xBF];
 #[cfg(feature = "http3")]
 use qpx_core::http_message::{Headers, OrdinaryHeaderName};
 
@@ -25,6 +27,8 @@ pub(crate) struct SseFeedResult {
 
 #[derive(Debug)]
 pub(crate) struct SseEventObserver {
+    bom_index: u8,
+    bom_candidate: Vec<u8>,
     line: Vec<u8>,
     line_truncated: bool,
     pending_cr: bool,
@@ -37,6 +41,8 @@ pub(crate) struct SseEventObserver {
 impl Default for SseEventObserver {
     fn default() -> Self {
         Self {
+            bom_index: 0,
+            bom_candidate: Vec::new(),
             line: Vec::new(),
             line_truncated: false,
             pending_cr: false,
@@ -65,35 +71,49 @@ impl SseEventObserver {
         let before = self.summary.event_count;
         self.summary.byte_count = self.summary.byte_count.saturating_add(chunk.len() as u64);
         for byte in chunk {
-            // The second half of a CRLF pair carries no content, even across
-            // feeds; dropping it before buffering keeps the next line clean.
-            if *byte == b'\n' && self.pending_cr {
-                self.pending_cr = false;
-                continue;
-            }
-            if self.line.len() < self.max_line_bytes {
-                self.line.push(*byte);
-            } else {
-                self.line_truncated = true;
-            }
-            match *byte {
-                // CR ends a line; a LF immediately after it belongs to the
-                // same CRLF terminator (handled above).
-                b'\r' => {
-                    self.process_line();
-                    self.pending_cr = true;
+            if self.bom_index < UTF8_BOM.len() as u8 {
+                if *byte == UTF8_BOM[self.bom_index as usize] {
+                    self.bom_candidate.push(*byte);
+                    self.bom_index += 1;
+                    if self.bom_index as usize == UTF8_BOM.len() {
+                        self.bom_candidate.clear();
+                    }
+                    continue;
                 }
-                b'\n' => {
-                    self.process_line();
-                }
-                _ => {
-                    self.pending_cr = false;
+                self.bom_index = UTF8_BOM.len() as u8;
+                for candidate in std::mem::take(&mut self.bom_candidate) {
+                    self.consume_byte(candidate);
                 }
             }
+            self.consume_byte(*byte);
         }
         SseFeedResult {
             events: self.summary.event_count.saturating_sub(before),
             bytes: chunk.len() as u64,
+        }
+    }
+
+    fn consume_byte(&mut self, byte: u8) {
+        // The second half of a CRLF pair carries no content, even across
+        // feeds; dropping it before buffering keeps the next line clean.
+        if byte == b'\n' && self.pending_cr {
+            self.pending_cr = false;
+            return;
+        }
+        if self.line.len() < self.max_line_bytes {
+            self.line.push(byte);
+        } else {
+            self.line_truncated = true;
+        }
+        match byte {
+            // CR ends a line; a LF immediately after it belongs to the
+            // same CRLF terminator (handled above).
+            b'\r' => {
+                self.process_line();
+                self.pending_cr = true;
+            }
+            b'\n' => self.process_line(),
+            _ => self.pending_cr = false,
         }
     }
 
@@ -202,6 +222,31 @@ mod dispatch_tests {
         let mut observer = SseEventObserver::new();
         observer.feed(b"id: 7\n\n");
         assert_eq!(observer.summary().last_event_id.as_deref(), Some("7"));
+    }
+
+    #[test]
+    fn leading_utf8_bom_split_across_chunks_preserves_first_event() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"\xEF").events, 0);
+        assert_eq!(observer.feed(b"\xBB\xBFdata: first\n\n").events, 1);
+        assert_eq!(observer.summary().event_count, 1);
+    }
+
+    #[test]
+    fn single_chunk_leading_bom_preserves_first_event() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(observer.feed(b"\xEF\xBB\xBFdata: first\n\n").events, 1);
+    }
+
+    #[test]
+    fn bom_after_stream_start_is_not_stripped() {
+        let mut observer = SseEventObserver::new();
+        assert_eq!(
+            observer
+                .feed(b"data: first\n\n\xEF\xBB\xBFdata: second\n\n")
+                .events,
+            1
+        );
     }
 
     #[test]
