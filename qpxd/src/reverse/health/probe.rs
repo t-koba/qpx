@@ -5,6 +5,7 @@ use hyper::{Request, StatusCode, Uri};
 use qpx_core::tls::CompiledUpstreamTlsTrust;
 use qpx_http::body::Body;
 use qpx_http::tls::builder::connect_client_http1;
+use std::borrow::Cow;
 use tokio::net::TcpStream;
 use url::Url;
 
@@ -29,14 +30,13 @@ pub(in crate::reverse) async fn probe_upstream(
             return probe_http(&normalized_origin, cfg, trust).await;
         }
     }
-    let default_port = if origin.upstream.starts_with("http://") {
-        80
-    } else {
-        443
-    };
-    let addr = origin.connect_authority(default_port)?;
-    let _ = TcpStream::connect(addr).await?;
+    let addr = tcp_probe_authority(origin)?;
+    let _ = TcpStream::connect(addr.as_ref()).await?;
     Ok(())
+}
+
+fn tcp_probe_authority(origin: &OriginEndpoint) -> Result<Cow<'_, str>> {
+    origin.connect_authority_ref(443)
 }
 
 async fn probe_http(
@@ -128,4 +128,21 @@ fn validate_probe_status(status: StatusCode, cfg: &HttpHealthCheckRuntime) -> Re
         return Ok(());
     }
     Err(anyhow!("unhealthy status: {}", code))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tcp_probe_authority_uses_ws_default_port() {
+        let origin = OriginEndpoint::direct("ws://origin.example");
+        assert_eq!(tcp_probe_authority(&origin).unwrap(), "origin.example:80");
+    }
+
+    #[test]
+    fn tcp_probe_authority_preserves_explicit_port() {
+        let origin = OriginEndpoint::direct("ws://origin.example:8080");
+        assert_eq!(tcp_probe_authority(&origin).unwrap(), "origin.example:8080");
+    }
 }
