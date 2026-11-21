@@ -1,5 +1,7 @@
 use anyhow::Result;
+use opentelemetry::propagation::Extractor;
 use qpx_core::config::OtelConfig;
+use std::cell::OnceCell;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tracing_subscriber::EnvFilter;
 
@@ -110,27 +112,54 @@ pub(super) fn build_otel_layer(
     Ok((layer, OtelGuard { provider }))
 }
 
+struct HeaderExtractor<'a> {
+    headers: &'a http::HeaderMap,
+    tracestate: OnceCell<Option<String>>,
+}
+
+impl<'a> HeaderExtractor<'a> {
+    fn new(headers: &'a http::HeaderMap) -> Self {
+        Self {
+            headers,
+            tracestate: OnceCell::new(),
+        }
+    }
+}
+
+impl Extractor for HeaderExtractor<'_> {
+    fn get(&self, key: &str) -> Option<&str> {
+        if key.eq_ignore_ascii_case("tracestate") {
+            return self
+                .tracestate
+                .get_or_init(|| {
+                    let mut values = self.headers.get_all("tracestate").iter();
+                    let first = values.next()?.to_str().ok()?;
+                    let mut joined = first.to_owned();
+                    for value in values {
+                        joined.push(',');
+                        joined.push_str(value.to_str().ok()?);
+                    }
+                    Some(joined)
+                })
+                .as_deref();
+        }
+        self.headers.get(key).and_then(|v| v.to_str().ok())
+    }
+
+    fn keys(&self) -> Vec<&str> {
+        self.headers.keys().map(|k| k.as_str()).collect()
+    }
+}
+
 /// Extracts an OpenTelemetry trace context from HTTP headers.
 pub fn extract_trace_context(headers: &http::HeaderMap) -> opentelemetry::Context {
-    use opentelemetry::propagation::Extractor;
-
     if !otel_enabled() {
         return opentelemetry::Context::new();
     }
 
-    struct HeaderExtractor<'a>(&'a http::HeaderMap);
-
-    impl<'a> Extractor for HeaderExtractor<'a> {
-        fn get(&self, key: &str) -> Option<&str> {
-            self.0.get(key).and_then(|v| v.to_str().ok())
-        }
-
-        fn keys(&self) -> Vec<&str> {
-            self.0.keys().map(|k| k.as_str()).collect()
-        }
-    }
-
-    opentelemetry::global::get_text_map_propagator(|prop| prop.extract(&HeaderExtractor(headers)))
+    opentelemetry::global::get_text_map_propagator(|prop| {
+        prop.extract(&HeaderExtractor::new(headers))
+    })
 }
 
 /// Injects the current OpenTelemetry trace context into HTTP headers.
@@ -162,4 +191,36 @@ pub fn inject_trace_context(headers: &mut qpx_core::http_message::Headers) {
             &mut HeaderInjector(headers),
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use opentelemetry::propagation::TextMapPropagator;
+    use opentelemetry::trace::TraceContextExt;
+    use opentelemetry_sdk::propagation::TraceContextPropagator;
+
+    #[test]
+    fn extract_combines_multiple_tracestate_lines() {
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            "traceparent",
+            "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01"
+                .parse()
+                .unwrap(),
+        );
+        headers.append("tracestate", "vendor1=one".parse().unwrap());
+        headers.append("tracestate", "vendor2=two".parse().unwrap());
+
+        let propagator = TraceContextPropagator::new();
+        let cx = propagator.extract_with_context(
+            &opentelemetry::Context::new(),
+            &HeaderExtractor::new(&headers),
+        );
+
+        assert_eq!(
+            cx.span().span_context().trace_state().header(),
+            "vendor1=one,vendor2=two"
+        );
+    }
 }
