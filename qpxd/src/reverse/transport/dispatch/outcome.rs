@@ -98,7 +98,6 @@ pub(super) async fn capture_reverse_response_outcome<R: ReverseTerminalResponse>
             super::ReverseAttemptOutcome::Response(Box::new((interim, response)))
         }
         super::ReverseAttemptOutcome::Retry(err) => super::ReverseAttemptOutcome::Retry(err),
-        super::ReverseAttemptOutcome::Stop(err) => super::ReverseAttemptOutcome::Stop(err),
     }
 }
 

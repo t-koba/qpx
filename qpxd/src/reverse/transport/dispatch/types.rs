@@ -331,7 +331,6 @@ pub(super) struct ReversePostModuleInput<'a> {
 pub(super) enum ReverseAttemptOutcome<R = Response<Body>> {
     Response(Box<(InterimList, R)>),
     Retry(anyhow::Error),
-    Stop(anyhow::Error),
 }
 
 pub(super) type ReverseResponseRuleContinue = (

@@ -42,7 +42,10 @@ pub(super) async fn reverse_continue_response_rule(
             suppress_retry,
             mirror,
         } => {
-            if response.status().is_server_error() && attempt_idx + 1 < attempts && !suppress_retry
+            if response.status().is_server_error()
+                && attempt_idx + 1 < attempts
+                && !suppress_retry
+                && consume_reverse_retry_budget(state, route)
             {
                 if let Some(upstream) = selected_upstream {
                     record_reverse_upstream_status(
@@ -53,15 +56,11 @@ pub(super) async fn reverse_continue_response_rule(
                     );
                 }
                 let retry_reason = format!("upstream returned {}", response.status());
-                let err = anyhow!(retry_reason.clone());
-                if !consume_reverse_retry_budget(state, route) {
-                    return Ok(Err(ReverseAttemptOutcome::Stop(err)));
-                }
                 http_modules
                     .on_retry(attempt_idx + 2, retry_reason.as_str())
                     .await?;
                 reverse_retry_backoff(route).await;
-                return Ok(Err(ReverseAttemptOutcome::Retry(err)));
+                return Ok(Err(ReverseAttemptOutcome::Retry(anyhow!(retry_reason))));
             }
             Ok(Ok((response, headers, cache_bypass, policy_tags, mirror)))
         }

@@ -197,10 +197,6 @@ pub(super) async fn dispatch_reverse_http_route<R: ReverseTerminalResponse>(
                         last_err = Some(err);
                         continue;
                     }
-                    ReverseAttemptOutcome::Stop(err) => {
-                        last_err = Some(err);
-                        break;
-                    }
                 }
             }
             Ok(Err(err)) => {

@@ -1,6 +1,79 @@
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn reverse_retry_budget_exhaustion_preserves_origin_response() -> Result<()> {
+    let dir = temp_dir("qpxd-retry-budget-origin-response")?;
+    let cfg = dir.join("reverse-route.yaml");
+    let (origin_addr, origin_hits) = start_status_backend(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "maintenance",
+        vec![(http::header::RETRY_AFTER, "120".parse()?)],
+    )
+    .await?;
+
+    let (port, mut qpxd) =
+        spawn_qpxd_on_random_port(&cfg, dir.join("reverse-route.log"), |port| {
+            format!(
+                r#"upstreams:
+- name: origin
+  url: http://{origin_addr}
+runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false
+edges:
+- kind: reverse
+  name: reverse
+  listen: 127.0.0.1:{port}
+  routes:
+  - name: app
+    streaming_requirement: preferred
+    match:
+      host:
+      - reverse.local
+      path:
+      - /app/*
+    resilience:
+      retry:
+        attempts: 2
+        backoff_ms: 0
+    timeout_ms: 1000
+    target:
+      type: upstream
+      upstreams:
+      - origin"#
+            )
+        })?;
+
+    let client = test_client();
+    let uri: hyper::Uri = format!("http://127.0.0.1:{port}/app/test").parse()?;
+    for expected_hits in [2, 3] {
+        let response = client
+            .request(
+                Request::builder()
+                    .method("GET")
+                    .uri(uri.clone())
+                    .header("host", "reverse.local")
+                    .body(empty_body())?,
+            )
+            .await
+            .with_context(|| {
+                format!(
+                    "reverse request to {port}; child status: {:?}{}",
+                    qpxd.child.try_wait(),
+                    qpxd.log_tail(),
+                )
+            })?;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "120");
+        let body = collect_body(response.into_body()).await?;
+        assert_eq!(&body[..], b"maintenance");
+        wait_for_counter(&origin_hits, expected_hits).await?;
+    }
+    assert_eq!(origin_hits.load(Ordering::Relaxed), 3);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reverse_route_retries_and_mirrors() -> Result<()> {
     let dir = temp_dir("qpxd-reverse-route-e2e")?;
     let cfg = dir.join("reverse-route.yaml");

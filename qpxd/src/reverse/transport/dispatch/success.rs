@@ -428,9 +428,8 @@ edges:
                 };
                 match outcome {
                     ReverseAttemptOutcome::Retry(_) => assert_eq!(case, "retry"),
-                    ReverseAttemptOutcome::Stop(_) => assert_eq!(case, "stop"),
                     ReverseAttemptOutcome::Response(response) => {
-                        assert!(!matches!(case, "retry" | "stop"));
+                        assert!(!matches!(case, "retry"));
                         let (interim, mut response) = *response;
                         assert_eq!(
                             interim.len(),
@@ -477,7 +476,7 @@ edges:
                         assert_eq!(
                             to_bytes(std::mem::replace(response.body_mut(), Body::empty())).await?,
                             match case {
-                                "stale" | "cache" => "cached",
+                                "stale" | "stop" | "cache" => "cached",
                                 "local" => "policy",
                                 _ => "origin",
                             }
@@ -509,7 +508,7 @@ edges:
                 .await??;
                 assert_eq!(
                     events.len(),
-                    usize::from(!matches!(case, "retry" | "stop" | "cache")),
+                    usize::from(!matches!(case, "retry" | "cache")),
                     "{case}"
                 );
                 if let Some(event) = events.first() {

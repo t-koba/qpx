@@ -71,6 +71,14 @@ async fn start_text_backend(
     body: &'static str,
     extra_headers: Vec<(http::header::HeaderName, http::HeaderValue)>,
 ) -> Result<(SocketAddr, Arc<AtomicUsize>)> {
+    start_status_backend(StatusCode::OK, body, extra_headers).await
+}
+
+async fn start_status_backend(
+    status: StatusCode,
+    body: &'static str,
+    extra_headers: Vec<(http::header::HeaderName, http::HeaderValue)>,
+) -> Result<(SocketAddr, Arc<AtomicUsize>)> {
     let hits = Arc::new(AtomicUsize::new(0));
     let listener = StdTcpListener::bind(("127.0.0.1", 0)).context("bind backend")?;
     listener.set_nonblocking(true)?;
@@ -83,7 +91,7 @@ async fn start_text_backend(
         let headers = extra_headers.clone();
         async move {
             hits.fetch_add(1, Ordering::Relaxed);
-            let mut response = Response::builder().status(StatusCode::OK);
+            let mut response = Response::builder().status(status);
             for (name, value) in &headers {
                 response = response.header(name, value);
             }
