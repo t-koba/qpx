@@ -11,17 +11,12 @@ pub struct HstsPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum HstsError {
-    #[error("HSTS max-age must be greater than zero")]
-    ZeroMaxAge,
     #[error("HSTS policy cannot be represented as an HTTP field value")]
     InvalidHeaderValue,
 }
 
 impl HstsPolicy {
     pub fn to_header_value(self) -> Result<HeaderValue, HstsError> {
-        if self.max_age_seconds == 0 {
-            return Err(HstsError::ZeroMaxAge);
-        }
         let mut value = format!("max-age={}", self.max_age_seconds);
         if self.include_subdomains {
             value.push_str("; includeSubDomains");
@@ -33,6 +28,18 @@ impl HstsPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn serializes_zero_max_age() {
+        assert_eq!(
+            HstsPolicy {
+                max_age_seconds: 0,
+                include_subdomains: false,
+            }
+            .to_header_value(),
+            Ok(HeaderValue::from_static("max-age=0")),
+        );
+    }
 
     #[test]
     fn serializes_hsts_policy() {
