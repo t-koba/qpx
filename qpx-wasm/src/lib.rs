@@ -23,7 +23,7 @@ use anyhow::anyhow;
 use bytes::{Buf, Bytes};
 use std::collections::HashMap;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,6 +32,7 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, ReadBuf};
 use tokio::sync::{Mutex, OnceCell, mpsc, oneshot};
 use tracing::info;
+use wasmparser::Payload;
 use wasmtime::*;
 use wasmtime_wasi::cli::{AsyncStdinStream, IsTerminal, StdoutStream};
 use wasmtime_wasi::p1::{self, WasiP1Ctx};
@@ -100,8 +101,9 @@ pub struct WasmExecutorConfig {
     pub idle_instances: usize,
 }
 
-struct PreparedStore {
+struct PreparedInstance {
     store: Store<WasmStoreData>,
+    instance: Option<Instance>,
 }
 
 pub use qpx_core::execution::{RequestHeaders, WasmRequest};
@@ -355,7 +357,8 @@ pub struct WasmExecutor {
     module: Arc<OnceCell<Module>>,
     linker: Arc<Linker<WasmStoreData>>,
     instance_pre: Arc<OnceCell<InstancePre<WasmStoreData>>>,
-    idle_instances: Arc<Mutex<Vec<PreparedStore>>>,
+    idle_instances: Arc<Mutex<Vec<PreparedInstance>>>,
+    core_start: Arc<OnceCell<bool>>,
     max_idle_instances: usize,
     max_module_bytes: u64,
     max_memory_bytes: u64,
@@ -400,6 +403,7 @@ impl WasmExecutor {
 
         let module = Arc::new(OnceCell::new());
         let instance_pre = Arc::new(OnceCell::new());
+        let core_start = Arc::new(OnceCell::new());
         if config.precompile {
             let compiled = Module::from_file(&engine, &config.module)
                 .map_err(|e| anyhow!("WASM precompile failed: {}", e))?;
@@ -426,12 +430,14 @@ impl WasmExecutor {
 
         let idle_instances = Arc::new(Mutex::new(Vec::with_capacity(config.idle_instances)));
         if config.precompile && config.idle_instances > 0 {
+            let has_core_start = module_has_core_start_section(&config.module, max_module_bytes)?;
+            let _ = core_start.set(has_core_start);
             schedule_idle_replenish(
                 Arc::clone(&idle_instances),
                 config.idle_instances,
-                engine.clone(),
                 Arc::clone(&epoch_ticker),
                 Arc::clone(&instance_pre),
+                has_core_start,
                 config.max_memory_bytes,
                 config.timeout_ms,
             );
@@ -444,6 +450,7 @@ impl WasmExecutor {
             linker: Arc::new(linker),
             instance_pre,
             idle_instances,
+            core_start,
             max_idle_instances: config.idle_instances,
             max_module_bytes,
             max_memory_bytes: config.max_memory_bytes,
@@ -473,6 +480,7 @@ impl WasmExecutor {
         let linker = Arc::clone(&self.linker);
         let instance_pre = Arc::clone(&self.instance_pre);
         let idle_instances = Arc::clone(&self.idle_instances);
+        let core_start = Arc::clone(&self.core_start);
         let max_idle_instances = self.max_idle_instances;
         let max_module_bytes = self.max_module_bytes;
         let max_memory_bytes = self.max_memory_bytes;
@@ -520,12 +528,25 @@ impl WasmExecutor {
                     })
                     .await?;
 
+                let has_core_start = if max_idle_instances > 0 {
+                    *core_start
+                        .get_or_try_init(|| {
+                            let module_path = module_path.clone();
+                            async move {
+                                module_has_core_start_section(&module_path, max_module_bytes)
+                            }
+                        })
+                        .await?
+                } else {
+                    false
+                };
+
                 let prepared = idle_instances.lock().await.pop();
-                let mut store = match prepared {
+                let (mut store, prepared_instance) = match prepared {
                     Some(mut prepared) => {
                         prepared.store.data_mut().wasi = wasi_ctx;
                         prepared.store.data_mut().limiter.max_memory = max_memory_bytes as usize;
-                        prepared.store
+                        (prepared.store, prepared.instance)
                     }
                     None => {
                         let store_data = WasmStoreData {
@@ -536,23 +557,25 @@ impl WasmExecutor {
                         };
                         let mut store = Store::new(&engine, store_data);
                         store.limiter(|data| &mut data.limiter);
-                        store
+                        (store, None)
                     }
                 };
                 store.set_epoch_deadline(std::cmp::max(1, timeout_ms / 10));
-                // Instantiate only after the request WASI context is installed:
-                // a core start section runs here and must see the request's
-                // environment whether the store came from the idle pool or not.
-                let instance = instance_template
-                    .instantiate_async(&mut store)
-                    .await
-                    .map_err(|e| anyhow!("WASM instantiate failed: {e}"))?;
+                // A core start section must run after the request WASI context is
+                // installed, so those modules stay deferred even from a pooled store.
+                let instance = match prepared_instance {
+                    Some(instance) => instance,
+                    None => instance_template
+                        .instantiate_async(&mut store)
+                        .await
+                        .map_err(|e| anyhow!("WASM instantiate failed: {e}"))?,
+                };
                 schedule_idle_replenish(
                     Arc::clone(&idle_instances),
                     max_idle_instances,
-                    engine.clone(),
                     replenish_ticker,
                     Arc::clone(&instance_pre),
+                    has_core_start,
                     max_memory_bytes,
                     timeout_ms,
                 );
@@ -589,11 +612,11 @@ impl WasmExecutor {
 }
 
 fn schedule_idle_replenish(
-    idle_instances: Arc<Mutex<Vec<PreparedStore>>>,
+    idle_instances: Arc<Mutex<Vec<PreparedInstance>>>,
     max_idle_instances: usize,
-    engine: Engine,
     epoch_ticker: Arc<EpochTicker>,
     instance_pre: Arc<OnceCell<InstancePre<WasmStoreData>>>,
+    has_core_start: bool,
     max_memory_bytes: u64,
     timeout_ms: u64,
 ) {
@@ -609,9 +632,9 @@ fn schedule_idle_replenish(
                     break;
                 }
             }
-            match prepare_idle_store(
-                &engine,
+            match prepare_idle_instance(
                 &instance_pre,
+                has_core_start,
                 max_memory_bytes as usize,
                 timeout_ms,
             )
@@ -633,28 +656,55 @@ fn schedule_idle_replenish(
     });
 }
 
-async fn prepare_idle_store(
-    engine: &Engine,
+async fn prepare_idle_instance(
     instance_pre: &OnceCell<InstancePre<WasmStoreData>>,
+    has_core_start: bool,
     max_memory_bytes: usize,
     timeout_ms: u64,
-) -> Result<PreparedStore> {
-    if instance_pre.get().is_none() {
-        return Err(anyhow!("WASM instance template missing").into());
-    }
+) -> Result<PreparedInstance> {
+    let template = instance_pre
+        .get()
+        .ok_or_else(|| anyhow!("WASM instance template missing"))?;
     let store_data = WasmStoreData {
         wasi: WasiCtxBuilder::new().build_p1(),
         limiter: MemoryLimiter {
             max_memory: max_memory_bytes,
         },
     };
-    let mut store = Store::new(engine, store_data);
+    let mut store = Store::new(template.module().engine(), store_data);
     store.limiter(|data| &mut data.limiter);
     store.set_epoch_deadline(std::cmp::max(1, timeout_ms / 10));
-    Ok(PreparedStore { store })
+    // Instantiating a start-free module here moves its setup off the request
+    // path; its WASI context is replaced with the request's one in `start`.
+    let instance = if has_core_start {
+        None
+    } else {
+        Some(
+            template
+                .instantiate_async(&mut store)
+                .await
+                .map_err(|e| anyhow!("WASM idle instantiate failed: {e}"))?,
+        )
+    };
+    Ok(PreparedInstance { store, instance })
 }
 
-fn enforce_module_size(module: &PathBuf, max_module_bytes: u64) -> Result<()> {
+fn module_has_core_start_section(module: &Path, max_module_bytes: u64) -> Result<bool> {
+    enforce_module_size(module, max_module_bytes)?;
+    let bytes = std::fs::read(module).map_err(|e| anyhow!("WASM module read failed: {e}"))?;
+    let wasm = wat::parse_bytes(&bytes).map_err(|e| anyhow!("WASM module parse failed: {e}"))?;
+    let mut has_core_start = false;
+    for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
+        if let Payload::StartSection { .. } =
+            payload.map_err(|e| anyhow!("WASM module scan failed: {e}"))?
+        {
+            has_core_start = true;
+        }
+    }
+    Ok(has_core_start)
+}
+
+fn enforce_module_size(module: &Path, max_module_bytes: u64) -> Result<()> {
     let size = std::fs::metadata(module)
         .map_err(|e| anyhow!("WASM module metadata failed: {}", e))?
         .len();
@@ -900,6 +950,19 @@ mod tests {
             err.chain()
                 .any(|cause| cause.to_string().contains("WASM compile failed")),
             "unexpected error chain: {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn idle_pool_prepares_instances_without_core_start_sections() {
+        let module = temp_file("prepared.wat", br#"(module (func (export "_start")))"#);
+        let executor = WasmExecutor::new(test_config(module, true)).expect("create executor");
+        wait_for_idle(&executor, 1).await;
+
+        let idle = executor.idle_instances.lock().await;
+        assert!(
+            idle[0].instance.is_some(),
+            "start-free module should have a prepared instance"
         );
     }
 

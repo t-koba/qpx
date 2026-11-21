@@ -16,4 +16,6 @@ tokio.workspace = true
 tracing.workspace = true
 wasmtime.workspace = true
 wasmtime-wasi.workspace = true
+wat.workspace = true
+wasmparser.workspace = true
 qpx-core = { path = "../qpx-core", default-features = false }

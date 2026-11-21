@@ -128,6 +128,8 @@ etherparse = "0.13"
 # WASM
 wasmtime = { version = "49.0.7", default-features = false, features = ["async", "cranelift", "parallel-compilation", "runtime", "std", "wat"] }
 wasmtime-wasi = { version = "49.0.7", default-features = false, features = ["p1"] }
+wat = "1.261.0"
+wasmparser = "0.261.0"
 
 # CLI
 clap = { version = "4", default-features = false, features = ["derive", "std", "help", "usage", "error-context"] }
