@@ -1110,7 +1110,7 @@ fn serialize_trailer_field_names(trailers: &HeaderMap) -> Option<HeaderValue> {
 
 #[cfg(test)]
 mod tests {
-    use super::{ConnectionHeaderMode, serialize_connection_headers};
+    use super::{ConnectionHeaderMode, serialize_connection_headers, serialize_status_and_headers};
     use crate::http::codec::h1_common::serialize_status_line;
     use bytes::BytesMut;
     use http::header::{CONNECTION, HeaderMap, HeaderValue};
@@ -1149,8 +1149,18 @@ mod tests {
 
         let unknown = StatusCode::from_u16(299).expect("valid status");
         let mut head = BytesMut::new();
-        serialize_status_line(&mut head, Version::HTTP_11, unknown);
-        assert_eq!(head.as_ref(), b"HTTP/1.1 299 \r\n");
+        serialize_status_and_headers(
+            &mut head,
+            Version::HTTP_11,
+            unknown,
+            &HeaderMap::new(),
+            ConnectionHeaderMode::Omit,
+        );
+        assert!(
+            head.as_ref().starts_with(b"HTTP/1.1 299 \r\n"),
+            "live response head: {:?}",
+            head.as_ref().split(|byte| *byte == b'\r').next()
+        );
 
         let mut raw =
             RawHttp1ResponseHead::from_parsed(&[], &Method::GET, unknown, Version::HTTP_11)
