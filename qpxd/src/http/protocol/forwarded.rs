@@ -285,6 +285,31 @@ mod tests {
     }
 
     #[test]
+    fn preserves_quoted_pair_in_trusted_forwarded_chain() {
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"),
+            "for=192.0.2.4;edge=\"west\\,canary\""
+                .parse()
+                .expect("header"),
+        );
+        apply_forwarded_policy(
+            &mut headers,
+            Some(&policy(UntrustedForwardedChainPolicy::Reject)),
+            "10.0.0.8".parse().expect("IP"),
+            "http",
+            None,
+        )
+        .expect("trusted peer");
+        assert_eq!(
+            headers
+                .get(&OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"))
+                .expect("Forwarded"),
+            "for=192.0.2.4;edge=\"west,canary\", for=10.0.0.8;by=qpx-edge;proto=http"
+        );
+    }
+
+    #[test]
     fn rejects_untrusted_chain_when_configured() {
         let mut headers = Headers::new();
         headers.insert(

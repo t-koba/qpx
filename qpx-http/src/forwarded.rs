@@ -153,7 +153,9 @@ fn parse_value(raw: &str) -> Result<String, ForwardedError> {
     let mut escaped = false;
     for byte in bytes[1..bytes.len() - 1].iter().copied() {
         if escaped {
-            if byte != b'"' && byte != b'\\' {
+            // RFC 9110 quoted-pairs may escape any printable ASCII character,
+            // not just the quote and backslash delimiters.
+            if !(b' '..=b'~').contains(&byte) {
                 return Err(ForwardedError::InvalidValue);
             }
             output.push(char::from(byte));
