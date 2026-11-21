@@ -29,6 +29,27 @@ fn resolve_script_uses_longest_existing_script_under_prefix() {
 }
 
 #[test]
+fn resolve_script_preserves_trailing_slash_in_path_info() {
+    let root = temp_cgi_root();
+    create_script(&root.join("app"));
+    let executor = test_executor(&root);
+
+    let without_slash = executor
+        .resolve_script(&test_request("/app", "", None))
+        .expect("resolve /app");
+    let with_slash = executor
+        .resolve_script(&test_request("/app", "/", None))
+        .expect("resolve /app/");
+
+    assert_eq!(without_slash.path, with_slash.path);
+    assert_eq!(without_slash.script_name, "/app");
+    assert_eq!(with_slash.script_name, "/app");
+    assert_eq!(without_slash.path_info, "");
+    assert_eq!(with_slash.path_info, "/");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn resolve_script_allows_route_prefix_to_identify_script() {
     let root = temp_cgi_root();
     create_script(&root.join("app"));

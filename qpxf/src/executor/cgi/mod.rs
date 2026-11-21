@@ -132,11 +132,7 @@ impl CgiExecutor {
                 last_existing_script_error(&script_path, err)?;
             }
             let script_name = join_url_path(candidate.url_prefix.as_str(), &script_relative);
-            let path_info = if script_len < segments.len() {
-                format!("/{}", segments[script_len..].join("/"))
-            } else {
-                String::new()
-            };
+            let path_info = path_info_after_segments(&candidate.relative_path, script_len);
             return Ok(ResolvedCgiScript {
                 path: canonical,
                 script_name,
@@ -160,6 +156,28 @@ fn last_existing_script_error<T>(path: &Path, err: anyhow::Error) -> Result<T> {
         "candidate CGI script is not secure: {}: {err}",
         path.display()
     ))
+}
+
+fn path_info_after_segments(relative: &str, script_segments: usize) -> String {
+    let mut remainder = relative.trim_start_matches('/');
+    let mut ended_with_separator = false;
+    for _ in 0..script_segments {
+        let Some(index) = remainder.find('/') else {
+            return String::new();
+        };
+        remainder = &remainder[index + 1..];
+        ended_with_separator = true;
+    }
+    let path = remainder.trim_start_matches('/');
+    if path.is_empty() {
+        if ended_with_separator {
+            "/".to_owned()
+        } else {
+            String::new()
+        }
+    } else {
+        format!("/{path}")
+    }
 }
 
 fn clean_relative_segments(relative: &str) -> Result<Vec<&str>> {
