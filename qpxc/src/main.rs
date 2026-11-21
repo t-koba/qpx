@@ -359,7 +359,12 @@ fn load_required_env(name: &str) -> Result<String> {
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 fn parse_host_from_endpoint(endpoint: &str) -> Option<String> {
     let authority: http::uri::Authority = endpoint.parse().ok()?;
-    Some(authority.host().to_string())
+    let host = authority.host();
+    let host = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    Some(host.to_string())
 }
 
 #[cfg(feature = "tls-rustls")]
@@ -389,6 +394,16 @@ mod tests {
             parse_host_from_endpoint("127.0.0.1:8080").as_deref(),
             Some("127.0.0.1")
         );
+    }
+
+    #[test]
+    fn bracketed_ipv6_endpoint_infers_ip_tls_name() {
+        let host = parse_host_from_endpoint("[::1]:19101").expect("IPv6 endpoint");
+        assert_eq!(host, "::1");
+        assert!(matches!(
+            server_name_for_host(&host).expect("TLS server name"),
+            rustls::pki_types::ServerName::IpAddress(_)
+        ));
     }
 
     #[test]
