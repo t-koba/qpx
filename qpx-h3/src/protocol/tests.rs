@@ -266,6 +266,34 @@ async fn control_state_reads_known_payloads_without_frame_buffer() {
 }
 
 #[tokio::test]
+async fn control_state_reader_ignores_integer_incremental() {
+    let state = PeerControlState::default();
+    let mut payload = Vec::new();
+    push_varint(&mut payload, 4);
+    payload.extend_from_slice(b"u=0, i=1");
+    let mut payload_reader = payload.as_slice();
+
+    state
+        .handle_control_frame_from_reader(
+            &mut payload_reader,
+            FRAME_PRIORITY_UPDATE_REQUEST,
+            payload.len() as u64,
+            128,
+            false,
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(
+        state.priority_for_request(4, None).await,
+        StreamPriority {
+            urgency: 0,
+            incremental: false
+        }
+    );
+}
+
+#[tokio::test]
 async fn control_state_reader_rejects_trailing_single_varint_payload() {
     let state = PeerControlState::default();
     let mut payload = [0x00, 0x00].as_slice();

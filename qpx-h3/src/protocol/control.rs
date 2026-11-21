@@ -561,6 +561,24 @@ pub(crate) fn parse_priority(value: &str) -> StreamPriority {
     priority
 }
 
+fn parse_priority_value_bytes(
+    value: &[u8],
+) -> std::result::Result<StreamPriority, ConnectionClose> {
+    if !value.is_ascii() {
+        return Err(ConnectionClose::new(
+            H3_GENERAL_PROTOCOL_ERROR,
+            "PRIORITY_UPDATE value must be ASCII structured field text",
+        ));
+    }
+    let value = std::str::from_utf8(value).map_err(|err| {
+        ConnectionClose::new(
+            H3_GENERAL_PROTOCOL_ERROR,
+            format!("malformed PRIORITY_UPDATE value: {err}"),
+        )
+    })?;
+    Ok(parse_priority(value))
+}
+
 fn parse_priority_update_payload(
     payload: &[u8],
 ) -> std::result::Result<(u64, StreamPriority), ConnectionClose> {
@@ -570,20 +588,8 @@ fn parse_priority_update_payload(
             format!("malformed PRIORITY_UPDATE target id: {err}"),
         )
     })?;
-    let priority_value = &payload[used..];
-    if !priority_value.is_ascii() {
-        return Err(ConnectionClose::new(
-            H3_GENERAL_PROTOCOL_ERROR,
-            "PRIORITY_UPDATE value must be ASCII structured field text",
-        ));
-    }
-    let priority_value = std::str::from_utf8(priority_value).map_err(|err| {
-        ConnectionClose::new(
-            H3_GENERAL_PROTOCOL_ERROR,
-            format!("malformed PRIORITY_UPDATE value: {err}"),
-        )
-    })?;
-    Ok((element_id, parse_priority(priority_value)))
+    let priority_value = parse_priority_value_bytes(&payload[used..])?;
+    Ok((element_id, priority_value))
 }
 
 async fn read_single_varint_control_payload<R>(
@@ -637,7 +643,7 @@ async fn read_priority_value<R>(
 where
     R: AsyncRead + Unpin,
 {
-    let mut parser = PriorityValueParser::default();
+    let mut value = Vec::with_capacity((*remaining).min(1024) as usize);
     let mut buf = [0u8; 1024];
     while *remaining != 0 {
         let want = (*remaining as usize).min(buf.len());
@@ -648,76 +654,9 @@ where
             )
         })?;
         *remaining -= want as u64;
-        for byte in &buf[..want] {
-            parser.push(*byte)?;
-        }
+        value.extend_from_slice(&buf[..want]);
     }
-    parser.finish()
-}
-
-#[derive(Default)]
-struct PriorityValueParser {
-    priority: StreamPriority,
-    token: Vec<u8>,
-    token_truncated: bool,
-}
-
-impl PriorityValueParser {
-    fn push(&mut self, byte: u8) -> std::result::Result<(), ConnectionClose> {
-        if !byte.is_ascii() {
-            return Err(ConnectionClose::new(
-                H3_GENERAL_PROTOCOL_ERROR,
-                "PRIORITY_UPDATE value must be ASCII structured field text",
-            ));
-        }
-        if byte == b',' {
-            self.finish_token();
-            return Ok(());
-        }
-        if self.token.len() < 64 {
-            self.token.push(byte);
-        } else {
-            self.token_truncated = true;
-        }
-        Ok(())
-    }
-
-    fn finish(mut self) -> std::result::Result<StreamPriority, ConnectionClose> {
-        self.finish_token();
-        Ok(self.priority)
-    }
-
-    fn finish_token(&mut self) {
-        if self.token_truncated {
-            self.token.clear();
-            self.token_truncated = false;
-            return;
-        }
-        let token = trim_ascii(self.token.as_slice());
-        if let Some(raw) = token.strip_prefix(b"u=") {
-            if let Ok(raw) = std::str::from_utf8(raw)
-                && let Ok(urgency) = raw.parse::<u8>()
-                && urgency <= 7
-            {
-                self.priority.urgency = urgency;
-            }
-        } else if token == b"i" || token == b"i=?1" || token == b"i=1" {
-            self.priority.incremental = true;
-        } else if token == b"i=?0" || token == b"i=0" {
-            self.priority.incremental = false;
-        }
-        self.token.clear();
-    }
-}
-
-fn trim_ascii(mut value: &[u8]) -> &[u8] {
-    while value.first().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[1..];
-    }
-    while value.last().is_some_and(u8::is_ascii_whitespace) {
-        value = &value[..value.len() - 1];
-    }
-    value
+    parse_priority_value_bytes(&value)
 }
 
 fn is_client_initiated_bidi_stream_id(stream_id: u64) -> bool {
