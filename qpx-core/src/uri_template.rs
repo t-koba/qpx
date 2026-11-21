@@ -4,7 +4,20 @@ use std::collections::HashMap;
 
 type Result<T> = std::result::Result<T, UriTemplateError>;
 
-const SIMPLE_ENCODE_SET: &AsciiSet = &CONTROLS
+const RESERVED_ENCODE_SET: &AsciiSet = &CONTROLS
+    .add(b' ')
+    .add(b'"')
+    .add(b'%')
+    .add(b'<')
+    .add(b'>')
+    .add(b'\\')
+    .add(b'^')
+    .add(b'`')
+    .add(b'{')
+    .add(b'|')
+    .add(b'}');
+
+const SIMPLE_ENCODE_SET: &AsciiSet = &RESERVED_ENCODE_SET
     .add(b':')
     .add(b'/')
     .add(b'?')
@@ -22,21 +35,7 @@ const SIMPLE_ENCODE_SET: &AsciiSet = &CONTROLS
     .add(b'+')
     .add(b',')
     .add(b';')
-    .add(b'=')
-    .add(b'%');
-
-const RESERVED_ENCODE_SET: &AsciiSet = &CONTROLS
-    .add(b' ')
-    .add(b'"')
-    .add(b'%')
-    .add(b'<')
-    .add(b'>')
-    .add(b'\\')
-    .add(b'^')
-    .add(b'`')
-    .add(b'{')
-    .add(b'|')
-    .add(b'}');
+    .add(b'=');
 
 /// Parsed RFC 6570 URI template with expansion and reverse-match support.
 #[derive(Debug, Clone)]
@@ -664,6 +663,15 @@ impl Operator {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn expands_query_value_with_percent_encoded_space() {
+        let template = UriTemplate::parse("/items{?q}").expect("template");
+        let expanded = template
+            .expand(|_| Some("a b".to_string()))
+            .expect("expand");
+        assert_eq!(expanded, "/items?q=a%20b");
+    }
 
     #[test]
     fn expands_path_and_query_operators() {
