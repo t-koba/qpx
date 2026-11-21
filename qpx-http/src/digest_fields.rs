@@ -19,7 +19,11 @@ impl DigestField {
         let Some(dictionary) = parse_dictionary_fields(headers, name)
             .map_err(|error| anyhow!("invalid {} Structured Field: {error}", name.as_str()))?
         else {
-            return Ok(None);
+            return if headers.contains_key(name) {
+                Err(anyhow!("{} must not be empty", name.as_str()))
+            } else {
+                Ok(None)
+            };
         };
         if dictionary.is_empty() {
             return Err(anyhow!("{} must not be empty", name.as_str()));
@@ -73,6 +77,19 @@ mod tests {
             .unwrap();
         digest.verify_sha256(body).unwrap();
         assert!(digest.verify_sha256(b"modified").is_err());
+    }
+
+    #[test]
+    fn rejects_present_empty_content_digest() {
+        let mut headers = HeaderMap::new();
+        assert!(
+            DigestField::parse(&headers, &CONTENT_DIGEST)
+                .unwrap()
+                .is_none()
+        );
+
+        headers.insert(CONTENT_DIGEST.clone(), HeaderValue::from_static(""));
+        assert!(DigestField::parse(&headers, &CONTENT_DIGEST).is_err());
     }
 
     #[test]
