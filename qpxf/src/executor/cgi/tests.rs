@@ -29,6 +29,31 @@ fn resolve_script_uses_longest_existing_script_under_prefix() {
 }
 
 #[test]
+fn resolve_script_doubled_slash_in_script_prefix_does_not_repeat_segment() {
+    let root = temp_cgi_root();
+    create_script(&root.join("nested").join("app"));
+    let executor = test_executor(&root);
+    let req = test_request("/nested", "//app/foo", None);
+
+    let resolved = executor
+        .resolve_script(&req)
+        .expect("resolve nested script with doubled slash");
+
+    assert_eq!(
+        resolved.path,
+        root.join("nested").join("app").canonicalize().unwrap()
+    );
+    assert_eq!(resolved.script_name, "/nested/app");
+    assert_eq!(resolved.path_info, "/foo");
+
+    let with_trailing_slash = executor
+        .resolve_script(&test_request("/nested", "//app/", None))
+        .expect("resolve nested script with doubled slash and trailing slash");
+    assert_eq!(with_trailing_slash.path_info, "/");
+    let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
 fn resolve_script_preserves_trailing_slash_in_path_info() {
     let root = temp_cgi_root();
     create_script(&root.join("app"));

@@ -159,25 +159,35 @@ fn last_existing_script_error<T>(path: &Path, err: anyhow::Error) -> Result<T> {
 }
 
 fn path_info_after_segments(relative: &str, script_segments: usize) -> String {
-    let mut remainder = relative.trim_start_matches('/');
-    let mut ended_with_separator = false;
-    for _ in 0..script_segments {
-        let Some(index) = remainder.find('/') else {
-            return String::new();
-        };
-        remainder = &remainder[index + 1..];
-        ended_with_separator = true;
-    }
-    let path = remainder.trim_start_matches('/');
-    if path.is_empty() {
-        if ended_with_separator {
-            "/".to_owned()
-        } else {
-            String::new()
+    let bytes = relative.as_bytes();
+    let mut index = 0;
+    let mut consumed = 0;
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index] == b'/' {
+            index += 1;
         }
-    } else {
-        format!("/{path}")
+        if index == bytes.len() {
+            break;
+        }
+        while index < bytes.len() && bytes[index] != b'/' {
+            index += 1;
+        }
+        consumed += 1;
+        if consumed == script_segments {
+            let remainder = &relative[index..];
+            let path = remainder.trim_start_matches('/');
+            return if path.is_empty() {
+                if remainder.ends_with('/') {
+                    "/".to_owned()
+                } else {
+                    String::new()
+                }
+            } else {
+                format!("/{path}")
+            };
+        }
     }
+    String::new()
 }
 
 fn clean_relative_segments(relative: &str) -> Result<Vec<&str>> {
