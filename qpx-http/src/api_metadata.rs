@@ -216,15 +216,49 @@ fn unix_seconds(value: SystemTime) -> Result<i64, ApiMetadataError> {
 }
 
 fn valid_relation_type(value: &str) -> bool {
-    (!value.is_empty()
+    let token = !value.is_empty()
         && value.bytes().all(|byte| {
             byte.is_ascii_alphanumeric()
                 || matches!(
                     byte,
                     b'!' | b'#' | b'$' | b'&' | b'.' | b'+' | b'-' | b'^' | b'_'
                 )
-        }))
-        || url::Url::parse(value).is_ok()
+        });
+    if token {
+        return true;
+    }
+
+    // RFC 8288 extension relations are RFC 3986 URIs. `Url` also accepts IRIs
+    // and values it silently normalizes, but this module emits the input
+    // verbatim, so only accept ASCII URI characters here.
+    value.bytes().all(|byte| {
+        byte.is_ascii_alphanumeric()
+            || matches!(
+                byte,
+                b'-' | b'.'
+                    | b'_'
+                    | b'~'
+                    | b':'
+                    | b'/'
+                    | b'?'
+                    | b'#'
+                    | b'['
+                    | b']'
+                    | b'@'
+                    | b'!'
+                    | b'$'
+                    | b'&'
+                    | b'\''
+                    | b'('
+                    | b')'
+                    | b'*'
+                    | b'+'
+                    | b','
+                    | b';'
+                    | b'='
+                    | b'%'
+            )
+    }) && url::Url::parse(value).is_ok()
 }
 
 fn quote(value: &str) -> String {
@@ -522,6 +556,22 @@ mod tests {
         );
         assert!(!valid_relation_type("not a uri: just words"));
         assert!(!valid_relation_type(":"));
+    }
+
+    #[test]
+    fn rejects_non_ascii_uri_relation_type() {
+        assert_eq!(
+            LinkValue::new("/v2", "https://example.com/rel\u{00e9}").err(),
+            Some(ApiMetadataError::InvalidLinkRelation)
+        );
+    }
+
+    #[test]
+    fn rejects_control_character_uri_relation_type() {
+        assert_eq!(
+            LinkValue::new("/v2", "https://example.com/\u{007f}").err(),
+            Some(ApiMetadataError::InvalidLinkRelation)
+        );
     }
 
     #[test]
