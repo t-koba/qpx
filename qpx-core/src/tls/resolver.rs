@@ -33,7 +33,9 @@ impl CaStore {
             .with_cert_resolver(resolver.clone());
         // Explicit fail-closed: RFC 8470 early data stays disabled on MITM listeners.
         config.max_early_data_size = 0;
-        config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
+        // Inspected TLS is always served by the HTTP/1 codec; never select
+        // h2 at the inner handshake when qpx cannot speak it there.
+        config.alpn_protocols = vec![b"http/1.1".to_vec()];
         Ok(MitmConfig {
             ca: self.clone(),
             resolver,
