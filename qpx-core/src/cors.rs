@@ -602,16 +602,20 @@ fn single_header<'a>(
 fn parse_request_headers(headers: &Headers) -> Result<Vec<HeaderName>, CorsRequestError> {
     let mut parsed = Vec::new();
     let mut seen = HashSet::new();
+    let mut present = false;
     let ordinary = OrdinaryHeaderName::try_from(REQUEST_HEADERS)
         .map_err(|_| CorsRequestError::InvalidHeaders)?;
     for value in headers.get_all(&ordinary) {
+        present = true;
         let value = value
             .to_str()
             .map_err(|_| CorsRequestError::InvalidHeaders)?;
         for raw in value.split(',') {
             let raw = raw.trim();
             if raw.is_empty() {
-                return Err(CorsRequestError::InvalidHeaders);
+                // RFC 9110 list recipients ignore a reasonable number of
+                // empty members; a field with no names is rejected below.
+                continue;
             }
             let name = HeaderName::from_bytes(raw.as_bytes())
                 .map_err(|_| CorsRequestError::InvalidHeaders)?;
@@ -619,6 +623,9 @@ fn parse_request_headers(headers: &Headers) -> Result<Vec<HeaderName>, CorsReque
                 parsed.push(name);
             }
         }
+    }
+    if present && parsed.is_empty() {
+        return Err(CorsRequestError::InvalidHeaders);
     }
     Ok(parsed)
 }
@@ -784,6 +791,44 @@ mod tests {
         assert_eq!(
             policy.apply_preflight_response(&request, &mut HeaderMap::new()),
             Err(CorsRejection::Header)
+        );
+    }
+
+    #[test]
+    fn request_headers_skip_empty_list_members() {
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from(REQUEST_HEADERS).expect("ordinary"),
+            HeaderValue::from_static("X-Request-Id, , Content-Type"),
+        );
+        assert_eq!(
+            parse_request_headers(&headers).expect("request headers"),
+            vec![
+                HeaderName::from_static("x-request-id"),
+                HeaderName::from_static("content-type"),
+            ]
+        );
+    }
+
+    #[test]
+    fn request_headers_reject_only_empty_list_members() {
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from(REQUEST_HEADERS).expect("ordinary"),
+            HeaderValue::from_static(" , "),
+        );
+        assert_eq!(
+            parse_request_headers(&headers),
+            Err(CorsRequestError::InvalidHeaders)
+        );
+    }
+
+    #[test]
+    fn request_headers_absent_field_is_empty() {
+        let headers = Headers::new();
+        assert_eq!(
+            parse_request_headers(&headers).expect("request headers"),
+            Vec::<HeaderName>::new()
         );
     }
 }
