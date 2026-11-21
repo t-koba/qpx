@@ -95,6 +95,16 @@ impl quinn::rustls::server::ResolvesServerCert for QuicSniResolver {
                 return None;
             }
         }
+        let wildcard = crate::reverse::tls::wildcard_sni_for_name(&name)?;
+        if let Some(key) = self.certs.get(&wildcard) {
+            return Some(key.clone());
+        }
+        if self.acme_snis.contains(&wildcard) {
+            #[cfg(feature = "acme")]
+            {
+                return qpx_acme::quic_cert_store().and_then(|store| store.get(&wildcard));
+            }
+        }
         None
     }
 }

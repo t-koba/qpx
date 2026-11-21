@@ -113,6 +113,16 @@ impl rustls::server::ResolvesServerCert for SniResolver {
                 return None;
             }
         }
+        let wildcard = super::wildcard_sni_for_name(&name)?;
+        if let Some(key) = self.certs.get(&wildcard) {
+            return Some(key.clone());
+        }
+        if self.acme_snis.contains(&wildcard) {
+            #[cfg(feature = "acme")]
+            {
+                return qpx_acme::cert_store().and_then(|store| store.get(&wildcard));
+            }
+        }
         None
     }
 }
@@ -199,4 +209,61 @@ pub(in crate::reverse) fn build_tls_acceptor(
     }
 
     Ok(NativeTlsAcceptor { by_sni, default })
+}
+
+#[cfg(all(test, feature = "tls-rustls"))]
+mod tests {
+    use super::*;
+    use qpx_core::config::{ReverseTlsConfig, TlsCertConfig};
+    use rustls::client::ClientConfig;
+    use rustls::server::{Acceptor, ResolvesServerCert};
+    use rustls::{ClientConnection, RootCertStore};
+    use std::fs;
+
+    fn resolve_for_sni(
+        resolver: &SniResolver,
+        name: &str,
+    ) -> Option<Arc<rustls::sign::CertifiedKey>> {
+        let config = ClientConfig::builder()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        let mut connection = ClientConnection::new(
+            Arc::new(config),
+            rustls::pki_types::ServerName::try_from(name.to_owned()).unwrap(),
+        )
+        .unwrap();
+        let mut wire = Vec::new();
+        connection.write_tls(&mut wire).unwrap();
+        let mut acceptor = Acceptor::default();
+        acceptor.read_tls(&mut wire.as_slice()).unwrap();
+        let accepted = acceptor.accept().unwrap().expect("complete ClientHello");
+        resolver.resolve(accepted.client_hello())
+    }
+
+    #[test]
+    fn wildcard_certificate_selects_for_one_label_sni() {
+        let _ = qpx_core::tls::init_rustls_crypto_provider();
+        let directory = tempfile::tempdir().unwrap();
+        let cert_path = directory.path().join("cert.pem");
+        let key_path = directory.path().join("key.pem");
+        let pair = rcgen::generate_simple_self_signed(vec!["*.example.test".to_owned()]).unwrap();
+        fs::write(&cert_path, pair.cert.pem()).unwrap();
+        fs::write(&key_path, pair.signing_key.serialize_pem()).unwrap();
+        let tls = ReverseTlsConfig {
+            certificates: vec![TlsCertConfig {
+                sni: "*.example.test".to_owned(),
+                pkcs12: None,
+                pkcs12_password_env: None,
+                cert: Some(cert_path.to_str().unwrap().to_owned()),
+                key: Some(key_path.to_str().unwrap().to_owned()),
+            }],
+            client_ca: None,
+        };
+        let resolver = SniResolver::new(&tls).unwrap();
+        let selected =
+            resolve_for_sni(&resolver, "shop.example.test").expect("wildcard certificate");
+        assert_eq!(selected.cert[0].as_ref(), pair.cert.der().as_ref());
+        assert!(resolve_for_sni(&resolver, "example.test").is_none());
+        assert!(resolve_for_sni(&resolver, "a.shop.example.test").is_none());
+    }
 }

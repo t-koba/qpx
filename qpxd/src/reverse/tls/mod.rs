@@ -19,6 +19,19 @@ use qpx_core::config::TlsCertConfig;
 #[cfg(feature = "tls-rustls")]
 use std::path::Path;
 
+/// Returns the single-label wildcard name matching `name`, if any.
+///
+/// A wildcard matches exactly one leading label: `*.example.test` matches
+/// `shop.example.test`, but not `example.test` or `a.shop.example.test`.
+#[cfg(any(feature = "tls-rustls", feature = "http3"))]
+pub(in crate::reverse) fn wildcard_sni_for_name(name: &str) -> Option<String> {
+    let (_, parent) = name.split_once('.')?;
+    if parent.is_empty() {
+        return None;
+    }
+    Some(format!("*.{parent}"))
+}
+
 /// Returns the trimmed certificate and key paths, or `None` for an ACME-managed pair.
 #[cfg(feature = "tls-rustls")]
 pub(in crate::reverse) fn certificate_file_paths(
@@ -59,6 +72,23 @@ mod tests {
             certificate_file_paths(&tls_cert(Some(" cert.pem "), Some(" key.pem "))).unwrap(),
             Some((Path::new("cert.pem"), Path::new("key.pem")))
         );
+    }
+
+    #[test]
+    fn wildcard_sni_matches_exactly_one_label() {
+        assert_eq!(
+            wildcard_sni_for_name("shop.example.test").as_deref(),
+            Some("*.example.test")
+        );
+        assert_eq!(
+            wildcard_sni_for_name("example.test").as_deref(),
+            Some("*.test")
+        );
+        assert_eq!(
+            wildcard_sni_for_name("a.shop.example.test").as_deref(),
+            Some("*.shop.example.test")
+        );
+        assert_eq!(wildcard_sni_for_name("localhost"), None);
     }
 
     #[test]
