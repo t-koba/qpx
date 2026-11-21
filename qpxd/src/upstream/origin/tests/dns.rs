@@ -110,6 +110,47 @@ async fn dns_discovery_retries_truncated_udp_response_over_tcp() -> Result<()> {
 }
 
 #[tokio::test]
+async fn dns_discovery_retries_truncated_ipv6_response_over_tcp() -> Result<()> {
+    let mut answers = HashMap::new();
+    answers.insert(
+        ("service.example".to_string(), DNS_TYPE_A),
+        vec![TestDnsRecord::A {
+            addr: Ipv4Addr::new(127, 0, 0, 12),
+            ttl_secs: 12,
+        }],
+    );
+    answers.insert(("service.example".to_string(), DNS_TYPE_AAAA), Vec::new());
+    let (nameserver, udp_server, tcp_server) =
+        match spawn_fake_dns_ipv6_server_with_tcp_fallback(answers).await {
+            Ok(servers) => servers,
+            Err(err) if err.root_cause().downcast_ref::<std::io::Error>().is_some() => {
+                eprintln!("skipping IPv6 TCP fallback test: {err}");
+                return Ok(());
+            }
+            Err(err) => return Err(err),
+        };
+
+    let config = discovery_config(UpstreamDiscoveryKind::Dns);
+    let result = discover_origin_endpoints_with_nameservers(
+        "https://service.example",
+        &config,
+        &[nameserver],
+    )
+    .await;
+
+    udp_server.abort();
+    tcp_server.abort();
+    let _ = udp_server.await;
+    let _ = tcp_server.await;
+
+    let (endpoints, delay) = result?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].connect_authority(443)?, "127.0.0.12:443");
+    assert_eq!(delay, Duration::from_secs(12));
+    Ok(())
+}
+
+#[tokio::test]
 async fn dns_discovery_falls_back_after_resolver_error_rcode() -> Result<()> {
     let mut answers = HashMap::new();
     answers.insert(

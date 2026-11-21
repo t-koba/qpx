@@ -190,6 +190,47 @@ async fn bind_fake_dns_tcp_first() -> std::io::Result<(UdpSocket, SocketAddr, Tc
     Ok((udp, addr, tcp))
 }
 
+async fn spawn_fake_dns_ipv6_server_with_tcp_fallback(
+    answers: HashMap<(String, u16), Vec<TestDnsRecord>>,
+) -> Result<(SocketAddr, JoinHandle<Result<()>>, JoinHandle<Result<()>>)> {
+    let (udp, addr, tcp) = bind_fake_dns_ipv6_udp_tcp_pair().await?;
+    let udp_task = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (n, peer) = udp.recv_from(&mut buf).await?;
+            let mut response = build_test_dns_response(&buf[..n], &HashMap::new())?;
+            response[2] |= 0x02;
+            udp.send_to(response.as_slice(), peer).await?;
+        }
+    });
+    let tcp_task = tokio::spawn(async move {
+        loop {
+            let (mut stream, _) = tcp.accept().await?;
+            let answers = answers.clone();
+            std::mem::drop(tokio::spawn(async move {
+                let mut len_buf = [0u8; 2];
+                stream.read_exact(&mut len_buf).await?;
+                let len = u16::from_be_bytes(len_buf) as usize;
+                let mut request = vec![0u8; len];
+                stream.read_exact(request.as_mut_slice()).await?;
+                let response = build_test_dns_response(request.as_slice(), &answers)?;
+                let response_len = u16::try_from(response.len())?;
+                stream.write_all(&response_len.to_be_bytes()).await?;
+                stream.write_all(response.as_slice()).await?;
+                anyhow::Ok(())
+            }));
+        }
+    });
+    Ok((addr, udp_task, tcp_task))
+}
+
+async fn bind_fake_dns_ipv6_udp_tcp_pair() -> Result<(UdpSocket, SocketAddr, TcpListener)> {
+    let tcp = TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).await?;
+    let addr = tcp.local_addr()?;
+    let udp = UdpSocket::bind(addr).await?;
+    Ok((udp, addr, tcp))
+}
+
 fn build_test_dns_response(
     request: &[u8],
     answers: &HashMap<(String, u16), Vec<TestDnsRecord>>,
