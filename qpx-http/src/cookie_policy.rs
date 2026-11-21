@@ -22,6 +22,7 @@ pub struct CookiePair {
 pub struct SetCookie {
     pub name: String,
     pub value: String,
+    pub quoted: bool,
     pub expires: Option<String>,
     pub max_age: Option<i64>,
     pub domain: Option<String>,
@@ -98,10 +99,15 @@ impl CookieSecurityPolicy {
 impl SetCookie {
     pub fn parse(value: &str) -> Result<Self> {
         let mut parts = value.split(';');
-        let pair = parse_cookie_pair(parts.next().unwrap_or_default().trim())?;
+        let pair_source = parts.next().unwrap_or_default().trim();
+        let quoted = pair_source
+            .split_once('=')
+            .is_some_and(|(_, value)| value.starts_with('"') && value.ends_with('"'));
+        let pair = parse_cookie_pair(pair_source)?;
         let mut cookie = Self {
             name: pair.name,
             value: pair.value,
+            quoted,
             expires: None,
             max_age: None,
             domain: None,
@@ -210,7 +216,12 @@ impl SetCookie {
 
     pub fn serialize(&self) -> Result<String> {
         self.validate()?;
-        let mut output = format!("{}={}", self.name, self.value);
+        let value = if self.quoted {
+            format!("\"{}\"", self.value)
+        } else {
+            self.value.clone()
+        };
+        let mut output = format!("{}={}", self.name, value);
         if let Some(expires) = &self.expires {
             httpdate::parse_http_date(expires).map_err(|_| anyhow!("invalid Expires attribute"))?;
             output.push_str("; Expires=");
@@ -394,7 +405,7 @@ mod tests {
         );
         headers.ordinary_append(
             OrdinaryHeaderName::try_from(SET_COOKIE).expect("ordinary"),
-            HeaderValue::from_static("b=2; Priority=High"),
+            HeaderValue::from_static("b=\"2\"; Priority=High"),
         );
         CookieSecurityPolicy {
             require_secure: true,
@@ -413,7 +424,7 @@ mod tests {
             values,
             [
                 "a=1; Secure; HttpOnly; SameSite=Lax",
-                "b=2; Secure; HttpOnly; SameSite=Lax; Priority=High"
+                "b=\"2\"; Secure; HttpOnly; SameSite=Lax; Priority=High"
             ]
         );
     }

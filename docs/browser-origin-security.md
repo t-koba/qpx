@@ -54,7 +54,8 @@ whereas omitting `accept_ch` emits no field at all. qpx removes every
 managed target-provided value before applying the configured value.
 
 Cookie enforcement parses every Set-Cookie field independently and preserves
-field multiplicity. `SameSite=None` and `Partitioned` require Secure. A policy
+field multiplicity and the cookie-pair's quoted wire form. `SameSite=None` and
+`Partitioned` require Secure. A policy
 that requires Secure fails closed on a connection qpx does not recognize as a
 secure origin; configure TLS termination consistently.
 

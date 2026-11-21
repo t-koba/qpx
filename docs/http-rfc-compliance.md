@@ -251,7 +251,8 @@ conflicting target values. Fetch-dependent responses carry the corresponding
 `application/reports+json` batches, rejects malformed payloads, and emits
 structured logs and `qpx_browser_reports_received_total` metrics. Cookie policy
 can enforce Secure, HttpOnly, SameSite, and Partitioned attributes on every
-Set-Cookie field while preserving validated extension attributes. Evidence is
+Set-Cookie field while preserving the cookie-pair value and validated extension
+attributes. Evidence is
 provided by `browser_policy::tests`, `cookie_policy::tests`, reverse collector
 tests, and `scripts/e2e-browser-origin.sh` using an unmodified headless browser.
 
