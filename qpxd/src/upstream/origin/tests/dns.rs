@@ -38,6 +38,44 @@ async fn dns_discovery_resolves_connect_authority_and_refresh_delay() -> Result<
 }
 
 #[tokio::test]
+async fn dns_discovery_queries_ipv6_nameserver() -> Result<()> {
+    let mut answers = HashMap::new();
+    answers.insert(
+        ("service.example".to_string(), DNS_TYPE_A),
+        vec![TestDnsRecord::A {
+            addr: Ipv4Addr::new(127, 0, 0, 11),
+            ttl_secs: 12,
+        }],
+    );
+    answers.insert(("service.example".to_string(), DNS_TYPE_AAAA), Vec::new());
+    let (nameserver, server) = match spawn_fake_dns_ipv6_server(answers).await {
+        Ok(pair) => pair,
+        Err(err) if err.root_cause().downcast_ref::<std::io::Error>().is_some() => {
+            eprintln!("skipping IPv6 nameserver test: {err}");
+            return Ok(());
+        }
+        Err(err) => return Err(err),
+    };
+
+    let config = discovery_config(UpstreamDiscoveryKind::Dns);
+    let result = discover_origin_endpoints_with_nameservers(
+        "https://service.example",
+        &config,
+        &[nameserver],
+    )
+    .await;
+
+    server.abort();
+    let _ = server.await;
+
+    let (endpoints, delay) = result?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].connect_authority(443)?, "127.0.0.11:443");
+    assert_eq!(delay, Duration::from_secs(12));
+    Ok(())
+}
+
+#[tokio::test]
 async fn dns_discovery_retries_truncated_udp_response_over_tcp() -> Result<()> {
     let mut answers = HashMap::new();
     answers.insert(

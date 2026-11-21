@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use qpx_core::config::{UpstreamDiscoveryConfig, UpstreamDiscoveryKind};
 use ring::rand::{SecureRandom, SystemRandom};
 use std::collections::HashSet;
-use std::net::SocketAddr;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Mutex, OnceLock};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 #[cfg(feature = "http3")]
@@ -386,13 +386,24 @@ async fn query_raw_dns(name: &str, qtype: u16, nameservers: &[SocketAddr]) -> Re
     if nameservers.is_empty() {
         return Err(anyhow!("no DNS nameservers configured"));
     }
-    let bind_addr = SocketAddr::from(([0, 0, 0, 0], 0));
-    let socket = UdpSocket::bind(bind_addr).await?;
-    let mut buf = [0u8; 2048];
+    let mut ipv4_socket = None;
+    let mut ipv6_socket = None;
     let mut last_rcode = None;
     let mut pending = HashSet::new();
     let mut last_send_err = None;
     for nameserver in nameservers.iter().copied() {
+        let socket = if nameserver.is_ipv4() {
+            if ipv4_socket.is_none() {
+                ipv4_socket = Some(UdpSocket::bind((Ipv4Addr::UNSPECIFIED, 0)).await?);
+            }
+            ipv4_socket.as_ref()
+        } else {
+            if ipv6_socket.is_none() {
+                ipv6_socket = Some(UdpSocket::bind((Ipv6Addr::UNSPECIFIED, 0)).await?);
+            }
+            ipv6_socket.as_ref()
+        }
+        .expect("nameserver-family socket was initialized");
         match socket.send_to(request.as_slice(), nameserver).await {
             Ok(_) => {
                 pending.insert(nameserver);
@@ -409,6 +420,8 @@ async fn query_raw_dns(name: &str, qtype: u16, nameservers: &[SocketAddr]) -> Re
         return Err(anyhow!("DNS query timed out for {}", name));
     }
 
+    let mut ipv4_buf = [0u8; 2048];
+    let mut ipv6_buf = [0u8; 2048];
     let deadline = Instant::now() + DNS_QUERY_TIMEOUT;
     while !pending.is_empty() {
         let now = Instant::now();
@@ -416,18 +429,39 @@ async fn query_raw_dns(name: &str, qtype: u16, nameservers: &[SocketAddr]) -> Re
             break;
         }
         let remaining = deadline.saturating_duration_since(now);
-        let (len, peer) = match timeout(remaining, socket.recv_from(&mut buf)).await {
-            Ok(result) => result?,
-            Err(_) => break,
+        let received = match (&mut ipv4_socket, &mut ipv6_socket) {
+            (Some(ipv4), Some(ipv6)) => tokio::select! {
+                result = timeout(remaining, ipv4.recv_from(&mut ipv4_buf)) => match result {
+                    Ok(result) => result.ok().map(|(len, peer)| (peer, &ipv4_buf[..len])),
+                    Err(_) => None,
+                },
+                result = timeout(remaining, ipv6.recv_from(&mut ipv6_buf)) => match result {
+                    Ok(result) => result.ok().map(|(len, peer)| (peer, &ipv6_buf[..len])),
+                    Err(_) => None,
+                },
+            },
+            (Some(ipv4), None) => match timeout(remaining, ipv4.recv_from(&mut ipv4_buf)).await {
+                Ok(result) => result.ok().map(|(len, peer)| (peer, &ipv4_buf[..len])),
+                Err(_) => None,
+            },
+            (None, Some(ipv6)) => match timeout(remaining, ipv6.recv_from(&mut ipv6_buf)).await {
+                Ok(result) => result.ok().map(|(len, peer)| (peer, &ipv6_buf[..len])),
+                Err(_) => None,
+            },
+            (None, None) => break,
+        };
+        let (peer, response) = match received {
+            Some(received) => received,
+            None => break,
         };
         if !pending.contains(&peer) {
             continue;
         }
-        if dns_response_is_truncated_match(&buf[..len], id, name, qtype).unwrap_or(false) {
+        if dns_response_is_truncated_match(response, id, name, qtype).unwrap_or(false) {
             return query_raw_dns_tcp(request.as_slice(), id, name, qtype, peer).await;
         }
-        match dns_response_query_status(&buf[..len], id, name, qtype) {
-            Ok(DnsResponseStatus::Success) => return Ok(buf[..len].to_vec()),
+        match dns_response_query_status(response, id, name, qtype) {
+            Ok(DnsResponseStatus::Success) => return Ok(response.to_vec()),
             Ok(DnsResponseStatus::ErrorRcode(rcode)) => {
                 last_rcode = Some(rcode);
                 pending.remove(&peer);

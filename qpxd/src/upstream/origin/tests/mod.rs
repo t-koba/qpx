@@ -61,6 +61,22 @@ async fn spawn_fake_dns_server(
     Ok((addr, task))
 }
 
+async fn spawn_fake_dns_ipv6_server(
+    answers: HashMap<(String, u16), Vec<TestDnsRecord>>,
+) -> Result<(SocketAddr, JoinHandle<Result<()>>)> {
+    let socket = UdpSocket::bind((Ipv6Addr::LOCALHOST, 0)).await?;
+    let addr = socket.local_addr()?;
+    let task = tokio::spawn(async move {
+        let mut buf = [0u8; 2048];
+        loop {
+            let (n, peer) = socket.recv_from(&mut buf).await?;
+            let response = build_test_dns_response(&buf[..n], &answers)?;
+            socket.send_to(response.as_slice(), peer).await?;
+        }
+    });
+    Ok((addr, task))
+}
+
 async fn spawn_fake_dns_rcode_server(rcode: u8) -> Result<(SocketAddr, JoinHandle<Result<()>>)> {
     let socket = UdpSocket::bind("127.0.0.1:0").await?;
     let addr = socket.local_addr()?;
