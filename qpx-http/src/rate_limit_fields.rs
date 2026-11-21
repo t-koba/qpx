@@ -26,6 +26,9 @@ impl RateLimitPolicyField {
     pub fn to_header_value(&self) -> Result<HeaderValue> {
         validate_integer(self.quota, "quota")?;
         validate_integer(self.window_seconds, "window")?;
+        if self.window_seconds == 0 {
+            return Err(anyhow!("RateLimit window must be >= 1"));
+        }
         let mut value = serialize_string(self.name.as_str())?;
         value.push_str(";q=");
         value.push_str(self.quota.to_string().as_str());
@@ -110,6 +113,21 @@ mod tests {
             value,
             "\"per-user\";q=100;w=60;qu=\"requests\";pk=:dGVuYW50OjQy:"
         );
+    }
+
+    #[test]
+    fn rejects_zero_policy_window() {
+        let mut policy = RateLimitPolicyField {
+            name: "per-user".to_string(),
+            quota: 100,
+            window_seconds: 0,
+            quota_unit: None,
+            partition_key: None,
+        };
+        assert!(policy.to_header_value().is_err());
+
+        policy.window_seconds = 1;
+        assert_eq!(policy.to_header_value().unwrap(), "\"per-user\";q=100;w=1");
     }
 
     #[test]
