@@ -18,8 +18,6 @@ pub enum PreferError {
     InvalidBytes,
     #[error("Prefer field contains a malformed preference")]
     InvalidPreference,
-    #[error("Prefer field contains a duplicate preference: {0}")]
-    DuplicatePreference(String),
 }
 
 pub fn parse_prefer(value: &HeaderValue) -> Result<Vec<Preference>, PreferError> {
@@ -35,9 +33,11 @@ pub fn parse_prefer(value: &HeaderValue) -> Result<Vec<Preference>, PreferError>
             .ok_or(PreferError::InvalidPreference)?;
         let (token, value) = parse_pair(first)?;
         let token = token.to_ascii_lowercase();
-        if seen.insert(token.clone(), ()).is_some() {
-            return Err(PreferError::DuplicatePreference(token));
+        if seen.contains_key(&token) {
+            // RFC 7240 §2: consider the first instance and ignore later ones.
+            continue;
         }
+        seen.insert(token.clone(), ());
         let mut parameters = BTreeMap::new();
         for component in components.iter().skip(1) {
             let (name, value) = parse_pair(component.trim())?;
@@ -168,10 +168,13 @@ mod tests {
     }
 
     #[test]
-    fn duplicate_preferences_are_rejected() {
-        assert!(matches!(
-            parse_prefer(&HeaderValue::from_static("wait=1, WAIT=2")),
-            Err(PreferError::DuplicatePreference(_))
-        ));
+    fn duplicate_preferences_keep_first() {
+        let parsed = parse_prefer(&HeaderValue::from_static("wait=1, WAIT=2, respond-async"))
+            .expect("duplicate preference should be ignored");
+        let members: Vec<_> = parsed
+            .iter()
+            .map(|preference| (preference.token.as_str(), preference.value.as_deref()))
+            .collect();
+        assert_eq!(members, [("wait", Some("1")), ("respond-async", None)]);
     }
 }
