@@ -1450,7 +1450,7 @@ impl CacheBackend for DiskCacheBackend {
         // hit opens one file instead of two.
         let body_key = cache_body_storage_key(key);
         let path = self.path_for(namespace, body_key.as_str());
-        timeout(
+        let written = timeout(
             options.body_read_timeout,
             self.write_body_stream(
                 namespace,
@@ -1461,7 +1461,9 @@ impl CacheBackend for DiskCacheBackend {
                 Some((key.to_string(), encode_metadata)),
             ),
         )
-        .await?
+        .await?;
+        self.release_decoded_records(namespace, key);
+        written
     }
 
     async fn retire_response_metadata(&self, namespace: &str, key: &str) -> Result<()> {
@@ -1474,12 +1476,17 @@ impl CacheBackend for DiskCacheBackend {
             HotRecentUpdateGuard::acquire(&self.hot_recent_update, &self.hot_recent_generation);
         let result = retire_metadata_trailer_sync(&path);
         drop(_update);
+        if result.is_ok() {
+            self.release_decoded_records(namespace, key);
+        }
         result
     }
 
     async fn delete(&self, namespace: &str, key: &str) -> Result<()> {
         let path = self.path_for(namespace, key);
-        self.delete_path(&path).await
+        self.delete_path(&path).await?;
+        self.release_decoded_records(namespace, key);
+        Ok(())
     }
 }
 
@@ -2548,6 +2555,117 @@ mod tests {
         assert!(
             old_metadata.upgrade().is_none(),
             "old metadata is still retained"
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_put_response_replacement_releases_decoded_metadata() {
+        let dir = temp_dir("response-decoded-record-release");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let envelope = |body_len| CachedResponseEnvelope {
+            status: 200,
+            headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
+            body: CachedBody::default(),
+            body_len,
+            stored_at_ms: 1,
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 60,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        };
+        let options = || BodyStreamWriteOptions {
+            max_body_bytes: 1024,
+            body_read_timeout: Duration::from_secs(1),
+            ttl_secs: 60,
+        };
+        let first = envelope(4);
+        backend
+            .put_response(
+                "ns",
+                "variant",
+                Body::from("body"),
+                options(),
+                Box::new(move |_| super::super::types::encode_cached_response_metadata(&first)),
+            )
+            .await
+            .expect("put response");
+        let decoded = backend
+            .get_decoded_response_metadata_many("ns", &["variant".to_string()])
+            .await
+            .expect("decode response metadata")
+            .pop()
+            .flatten()
+            .expect("response metadata");
+        let old = std::sync::Arc::downgrade(&decoded);
+        drop(decoded);
+
+        let replacement = envelope(5);
+        backend
+            .put_response(
+                "ns",
+                "variant",
+                Body::from("body2"),
+                options(),
+                Box::new(move |_| {
+                    super::super::types::encode_cached_response_metadata(&replacement)
+                }),
+            )
+            .await
+            .expect("replace response");
+        assert!(
+            old.upgrade().is_none(),
+            "old decoded metadata retained after put_response replacement"
+        );
+
+        let decoded = backend
+            .get_decoded_response_metadata_many("ns", &["variant".to_string()])
+            .await
+            .expect("decode replacement metadata")
+            .pop()
+            .flatten()
+            .expect("replacement metadata");
+        let old = std::sync::Arc::downgrade(&decoded);
+        drop(decoded);
+        backend
+            .retire_response_metadata("ns", "variant")
+            .await
+            .expect("retire metadata");
+        assert!(
+            old.upgrade().is_none(),
+            "decoded metadata retained after retire_response_metadata"
+        );
+
+        let retired = envelope(6);
+        backend
+            .put_response(
+                "ns",
+                "variant",
+                Body::from("body3"),
+                options(),
+                Box::new(move |_| super::super::types::encode_cached_response_metadata(&retired)),
+            )
+            .await
+            .expect("replace retired response");
+        let decoded = backend
+            .get_decoded_response_metadata_many("ns", &["variant".to_string()])
+            .await
+            .expect("decode metadata before delete")
+            .pop()
+            .flatten()
+            .expect("metadata before delete");
+        let old = std::sync::Arc::downgrade(&decoded);
+        drop(decoded);
+        backend
+            .delete("ns", "variant")
+            .await
+            .expect("delete response key");
+        assert!(
+            old.upgrade().is_none(),
+            "decoded metadata retained after delete"
         );
         let _ = fs::remove_dir_all(dir);
     }
