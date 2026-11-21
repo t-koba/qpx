@@ -248,6 +248,14 @@ fn same_bytes_allocation(left: &Bytes, right: &Bytes) -> bool {
     left.len() == right.len() && left.as_ptr() == right.as_ptr()
 }
 
+fn same_arc_option<T>(left: Option<&std::sync::Arc<T>>, right: &Option<std::sync::Arc<T>>) -> bool {
+    match (left, right) {
+        (None, None) => true,
+        (Some(left), Some(right)) => std::sync::Arc::ptr_eq(left, right),
+        _ => false,
+    }
+}
+
 impl DiskCacheBackend {
     pub fn new(cfg: CacheBackendConfig) -> Result<Self> {
         let shared = cfg.writer_mode == qpx_core::config::CacheWriterMode::Shared;
@@ -525,7 +533,8 @@ impl DiskCacheBackend {
             return Ok(std::sync::Arc::new(serde_json::from_slice(&raw)?));
         }
         let slot = qpx_http::sharding::modulo(&(namespace, key), self.decoded_variants.len());
-        if let Some(entry) = self.decoded_variants[slot].load_full()
+        let observed = self.decoded_variants[slot].load_full();
+        if let Some(entry) = observed.as_ref()
             && entry.namespace.as_ref() == namespace
             && entry.key.as_ref() == key
             && same_bytes_allocation(&entry.raw, &raw)
@@ -534,13 +543,44 @@ impl DiskCacheBackend {
         }
         let value: std::sync::Arc<VariantIndex> =
             std::sync::Arc::new(serde_json::from_slice(&raw)?);
-        self.decoded_variants[slot].store(Some(std::sync::Arc::new(DecodedVariantIndexEntry {
+        let entry = std::sync::Arc::new(DecodedVariantIndexEntry {
             namespace: std::sync::Arc::from(namespace),
             key: std::sync::Arc::from(key),
             raw,
             value: value.clone(),
-        })));
+        });
+        self.publish_decoded_variant(slot, observed, entry);
         Ok(value)
+    }
+
+    fn publish_decoded_variant(
+        &self,
+        slot: usize,
+        observed: Option<std::sync::Arc<DecodedVariantIndexEntry>>,
+        entry: std::sync::Arc<DecodedVariantIndexEntry>,
+    ) {
+        self.decoded_variants[slot].rcu(|current| {
+            if same_arc_option(observed.as_ref(), current) {
+                Some(entry.clone())
+            } else {
+                current.clone()
+            }
+        });
+    }
+
+    fn publish_decoded_metadata(
+        &self,
+        slot: usize,
+        observed: Option<std::sync::Arc<DecodedMetadataEntry>>,
+        entry: std::sync::Arc<DecodedMetadataEntry>,
+    ) {
+        self.decoded_metadata[slot].rcu(|current| {
+            if same_arc_option(observed.as_ref(), current) {
+                Some(entry.clone())
+            } else {
+                current.clone()
+            }
+        });
     }
 
     fn release_decoded_records(&self, namespace: &str, key: &str) {
@@ -549,20 +589,26 @@ impl DiskCacheBackend {
         }
         let variant_slot =
             qpx_http::sharding::modulo(&(namespace, key), self.decoded_variants.len());
-        if self.decoded_variants[variant_slot]
-            .load_full()
-            .is_some_and(|entry| entry.namespace.as_ref() == namespace && entry.key.as_ref() == key)
-        {
-            self.decoded_variants[variant_slot].store(None);
-        }
+        self.decoded_variants[variant_slot].rcu(|current| {
+            if current.as_ref().is_some_and(|entry| {
+                entry.namespace.as_ref() == namespace && entry.key.as_ref() == key
+            }) {
+                None
+            } else {
+                current.clone()
+            }
+        });
         let metadata_slot =
             qpx_http::sharding::modulo(&(namespace, key), self.decoded_metadata.len());
-        if self.decoded_metadata[metadata_slot]
-            .load_full()
-            .is_some_and(|entry| entry.namespace.as_ref() == namespace && entry.key.as_ref() == key)
-        {
-            self.decoded_metadata[metadata_slot].store(None);
-        }
+        self.decoded_metadata[metadata_slot].rcu(|current| {
+            if current.as_ref().is_some_and(|entry| {
+                entry.namespace.as_ref() == namespace && entry.key.as_ref() == key
+            }) {
+                None
+            } else {
+                current.clone()
+            }
+        });
     }
 
     fn decode_response_metadata(
@@ -575,7 +621,8 @@ impl DiskCacheBackend {
             return Ok(std::sync::Arc::new(decode_cached_response_metadata(raw)?));
         }
         let slot = qpx_http::sharding::modulo(&(namespace, key), self.decoded_metadata.len());
-        if let Some(entry) = self.decoded_metadata[slot].load_full()
+        let observed = self.decoded_metadata[slot].load_full();
+        if let Some(entry) = observed.as_ref()
             && entry.namespace.as_ref() == namespace
             && entry.key.as_ref() == key
             && same_bytes_allocation(&entry.raw, &raw)
@@ -583,12 +630,13 @@ impl DiskCacheBackend {
             return Ok(entry.value.clone());
         }
         let value = std::sync::Arc::new(decode_cached_response_metadata(raw.clone())?);
-        self.decoded_metadata[slot].store(Some(std::sync::Arc::new(DecodedMetadataEntry {
+        let entry = std::sync::Arc::new(DecodedMetadataEntry {
             namespace: std::sync::Arc::from(namespace),
             key: std::sync::Arc::from(key),
             raw,
             value: value.clone(),
-        })));
+        });
+        self.publish_decoded_metadata(slot, observed, entry);
         Ok(value)
     }
 
@@ -2938,6 +2986,125 @@ mod tests {
             "unexpected error: {err}"
         );
         let _ = fs::remove_file(link);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    fn variant_raw() -> Bytes {
+        Bytes::from(
+            serde_json::to_vec(&VariantIndex {
+                variants: vec!["v1".to_string()],
+            })
+            .expect("encode index"),
+        )
+    }
+
+    fn metadata_raw(body_len: u64) -> Bytes {
+        super::super::types::encode_cached_response_metadata(&CachedResponseEnvelope {
+            status: 200,
+            headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
+            body: CachedBody::default(),
+            body_len,
+            stored_at_ms: 1,
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 60,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        })
+        .expect("encode metadata")
+        .into()
+    }
+
+    #[test]
+    fn in_flight_decoded_reader_cannot_reinstall_invalidated_records() {
+        let dir = temp_dir("decoded-slot-in-flight");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let variant_slot =
+            qpx_http::sharding::modulo(&("ns", "index"), backend.decoded_variants.len());
+        let metadata_slot =
+            qpx_http::sharding::modulo(&("ns", "v1"), backend.decoded_metadata.len());
+
+        backend
+            .decode_variant_index("ns", "index", variant_raw())
+            .expect("decode index");
+        backend
+            .decode_response_metadata("ns", "v1", metadata_raw(4))
+            .expect("decode metadata");
+        let observed_variant = backend.decoded_variants[variant_slot].load_full().unwrap();
+        let observed_metadata = backend.decoded_metadata[metadata_slot].load_full().unwrap();
+
+        backend.release_decoded_records("ns", "index");
+        backend.release_decoded_records("ns", "v1");
+        backend.publish_decoded_variant(
+            variant_slot,
+            Some(observed_variant.clone()),
+            observed_variant,
+        );
+        backend.publish_decoded_metadata(
+            metadata_slot,
+            Some(observed_metadata.clone()),
+            observed_metadata,
+        );
+
+        assert!(backend.decoded_variants[variant_slot].load_full().is_none());
+        assert!(
+            backend.decoded_metadata[metadata_slot]
+                .load_full()
+                .is_none()
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn decoded_release_preserves_colliding_slot_entries() {
+        let dir = temp_dir("decoded-slot-collision");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let variant_slot =
+            qpx_http::sharding::modulo(&("ns", "index"), backend.decoded_variants.len());
+        let metadata_slot =
+            qpx_http::sharding::modulo(&("ns", "v1"), backend.decoded_metadata.len());
+        let colliding_variant = Arc::new(DecodedVariantIndexEntry {
+            namespace: Arc::from("other"),
+            key: Arc::from("other-index"),
+            raw: variant_raw(),
+            value: Arc::new(VariantIndex {
+                variants: Vec::new(),
+            }),
+        });
+        let colliding_metadata = Arc::new(DecodedMetadataEntry {
+            namespace: Arc::from("other"),
+            key: Arc::from("other-v1"),
+            raw: metadata_raw(9),
+            value: Arc::new(CachedResponseEnvelope {
+                status: 204,
+                headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
+                body: CachedBody::default(),
+                body_len: 9,
+                stored_at_ms: 1,
+                initial_age_secs: 0,
+                response_delay_secs: 0,
+                freshness_lifetime_secs: 60,
+                vary_headers: Vec::new(),
+                vary_values: Vec::new(),
+                response_directives: Default::default(),
+                response_header_values: Default::default(),
+            }),
+        });
+        backend.decoded_variants[variant_slot].store(Some(colliding_variant.clone()));
+        backend.decoded_metadata[metadata_slot].store(Some(colliding_metadata.clone()));
+
+        backend.release_decoded_records("ns", "index");
+
+        assert!(Arc::ptr_eq(
+            &backend.decoded_variants[variant_slot].load_full().unwrap(),
+            &colliding_variant
+        ));
+        assert!(Arc::ptr_eq(
+            &backend.decoded_metadata[metadata_slot].load_full().unwrap(),
+            &colliding_metadata
+        ));
         let _ = fs::remove_dir_all(dir);
     }
 }
