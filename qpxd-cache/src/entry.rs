@@ -9,6 +9,7 @@ use hyper::{Method, StatusCode};
 use qpx_core::http_message::OrdinaryHeaderName;
 use qpx_core::http_message::Response;
 use qpx_http::body::Body;
+use qpx_http::digest_fields::CONTENT_DIGEST;
 
 pub fn primary_from_variant_key(variant_key: &str) -> Option<&str> {
     let rest = variant_key.strip_prefix("obj:")?;
@@ -187,6 +188,9 @@ fn build_response(params: BuildResponseParams<'_>) -> Result<Response<Body>> {
         cache_status,
     );
     if let Some(content_range) = params.content_range {
+        // RFC 9530 Content-Digest covers this message's content, which a range
+        // response does not share with the stored full representation.
+        response.headers_mut().remove(&ord(CONTENT_DIGEST.as_str()));
         response.headers_mut().insert(
             ord(ACCEPT_RANGES.as_str()),
             http::HeaderValue::from_static("bytes"),
@@ -305,6 +309,34 @@ mod tests {
                 .declared_content_length(),
             None
         );
+    }
+
+    #[test]
+    fn cached_range_does_not_replay_the_full_body_digest() {
+        let mut envelope = envelope_with_headers(vec![(
+            "content-digest".to_owned(),
+            "sha-256=:ungWv48Bz+pBQUDeXa4iI7ADYaOWF3qctBD/YfIAFa0=:".to_owned(),
+        )]);
+        envelope.body_len = 3;
+        let request = RequestDirectives {
+            range: Some(ByteRangeSpec::From {
+                start: 0,
+                end: Some(0),
+            }),
+            ..Default::default()
+        };
+        let response = response_from_envelope_for_request_with_body(
+            &Method::GET,
+            &request,
+            &envelope,
+            0,
+            "HIT",
+            Body::from("a"),
+            1,
+        )
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert!(response.headers().get(&ord("content-digest")).is_none());
     }
 
     #[test]
