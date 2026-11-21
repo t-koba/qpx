@@ -108,3 +108,62 @@ impl quinn::rustls::server::ResolvesServerCert for QuicSniResolver {
         None
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qpx_core::config::{ReverseTlsConfig, TlsCertConfig};
+    use quinn::rustls::client::ClientConfig;
+    use quinn::rustls::server::{Acceptor, ResolvesServerCert};
+    use quinn::rustls::{ClientConnection, RootCertStore};
+    use std::fs;
+
+    fn resolve_for_sni(
+        resolver: &QuicSniResolver,
+        name: &str,
+    ) -> Option<Arc<quinn::rustls::sign::CertifiedKey>> {
+        let provider = quinn::rustls::crypto::aws_lc_rs::default_provider();
+        let config = ClientConfig::builder_with_provider(provider.into())
+            .with_protocol_versions(&[&quinn::rustls::version::TLS13])
+            .unwrap()
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        let mut connection = ClientConnection::new(
+            Arc::new(config),
+            quinn::rustls::pki_types::ServerName::try_from(name.to_owned()).unwrap(),
+        )
+        .unwrap();
+        let mut wire = Vec::new();
+        connection.write_tls(&mut wire).unwrap();
+        let mut acceptor = Acceptor::default();
+        acceptor.read_tls(&mut wire.as_slice()).unwrap();
+        let accepted = acceptor.accept().unwrap().expect("complete ClientHello");
+        resolver.resolve(accepted.client_hello())
+    }
+
+    #[test]
+    fn wildcard_certificate_selects_for_h3_one_label_sni() {
+        let directory = tempfile::tempdir().unwrap();
+        let cert_path = directory.path().join("cert.pem");
+        let key_path = directory.path().join("key.pem");
+        let pair = rcgen::generate_simple_self_signed(vec!["*.example.test".to_owned()]).unwrap();
+        fs::write(&cert_path, pair.cert.pem()).unwrap();
+        fs::write(&key_path, pair.signing_key.serialize_pem()).unwrap();
+        let tls = ReverseTlsConfig {
+            certificates: vec![TlsCertConfig {
+                sni: "*.example.test".to_owned(),
+                pkcs12: None,
+                pkcs12_password_env: None,
+                cert: Some(cert_path.to_str().unwrap().to_owned()),
+                key: Some(key_path.to_str().unwrap().to_owned()),
+            }],
+            client_ca: None,
+        };
+        let resolver = QuicSniResolver::new(&tls).unwrap();
+        let selected =
+            resolve_for_sni(&resolver, "shop.example.test").expect("wildcard certificate");
+        assert_eq!(selected.cert[0].as_ref(), pair.cert.der().as_ref());
+        assert!(resolve_for_sni(&resolver, "example.test").is_none());
+        assert!(resolve_for_sni(&resolver, "a.shop.example.test").is_none());
+    }
+}
