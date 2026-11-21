@@ -94,7 +94,7 @@ pub(super) fn parse_grpc_web_trailer_block(raw: &[u8]) -> Result<HeaderMap> {
         let Some((name, value)) = line.split_once(':') else {
             return Err(anyhow!("grpc-web trailer block line missing ':'"));
         };
-        headers.insert(
+        headers.append(
             http::header::HeaderName::from_bytes(name.trim().as_bytes())?,
             http::HeaderValue::from_str(value.trim())?,
         );

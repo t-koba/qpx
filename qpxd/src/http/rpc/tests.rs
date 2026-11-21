@@ -6,7 +6,7 @@ use std::time::Duration;
 #[test]
 fn parses_grpc_web_trailer_frame() {
     let body = Bytes::from(frame_grpc_web_trailers(
-        b"grpc-status: 7\r\ngrpc-message: denied\r\n",
+        b"grpc-status: 7\r\ngrpc-message: denied\r\nx-label: blue\r\nx-label: green\r\n",
     ));
     let mut observer = GrpcFrameObserver::grpc_web(false, None, None);
     observer.feed(&body).expect("feed");
@@ -17,6 +17,14 @@ fn parses_grpc_web_trailer_frame() {
             .get("grpc-status")
             .and_then(|value| value.to_str().ok()),
         Some("7")
+    );
+    assert_eq!(
+        trailers
+            .get_all("x-label")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["blue", "green"]
     );
     assert_eq!(summary.message_count, 0);
 }
