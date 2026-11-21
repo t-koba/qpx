@@ -612,6 +612,28 @@ mod parse_tests {
     }
 
     #[test]
+    fn finalized_raw_head_materializes_at_ingress_field_limit() {
+        let mut raw =
+            b"HTTP/1.1 204 No Content\r\nDate: Thu, 01 Jan 1970 00:00:00 GMT\r\n".to_vec();
+        for index in 0..127 {
+            raw.extend_from_slice(format!("X-Test-{index}: value\r\n").as_bytes());
+        }
+        raw.extend_from_slice(b"\r\n");
+
+        let parsed = try_parse_raw_response_head(&raw, &Method::GET)
+            .expect("parse")
+            .expect("complete");
+        let mut head = (*parsed.3.expect("raw head")).clone();
+        head.finalize("qpx");
+
+        let headers = head.materialized_headers().expect("materialized headers");
+        assert_eq!(headers.len(), 130);
+        assert!(headers.contains_key("x-test-126"));
+        assert!(headers.contains_key("proxy-status"));
+        assert!(headers.contains_key("via"));
+    }
+
+    #[test]
     fn response_head_parser_promotes_storage_and_enforces_byte_limit() {
         let mut raw = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n".to_vec();
         for index in 0..40 {

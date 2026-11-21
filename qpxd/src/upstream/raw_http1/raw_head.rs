@@ -275,7 +275,13 @@ impl RawHttp1ResponseHead {
         let mut block = BytesMut::with_capacity(self.header_lines.len() + 2);
         block.extend_from_slice(&self.header_lines);
         block.extend_from_slice(b"\r\n");
-        let mut parsed = [httparse::EMPTY_HEADER; 128];
+        let field_count = self
+            .header_lines
+            .windows(2)
+            .filter(|pair| pair[0] == b'\r' && pair[1] == b'\n')
+            .count()
+            .max(1);
+        let mut parsed = vec![httparse::EMPTY_HEADER; field_count];
         let headers = match httparse::parse_headers(&block, &mut parsed)? {
             httparse::Status::Complete((consumed, headers)) if consumed == block.len() => {
                 crate::http::codec::h1_common::parse_header_map(headers)?
