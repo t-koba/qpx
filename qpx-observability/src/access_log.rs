@@ -1474,6 +1474,83 @@ mod userinfo_output_tests {
         assert!(log.contains(r#""user_agent":"Probe/1.0 (café)""#), "{log}");
     }
 
+    #[derive(Debug, Clone, Default)]
+    struct CapturedSpans(Arc<Mutex<Vec<opentelemetry_sdk::trace::SpanData>>>);
+
+    impl opentelemetry_sdk::trace::SpanExporter for CapturedSpans {
+        async fn export(
+            &self,
+            batch: Vec<opentelemetry_sdk::trace::SpanData>,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            self.0.lock().unwrap().extend(batch);
+            Ok(())
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn utf8_user_agent_is_pinned_at_every_emission_site() {
+        use opentelemetry::trace::TracerProvider as _;
+        use tracing_subscriber::prelude::*;
+
+        let spans = CapturedSpans::default();
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_simple_exporter(spans.clone())
+            .build();
+        let output = Output::default();
+        let writer = output.clone();
+        let _guard = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")))
+            .with(
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_ansi(false)
+                    .without_time()
+                    .with_writer(move || writer.clone()),
+            )
+            .set_default();
+
+        let expected = "\"user_agent\":\"Probe/1.0 (café)\"";
+        for format in ["combined", "json"] {
+            let mut config = AccessLogConfig::default();
+            config.output.enabled = true;
+            config.output.format = format.into();
+            let service = AccessLogService::new(
+                crate::handler_fn(|_: Request<()>| async {
+                    Ok::<_, ()>(Response::from_http(http::Response::new(())))
+                }),
+                "127.0.0.1:8080".parse().unwrap(),
+                AccessLogContext {
+                    kind: "test",
+                    name: Arc::from("test"),
+                },
+                &config,
+            );
+            let request = Request::builder()
+                .header(
+                    http::header::USER_AGENT,
+                    http::HeaderValue::from_bytes(b"Probe/1.0 (caf\xC3\xA9)").unwrap(),
+                )
+                .body(())
+                .unwrap();
+            service.call_with_otel_enabled(request, true).await.unwrap();
+        }
+
+        provider.force_flush().unwrap();
+        let captured = spans.0.lock().unwrap();
+        assert_eq!(captured.len(), 2);
+        for span in captured.iter() {
+            assert!(
+                span.attributes.iter().any(|attr| {
+                    attr.key.as_str() == "user_agent.original"
+                        && attr.value.to_string() == "Probe/1.0 (café)"
+                }),
+                "{span:?}"
+            );
+        }
+        let log = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+        assert_eq!(log.matches(expected).count(), 2, "{log}");
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn userinfo_absent_from_combined_structured_logs_and_trace_uri_fields() {
         let output = Output::default();
