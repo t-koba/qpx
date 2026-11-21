@@ -64,9 +64,10 @@ impl ProblemDetails {
     }
 
     pub fn to_json(&self) -> Result<Vec<u8>> {
-        if StatusCode::from_u16(self.status).is_err() {
-            return Err(anyhow!("problem status is not a valid HTTP status"));
-        }
+        crate::protocol::semantics::validate_http_status_class(
+            StatusCode::from_u16(self.status)?,
+            "problem",
+        )?;
         validate_uri_reference(&self.type_uri, "problem type")?;
         if let Some(instance) = self.instance.as_deref() {
             validate_uri_reference(instance, "problem instance")?;
@@ -108,5 +109,12 @@ mod tests {
                 .with_extension("status", Value::Null)
                 .is_err()
         );
+    }
+    #[test]
+    fn rejects_problem_status_outside_http_classes() {
+        let problem =
+            |code| ProblemDetails::new(StatusCode::from_u16(code).unwrap(), "Example problem");
+        assert!(problem(599).to_json().is_ok());
+        assert!(problem(600).to_json().is_err());
     }
 }
