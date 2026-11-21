@@ -238,3 +238,50 @@ fn vary_matching_works() {
     };
     assert!(matches_vary(req_headers.view(), None, &envelope,));
 }
+
+#[tokio::test]
+async fn purge_request_key_removes_cached_get_target() {
+    let get = make_get_request("/purge-target");
+    let get_key = CacheRequestKey::for_target(&get, "http")
+        .expect("cache key")
+        .expect("target key");
+    let purge_key = get_key.with_method_group("PURGE");
+    let policy = policy();
+    let namespace = super::util::cache_namespace(&policy, "default");
+    let backend = Arc::new(MockBackend::new());
+    let get_primary = get_key.primary_hash();
+    let variant = variant_storage_key(get_primary.as_str(), &[]);
+    let index = VariantIndex {
+        variants: vec![variant.clone()],
+    };
+    backend
+        .put(namespace, variant.as_str(), b"cached", 30)
+        .await
+        .expect("put variant");
+    backend
+        .put(
+            namespace,
+            index_storage_key(get_primary.as_str()).as_str(),
+            serde_json::to_vec(&index)
+                .expect("serialize index")
+                .as_slice(),
+            30,
+        )
+        .await
+        .expect("put index");
+    let mut backends = HashMap::new();
+    backends.insert("b".to_string(), backend.clone() as Arc<dyn CacheBackend>);
+
+    let purged = purge_cache_target(&purge_key, &policy, &backends)
+        .await
+        .expect("purge");
+
+    assert!(purged);
+    assert!(
+        backend
+            .get(namespace, index_storage_key(get_primary.as_str()).as_str())
+            .await
+            .expect("get index")
+            .is_none()
+    );
+}

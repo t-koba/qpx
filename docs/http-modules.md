@@ -24,7 +24,8 @@ and buffering reasons.
   `response_headers`. Subrequests must declare `allowed_schemes`,
   `allowed_hosts`, and `max_response_bytes`. Redirects are denied by default and
   allowed redirects are still checked for private IP destinations.
-- `cache_purge`: first-class HTTP purge endpoint for the configured cache key.
+- `cache_purge`: first-class HTTP purge endpoint. It invalidates all cached
+  method groups for the request target, not just the configured purge method.
   Requires `cache.enabled: true` on the listener or reverse route where it is
   used.
 

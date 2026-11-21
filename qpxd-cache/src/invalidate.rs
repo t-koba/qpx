@@ -69,6 +69,29 @@ pub async fn purge_cache_key(
     Ok(true)
 }
 
+pub async fn purge_cache_target(
+    key: &CacheRequestKey,
+    policy: &CachePolicyConfig,
+    backends: &HashMap<String, Arc<dyn CacheBackend>>,
+) -> Result<bool> {
+    if !policy.enabled {
+        return Ok(false);
+    }
+    let Some(backend) = backends.get(policy.backend.as_str()) else {
+        return Ok(false);
+    };
+    let namespace = cache_namespace(policy, "default");
+    let mut seen = HashSet::new();
+    for target in invalidation_keys_for_target(key) {
+        let primary = target.primary_hash_arc();
+        if !seen.insert(primary.clone()) {
+            continue;
+        }
+        invalidate_primary(backend.as_ref(), namespace, primary.as_ref()).await?;
+    }
+    Ok(true)
+}
+
 pub async fn invalidate_primary(
     backend: &dyn CacheBackend,
     namespace: &str,

@@ -18,7 +18,7 @@ mod util;
 
 pub use backends::build_backends;
 pub use directives::parse_cache_control_response_directives;
-pub use invalidate::{maybe_invalidate, purge_cache_key};
+pub use invalidate::{maybe_invalidate, purge_cache_key, purge_cache_target};
 pub use key::normalize_authority;
 pub use lookup_ops::{
     attach_revalidation_headers, build_hot_hit_response, build_only_if_cached_miss_response,

@@ -23,7 +23,7 @@ use qpx_core::http_message::{
     Response as OwnerResponse,
 };
 use qpx_http::body::Body;
-use qpxd_cache::{CacheRequestKey, purge_cache_key};
+use qpxd_cache::{CacheRequestKey, purge_cache_target};
 use std::borrow::Cow;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
@@ -905,12 +905,12 @@ impl HttpModuleContext {
         CacheRequestKey::for_target(&minimal, default_scheme)
     }
 
-    pub async fn purge_cache_key(&self, key: &CacheRequestKey) -> Result<bool> {
+    pub async fn purge_cache_target(&self, key: &CacheRequestKey) -> Result<bool> {
         let Some(policy) = self.session.cache_policy.clone() else {
             return Ok(false);
         };
         let backends = self.runtime.cache.backends.clone();
-        let _ = purge_cache_key(key, &policy, &backends).await?;
+        let _ = purge_cache_target(key, &policy, &backends).await?;
         Ok(true)
     }
 }

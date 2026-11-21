@@ -143,7 +143,7 @@ impl HttpModule for CachePurgeModule {
             ctx.cache_request_key(&view)?
         };
         if let Some(key) = key {
-            let _ = ctx.purge_cache_key(&key).await?;
+            let _ = ctx.purge_cache_target(&key).await?;
         }
         Ok(HttpModuleEvent::RequestHeadersResult(
             RequestHeadersOutcome::Respond(Box::new(self.build_response())),
