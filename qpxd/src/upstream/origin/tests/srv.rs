@@ -89,3 +89,54 @@ async fn srv_discovery_skips_target_root_unavailable_records() -> Result<()> {
     assert!(endpoints.is_empty());
     Ok(())
 }
+
+#[tokio::test]
+async fn srv_discovery_keeps_resolvable_target_when_preferred_target_lookup_fails() -> Result<()> {
+    let mut answers = HashMap::new();
+    answers.insert(
+        ("_https._tcp.service.example".to_string(), DNS_TYPE_SRV),
+        vec![
+            TestDnsRecord::Srv {
+                priority: 10,
+                weight: 0,
+                port: 8443,
+                target: "preferred.service.example".to_string(),
+                ttl_secs: 20,
+            },
+            TestDnsRecord::Srv {
+                priority: 20,
+                weight: 0,
+                port: 8443,
+                target: "backup.service.example".to_string(),
+                ttl_secs: 20,
+            },
+        ],
+    );
+    answers.insert(
+        ("backup.service.example".to_string(), DNS_TYPE_AAAA),
+        vec![TestDnsRecord::Aaaa {
+            addr: Ipv6Addr::LOCALHOST,
+            ttl_secs: 12,
+        }],
+    );
+    let (nameserver, server) =
+        spawn_fake_dns_server_with_failing_qtypes(answers, vec![DNS_TYPE_A], 2).await?;
+
+    let mut config = discovery_config(UpstreamDiscoveryKind::Srv);
+    config.name = Some("_https._tcp.service.example".to_string());
+    let result = discover_origin_endpoints_with_nameservers(
+        "https://service.example",
+        &config,
+        &[nameserver],
+    )
+    .await;
+
+    server.abort();
+    let _ = server.await;
+
+    let (endpoints, delay) = result?;
+    assert_eq!(endpoints.len(), 1);
+    assert_eq!(endpoints[0].connect_authority(443)?, "[::1]:8443");
+    assert_eq!(delay, Duration::from_secs(12));
+    Ok(())
+}

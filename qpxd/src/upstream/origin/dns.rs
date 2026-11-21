@@ -93,10 +93,19 @@ pub(super) async fn discover_origin_endpoints_with_nameservers(
             let (srv_records, srv_delay) = query_srv_records(name, nameservers).await?;
             let mut endpoints = Vec::new();
             let mut ttl = Some(srv_delay);
+            let mut first_error = None;
             for record in order_srv_records(srv_records) {
                 let port = config.port.unwrap_or(record.port);
                 let (records, delay) =
-                    resolve_host_records(record.target.as_str(), nameservers).await?;
+                    match resolve_host_records(record.target.as_str(), nameservers).await {
+                        Ok(resolved) => resolved,
+                        Err(err) => {
+                            if first_error.is_none() {
+                                first_error = Some(err);
+                            }
+                            continue;
+                        }
+                    };
                 ttl = Some(match ttl {
                     Some(current) => current.min(delay),
                     None => delay,
@@ -111,6 +120,11 @@ pub(super) async fn discover_origin_endpoints_with_nameservers(
                         logical_host.clone(),
                     ));
                 }
+            }
+            if endpoints.is_empty()
+                && let Some(err) = first_error
+            {
+                return Err(err);
             }
             Ok((
                 endpoints,
