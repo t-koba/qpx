@@ -406,23 +406,7 @@ pub(super) fn sha256_hex(input: &[u8]) -> String {
 
 #[cfg(feature = "digest-auth")]
 pub(super) fn parse_sha256_ha1(raw: &str) -> Option<String> {
-    let raw = raw.trim();
-    if raw.is_empty() {
-        return None;
-    }
-    let hex = if raw.len() > 8 && raw[..8].eq_ignore_ascii_case("sha-256:") {
-        &raw[8..]
-    } else {
-        raw
-    };
-    let hex = hex.trim();
-    if hex.len() != 64 {
-        return None;
-    }
-    if !hex.as_bytes().iter().all(|b| b.is_ascii_hexdigit()) {
-        return None;
-    }
-    Some(hex.to_ascii_lowercase())
+    qpx_core::http_auth::normalize_sha256_ha1(raw)
 }
 
 #[cfg(feature = "digest-auth")]
@@ -457,7 +441,7 @@ pub(super) fn constant_time_eq_hex_lower(expected_lower: &str, actual: &str) -> 
 
 #[cfg(all(test, feature = "digest-auth"))]
 mod tests {
-    use super::parse_nc;
+    use super::{parse_nc, parse_sha256_ha1};
 
     #[test]
     fn nonce_count_rejects_leading_plus() {
@@ -467,5 +451,10 @@ mod tests {
     #[test]
     fn nonce_count_accepts_eight_hex_digits() {
         assert_eq!(parse_nc("0000000f"), Some(15));
+    }
+
+    #[test]
+    fn parse_sha256_ha1_rejects_non_ascii_without_panicking() {
+        assert_eq!(parse_sha256_ha1("1234567é"), None);
     }
 }

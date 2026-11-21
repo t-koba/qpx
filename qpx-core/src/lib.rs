@@ -24,6 +24,7 @@ pub mod envsubst;
 pub mod execution;
 /// Shared exporter configuration and queue policy types.
 pub mod exporter;
+pub mod http_auth;
 /// The HTTP token vocabulary: the RFC 9110 token grammar and the
 /// comma-separated header token search.
 pub mod http_content_length;

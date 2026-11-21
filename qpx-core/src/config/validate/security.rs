@@ -1238,14 +1238,7 @@ pub(super) fn validate_auth_config(auth: &AuthConfig) -> Result<()> {
 }
 
 fn is_valid_sha256_ha1(raw: &str) -> bool {
-    let raw = raw.trim();
-    let hex = if raw.len() > 8 && raw[..8].eq_ignore_ascii_case("sha-256:") {
-        &raw[8..]
-    } else {
-        raw
-    };
-    let hex = hex.trim();
-    hex.len() == 64 && hex.as_bytes().iter().all(|b| b.is_ascii_hexdigit())
+    crate::http_auth::normalize_sha256_ha1(raw).is_some()
 }
 
 pub(super) fn default_signed_assertion_algorithms(
@@ -1291,6 +1284,11 @@ pub(super) fn default_signed_assertion_algorithms(
 mod tests {
     use super::*;
     use crate::config::DpopConfig;
+
+    #[test]
+    fn sha256_ha1_rejects_non_ascii_without_panicking() {
+        assert!(!is_valid_sha256_ha1("1234567é"));
+    }
 
     #[test]
     fn bearer_jwt_validates_supported_algorithms_only() {
