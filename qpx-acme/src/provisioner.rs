@@ -147,7 +147,8 @@ fn reuse_existing_certificate(state: &AcmeRuntime, sni: &str) -> Result<bool> {
     if !cert_path.exists() || !key_path.exists() {
         return Ok(false);
     }
-    if should_renew(read_leaf_not_after(&cert_path)?, state.renew_before_days)? {
+    let (not_before, not_after) = read_leaf_validity(&cert_path)?;
+    if SystemTime::now() < not_before || should_renew(not_after, state.renew_before_days)? {
         return Ok(false);
     }
     load_cert_into_store(state, sni)
@@ -712,7 +713,7 @@ fn should_renew(not_after: SystemTime, renew_before_days: u64) -> Result<bool> {
     Ok(now >= renew_at)
 }
 
-fn read_leaf_not_after(cert_path: &Path) -> Result<SystemTime> {
+fn read_leaf_validity(cert_path: &Path) -> Result<(SystemTime, SystemTime)> {
     let data = fs::read(cert_path)?;
     for pem in Pem::iter_from_buffer(&data) {
         let pem = pem.map_err(|e| anyhow!("invalid PEM in {}: {e}", cert_path.display()))?;
@@ -722,11 +723,15 @@ fn read_leaf_not_after(cert_path: &Path) -> Result<SystemTime> {
         let cert = pem
             .parse_x509()
             .map_err(|e| anyhow!("invalid x509 in {}: {e:?}", cert_path.display()))?;
-        let ts = cert.validity().not_after.to_datetime().unix_timestamp();
-        if ts < 0 {
-            return Err(anyhow!("invalid x509 not_after in {}", cert_path.display()));
+        let not_before = cert.validity().not_before.to_datetime().unix_timestamp();
+        let not_after = cert.validity().not_after.to_datetime().unix_timestamp();
+        if not_before < 0 || not_after < 0 {
+            return Err(anyhow!("invalid x509 validity in {}", cert_path.display()));
         }
-        return Ok(UNIX_EPOCH + Duration::from_secs(ts as u64));
+        return Ok((
+            UNIX_EPOCH + Duration::from_secs(not_before as u64),
+            UNIX_EPOCH + Duration::from_secs(not_after as u64),
+        ));
     }
     Err(anyhow!("no certificate found in {}", cert_path.display()))
 }
@@ -1159,7 +1164,7 @@ mod tests {
         let (cert, key) = test_pair();
         fixture.write_pair(&cert, &key);
         let (cert_path, key_path) = cert_paths_for_sni(&fixture.0, TEST_SNI);
-        assert!(!should_renew(read_leaf_not_after(&cert_path).unwrap(), 30).unwrap());
+        assert!(!should_renew(read_leaf_validity(&cert_path).unwrap().1, 30).unwrap());
         let (replacement_cert, replacement_key) = test_pair();
         // Simulate interruption after key.pem is replaced but before cert.pem is written.
         write_bytes_file(&key_path, replacement_key.serialize_pem().as_bytes(), 0o600).unwrap();
@@ -1221,6 +1226,22 @@ mod tests {
         // A directory causes a deterministic read failure even when tests run as root.
         fs::create_dir(&key_path).unwrap();
         assert_rejected();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn future_dated_certificate_is_not_reused() {
+        let fixture = CertFixture::new();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        params.not_before = rcgen::date_time_ymd(2099, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+        fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
+        assert!(!matches!(
+            reuse_existing_certificate(&fixture.0, TEST_SNI),
+            Ok(true)
+        ));
+        fixture.assert_empty();
     }
 
     #[cfg(unix)]
