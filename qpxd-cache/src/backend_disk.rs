@@ -543,6 +543,28 @@ impl DiskCacheBackend {
         Ok(value)
     }
 
+    fn release_decoded_records(&self, namespace: &str, key: &str) {
+        if self.shared {
+            return;
+        }
+        let variant_slot =
+            qpx_http::sharding::modulo(&(namespace, key), self.decoded_variants.len());
+        if self.decoded_variants[variant_slot]
+            .load_full()
+            .is_some_and(|entry| entry.namespace.as_ref() == namespace && entry.key.as_ref() == key)
+        {
+            self.decoded_variants[variant_slot].store(None);
+        }
+        let metadata_slot =
+            qpx_http::sharding::modulo(&(namespace, key), self.decoded_metadata.len());
+        if self.decoded_metadata[metadata_slot]
+            .load_full()
+            .is_some_and(|entry| entry.namespace.as_ref() == namespace && entry.key.as_ref() == key)
+        {
+            self.decoded_metadata[metadata_slot].store(None);
+        }
+    }
+
     fn decode_response_metadata(
         &self,
         namespace: &str,
@@ -860,6 +882,7 @@ impl DiskCacheBackend {
         })
         .await
         .context("disk cache writer task failed")??;
+        self.release_decoded_records(namespace, key);
         self.remember_write(path.to_path_buf(), write.total_len, write.expires_at_ms)
             .await?;
         self.hot_insert(
@@ -2433,6 +2456,99 @@ mod tests {
             .flatten()
             .expect("repeated metadata");
         assert!(std::sync::Arc::ptr_eq(&first, &repeated));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_replacement_releases_decoded_records() {
+        let dir = temp_dir("decoded-record-release");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+
+        let index = VariantIndex {
+            variants: vec!["v1".to_string()],
+        };
+        backend
+            .put(
+                "ns",
+                "index",
+                &serde_json::to_vec(&index).expect("encode index"),
+                60,
+            )
+            .await
+            .expect("put index");
+        let first = backend
+            .get_decoded_variant_index("ns", "index")
+            .await
+            .expect("decode index")
+            .expect("index");
+        let old_index = std::sync::Arc::downgrade(&first);
+        drop(first);
+
+        let envelope = CachedResponseEnvelope {
+            status: 200,
+            headers: crate::types::CachedHeaders::from_pairs(vec![(
+                "content-type".to_string(),
+                "text/plain".to_string(),
+            )]),
+            body: CachedBody::default(),
+            body_len: 7,
+            stored_at_ms: 1,
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 60,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        };
+        let encode_envelope = |value: &CachedResponseEnvelope| {
+            super::super::types::encode_cached_response_metadata(value).expect("encode metadata")
+        };
+        backend
+            .put("ns", "metadata", &encode_envelope(&envelope), 60)
+            .await
+            .expect("put metadata");
+        let first = backend
+            .get_decoded_response_metadata_many("ns", &["metadata".to_string()])
+            .await
+            .expect("decode metadata")
+            .pop()
+            .flatten()
+            .expect("metadata");
+        let old_metadata = std::sync::Arc::downgrade(&first);
+        drop(first);
+
+        let replacement = VariantIndex {
+            variants: vec!["v2".to_string()],
+        };
+        backend
+            .put(
+                "ns",
+                "index",
+                &serde_json::to_vec(&replacement).expect("encode replacement index"),
+                60,
+            )
+            .await
+            .expect("replace index");
+        let replacement_envelope = CachedResponseEnvelope {
+            body_len: 8,
+            ..envelope
+        };
+        backend
+            .put(
+                "ns",
+                "metadata",
+                &encode_envelope(&replacement_envelope),
+                60,
+            )
+            .await
+            .expect("replace metadata");
+
+        assert!(old_index.upgrade().is_none(), "old index is still retained");
+        assert!(
+            old_metadata.upgrade().is_none(),
+            "old metadata is still retained"
+        );
         let _ = fs::remove_dir_all(dir);
     }
 
