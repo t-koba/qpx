@@ -42,12 +42,7 @@ impl LinkValue {
     }
 
     fn validate(&self) -> Result<(), ApiMetadataError> {
-        if self.target.is_empty()
-            || self
-                .target
-                .bytes()
-                .any(|byte| byte <= 0x20 || byte == b'>' || byte == 0x7f)
-        {
+        if self.target.is_empty() || !self.target.bytes().all(is_uri_char) {
             return Err(ApiMetadataError::InvalidLinkTarget);
         }
         if self.relation.is_empty()
@@ -231,34 +226,38 @@ fn valid_relation_type(value: &str) -> bool {
     // RFC 8288 extension relations are RFC 3986 URIs. `Url` also accepts IRIs
     // and values it silently normalizes, but this module emits the input
     // verbatim, so only accept ASCII URI characters here.
-    value.bytes().all(|byte| {
-        byte.is_ascii_alphanumeric()
-            || matches!(
-                byte,
-                b'-' | b'.'
-                    | b'_'
-                    | b'~'
-                    | b':'
-                    | b'/'
-                    | b'?'
-                    | b'#'
-                    | b'['
-                    | b']'
-                    | b'@'
-                    | b'!'
-                    | b'$'
-                    | b'&'
-                    | b'\''
-                    | b'('
-                    | b')'
-                    | b'*'
-                    | b'+'
-                    | b','
-                    | b';'
-                    | b'='
-                    | b'%'
-            )
-    }) && url::Url::parse(value).is_ok()
+    value.bytes().all(is_uri_char) && url::Url::parse(value).is_ok()
+}
+
+/// RFC 3986 `unreserved / reserved / pct-encoded` characters, excluding
+/// delimiters that would change the Link header syntax.
+fn is_uri_char(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric()
+        || matches!(
+            byte,
+            b'-' | b'.'
+                | b'_'
+                | b'~'
+                | b':'
+                | b'/'
+                | b'?'
+                | b'#'
+                | b'['
+                | b']'
+                | b'@'
+                | b'!'
+                | b'$'
+                | b'&'
+                | b'\''
+                | b'('
+                | b')'
+                | b'*'
+                | b'+'
+                | b','
+                | b';'
+                | b'='
+                | b'%'
+        )
 }
 
 fn quote(value: &str) -> String {
@@ -556,6 +555,14 @@ mod tests {
         );
         assert!(!valid_relation_type("not a uri: just words"));
         assert!(!valid_relation_type(":"));
+    }
+
+    #[test]
+    fn rejects_non_ascii_link_target() {
+        assert_eq!(
+            LinkValue::new("/v2/rel\u{00e9}", "next").err(),
+            Some(ApiMetadataError::InvalidLinkTarget)
+        );
     }
 
     #[test]
