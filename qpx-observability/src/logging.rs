@@ -550,9 +550,22 @@ fn is_daily_suffix(suffix: &str) -> bool {
     if !all_digits(&b[0..4]) || !all_digits(&b[5..7]) || !all_digits(&b[8..10]) {
         return false;
     }
+    let year = b[0..4]
+        .iter()
+        .fold(0_u32, |value, digit| value * 10 + u32::from(digit - b'0'));
     let month = two_digit_number(&b[5..7]).unwrap_or(0);
     let day = two_digit_number(&b[8..10]).unwrap_or(0);
-    (1..=12).contains(&month) && (1..=31).contains(&day)
+    if year == 0 || !(1..=12).contains(&month) {
+        return false;
+    }
+    let leap_year = year % 4 == 0 && (year % 100 != 0 || year % 400 == 0);
+    let days_in_month = match month {
+        2 if leap_year => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    };
+    (1..=days_in_month).contains(&day)
 }
 
 fn is_hourly_suffix(suffix: &str) -> bool {
@@ -785,7 +798,7 @@ mod rotation_safety_tests {
     // green on Windows where those tests compile out.
     #[cfg(unix)]
     use super::{LogOutputConfig, build_log_sink};
-    use super::{RotationCleanup, cleanup_old_logs, is_rotation_suffix};
+    use super::{RotationCleanup, cleanup_old_logs, is_daily_suffix, is_rotation_suffix};
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static PROBE_COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -849,6 +862,47 @@ mod rotation_safety_tests {
         );
         assert!(
             !dir.join("access.log.2026-10-11").exists(),
+            "oldest valid rotation output beyond keep must be evicted"
+        );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn daily_suffix_validates_calendar_days() {
+        for suffix in ["2024-02-29", "2000-02-29", "2024-04-30", "2026-12-31"] {
+            assert!(is_daily_suffix(suffix), "{suffix} should be valid");
+        }
+        for suffix in [
+            "2023-02-29",
+            "2100-02-29",
+            "0000-01-01",
+            "2026-00-10",
+            "2026-13-01",
+            "2026-01-00",
+            "2026-04-31",
+            "2026-11-31",
+        ] {
+            assert!(!is_daily_suffix(suffix), "{suffix} should be invalid");
+        }
+    }
+
+    #[test]
+    fn rotation_cleanup_ignores_impossible_calendar_dates() {
+        let dir = probe_dir("cleanup-impossible-date");
+        write_file(&dir, "access.log.2026-11-29", "old");
+        write_file(&dir, "access.log.2026-11-30", "new");
+        write_file(&dir, "access.log.2026-11-31", "not a rotation output");
+        cleanup_old_logs(&cleanup_for(&dir, "daily", 1));
+        assert!(
+            dir.join("access.log.2026-11-30").exists(),
+            "newest valid rotation output must survive"
+        );
+        assert!(
+            dir.join("access.log.2026-11-31").exists(),
+            "impossible date must not occupy a retention slot"
+        );
+        assert!(
+            !dir.join("access.log.2026-11-29").exists(),
             "oldest valid rotation output beyond keep must be evicted"
         );
         std::fs::remove_dir_all(&dir).ok();
