@@ -33,11 +33,6 @@ pub fn parse_prefer(value: &HeaderValue) -> Result<Vec<Preference>, PreferError>
             .ok_or(PreferError::InvalidPreference)?;
         let (token, value) = parse_pair(first)?;
         let token = token.to_ascii_lowercase();
-        if seen.contains_key(&token) {
-            // RFC 7240 §2: consider the first instance and ignore later ones.
-            continue;
-        }
-        seen.insert(token.clone(), ());
         let mut parameters = BTreeMap::new();
         for component in components.iter().skip(1) {
             let (name, value) = parse_pair(component.trim())?;
@@ -45,6 +40,10 @@ pub fn parse_prefer(value: &HeaderValue) -> Result<Vec<Preference>, PreferError>
             if parameters.insert(name, value).is_some() {
                 return Err(PreferError::InvalidPreference);
             }
+        }
+        if seen.insert(token.clone(), ()).is_some() {
+            // RFC 7240 §2: consider the first instance and ignore later ones.
+            continue;
         }
         preferences.push(Preference {
             token,
@@ -165,6 +164,11 @@ mod tests {
         assert_eq!(parsed[0].token, "respond-async");
         assert_eq!(parsed[1].value.as_deref(), Some("10"));
         assert_eq!(parsed[1].parameters["handling"].as_deref(), Some("strict"));
+    }
+
+    #[test]
+    fn duplicate_preference_still_validates_all_parameters() {
+        assert!(parse_prefer(&HeaderValue::from_static("wait=1, WAIT=2; =oops")).is_err());
     }
 
     #[test]
