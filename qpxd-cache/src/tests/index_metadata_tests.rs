@@ -272,7 +272,7 @@ async fn purge_request_key_removes_cached_get_target() {
     let mut backends = HashMap::new();
     backends.insert("b".to_string(), backend.clone() as Arc<dyn CacheBackend>);
 
-    let purged = purge_cache_target(&purge_key, &policy, &backends)
+    let purged = purge_cache_key(&purge_key, &policy, &backends)
         .await
         .expect("purge");
 
