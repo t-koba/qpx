@@ -292,6 +292,9 @@ pub(super) async fn open_transfer_once_passive(
 ) -> Result<FtpDataTransfer> {
     let mut client = BasicFtpClient::connect(addr, deadline).await?;
     client.login(user, pass).await?;
+    if matches!(command_context, "RETR" | "STOR") {
+        client.expect_command("TYPE I", &[200], "TYPE I").await?;
+    }
     let data_addr = passive_data_addr(&mut client).await?;
     let data = deadline.connect(data_addr).await?;
     client
@@ -315,6 +318,9 @@ pub(super) async fn open_transfer_once_active(
 ) -> Result<FtpDataTransfer> {
     let mut client = BasicFtpClient::connect(addr, deadline).await?;
     client.login(user, pass).await?;
+    if matches!(command_context, "RETR" | "STOR") {
+        client.expect_command("TYPE I", &[200], "TYPE I").await?;
+    }
     let listener = active_data_listener(client.control_stream()).await?;
     client
         .expect_command(port_command(listener.local_addr()?)?, &[200], "PORT")

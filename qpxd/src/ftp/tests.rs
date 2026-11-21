@@ -267,6 +267,14 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
             .unwrap();
         line.clear();
         stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "TYPE I\r\n");
+        stream
+            .get_mut()
+            .write_all(b"200 Type set to I\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
         assert_eq!(line, "EPSV\r\n");
         let data = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let reply = format!(
@@ -283,7 +291,7 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
             .write_all(b"150 data follows\r\n")
             .await
             .unwrap();
-        data.write_all(b"synthetic file contents").await.unwrap();
+        data.write_all(b"\x00\xff\r\n\n").await.unwrap();
         data.shutdown().await.unwrap();
         stream
             .get_mut()
@@ -317,7 +325,7 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
     let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
         .await
         .unwrap();
-    assert_eq!(body.as_ref(), b"synthetic file contents");
+    assert_eq!(body.as_ref(), b"\x00\xff\r\n\n");
     server.await.unwrap();
 }
 
