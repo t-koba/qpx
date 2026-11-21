@@ -1088,6 +1088,20 @@ mod tests {
                 .is_none()
         );
 
+        // An all-digit Age that exceeds u64 must saturate, not imply youth.
+        record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=600"#])).await;
+        record_h3_alt_svc(
+            &origin,
+            &alt_svc_headers_with_age(r#"h3=":8443"; ma=60"#, Some("18446744073709551616"), None),
+        )
+        .await;
+        assert!(
+            cached_alt_svc_h3_endpoint(&origin)
+                .await
+                .expect("overflowing age clears")
+                .is_none()
+        );
+
         // Age within ma keeps a usable route.
         record_h3_alt_svc(&origin, &alt_svc_headers(&[r#"h3=":8443"; ma=600"#])).await;
         record_h3_alt_svc(

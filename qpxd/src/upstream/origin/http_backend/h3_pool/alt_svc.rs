@@ -260,8 +260,18 @@ pub(super) fn alt_svc_response_age(headers: &impl OrdinaryHeaderMut) -> Duration
     let age_value = headers
         .ordinary_values(&age)
         .filter_map(|value| value.to_str().ok())
-        .filter_map(|value| value.trim().parse::<u64>().ok())
-        .map(Duration::from_secs)
+        .filter_map(|value| {
+            let value = value.trim();
+            match value.parse::<u64>() {
+                Ok(age) => Some(Duration::from_secs(age)),
+                Err(_) if !value.is_empty() && value.bytes().all(|byte| byte.is_ascii_digit()) => {
+                    // RFC 9111 §1.2.2: a well-formed delta-seconds value that
+                    // overflows saturates instead of implying a younger age.
+                    Some(Duration::from_secs(u64::MAX))
+                }
+                Err(_) => None,
+            }
+        })
         .max()
         .unwrap_or(Duration::ZERO);
     let apparent_age = headers
