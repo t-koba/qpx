@@ -247,7 +247,7 @@ pub fn canonical_schema_value() -> serde_json::Value {
                         "required": ["max_age_seconds"],
                         "additionalProperties": false,
                         "properties": {
-                            "max_age_seconds": {"type": "integer", "minimum": 1},
+                            "max_age_seconds": {"type": "integer", "minimum": 0},
                             "include_subdomains": {"type": "boolean"}
                         }
                     },

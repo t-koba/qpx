@@ -628,3 +628,22 @@ fn canonical_schema_exposes_browser_origin_policies() {
         Some(1)
     );
 }
+
+#[test]
+fn canonical_schema_accepts_hsts_max_age_zero() {
+    let validator =
+        jsonschema::validator_for(&canonical_schema_value()).expect("canonical schema compiles");
+    let config = serde_json::json!({
+        "edges": [{
+            "kind": "reverse",
+            "name": "hsts-zero",
+            "listen": "127.0.0.1:0",
+            "routes": [{
+                "match": {},
+                "target": {"type": "upstream", "upstreams": []},
+                "http": {"hsts": {"max_age_seconds": 0}}
+            }]
+        }]
+    });
+    assert!(validator.is_valid(&config));
+}
