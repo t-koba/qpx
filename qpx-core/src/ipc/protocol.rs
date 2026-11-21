@@ -31,6 +31,9 @@ pub async fn write_frame<W: tokio::io::AsyncWrite + Unpin, T: serde::Serialize>(
     data: &T,
 ) -> Result<()> {
     let payload = serde_json::to_vec(data).map_err(IpcProtocolError::Encode)?;
+    if payload.len() > MAX_IPC_FRAME_BYTES {
+        return Err(IpcProtocolError::PayloadTooLarge);
+    }
     let mut buf = BytesMut::with_capacity(9 + payload.len());
     buf.put_slice(MAGIC);
     buf.put_u8(VERSION);
@@ -87,4 +90,21 @@ pub fn fuzz_decode_ipc_meta_frame(buf: &[u8]) {
     };
     let _ = serde_json::from_slice::<crate::ipc::meta::IpcRequestMeta>(payload);
     let _ = serde_json::from_slice::<crate::ipc::meta::IpcResponseMeta>(payload);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn write_frame_rejects_json_over_the_encoded_byte_limit() {
+        let mut value = "é".repeat((MAX_IPC_FRAME_BYTES - 2) / 2);
+        value.push('a');
+        let mut writer = Vec::new();
+        assert!(matches!(
+            write_frame(&mut writer, &value).await,
+            Err(IpcProtocolError::PayloadTooLarge)
+        ));
+        assert!(writer.is_empty());
+    }
 }
