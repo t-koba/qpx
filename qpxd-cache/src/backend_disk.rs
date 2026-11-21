@@ -3096,6 +3096,7 @@ mod tests {
         backend.decoded_metadata[metadata_slot].store(Some(colliding_metadata.clone()));
 
         backend.release_decoded_records("ns", "index");
+        backend.release_decoded_records("ns", "v1");
 
         assert!(Arc::ptr_eq(
             &backend.decoded_variants[variant_slot].load_full().unwrap(),
