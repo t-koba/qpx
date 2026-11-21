@@ -238,9 +238,14 @@ fn empty_response(status: StatusCode) -> Response<Http01Body> {
     response
 }
 
-fn handle_http01(req: Request<Incoming>, tokens: &Http01TokenStore) -> Response<Http01Body> {
+fn handle_http01<B>(req: Request<B>, tokens: &Http01TokenStore) -> Response<Http01Body> {
     if req.method() != Method::GET && req.method() != Method::HEAD {
-        return empty_response(StatusCode::METHOD_NOT_ALLOWED);
+        let mut response = empty_response(StatusCode::METHOD_NOT_ALLOWED);
+        response.headers_mut().insert(
+            http::header::ALLOW,
+            http::HeaderValue::from_static("GET, HEAD"),
+        );
+        return response;
     }
     let Some(token) = req
         .uri()
@@ -268,5 +273,32 @@ fn handle_http01(req: Request<Incoming>, tokens: &Http01TokenStore) -> Response<
             response
         }
         None => empty_response(StatusCode::NOT_FOUND),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::Http01TokenStore;
+
+    #[test]
+    fn http01_method_not_allowed_advertises_get_and_head() {
+        let tokens = Http01TokenStore::new();
+        tokens.insert("token".to_owned(), "key-auth".to_owned());
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/.well-known/acme-challenge/token")
+            .body(())
+            .expect("challenge request");
+
+        let response = handle_http01(request, &tokens);
+        assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
+        assert_eq!(
+            response
+                .headers()
+                .get(http::header::ALLOW)
+                .and_then(|value| value.to_str().ok()),
+            Some("GET, HEAD")
+        );
     }
 }
