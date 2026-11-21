@@ -113,6 +113,10 @@ fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<bool> {
         return Ok(false);
     }
     let chain = load_cert_chain(&cert_path)?;
+    let (_, not_after) = read_leaf_validity(&cert_path)?;
+    if SystemTime::now() >= not_after {
+        return Err(anyhow!("ACME certificate for {sni} has expired"));
+    }
     #[cfg(feature = "http3")]
     let quic_chain = chain.clone();
     let key = load_private_key(&key_path)?;
@@ -1242,6 +1246,36 @@ mod tests {
             Ok(true)
         ));
         fixture.assert_empty();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_certificate_is_not_loaded_into_store() {
+        let fixture = CertFixture::new();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        params.not_after = rcgen::date_time_ymd(2000, 1, 1);
+        fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
+        assert!(!matches!(
+            load_cert_into_store(&fixture.0, TEST_SNI),
+            Ok(true)
+        ));
+        fixture.assert_empty();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn certificate_due_for_renewal_is_still_loaded_into_store() {
+        let mut fixture = CertFixture::new();
+        fixture.0.renew_before_days = 40_000;
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+        fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
+        let (_, not_after) =
+            read_leaf_validity(&cert_paths_for_sni(&fixture.0, TEST_SNI).0).unwrap();
+        assert!(should_renew(not_after, fixture.0.renew_before_days).unwrap());
+        assert!(load_cert_into_store(&fixture.0, TEST_SNI).unwrap());
     }
 
     #[cfg(unix)]
