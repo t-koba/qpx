@@ -65,13 +65,18 @@ pub(crate) fn is_websocket_upgrade(
 fn parse_websocket_subprotocol_offers(headers: &Headers) -> anyhow::Result<Vec<String>> {
     let mut seen = HashSet::new();
     let mut protocols = Vec::new();
+    let mut saw_field = false;
     for value in headers
         .get_all(&OrdinaryHeaderName::try_from("sec-websocket-protocol").expect("ordinary field"))
     {
+        saw_field = true;
         let value = value
             .to_str()
             .map_err(|_| anyhow::anyhow!("WebSocket subprotocol is not ASCII"))?;
         for token in value.split(',').map(trim_http_ows) {
+            if token.is_empty() {
+                continue;
+            }
             if !is_http_token(token) {
                 return Err(anyhow::anyhow!("WebSocket subprotocol token is invalid"));
             }
@@ -82,6 +87,9 @@ fn parse_websocket_subprotocol_offers(headers: &Headers) -> anyhow::Result<Vec<S
             }
             protocols.push(token.to_owned());
         }
+    }
+    if saw_field && protocols.is_empty() {
+        return Err(anyhow::anyhow!("WebSocket subprotocol list has no tokens"));
     }
     Ok(protocols)
 }
@@ -369,6 +377,26 @@ mod tests {
             "dGhlIHNhbXBsZSBub25jZQ==".parse().unwrap(),
         );
         assert!(is_websocket_upgrade(&http::Method::GET, &headers).unwrap());
+    }
+
+    #[test]
+    fn websocket_upgrade_ignores_empty_subprotocol_list_members() {
+        let mut headers = valid_h1_websocket_headers();
+        headers.insert(
+            OrdinaryHeaderName::try_from("sec-websocket-protocol").unwrap(),
+            "chat,, superchat".parse().unwrap(),
+        );
+        assert!(is_websocket_upgrade(&http::Method::GET, &headers).unwrap());
+    }
+
+    #[test]
+    fn websocket_upgrade_rejects_empty_subprotocol_list() {
+        let mut headers = valid_h1_websocket_headers();
+        headers.insert(
+            OrdinaryHeaderName::try_from("sec-websocket-protocol").unwrap(),
+            " , ".parse().unwrap(),
+        );
+        assert!(is_websocket_upgrade(&http::Method::GET, &headers).is_err());
     }
 
     #[test]
