@@ -23,6 +23,7 @@ use anyhow::anyhow;
 use bytes::{Buf, Bytes};
 use std::collections::HashMap;
 use std::io;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -689,15 +690,9 @@ fn load_compiled_module(
     max_module_bytes: u64,
 ) -> Result<CompiledModule> {
     enforce_module_size(path, max_module_bytes)?;
-    let bytes = std::fs::read(path).map_err(|e| anyhow!("WASM module read failed: {e}"))?;
-    if bytes.len() as u64 > max_module_bytes {
-        return Err(anyhow!(
-            "WASM module {} exceeds max_module_bytes={}",
-            path.display(),
-            max_module_bytes
-        )
-        .into());
-    }
+    let mut file =
+        std::fs::File::open(path).map_err(|e| anyhow!("WASM module read failed: {e}"))?;
+    let bytes = read_bounded_module_bytes(&mut file, path, max_module_bytes)?;
     let wasm = wat::parse_bytes(&bytes).map_err(|e| anyhow!("WASM module parse failed: {e}"))?;
     let mut has_core_start = false;
     for payload in wasmtime::wasmparser::Parser::new(0).parse_all(&wasm) {
@@ -712,6 +707,30 @@ fn load_compiled_module(
         module,
         has_core_start,
     })
+}
+
+/// Reads at most `max_module_bytes + 1` bytes so an oversized module is
+/// rejected without consuming or allocating its remainder. The extra byte is
+/// only an overflow sentinel; it is never compiled.
+fn read_bounded_module_bytes<R: Read>(
+    reader: &mut R,
+    module: &Path,
+    max_module_bytes: u64,
+) -> Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader
+        .take(max_module_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|e| anyhow!("WASM module read failed: {e}"))?;
+    if bytes.len() as u64 > max_module_bytes {
+        return Err(anyhow!(
+            "WASM module {} exceeds max_module_bytes={}",
+            module.display(),
+            max_module_bytes
+        )
+        .into());
+    }
+    Ok(bytes)
 }
 
 fn enforce_module_size(module: &Path, max_module_bytes: u64) -> Result<()> {
@@ -960,6 +979,24 @@ mod tests {
             err.chain()
                 .any(|cause| cause.to_string().contains("WASM compile failed")),
             "unexpected error chain: {err:?}"
+        );
+    }
+
+    #[test]
+    fn bounded_module_read_stops_after_limit_plus_one_byte() {
+        let mut source = io::Cursor::new(vec![b'x'; 32]);
+        let error = read_bounded_module_bytes(&mut source, Path::new("bounded.wasm"), 8)
+            .expect_err("over-limit module");
+        assert!(
+            error
+                .chain()
+                .any(|cause| cause.to_string().contains("exceeds max_module_bytes")),
+            "unexpected error: {error:?}"
+        );
+        assert_eq!(
+            source.position(),
+            9,
+            "bounded reader must stop at limit + 1 byte"
         );
     }
 
