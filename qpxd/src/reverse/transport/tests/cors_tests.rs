@@ -534,3 +534,58 @@ async fn reverse_terminal_metadata_preserves_policy_effects_for_h1_and_h2() {
         }
     }
 }
+
+#[tokio::test]
+async fn fetch_metadata_rejection_appends_api_link_once() {
+    let reverse = build_reverse(
+        br#"edges:
+- kind: reverse
+  name: fetch-metadata-link
+  listen: 127.0.0.1:19080
+  routes:
+  - name: api
+    match:
+      path: [/api/**]
+    headers:
+      response_set:
+        X-Route-Marker: kept
+    http:
+      api_metadata:
+        deprecation_unix_seconds: 0
+        links:
+        - target: /docs
+          relation: deprecation
+      fetch_metadata:
+        allowed_sites: [same-origin]
+        allow_missing: false
+    target:
+      type: local_response
+      response:
+        status: 200
+        content_type: text/plain
+        body: ok
+"#,
+    );
+    let request = Request::from_http(
+        http::Request::builder()
+            .method(Method::GET)
+            .uri("/api/item")
+            .version(Version::HTTP_11)
+            .header("host", "api.example")
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let (interim, response) = handle_request_with_interim(request, reverse, connection())
+        .await
+        .expect("fetch metadata rejection");
+    assert!(interim.is_empty());
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        response
+            .headers()
+            .get_all(&ordinary("link"))
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>(),
+        ["</docs>; rel=\"deprecation\""]
+    );
+}

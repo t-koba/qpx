@@ -84,8 +84,6 @@ pub(super) fn enforce_selected_reverse_route_constraints(
                     request_method,
                     request_version,
                     proxy_name,
-                    route,
-                    conn,
                     (
                         StatusCode::BAD_REQUEST,
                         "Invalid Fetch Metadata",
@@ -99,8 +97,6 @@ pub(super) fn enforce_selected_reverse_route_constraints(
                 request_method,
                 request_version,
                 proxy_name,
-                route,
-                conn,
                 (
                     StatusCode::FORBIDDEN,
                     "Fetch Metadata policy rejected request",
@@ -162,8 +158,6 @@ fn fetch_metadata_rejection(
     request_method: &Method,
     request_version: http::Version,
     proxy_name: &str,
-    route: &crate::reverse::router::HttpRoute,
-    conn: &ReverseConnInfo,
     problem: (StatusCode, &'static str, String),
 ) -> Result<ReverseEarlyResult<OwnerRequest<Body>>> {
     let (status, title, detail) = problem;
@@ -176,8 +170,7 @@ fn fetch_metadata_rejection(
         http::header::CONTENT_TYPE.try_into().expect("ordinary"),
         http::HeaderValue::from_static(qpx_http::problem::PROBLEM_JSON),
     );
-    let mut response =
+    let response =
         finalize_response_for_request(request_method, request_version, proxy_name, response, false);
-    super::apply_reverse_route_metadata(route, conn.tls_terminated, &mut response)?;
     Ok(Err(empty_interim_response(response)))
 }
