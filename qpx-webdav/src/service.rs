@@ -545,7 +545,7 @@ impl<S: WebDavStore> WebDavService<S> {
             let is_calendar = properties.iter().any(|property| {
                 property.namespace == CALDAV_NAMESPACE && property.name == CALENDAR_MARKER
             });
-            let mut href = resource.as_str().to_owned();
+            let mut href = resource.as_uri_path();
             if metadata.is_collection && !href.ends_with('/') {
                 href.push('/');
             }
@@ -767,7 +767,7 @@ impl<S: WebDavStore> WebDavService<S> {
             StatusCode::CREATED,
             Vec::new(),
             http::header::LOCATION,
-            HeaderValue::from_str(&format!("{}/.versions/{version}", resource.as_str()))?,
+            HeaderValue::from_str(&format!("{}/.versions/{version}", resource.as_uri_path()))?,
         )
     }
 
@@ -836,7 +836,7 @@ impl<S: WebDavStore> WebDavService<S> {
             xml.push_str("<D:response><D:href>");
             xml.push_str(&escape_xml(&format!(
                 "{}/.versions/{}",
-                resource.as_str(),
+                resource.as_uri_path(),
                 version.version_name
             )));
             xml.push_str("</D:href><D:propstat><D:prop><D:version-name>");
@@ -924,7 +924,7 @@ impl<S: WebDavStore> WebDavService<S> {
             let calendar = std::str::from_utf8(&body)
                 .map_err(|_| anyhow!("stored calendar resource is not UTF-8"))?;
             xml.push_str("<D:response><D:href>");
-            xml.push_str(&escape_xml(resource.as_str()));
+            xml.push_str(&escape_xml(&resource.as_uri_path()));
             xml.push_str("</D:href><D:propstat><D:prop><D:getetag>");
             xml.push_str(&escape_xml(&metadata.etag));
             xml.push_str(
@@ -2164,7 +2164,7 @@ fn multistatus_property_response(
 ) -> Result<Response<Vec<u8>>> {
     let mut xml = format!(
         r#"<?xml version="1.0" encoding="utf-8"?><D:multistatus xmlns:D="DAV:"><D:response><D:href>{}</D:href><D:propstat><D:prop>"#,
-        escape_xml(resource.as_str())
+        escape_xml(&resource.as_uri_path())
     );
     for (namespace, name) in names {
         xml.push_str("<Q:property xmlns:Q=\"");
@@ -2347,6 +2347,56 @@ mod tests {
                 .value_xml,
             "internal"
         );
+    }
+
+    #[test]
+    fn propfind_href_round_trips_to_get_for_literal_percent_sequence() {
+        let directory = tempdir().unwrap();
+        let data = FileSystemDataStore::open(directory.path().join("data")).unwrap();
+        let metadata = RedbMetadataStore::open(directory.path().join("metadata.redb")).unwrap();
+        let service = WebDavService::new(Arc::new(PersistentWebDavStore::new(data, metadata)));
+        let context = WebDavRequestContext::default();
+
+        let mkcol = http::Request::builder()
+            .method("MKCOL")
+            .uri("/docs")
+            .body(Vec::new())
+            .map(Request::from_http)
+            .unwrap();
+        assert_eq!(service.handle(mkcol, &context).unwrap().status(), 201);
+
+        let put = http::Request::builder()
+            .method("PUT")
+            .uri("/docs/report%2520draft.txt")
+            .body(b"draft".to_vec())
+            .map(Request::from_http)
+            .unwrap();
+        assert_eq!(service.handle(put, &context).unwrap().status(), 201);
+
+        let propfind = http::Request::builder()
+            .method("PROPFIND")
+            .uri("/docs")
+            .header("depth", "1")
+            .body(Vec::new())
+            .map(Request::from_http)
+            .unwrap();
+        let response = service.handle(propfind, &context).unwrap();
+        assert_eq!(response.status(), 207);
+        let body = String::from_utf8(response.into_head_and_body().1).unwrap();
+        assert!(
+            body.contains("<D:href>/docs/report%2520draft.txt</D:href>"),
+            "unexpected multistatus: {body}"
+        );
+
+        let get = http::Request::builder()
+            .method("GET")
+            .uri("/docs/report%2520draft.txt")
+            .body(Vec::new())
+            .map(Request::from_http)
+            .unwrap();
+        let response = service.handle(get, &context).unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(response.body(), &Bytes::from_static(b"draft"));
     }
 
     #[test]

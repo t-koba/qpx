@@ -1,5 +1,5 @@
 use anyhow::{Result, anyhow};
-use percent_encoding::percent_decode_str;
+use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, percent_decode_str, utf8_percent_encode};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::fmt;
 use std::sync::Arc;
@@ -82,6 +82,25 @@ impl ResourceId {
 
     pub fn as_str(&self) -> &str {
         &self.0
+    }
+
+    /// URI-path form for DAV hrefs: literal `%` and other reserved bytes are
+    /// encoded, while segment separators and unreserved characters stay as-is.
+    pub(crate) fn as_uri_path(&self) -> String {
+        const SEGMENT: &AsciiSet = &NON_ALPHANUMERIC
+            .remove(b'-')
+            .remove(b'.')
+            .remove(b'_')
+            .remove(b'~');
+
+        let mut path = String::with_capacity(self.0.len());
+        for (index, segment) in self.0.split('/').enumerate() {
+            if index > 0 {
+                path.push('/');
+            }
+            path.extend(utf8_percent_encode(segment, SEGMENT));
+        }
+        path
     }
 
     pub(crate) fn is_same_resource(&self, other: &Self) -> bool {
