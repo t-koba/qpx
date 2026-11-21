@@ -113,8 +113,12 @@ fn load_cert_into_store(state: &AcmeRuntime, sni: &str) -> Result<bool> {
         return Ok(false);
     }
     let chain = load_cert_chain(&cert_path)?;
-    let (_, not_after) = read_leaf_validity(&cert_path)?;
-    if SystemTime::now() >= not_after {
+    let (not_before, not_after) = read_leaf_validity(&cert_path)?;
+    let now = SystemTime::now();
+    if now < not_before {
+        return Err(anyhow!("ACME certificate for {sni} is not yet valid"));
+    }
+    if now >= not_after {
         return Err(anyhow!("ACME certificate for {sni} has expired"));
     }
     #[cfg(feature = "http3")]
@@ -1243,6 +1247,22 @@ mod tests {
         fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
         assert!(!matches!(
             reuse_existing_certificate(&fixture.0, TEST_SNI),
+            Ok(true)
+        ));
+        fixture.assert_empty();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn future_dated_certificate_is_not_loaded_into_store() {
+        let fixture = CertFixture::new();
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        params.not_before = rcgen::date_time_ymd(2099, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+        fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
+        assert!(!matches!(
+            load_cert_into_store(&fixture.0, TEST_SNI),
             Ok(true)
         ));
         fixture.assert_empty();
