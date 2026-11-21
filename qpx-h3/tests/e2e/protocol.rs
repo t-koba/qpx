@@ -251,6 +251,46 @@ impl RequestHandler for OwnedIngressHandler {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn literal_empty_final_header_reaches_handler() -> Result<()> {
+    use qpx_core::http_message::OrdinaryHeaderName;
+
+    let (seen_tx, seen_rx) = oneshot::channel();
+    let handler = OwnedIngressHandler {
+        seen: Arc::new(Mutex::new(Some(seen_tx))),
+    };
+    let (addr, client_config, server_task) = start_server(handler).await?;
+    let (_client_endpoint, connection) = connect_client(addr, client_config).await?;
+    open_client_control_stream(&connection).await?;
+    open_client_qpack_streams(&connection).await?;
+
+    let authority = format!("localhost:{}", addr.port());
+    let mut headers = build_head_request_headers(&authority);
+    encode_string(&mut headers, 4, 0b0010, b"x-empty");
+    encode_string(&mut headers, 8, 0, b"");
+    let (mut send, mut recv) = connection.open_bi().await?;
+    write_frame_raw(&mut send, FRAME_HEADERS, &headers).await?;
+    send.finish()?;
+
+    assert_eq!(
+        read_frame_raw(&mut recv, "empty literal response").await?.0,
+        FRAME_HEADERS
+    );
+    let head = timeout(TEST_TIMEOUT, seen_rx).await??;
+    let name = OrdinaryHeaderName::try_from("x-empty")?;
+    assert_eq!(
+        head.headers()
+            .get_all(&name)
+            .map(|value| value.as_bytes())
+            .collect::<Vec<_>>(),
+        vec![b"".as_slice()]
+    );
+
+    server_task.abort();
+    let _ = server_task.await;
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn decoded_qpack_fields_reach_owned_handler_without_coalescing() -> Result<()> {
     use qpx_core::http_message::OrdinaryHeaderName;
 

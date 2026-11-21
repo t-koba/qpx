@@ -75,6 +75,9 @@ impl FieldPayloadReader<'_> {
         if len > self.remaining() {
             return Err(HeaderDecodeError::qpack("truncated QPACK string literal"));
         }
+        if len == 0 {
+            return Ok(Bytes::new());
+        }
         self.refill().await?;
         if let Some(front) = self.buffers.front_mut()
             && front.len() >= len
