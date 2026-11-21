@@ -330,6 +330,155 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
 }
 
 #[tokio::test]
+async fn forward_ftp_active_mode_negotiates_binary_representation() {
+    use tokio::io::AsyncBufReadExt;
+    use tokio::net::TcpListener;
+    let control = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = control.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        // First attempt: refuse both passive modes so the caller falls back to active.
+        let (stream, _) = control.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        stream
+            .get_mut()
+            .write_all(b"220 synthetic FTP server\r\n")
+            .await
+            .unwrap();
+        let mut line = String::new();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "USER synthetic-user\r\n");
+        stream
+            .get_mut()
+            .write_all(b"331 password required\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "PASS synthetic-pass\r\n");
+        stream
+            .get_mut()
+            .write_all(b"230 logged in\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "TYPE I\r\n");
+        stream
+            .get_mut()
+            .write_all(b"200 Type set to I\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "EPSV\r\n");
+        stream
+            .get_mut()
+            .write_all(b"500 EPSV unavailable\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "PASV\r\n");
+        stream
+            .get_mut()
+            .write_all(b"500 PASV unavailable\r\n")
+            .await
+            .unwrap();
+
+        // Second attempt: active mode connects back to the listener in PORT.
+        let (stream, _) = control.accept().await.unwrap();
+        let mut stream = BufReader::new(stream);
+        stream
+            .get_mut()
+            .write_all(b"220 synthetic FTP server\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "USER synthetic-user\r\n");
+        stream
+            .get_mut()
+            .write_all(b"331 password required\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "PASS synthetic-pass\r\n");
+        stream
+            .get_mut()
+            .write_all(b"230 logged in\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "TYPE I\r\n");
+        stream
+            .get_mut()
+            .write_all(b"200 Type set to I\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        let port_args = line.strip_prefix("PORT ").unwrap().trim_end();
+        let parts: Vec<&str> = port_args.split(',').collect();
+        assert_eq!(&parts[..4], ["127", "0", "0", "1"]);
+        let data_port: u16 =
+            parts[4].parse::<u16>().unwrap() * 256 + parts[5].parse::<u16>().unwrap();
+        stream
+            .get_mut()
+            .write_all(b"200 PORT command successful\r\n")
+            .await
+            .unwrap();
+        line.clear();
+        stream.read_line(&mut line).await.unwrap();
+        assert_eq!(line, "RETR file.txt\r\n");
+        stream
+            .get_mut()
+            .write_all(b"150 data follows\r\n")
+            .await
+            .unwrap();
+        let mut data = tokio::net::TcpStream::connect(("127.0.0.1", data_port))
+            .await
+            .unwrap();
+        data.write_all(b"\x00\xff\r\n\n").await.unwrap();
+        data.shutdown().await.unwrap();
+        stream
+            .get_mut()
+            .write_all(b"226 complete\r\n")
+            .await
+            .unwrap();
+    });
+    let runtime = ftp_forward_test_runtime();
+    let req = OwnerRequest::from_http(
+        Request::builder()
+            .uri(format!(
+                "ftp://synthetic%2Duser:synthetic%2Dpass@{addr}/file.txt"
+            ))
+            .header("host", addr.to_string())
+            .body(Body::empty())
+            .unwrap(),
+    );
+    let response = timeout(
+        StdDuration::from_secs(5),
+        crate::forward::handle_request_inner(
+            req,
+            runtime,
+            "ftp-test",
+            "127.0.0.1:12345".parse().unwrap(),
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .unwrap();
+    assert_eq!(body.as_ref(), b"\x00\xff\r\n\n");
+    server.await.unwrap();
+}
+
+#[tokio::test]
 async fn forward_http_userinfo_is_rejected_before_dispatch() {
     for scheme in ["http", "https"] {
         let req = OwnerRequest::from_http(
