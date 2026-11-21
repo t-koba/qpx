@@ -106,6 +106,11 @@ struct PreparedInstance {
     instance: Option<Instance>,
 }
 
+struct CompiledModule {
+    module: Module,
+    has_core_start: bool,
+}
+
 pub use qpx_core::execution::{RequestHeaders, WasmRequest};
 
 /// Running WASM execution handles and I/O streams.
@@ -354,11 +359,10 @@ impl Drop for EpochTicker {
 pub struct WasmExecutor {
     engine: Engine,
     module_path: PathBuf,
-    module: Arc<OnceCell<Module>>,
+    module: Arc<OnceCell<CompiledModule>>,
     linker: Arc<Linker<WasmStoreData>>,
     instance_pre: Arc<OnceCell<InstancePre<WasmStoreData>>>,
     idle_instances: Arc<Mutex<Vec<PreparedInstance>>>,
-    core_start: Arc<OnceCell<bool>>,
     max_idle_instances: usize,
     max_module_bytes: u64,
     max_memory_bytes: u64,
@@ -403,17 +407,20 @@ impl WasmExecutor {
 
         let module = Arc::new(OnceCell::new());
         let instance_pre = Arc::new(OnceCell::new());
-        let core_start = Arc::new(OnceCell::new());
-        if config.precompile {
-            let compiled = Module::from_file(&engine, &config.module)
+        let has_core_start = if config.precompile {
+            let compiled = load_compiled_module(&config.module, &engine, max_module_bytes)
                 .map_err(|e| anyhow!("WASM precompile failed: {}", e))?;
             let pre = linker
-                .instantiate_pre(&compiled)
+                .instantiate_pre(&compiled.module)
                 .map_err(|e| anyhow!("WASM instantiate_pre failed: {e}"))?;
+            let has_core_start = compiled.has_core_start;
             let _ = module.set(compiled);
             let _ = instance_pre.set(pre);
             info!(module = %config.module.display(), "WASM module loaded (precompiled)");
-        }
+            has_core_start
+        } else {
+            false
+        };
 
         let ticker_engine = engine.clone();
         let epoch_ticker = tokio::spawn(async move {
@@ -430,8 +437,6 @@ impl WasmExecutor {
 
         let idle_instances = Arc::new(Mutex::new(Vec::with_capacity(config.idle_instances)));
         if config.precompile && config.idle_instances > 0 {
-            let has_core_start = module_has_core_start_section(&config.module, max_module_bytes)?;
-            let _ = core_start.set(has_core_start);
             schedule_idle_replenish(
                 Arc::clone(&idle_instances),
                 config.idle_instances,
@@ -450,7 +455,6 @@ impl WasmExecutor {
             linker: Arc::new(linker),
             instance_pre,
             idle_instances,
-            core_start,
             max_idle_instances: config.idle_instances,
             max_module_bytes,
             max_memory_bytes: config.max_memory_bytes,
@@ -480,7 +484,6 @@ impl WasmExecutor {
         let linker = Arc::clone(&self.linker);
         let instance_pre = Arc::clone(&self.instance_pre);
         let idle_instances = Arc::clone(&self.idle_instances);
-        let core_start = Arc::clone(&self.core_start);
         let max_idle_instances = self.max_idle_instances;
         let max_module_bytes = self.max_module_bytes;
         let max_memory_bytes = self.max_memory_bytes;
@@ -506,19 +509,23 @@ impl WasmExecutor {
 
                 let wasi_ctx = wasi_builder.build_p1();
 
-                let module = module
-                    .get_or_try_init(|| async {
-                        enforce_module_size(&module_path, max_module_bytes)?;
+                let compiled = module
+                    .get_or_try_init(|| {
                         let engine = engine.clone();
                         let module_path = module_path.clone();
-                        tokio::task::spawn_blocking(move || {
-                            Module::from_file(&engine, &module_path)
-                        })
-                        .await
-                        .map_err(|e| anyhow!("WASM compile join failed: {}", e))?
-                        .map_err(|e| anyhow!("WASM compile failed: {}", e))
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                load_compiled_module(&module_path, &engine, max_module_bytes)
+                            })
+                            .await
+                            .map_err(|e| anyhow!("WASM compile join failed: {}", e))?
+                            .map_err(|e| anyhow!("WASM compile failed: {e}"))
+                        }
                     })
-                    .await?;
+                    .await
+                    .map_err(WasmError::from)?;
+                let module = &compiled.module;
+                let has_core_start = compiled.has_core_start;
 
                 let instance_template = instance_pre
                     .get_or_try_init(|| async {
@@ -527,19 +534,6 @@ impl WasmExecutor {
                             .map_err(|e| anyhow!("WASM instantiate_pre failed: {}", e))
                     })
                     .await?;
-
-                let has_core_start = if max_idle_instances > 0 {
-                    *core_start
-                        .get_or_try_init(|| {
-                            let module_path = module_path.clone();
-                            async move {
-                                module_has_core_start_section(&module_path, max_module_bytes)
-                            }
-                        })
-                        .await?
-                } else {
-                    false
-                };
 
                 let prepared = idle_instances.lock().await.pop();
                 let (mut store, prepared_instance) = match prepared {
@@ -689,9 +683,21 @@ async fn prepare_idle_instance(
     Ok(PreparedInstance { store, instance })
 }
 
-fn module_has_core_start_section(module: &Path, max_module_bytes: u64) -> Result<bool> {
-    enforce_module_size(module, max_module_bytes)?;
-    let bytes = std::fs::read(module).map_err(|e| anyhow!("WASM module read failed: {e}"))?;
+fn load_compiled_module(
+    path: &Path,
+    engine: &Engine,
+    max_module_bytes: u64,
+) -> Result<CompiledModule> {
+    enforce_module_size(path, max_module_bytes)?;
+    let bytes = std::fs::read(path).map_err(|e| anyhow!("WASM module read failed: {e}"))?;
+    if bytes.len() as u64 > max_module_bytes {
+        return Err(anyhow!(
+            "WASM module {} exceeds max_module_bytes={}",
+            path.display(),
+            max_module_bytes
+        )
+        .into());
+    }
     let wasm = wat::parse_bytes(&bytes).map_err(|e| anyhow!("WASM module parse failed: {e}"))?;
     let mut has_core_start = false;
     for payload in wasmparser::Parser::new(0).parse_all(&wasm) {
@@ -701,7 +707,11 @@ fn module_has_core_start_section(module: &Path, max_module_bytes: u64) -> Result
             has_core_start = true;
         }
     }
-    Ok(has_core_start)
+    let module = Module::new(engine, &wasm).map_err(|e| anyhow!("WASM compile failed: {e}"))?;
+    Ok(CompiledModule {
+        module,
+        has_core_start,
+    })
 }
 
 fn enforce_module_size(module: &Path, max_module_bytes: u64) -> Result<()> {
@@ -951,6 +961,28 @@ mod tests {
                 .any(|cause| cause.to_string().contains("WASM compile failed")),
             "unexpected error chain: {err:?}"
         );
+    }
+
+    #[test]
+    fn compiled_module_and_start_flag_share_one_snapshot() {
+        let module_path = temp_file(
+            "start-flag.wat",
+            br#"(module (func $init) (start $init) (func (export "_start")))"#,
+        );
+        let engine = Engine::default();
+        let compiled = load_compiled_module(&module_path, &engine, DEFAULT_MAX_MODULE_BYTES)
+            .expect("load compiled module");
+        assert!(compiled.has_core_start);
+
+        std::fs::write(&module_path, br#"(module (func (export "_start")))"#)
+            .expect("replace module file");
+        assert!(
+            compiled.has_core_start,
+            "cached classification must describe the compiled module"
+        );
+        let replacement =
+            load_compiled_module(&module_path, &engine, DEFAULT_MAX_MODULE_BYTES).unwrap();
+        assert!(!replacement.has_core_start);
     }
 
     #[tokio::test]
