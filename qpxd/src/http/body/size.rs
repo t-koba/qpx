@@ -241,11 +241,15 @@ impl http_body::Body for LimitedBody {
 
     fn size_hint(&self) -> http_body::SizeHint {
         let mut hint = self.inner.size_hint();
-        if let Some(upper) = hint.upper() {
-            hint.set_upper(upper.min(self.limit.saturating_sub(self.seen) as u64));
+        let remaining = self.limit.saturating_sub(self.seen) as u64;
+        let lower = if hint.lower() <= remaining {
+            hint.lower()
         } else {
-            hint.set_upper(self.limit.saturating_sub(self.seen) as u64);
-        }
+            0
+        };
+        let upper = hint.upper().unwrap_or(remaining).min(remaining);
+        hint.set_lower(lower);
+        hint.set_upper(upper);
         hint
     }
 }

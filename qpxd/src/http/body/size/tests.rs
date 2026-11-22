@@ -541,3 +541,17 @@ async fn owned_request_rpc_observation_keeps_summary_and_context() {
     assert_eq!(rpc.request_message_bytes, Some(2));
     assert_eq!(rpc.message_size, Some(2));
 }
+
+#[test]
+fn limited_body_hint_stays_valid_when_cap_is_smaller_than_inner_body() {
+    let body = LimitedBody {
+        inner: Body::from("ab"),
+        seen: 0,
+        limit: 1,
+        exceeded: false,
+    };
+
+    let hint = http_body::Body::size_hint(&body);
+    assert_eq!(hint.lower(), 0);
+    assert_eq!(hint.upper(), Some(1));
+}
