@@ -109,6 +109,149 @@ fn priority_scheduler_orders_incremental_work_by_urgency() {
     assert_eq!(scheduler.next_task(), None);
 }
 
+#[tokio::test]
+async fn priority_scheduler_selects_at_permit_release() -> Result<()> {
+    use crate::http3::listener::scheduler::{
+        ScheduledH3Stream, request_priority, run_priority_scheduler,
+    };
+    use bytes::Bytes;
+
+    #[derive(Clone)]
+    struct RecordPaths(tokio::sync::mpsc::UnboundedSender<String>);
+
+    #[async_trait]
+    impl H3RequestHandler for RecordPaths {
+        type Response = Response<Body>;
+
+        fn limits(&self) -> H3Limits {
+            let mut limits =
+                CountLimitSelections(Arc::new(std::sync::atomic::AtomicUsize::new(0))).limits();
+            limits.max_concurrent_streams_per_connection = 1;
+            limits
+        }
+
+        async fn handle_http(&self, req: Request<Body>, _: H3ConnInfo) -> Self::Response {
+            self.0
+                .send(req.uri().path().to_string())
+                .expect("path recorder must stay open");
+            Response::new(Body::empty())
+        }
+
+        async fn handle_connect(
+            &self,
+            _: Request<()>,
+            _: H3ServerRequestStream,
+            _: H3ConnInfo,
+            _: H3ConnectKind,
+            _: Option<H3StreamDatagrams>,
+        ) -> Result<()> {
+            panic!("ordinary request must not enter CONNECT handling")
+        }
+    }
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let (endpoint, _client, server_conn, client_conn) = h3_loopback().await?;
+        let info = H3ConnInfo {
+            remote_addr: server_conn.remote_address(),
+            dst_port: endpoint.local_addr()?.port(),
+            tls_sni: None,
+            peer_certificates: None,
+        };
+        let (resolved_tx, mut resolved_rx) = tokio::sync::mpsc::channel(2);
+        let server_task = tokio::spawn(async move {
+            let mut connection = ::h3::server::builder()
+                .build::<_, Bytes>(crate::http3::quinn_adapter::Connection::new(server_conn))
+                .await
+                .unwrap();
+            while let Ok(Some(resolver)) = connection.accept().await {
+                let (head, stream) = resolver.resolve_request().await.unwrap();
+                let path = head.uri().path().to_string();
+                let priority = request_priority(head.headers());
+                resolved_tx
+                    .send((
+                        path,
+                        ScheduledH3Stream {
+                            req_head: head,
+                            req_stream: stream,
+                            datagrams: None,
+                            disabled_datagram_registration: None,
+                            priority,
+                        },
+                    ))
+                    .await
+                    .unwrap();
+            }
+        });
+
+        let (mut h3_client, mut sender) = ::h3::client::builder()
+            .build::<_, _, Bytes>(crate::http3::quinn_adapter::Connection::new(client_conn))
+            .await?;
+        let client_task = tokio::spawn(async move {
+            let _ = std::future::poll_fn(|cx| h3_client.poll_close(cx)).await;
+        });
+        for (path, urgency) in [("/low", "u=7"), ("/high", "u=0")] {
+            let mut stream = sender
+                .send_request(
+                    ::http::Request::get(format!("https://localhost{path}"))
+                        .header("priority", urgency)
+                        .body(())?,
+                )
+                .await?;
+            stream.finish().await?;
+        }
+
+        let mut low = None;
+        let mut high = None;
+        for _ in 0..2 {
+            let (path, task) = resolved_rx.recv().await.expect("resolved H3 request");
+            match path.as_str() {
+                "/low" => low = Some(task),
+                "/high" => high = Some(task),
+                other => panic!("unexpected H3 request path: {other}"),
+            }
+        }
+        let low = low.expect("/low request");
+        let high = high.expect("/high request");
+        assert_eq!(low.priority.urgency, 7);
+        assert_eq!(high.priority.urgency, 0);
+
+        let (path_tx, mut path_rx) = tokio::sync::mpsc::unbounded_channel();
+        let handler = RecordPaths(path_tx);
+        let limits = handler.limits();
+        let (scheduler_tx, scheduler_rx) = tokio::sync::mpsc::channel(2);
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+        let held_permit = semaphore.clone().acquire_owned().await?;
+
+        scheduler_tx.send(low).await?;
+        let mut scheduler = Box::pin(run_priority_scheduler(
+            scheduler_rx,
+            semaphore.clone(),
+            handler,
+            info,
+            limits,
+        ));
+        assert!(
+            futures_util::poll!(&mut scheduler).is_pending(),
+            "scheduler must wait while the only stream permit is held"
+        );
+
+        scheduler_tx.send(high).await?;
+        drop(scheduler_tx);
+        drop(held_permit);
+        scheduler.await;
+
+        let first = path_rx.recv().await.expect("first handled request path");
+        assert_eq!(
+            first, "/high",
+            "a request arriving while the permit is held must be considered first"
+        );
+        server_task.abort();
+        client_task.abort();
+        Ok::<_, anyhow::Error>(())
+    })
+    .await?
+}
+
 #[test]
 fn h3_field_section_cap_matches_edge_caps() {
     assert_eq!(

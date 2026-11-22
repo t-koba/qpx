@@ -26,42 +26,61 @@ pub(super) async fn run_priority_scheduler<H: H3RequestHandler>(
     let mut scheduler = PriorityScheduler::new();
     let mut closed = false;
     loop {
-        while let Ok(task) = rx.try_recv() {
-            let priority = task.priority;
-            scheduler.enqueue(task, priority);
-        }
-        if let Some(task) = scheduler.next_task() {
-            let permit = match stream_semaphore.clone().acquire_owned().await {
-                Ok(permit) => permit,
-                Err(_) => break,
-            };
-            let handler = handler.clone();
-            let conn_info = conn_info.clone();
-            let limits = limits.clone();
-            tokio::spawn(async move {
-                let _permit = permit;
-                handle_stream(
-                    task.req_head,
-                    task.req_stream,
-                    conn_info,
-                    handler,
-                    limits,
-                    task.datagrams,
-                    task.disabled_datagram_registration,
-                )
-                .await;
-            });
+        drain_scheduled_streams(&mut rx, &mut scheduler);
+        if scheduler.is_empty() {
+            if closed {
+                break;
+            }
+            match rx.recv().await {
+                Some(task) => {
+                    let priority = task.priority;
+                    scheduler.enqueue(task, priority);
+                }
+                None => closed = true,
+            }
             continue;
         }
-        if closed {
-            break;
-        }
-        match rx.recv().await {
-            Some(task) => {
+
+        let permit = match stream_semaphore.clone().acquire_owned().await {
+            Ok(permit) => permit,
+            Err(_) => break,
+        };
+        // Requests queued while the permit was unavailable must take part in
+        // the selection; commit to a task only once a slot is actually free.
+        drain_scheduled_streams(&mut rx, &mut scheduler);
+        let task = scheduler
+            .next_task()
+            .expect("scheduler had work before permit acquisition");
+        let handler = handler.clone();
+        let conn_info = conn_info.clone();
+        let limits = limits.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            handle_stream(
+                task.req_head,
+                task.req_stream,
+                conn_info,
+                handler,
+                limits,
+                task.datagrams,
+                task.disabled_datagram_registration,
+            )
+            .await;
+        });
+    }
+}
+
+fn drain_scheduled_streams(
+    rx: &mut mpsc::Receiver<ScheduledH3Stream>,
+    scheduler: &mut PriorityScheduler<ScheduledH3Stream>,
+) {
+    for _ in 0..rx.len() {
+        match rx.try_recv() {
+            Ok(task) => {
                 let priority = task.priority;
                 scheduler.enqueue(task, priority);
             }
-            None => closed = true,
+            Err(_) => break,
         }
     }
 }
@@ -98,6 +117,12 @@ impl<T> PriorityScheduler<T> {
         } else {
             queue.non_incremental.push_back(task);
         }
+    }
+
+    pub(super) fn is_empty(&self) -> bool {
+        self.queues
+            .iter()
+            .all(|queue| queue.non_incremental.is_empty() && queue.incremental.is_empty())
     }
 
     pub(super) fn next_task(&mut self) -> Option<T> {
