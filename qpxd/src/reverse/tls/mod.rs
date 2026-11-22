@@ -23,7 +23,7 @@ use std::path::Path;
 ///
 /// A wildcard matches exactly one leading label: `*.example.test` matches
 /// `shop.example.test`, but not `example.test` or `a.shop.example.test`.
-#[cfg(any(feature = "tls-rustls", feature = "http3"))]
+#[cfg(any(feature = "tls-rustls", feature = "tls-native", feature = "http3"))]
 pub(in crate::reverse) fn wildcard_sni_for_name(name: &str) -> Option<String> {
     let (_, parent) = name.split_once('.')?;
     if parent.is_empty() {

@@ -131,6 +131,19 @@ impl rustls::server::ResolvesServerCert for SniResolver {
 pub(in crate::reverse) type ReverseTlsAcceptor = NativeTlsAcceptor;
 
 #[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
+fn native_cert_sni<V>(
+    by_sni: &std::collections::HashMap<String, V>,
+    sni: Option<&str>,
+) -> Option<String> {
+    let name = sni?.to_ascii_lowercase();
+    if by_sni.contains_key(&name) {
+        return Some(name);
+    }
+    let wildcard = super::wildcard_sni_for_name(&name)?;
+    by_sni.contains_key(&wildcard).then_some(wildcard)
+}
+
+#[cfg(all(not(feature = "tls-rustls"), feature = "tls-native"))]
 #[derive(Clone)]
 pub(in crate::reverse) struct NativeTlsAcceptor {
     by_sni: std::collections::HashMap<String, tokio_native_tls::TlsAcceptor>,
@@ -147,7 +160,7 @@ impl NativeTlsAcceptor {
     where
         S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
     {
-        let key = sni.map(|v| v.to_ascii_lowercase());
+        let key = native_cert_sni(&self.by_sni, sni);
         let acceptor = key
             .as_deref()
             .and_then(|k| self.by_sni.get(k))
@@ -265,5 +278,33 @@ mod tests {
         assert_eq!(selected.cert[0].as_ref(), pair.cert.der().as_ref());
         assert!(resolve_for_sni(&resolver, "example.test").is_none());
         assert!(resolve_for_sni(&resolver, "a.shop.example.test").is_none());
+    }
+}
+
+#[cfg(all(test, not(feature = "tls-rustls"), feature = "tls-native"))]
+mod native_tests {
+    use super::*;
+
+    #[test]
+    fn native_sni_uses_one_label_wildcard() {
+        let wildcard_only = std::collections::HashMap::from([("*.example.test".to_string(), ())]);
+        assert_eq!(
+            native_cert_sni(&wildcard_only, Some("shop.example.test")).as_deref(),
+            Some("*.example.test")
+        );
+        assert_eq!(
+            native_cert_sni(&wildcard_only, Some("a.shop.example.test")),
+            None
+        );
+        assert_eq!(native_cert_sni(&wildcard_only, Some("example.test")), None);
+
+        let exact_and_wildcard = std::collections::HashMap::from([
+            ("*.example.test".to_string(), ()),
+            ("shop.example.test".to_string(), ()),
+        ]);
+        assert_eq!(
+            native_cert_sni(&exact_and_wildcard, Some("SHOP.EXAMPLE.TEST")).as_deref(),
+            Some("shop.example.test")
+        );
     }
 }
