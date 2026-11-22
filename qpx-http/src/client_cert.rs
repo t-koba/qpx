@@ -236,6 +236,7 @@ impl ClientCertificateHeaders {
         include_chain: bool,
         limits: &ClientCertLimits,
     ) -> Result<Option<Self>, ClientCertError> {
+        (*limits).validate()?;
         let Some(end_entity) = certificates.first() else {
             return Ok(None);
         };
@@ -599,6 +600,27 @@ mod tests {
             end_entity.cert.der().to_vec(),
             intermediate.cert.der().to_vec(),
         )
+    }
+
+    #[test]
+    fn empty_peer_certificates_still_require_valid_limits() {
+        let limits = ClientCertLimits {
+            max_field_bytes: 0,
+            ..ClientCertLimits::default()
+        };
+
+        assert!(matches!(
+            ClientCertificateHeaders::from_peer_certificates(&[], false, &limits),
+            Err(ClientCertError::InvalidLimits)
+        ));
+        assert_eq!(
+            ClientCertificateHeaders::from_peer_certificates(
+                &[],
+                false,
+                &ClientCertLimits::default()
+            ),
+            Ok(None)
+        );
     }
 
     #[test]
