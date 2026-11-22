@@ -167,6 +167,14 @@ impl UdpBindings {
 
     #[cfg(feature = "http3")]
     fn udp_socket_for_listen(&self, config: &Config, listen: &str) -> Option<Result<UdpSocket>> {
+        // A configured port 0 is an instruction to allocate a fresh port, not an
+        // endpoint identity; reusing the old socket would give two edges one port.
+        if listen
+            .parse::<SocketAddr>()
+            .is_ok_and(|addr| addr.port() == 0)
+        {
+            return None;
+        }
         for listener in config.ingress_edges() {
             let old_listen = listener
                 .http3
@@ -367,5 +375,108 @@ mod listen_tests {
             "127.0.0.1:8443"
         );
         assert_eq!(effective_http3_listen(None, "0.0.0.0:443"), "0.0.0.0:443");
+    }
+}
+
+#[cfg(all(test, feature = "http3"))]
+mod tests {
+    use super::*;
+    use qpx_core::config::{
+        ActionConfig, ActionKind, EdgeConfig, Http3IngressEdgeConfig, IngressEdgeConfig,
+        IngressEdgeMode,
+    };
+
+    fn config(names: &[&str]) -> Config {
+        Config {
+            state_dir: None,
+            identity: Default::default(),
+            messages: Default::default(),
+            runtime: Default::default(),
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: Default::default(),
+                access_log: Default::default(),
+                audit_log: Default::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: Default::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    services: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: Default::default(),
+            traffic: Default::default(),
+            acme: None,
+            edges: names
+                .iter()
+                .map(|name| {
+                    EdgeConfig::Forward(IngressEdgeConfig {
+                        name: (*name).to_string(),
+                        mode: IngressEdgeMode::Forward,
+                        listen: "127.0.0.1:0".to_string(),
+                        default_action: ActionConfig {
+                            kind: ActionKind::Direct,
+                            upstream: None,
+                            local_response: None,
+                        },
+                        original_dst: None,
+                        tls_inspection: None,
+                        rules: Vec::new(),
+                        connection_filter: Vec::new(),
+                        streaming: None,
+                        grpc: None,
+                        sse: None,
+                        streaming_requirement: None,
+                        upstream_proxy: None,
+                        http3: Some(Http3IngressEdgeConfig {
+                            enabled: true,
+                            listen: Some("127.0.0.1:0".to_string()),
+                            connect_udp: None,
+                            connect_ip: None,
+                        }),
+                        ftp: Default::default(),
+                        xdp: None,
+                        cache: None,
+                        capture: None,
+                        rate_limit: None,
+                        policy_context: None,
+                        http: None,
+                        http_guard_profile: None,
+                        destination_resolution: None,
+                        http_modules: Vec::new(),
+                    })
+                })
+                .collect(),
+            upstreams: Vec::new(),
+            caches: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn ephemeral_hot_reload_binds_distinct_udp_sockets() {
+        let previous_config = config(&["a"]);
+        let previous = UdpBindings::bind(&previous_config).expect("initial bind");
+        let reloaded_config = config(&["a", "b"]);
+        let reloaded =
+            UdpBindings::bind_for_hot_reload(&reloaded_config, &previous_config, &previous)
+                .expect("hot reload bind");
+        let a = reloaded
+            .clone_listener("a")
+            .expect("clone a")
+            .expect("a socket");
+        let b = reloaded
+            .clone_listener("b")
+            .expect("clone b")
+            .expect("b socket");
+        assert_ne!(
+            a.local_addr().expect("a addr"),
+            b.local_addr().expect("b addr")
+        );
     }
 }
