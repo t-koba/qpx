@@ -24,6 +24,7 @@ struct TimeoutAfterPendingWithReusable<'a, 'timer, F, P> {
     timeout: &'a mut ReusablePendingTimeout<'timer>,
     on_pending: P,
     armed: bool,
+    infinite: bool,
     completed: bool,
 }
 
@@ -59,6 +60,7 @@ impl<'a> ReusablePendingTimeout<'a> {
             timeout: self,
             on_pending,
             armed: false,
+            infinite: false,
             completed: false,
         }
     }
@@ -152,9 +154,14 @@ where
 
         if !this.armed {
             (this.on_pending)();
-            let deadline = Instant::now() + this.duration;
-            this.timeout.timer.as_mut().reset(deadline);
+            match Instant::now().checked_add(this.duration) {
+                Some(deadline) => this.timeout.timer.as_mut().reset(deadline),
+                None => this.infinite = true,
+            }
             this.armed = true;
+        }
+        if this.infinite {
+            return Poll::Pending;
         }
         if this.timeout.timer.as_mut().poll(cx).is_ready() {
             this.completed = true;
@@ -232,5 +239,16 @@ mod tests {
             std::ptr::from_ref(timeout.timer.as_ref().get_ref()),
             timer_address
         );
+    }
+    #[tokio::test]
+    async fn reusable_timeout_handles_unrepresentable_deadline() {
+        let timer = sleep(Duration::ZERO);
+        tokio::pin!(timer);
+        let mut timeout = ReusablePendingTimeout::new(timer.as_mut());
+
+        let guarded = timeout.timeout_after_pending(Duration::MAX, std::future::pending::<()>());
+        let result = tokio::time::timeout(Duration::from_millis(20), guarded).await;
+
+        assert!(result.is_err());
     }
 }
