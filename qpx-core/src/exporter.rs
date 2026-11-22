@@ -203,8 +203,12 @@ impl CaptureEvent {
         let server_len = u32::from_le_bytes(read_array::<4>(&buf, 24)?) as usize;
         let payload_len = u32::from_le_bytes(read_array::<4>(&buf, 28)?) as usize;
 
-        let total_len =
-            CAPTURE_WIRE_HEADER_LEN + session_len + client_len + server_len + payload_len;
+        let total_len = CAPTURE_WIRE_HEADER_LEN
+            .checked_add(session_len)
+            .and_then(|len| len.checked_add(client_len))
+            .and_then(|len| len.checked_add(server_len))
+            .and_then(|len| len.checked_add(payload_len))
+            .ok_or(CaptureWireError::LengthOverflow)?;
         if total_len != buf.len() {
             return Err(CaptureWireError::LengthMismatch {
                 expected: total_len,
@@ -213,13 +217,24 @@ impl CaptureEvent {
         }
 
         let mut offset = CAPTURE_WIRE_HEADER_LEN;
-        let session_bytes = &buf[offset..offset + session_len];
-        offset += session_len;
-        let client_bytes = &buf[offset..offset + client_len];
-        offset += client_len;
-        let server_bytes = &buf[offset..offset + server_len];
-        offset += server_len;
-        let payload_end = offset + payload_len;
+        let session_end = offset
+            .checked_add(session_len)
+            .ok_or(CaptureWireError::FieldOffsetOverflow)?;
+        let session_bytes = &buf[offset..session_end];
+        offset = session_end;
+        let client_end = offset
+            .checked_add(client_len)
+            .ok_or(CaptureWireError::FieldOffsetOverflow)?;
+        let client_bytes = &buf[offset..client_end];
+        offset = client_end;
+        let server_end = offset
+            .checked_add(server_len)
+            .ok_or(CaptureWireError::FieldOffsetOverflow)?;
+        let server_bytes = &buf[offset..server_end];
+        offset = server_end;
+        let payload_end = offset
+            .checked_add(payload_len)
+            .ok_or(CaptureWireError::FieldOffsetOverflow)?;
 
         let session_id = std::str::from_utf8(session_bytes)
             .map_err(|_| CaptureWireError::InvalidUtf8 {
@@ -299,6 +314,18 @@ pub fn unix_timestamp_nanos() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decode_rejects_lengths_that_wrap_32_bit_offsets() {
+        // On a 32-bit target these lengths wrap to a plausible total of 60
+        // while the first field's end wraps before the header ends.
+        let mut buf = vec![0u8; 60];
+        buf[..4].copy_from_slice(&CAPTURE_WIRE_MAGIC);
+        buf[4] = CAPTURE_WIRE_VERSION;
+        buf[16..20].copy_from_slice(&u32::MAX.to_le_bytes());
+        buf[20..24].copy_from_slice(&29u32.to_le_bytes());
+        assert!(CaptureEvent::decode_wire(Bytes::from(buf)).is_err());
+    }
 
     #[test]
     fn capture_event_wire_roundtrip() -> Result<()> {
