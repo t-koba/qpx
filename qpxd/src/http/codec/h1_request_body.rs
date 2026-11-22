@@ -53,9 +53,26 @@ where
 }
 
 pub(crate) async fn forward_chunked_request_body<R>(
+    read_half: R,
+    read_buf: BytesMut,
+    mut sender: Sender,
+    read_timeout: Duration,
+) -> Result<(R, BytesMut)>
+where
+    R: AsyncRead + Unpin,
+{
+    let result =
+        forward_chunked_request_body_inner(read_half, read_buf, &mut sender, read_timeout).await;
+    if result.is_err() {
+        sender.abort();
+    }
+    result
+}
+
+async fn forward_chunked_request_body_inner<R>(
     mut read_half: R,
     mut read_buf: BytesMut,
-    mut sender: Sender,
+    sender: &mut Sender,
     read_timeout: Duration,
 ) -> Result<(R, BytesMut)>
 where
@@ -100,7 +117,7 @@ where
             &mut read_half,
             &mut read_buf,
             size,
-            &mut sender,
+            &mut *sender,
             deliver,
             read_timeout,
         )
@@ -318,6 +335,22 @@ mod tests {
             err.to_string().contains("chunked request body exceeds"),
             "{err}"
         );
+    }
+
+    #[tokio::test]
+    async fn interrupted_chunk_reports_error_to_body_consumer() {
+        let (sender, mut body) = Body::channel();
+        let result = forward_chunked_request_body(
+            tokio::io::empty(),
+            BytesMut::from(&b"2\r\nx"[..]),
+            sender,
+            Duration::from_secs(1),
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(body.data().await.unwrap().unwrap(), &b"x"[..]);
+        assert!(matches!(body.data().await, Some(Err(_))));
     }
 
     #[tokio::test]
