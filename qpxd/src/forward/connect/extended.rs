@@ -77,23 +77,49 @@ pub(super) async fn recv_upstream_h2_response_with_interim(
     }
 }
 
+type ConnectAttempt = Pin<Box<dyn std::future::Future<Output = std::io::Result<TcpStream>> + Send>>;
+
 async fn connect_extended_upstream_addrs(
-    mut addrs: impl Iterator<Item = std::net::SocketAddr>,
+    addrs: impl Iterator<Item = std::net::SocketAddr>,
     timeout_dur: Duration,
 ) -> Result<TcpStream> {
-    let first = addrs
-        .next()
-        .ok_or_else(|| anyhow!("failed to resolve extended CONNECT upstream"))?;
+    connect_extended_upstream_addrs_with(addrs, timeout_dur, |addr| {
+        Box::pin(TcpStream::connect(addr))
+    })
+    .await
+}
+
+async fn connect_extended_upstream_addrs_with(
+    addrs: impl Iterator<Item = std::net::SocketAddr>,
+    timeout_dur: Duration,
+    connect: impl Fn(std::net::SocketAddr) -> ConnectAttempt,
+) -> Result<TcpStream> {
+    let addrs: Vec<_> = addrs.collect();
+    if addrs.is_empty() {
+        return Err(anyhow!("failed to resolve extended CONNECT upstream"));
+    }
+    // One address must not consume the whole fallback window when it stalls
+    // (for example a SYN blackhole). Each address gets an equal share of the
+    // overall budget; fast failures leave the rest of the budget unused.
+    let per_attempt = timeout_dur
+        .checked_div(u32::try_from(addrs.len()).unwrap_or(u32::MAX))
+        .filter(|share| !share.is_zero())
+        .unwrap_or(Duration::from_millis(1));
     timeout(timeout_dur, async {
         let mut last_error = None;
-        for addr in std::iter::once(first).chain(addrs) {
-            match TcpStream::connect(addr).await {
-                Ok(tcp) => return Ok(tcp),
-                Err(err) => last_error = Some(err),
+        for addr in addrs {
+            match timeout(per_attempt, connect(addr)).await {
+                Ok(Ok(tcp)) => return Ok(tcp),
+                Ok(Err(err)) => last_error = Some(anyhow::Error::new(err)),
+                Err(_) => {
+                    last_error = Some(anyhow!(
+                        "extended CONNECT upstream {addr} connect timed out"
+                    ))
+                }
             }
         }
         match last_error {
-            Some(err) => Err(anyhow::Error::new(err)),
+            Some(err) => Err(err),
             None => Err(anyhow!("failed to resolve extended CONNECT upstream")),
         }
     })
@@ -518,6 +544,33 @@ fn abort_downstream(sender: &mut Option<qpx_http::body::Sender>) {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn extended_connect_dial_times_out_stalled_address_and_falls_back() -> Result<()> {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let live_addr = listener.local_addr()?;
+        let stalled_addr: std::net::SocketAddr = "127.0.0.1:9".parse()?;
+        let addrs = vec![stalled_addr, live_addr];
+
+        let tcp = tokio::time::timeout(
+            Duration::from_millis(500),
+            connect_extended_upstream_addrs_with(
+                addrs.into_iter(),
+                Duration::from_millis(50),
+                |addr| {
+                    if addr == stalled_addr {
+                        Box::pin(std::future::pending::<std::io::Result<TcpStream>>())
+                    } else {
+                        Box::pin(TcpStream::connect(addr))
+                    }
+                },
+            ),
+        )
+        .await
+        .expect("a stalled address must not consume the whole fallback budget")?;
+        assert_eq!(tcp.peer_addr()?, live_addr);
+        Ok(())
+    }
 
     #[tokio::test]
     async fn extended_connect_dial_falls_back_to_next_address() -> Result<()> {
