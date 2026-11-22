@@ -34,9 +34,6 @@ pub(crate) async fn accept_tcp_with_connection_permit(
     accept_error_message: &'static str,
 ) -> Result<Option<(OwnedSemaphorePermit, TcpStream, SocketAddr)>> {
     loop {
-        let Some(permit) = acquire_connection_permit(semaphore, shutdown).await? else {
-            return Ok(None);
-        };
         let accepted = tokio::select! {
             changed = shutdown.changed() => {
                 if changed.is_err() || *shutdown.borrow() {
@@ -54,6 +51,9 @@ pub(crate) async fn accept_tcp_with_connection_permit(
             }
         };
         let Some((stream, remote_addr)) = accepted else {
+            return Ok(None);
+        };
+        let Some(permit) = acquire_connection_permit(semaphore, shutdown).await? else {
             return Ok(None);
         };
         return Ok(Some((permit, stream, remote_addr)));
@@ -125,6 +125,24 @@ mod tests {
         .await
         .unwrap();
         assert!(accepted.is_none());
+        assert_eq!(semaphore.available_permits(), 1);
+    }
+
+    #[tokio::test]
+    async fn idle_listener_does_not_hold_connection_permit() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let semaphore = Arc::new(Semaphore::new(1));
+        let (_sender, mut shutdown) = watch::channel(false);
+
+        let accept = accept_tcp_with_connection_permit(
+            &listener,
+            &semaphore,
+            &mut shutdown,
+            "test accept failed",
+        );
+        tokio::pin!(accept);
+        assert!(poll!(&mut accept).is_pending());
+        assert!(semaphore.clone().try_acquire_owned().is_ok());
         assert_eq!(semaphore.available_permits(), 1);
     }
 
