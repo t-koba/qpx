@@ -181,23 +181,12 @@ impl ProxyTasks {
             .brokered_h3_control_tx
             .send(control::SidecarControl::Stop);
         let _ = self.tcp_shutdown_tx.send(true);
-        if let Some(exportable_sidecar_task) = self.exportable_sidecar_task {
-            server_set_result(
-                exportable_sidecar_task.await,
-                "exportable UDP sidecar set failed while stopping",
-                "exportable UDP sidecar join failed while stopping",
-            )?;
-        }
-        server_set_result(
-            self.brokered_h3_task.await,
-            "brokered HTTP/3 sidecar set failed while stopping",
-            "brokered HTTP/3 sidecar join failed while stopping",
-        )?;
-        server_set_result(
-            self.tcp_task.await,
-            "tcp listener/reverse set failed while stopping",
-            "tcp listener/reverse join failed while stopping",
+        join_server_sets(
+            self.exportable_sidecar_task,
+            self.brokered_h3_task,
+            self.tcp_task,
         )
+        .await
     }
 
     pub(crate) async fn prepare_binary_upgrade(
@@ -302,6 +291,42 @@ impl ProxyTasks {
             "tcp listener/reverse set failed while draining",
             "tcp listener/reverse join failed while draining",
         )
+    }
+}
+
+async fn join_server_sets(
+    exportable: Option<tokio::task::JoinHandle<Result<()>>>,
+    brokered: tokio::task::JoinHandle<Result<()>>,
+    tcp: tokio::task::JoinHandle<Result<()>>,
+) -> Result<()> {
+    let mut first_error = None;
+    if let Some(exportable) = exportable {
+        first_error = server_set_result(
+            exportable.await,
+            "exportable UDP sidecar set failed while stopping",
+            "exportable UDP sidecar join failed while stopping",
+        )
+        .err();
+    }
+    if let Err(err) = server_set_result(
+        brokered.await,
+        "brokered HTTP/3 sidecar set failed while stopping",
+        "brokered HTTP/3 sidecar join failed while stopping",
+    ) && first_error.is_none()
+    {
+        first_error = Some(err);
+    }
+    if let Err(err) = server_set_result(
+        tcp.await,
+        "tcp listener/reverse set failed while stopping",
+        "tcp listener/reverse join failed while stopping",
+    ) && first_error.is_none()
+    {
+        first_error = Some(err);
+    }
+    match first_error {
+        Some(err) => Err(err),
+        None => Ok(()),
     }
 }
 
@@ -472,8 +497,11 @@ fn brokered_reverse_h3_sockets(
 
 #[cfg(test)]
 mod tests {
-    use super::server_set_result;
+    use super::{join_server_sets, server_set_result};
     use anyhow::anyhow;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn server_set_result_preserves_success_and_set_context() {
@@ -491,5 +519,35 @@ mod tests {
         task.abort();
         let error = server_set_result(task.await, "set context", "join context").unwrap_err();
         assert!(error.to_string().starts_with("join context: task "));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn join_server_sets_waits_for_tcp_after_exportable_error() {
+        let (gate_tx, gate_rx) = tokio::sync::oneshot::channel::<()>();
+        let exportable = tokio::spawn(async { Err(anyhow::anyhow!("export failed")) });
+        let brokered = tokio::spawn(async { Ok(()) });
+        let tcp_finished = Arc::new(AtomicBool::new(false));
+        let finished = Arc::clone(&tcp_finished);
+        let tcp = tokio::spawn(async move {
+            gate_rx.await.expect("gate");
+            finished.store(true, Ordering::SeqCst);
+            Ok(())
+        });
+
+        let mut joining = Box::pin(join_server_sets(Some(exportable), brokered, tcp));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut joining)
+                .await
+                .is_err(),
+            "shutdown must wait for the TCP server set"
+        );
+        gate_tx.send(()).expect("send gate");
+        let error = joining.await.expect_err("exportable error");
+        assert_eq!(
+            error.to_string(),
+            "exportable UDP sidecar set failed while stopping"
+        );
+        assert_eq!(error.root_cause().to_string(), "export failed");
+        assert!(tcp_finished.load(Ordering::SeqCst));
     }
 }
