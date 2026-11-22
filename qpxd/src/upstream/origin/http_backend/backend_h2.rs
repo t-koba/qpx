@@ -37,6 +37,14 @@ pub(super) fn prepare_h2_request(
     super::prepare_origin_request_head(req, scheme, authority, http::Version::HTTP_2)
 }
 
+struct UploadTaskAbort(tokio::task::AbortHandle);
+
+impl Drop for UploadTaskAbort {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
 pub(super) async fn send_h2_request_with_sender(
     req: hyper::Request<Body>,
     mut sender: h2::client::SendRequest<Bytes>,
@@ -70,6 +78,7 @@ pub(super) async fn send_h2_request_with_sender(
     let mut upload = tokio::spawn(async move {
         stream_request_body_to_h2(&mut body, &mut send_stream, declared_length).await
     });
+    let mut upload_abort = Some(UploadTaskAbort(upload.abort_handle()));
     let mut recv = Box::pin(recv_h2_response_with_interim(&mut response));
     let mut upload_error = None;
     let (interim, response) = poll_fn(|cx| {
@@ -91,8 +100,11 @@ pub(super) async fn send_h2_request_with_sender(
     let mut response = h2_response_to_owner_with_inflight(response, inflight)?;
     if !upload.is_finished() {
         // A final response can precede upload EOF. Keep the upload alive with
-        // the response body so it is aborted with the exchange, not forgotten.
-        response.body_mut().retain_resource(upload);
+        // the response body; dropping that body aborts the upload instead of
+        // detaching the task.
+        response
+            .body_mut()
+            .retain_resource(upload_abort.take().expect("upload abort guard"));
     }
     Ok(Http1ResponseWithInterim {
         interim,
@@ -359,6 +371,123 @@ mod tests {
 
         drop(upload_sender);
         server_task.await??;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn h2_early_final_response_aborts_upload_when_body_dropped() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::time::timeout;
+
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client, client_connection) = h2::client::handshake(client_io).await?;
+        tokio::spawn(async move {
+            let _ = client_connection.await;
+        });
+        tokio::spawn(async move {
+            let mut server_connection = h2::server::handshake(server_io).await?;
+            let (_request, mut respond) = server_connection.accept().await.expect("accept")?;
+            let response = ::http::Response::builder()
+                .status(::http::StatusCode::FORBIDDEN)
+                .body(())
+                .expect("final response");
+            respond.send_response(response, true)?;
+            poll_fn(|cx| {
+                if let Poll::Ready(result) = server_connection.poll_closed(cx) {
+                    result.expect("server connection stays open");
+                }
+                Poll::Ready(())
+            })
+            .await;
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (upload_sender, mut body) = Body::channel();
+        body.retain_resource(DropMarker(dropped.clone()));
+        let request = hyper::Request::builder()
+            .method("POST")
+            .uri("https://origin.test/upload")
+            .body(body)?;
+        let exchange = timeout(
+            std::time::Duration::from_secs(2),
+            send_h2_request_with_sender(request, client, None, None),
+        )
+        .await
+        .expect("final response")?;
+        drop(exchange.response);
+        let _ = timeout(std::time::Duration::from_millis(200), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "ending the exchange must abort the request upload"
+        );
+        drop(upload_sender);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn h2_response_error_aborts_upload() -> Result<()> {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use tokio::time::timeout;
+
+        struct DropMarker(Arc<AtomicBool>);
+        impl Drop for DropMarker {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client, client_connection) = h2::client::handshake(client_io).await?;
+        tokio::spawn(async move {
+            let _ = client_connection.await;
+        });
+        tokio::spawn(async move {
+            let mut server_connection = h2::server::handshake(server_io).await?;
+            let (_request, mut respond) = server_connection.accept().await.expect("accept")?;
+            respond.send_reset(h2::Reason::INTERNAL_ERROR);
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let dropped = Arc::new(AtomicBool::new(false));
+        let (upload_sender, mut body) = Body::channel();
+        body.retain_resource(DropMarker(dropped.clone()));
+        let request = hyper::Request::builder()
+            .method("POST")
+            .uri("https://origin.test/upload")
+            .body(body)?;
+        let result = timeout(
+            std::time::Duration::from_secs(2),
+            send_h2_request_with_sender(request, client, None, None),
+        )
+        .await
+        .expect("origin reset must fail the exchange");
+        assert!(result.is_err(), "origin reset must fail the exchange");
+        let _ = timeout(std::time::Duration::from_millis(200), async {
+            while !dropped.load(Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "a failed exchange must abort the request upload"
+        );
+        drop(upload_sender);
         Ok(())
     }
 }
