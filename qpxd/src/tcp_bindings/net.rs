@@ -45,8 +45,15 @@ pub(crate) fn bind_tcp_std_listeners(
     };
 
     let mut forward_edges = Vec::with_capacity(effective);
-    for _ in 0..effective {
-        forward_edges.push(bind_single_std(addr, runtime, effective > 1)?);
+    let mut bind_addr = addr;
+    for index in 0..effective {
+        let listener = bind_single_std(bind_addr, runtime, effective > 1)?;
+        if index == 0 && addr.port() == 0 {
+            bind_addr = listener
+                .local_addr()
+                .context("failed to read assigned listener address")?;
+        }
+        forward_edges.push(listener);
     }
     Ok(forward_edges)
 }
@@ -147,4 +154,23 @@ fn default_parallelism() -> usize {
     std::thread::available_parallelism()
         .map(|v| v.get())
         .unwrap_or(1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn reuse_port_group_shares_ephemeral_port() {
+        let runtime = RuntimeConfig {
+            acceptor_tasks_per_listener: Some(2),
+            reuse_port: true,
+            ..RuntimeConfig::default()
+        };
+        let listeners = bind_tcp_std_listeners("127.0.0.1:0".parse().unwrap(), &runtime).unwrap();
+        assert_eq!(listeners.len(), 2);
+        let first = listeners[0].local_addr().unwrap();
+        assert_eq!(listeners[1].local_addr().unwrap(), first);
+    }
 }
