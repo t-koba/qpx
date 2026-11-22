@@ -265,11 +265,6 @@ fn init_logging_inner(
     system_filter = system_filter
         .add_directive("access_log=off".parse::<Directive>()?)
         .add_directive("audit_log=off".parse::<Directive>()?);
-    super::set_request_spans_enabled(request_spans_are_consumed(
-        system.format.as_str(),
-        otel.is_some_and(|config| config.enabled),
-    ));
-
     let system_layer = if system.format.eq_ignore_ascii_case("json") {
         tracing_subscriber::fmt::layer()
             .with_ansi(false)
@@ -390,6 +385,12 @@ fn init_logging_inner(
     combined.extend(otel_layer);
 
     tracing_subscriber::registry().with(combined).try_init()?;
+    // The flag describes the installed subscriber. A rejected reinit must not
+    // change what the process reports about request-span consumption.
+    super::set_request_spans_enabled(request_spans_are_consumed(
+        system.format.as_str(),
+        otel.is_some_and(|config| config.enabled),
+    ));
     if let Some(writer) = direct_access_writer {
         DIRECT_COMBINED_ACCESS_WRITER
             .set(writer)
