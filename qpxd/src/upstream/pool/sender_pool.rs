@@ -70,7 +70,16 @@ impl UpstreamProxySlot {
     /// Removes as many permits as are immediately available and carries the
     /// remainder as pending shrink. `forget_permits` reports what it actually
     /// removed, so concurrent acquisitions cannot make the limit drift upward.
-    fn settle_shrink(&self, limiter: &mut UpstreamProxySlotLimiter, shrink: usize) {
+    /// `before_forget` is a test seam that forces an acquire into the old
+    /// read-to-forget window; production passes a no-op.
+    fn settle_shrink(
+        &self,
+        limiter: &mut UpstreamProxySlotLimiter,
+        shrink: usize,
+        before_forget: impl FnOnce(),
+    ) {
+        let _available_snapshot = self.semaphore.available_permits();
+        before_forget();
         let removed = self.semaphore.forget_permits(shrink);
         limiter.pending_shrink += shrink.saturating_sub(removed);
     }
@@ -92,7 +101,7 @@ impl UpstreamProxySlot {
             }
         } else {
             let shrink = limiter.limit - desired;
-            self.settle_shrink(&mut limiter, shrink);
+            self.settle_shrink(&mut limiter, shrink, || {});
         }
         limiter.limit = desired;
     }
@@ -166,24 +175,27 @@ impl UpstreamProxyPool {
 #[cfg(test)]
 mod shrink_tests {
     use super::*;
+    use std::sync::Mutex;
 
     #[test]
     fn shrink_accounts_for_permits_stolen_after_availability_read() {
         let slot = Arc::new(UpstreamProxySlot::new(4));
-        let held: Vec<_> = (0..2)
-            .map(|_| slot.try_acquire().expect("initial permit"))
-            .collect();
-        assert_eq!(slot.semaphore.available_permits(), 2);
-
+        let stolen = Mutex::new(Vec::new());
         let mut limiter = slot.lock_limiter();
-        // The snapshot was taken before the two permits above were acquired.
-        slot.settle_shrink(&mut limiter, 3);
+
+        slot.settle_shrink(&mut limiter, 3, || {
+            let mut held = stolen.lock().expect("stolen permit list");
+            for _ in 0..2 {
+                held.push(slot.try_acquire().expect("permit stolen during shrink"));
+            }
+        });
+
         assert_eq!(
             limiter.pending_shrink, 1,
             "only two of the three requested permits could be removed"
         );
         drop(limiter);
-        drop(held);
+        drop(stolen.into_inner().expect("stolen permit list"));
         assert_eq!(
             slot.semaphore.available_permits(),
             1,
