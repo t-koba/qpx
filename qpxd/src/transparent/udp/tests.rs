@@ -386,3 +386,48 @@ async fn transparent_session_index_maintenance_paths() {
     assert!(index.remove_session(8).is_some());
     assert!(index.drain_all().is_empty());
 }
+
+#[tokio::test]
+async fn upstream_receive_timeout_keeps_recently_active_client_session() {
+    let listener_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("listener"));
+    let upstream_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("upstream"));
+    let (close_tx, _close_rx) = watch::channel(false);
+    let client_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 42001);
+    let permits = AppliedRateLimits::default()
+        .acquire_concurrency(&RateLimitContext::default())
+        .expect("permits");
+    let run_started = Instant::now();
+    let session = Arc::new(TransparentUdpSession::new(TransparentUdpSessionInit {
+        socket: upstream_socket.clone(),
+        close_tx,
+        client_addr,
+        target_key: "198.51.100.7:443".to_string(),
+        matched_rule: None,
+        rate_limit_profile: None,
+        seen_ms: 0,
+        limits: AppliedRateLimits::default(),
+        rate_limit_ctx: RateLimitContext::default(),
+        concurrency_permits: permits,
+    }));
+    let sessions = Arc::new(SharedSessionIndex::new());
+    sessions.insert(7, session.clone());
+
+    let idle_timeout = Duration::from_millis(500);
+    let relay = spawn_transparent_udp_relay(
+        listener_socket,
+        sessions.clone(),
+        7,
+        session.clone(),
+        upstream_socket,
+        idle_timeout,
+        run_started,
+    );
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    session.mark_client_seen(run_started.elapsed().as_millis() as u64);
+    tokio::time::sleep(Duration::from_millis(400)).await;
+
+    assert!(sessions.session(7).is_some());
+    let _ = session.close_tx.send(true);
+    relay.await.expect("relay task");
+}

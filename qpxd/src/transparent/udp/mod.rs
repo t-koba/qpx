@@ -389,7 +389,19 @@ fn spawn_transparent_udp_relay(
                 recv = timeout(idle_timeout, udp_recv.recv(&mut recv_buf)) => {
                     match recv {
                         Ok(Ok(n)) => n,
-                        Ok(Err(_)) | Err(_) => break,
+                        Ok(Err(_)) => break,
+                        // A silent upstream is not idle if the client is still
+                        // sending: the shared timestamp is also used by the
+                        // listener's expiry sweep.
+                        Err(_) => {
+                            let now_ms = run_started.elapsed().as_millis() as u64;
+                            if now_ms.saturating_sub(session.last_seen_ms())
+                                > idle_timeout.as_millis() as u64
+                            {
+                                break;
+                            }
+                            continue;
+                        }
                     }
                 }
             };
