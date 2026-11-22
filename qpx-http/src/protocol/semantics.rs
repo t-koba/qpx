@@ -667,8 +667,8 @@ pub fn normalize_response_for_request_with_options<R: FinalizeResponse>(
             strip_message_body_headers(response.headers_mut());
         }
     } else if content_length_forbidden {
-        // A permitted 101 upgrade still cannot carry Content-Length.
-        response.headers_mut().remove_content_length();
+        // A permitted 101 upgrade still cannot carry message framing headers.
+        strip_message_body_headers(response.headers_mut());
     }
     no_body
 }

@@ -376,6 +376,20 @@ fn normalize_response_can_preserve_switching_protocols_for_upgrade_paths() {
 }
 
 #[test]
+fn normalize_upgrade_response_strips_transfer_encoding() {
+    let mut resp = http::Response::builder()
+        .status(StatusCode::SWITCHING_PROTOCOLS)
+        .header(TRANSFER_ENCODING, "chunked")
+        .body(String::new())
+        .expect("response");
+
+    normalize_response_for_request_with_options(&Method::GET, &mut resp, true);
+
+    assert_eq!(resp.status(), StatusCode::SWITCHING_PROTOCOLS);
+    assert!(!resp.headers().contains_key(TRANSFER_ENCODING));
+}
+
+#[test]
 fn validate_rejects_mismatched_content_length_values() {
     let mut req = http::Request::builder()
         .version(Version::HTTP_11)
