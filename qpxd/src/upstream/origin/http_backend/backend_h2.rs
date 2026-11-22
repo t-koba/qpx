@@ -81,10 +81,13 @@ pub(super) async fn send_h2_request_with_sender(
     let mut upload_abort = Some(UploadTaskAbort(upload.abort_handle()));
     let mut recv = Box::pin(recv_h2_response_with_interim(&mut response));
     let mut upload_error = None;
+    let mut upload_consumed = false;
     let (interim, response) = poll_fn(|cx| {
-        if !upload.is_finished()
-            && let Poll::Ready(joined) = Pin::new(&mut upload).poll(cx)
-        {
+        // `is_finished()` reports task completion, not whether the join result
+        // was observed. Keep polling until the result is consumed so a failed
+        // upload is returned even when response reception stays pending.
+        if !upload_consumed && let Poll::Ready(joined) = Pin::new(&mut upload).poll(cx) {
+            upload_consumed = true;
             upload_error = Some(match joined {
                 Ok(Ok(())) => return recv.as_mut().poll(cx),
                 Ok(Err(err)) => err,
@@ -98,7 +101,7 @@ pub(super) async fn send_h2_request_with_sender(
     })
     .await?;
     let mut response = h2_response_to_owner_with_inflight(response, inflight)?;
-    if !upload.is_finished() {
+    if !upload_consumed {
         // A final response can precede upload EOF. Keep the upload alive with
         // the response body; dropping that body aborts the upload instead of
         // detaching the task.
@@ -488,6 +491,45 @@ mod tests {
             "a failed exchange must abort the request upload"
         );
         drop(upload_sender);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn h2_upload_failure_is_returned_while_response_is_pending() -> Result<()> {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client, client_connection) = h2::client::handshake(client_io).await?;
+        tokio::spawn(async move {
+            let _ = client_connection.await;
+        });
+        let server_task = tokio::spawn(async move {
+            let mut server_connection = h2::server::handshake(server_io).await?;
+            let (_request, _respond) = server_connection.accept().await.expect("accept request")?;
+            poll_fn(|cx| match server_connection.poll_closed(cx) {
+                Poll::Ready(result) => Poll::Ready(result),
+                Poll::Pending => Poll::Pending,
+            })
+            .await?;
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let (mut upload_sender, body) = Body::channel();
+        let request = hyper::Request::builder()
+            .method("POST")
+            .uri("https://origin.test/upload")
+            .body(body)?;
+        let exchange = send_h2_request_with_sender(request, client, None, None);
+        upload_sender.abort();
+        let result = timeout(Duration::from_secs(2), exchange)
+            .await
+            .expect("a failed upload must end the exchange while response is pending");
+        assert!(
+            result.is_err(),
+            "the aborted upload must be returned, not waited on"
+        );
+        server_task.abort();
         Ok(())
     }
 }
