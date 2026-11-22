@@ -135,10 +135,10 @@ impl PatternSet {
                         suffix.push(rest.to_string());
                         continue;
                     }
-                    if is_exact_pattern(normalized.as_str()) {
-                        exact.insert(normalized);
-                    } else if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
+                    if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
                         regex.push(Regex::new(pattern)?);
+                    } else if is_exact_pattern(normalized.as_str()) {
+                        exact.insert(normalized);
                     } else {
                         glob_values.push(normalized);
                     }

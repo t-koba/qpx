@@ -365,3 +365,18 @@ fn destination_ip_accepts_bracketed_ipv6_host_and_sni() {
     };
     assert_eq!(destination_ip(&bracketed_name), None);
 }
+
+#[test]
+fn domain_named_set_compiles_explicit_regex_pattern() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "category:explicit-domain-regex".to_string(),
+        kind: NamedSetKind::Domain,
+        values: vec![r"re:^www\.example\.test$".to_string()],
+        file: None,
+    }];
+
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let patterns = &classifier.category[0].patterns;
+    assert!(patterns.matches_text("www.example.test"));
+}
