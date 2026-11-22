@@ -972,3 +972,28 @@ fn removed_dynamic_endpoint_retires_after_repeated_refreshes() {
         "removed endpoint must retire after its drain timeout despite refreshes"
     );
 }
+
+#[test]
+fn slow_start_starts_at_zero_progress_when_warmup_ends() {
+    let endpoint = Arc::new(UpstreamEndpoint::new("http://boundary".to_string()));
+    let lifecycle = EndpointLifecycleRuntime {
+        slow_start: Some(Duration::from_millis(1_000)),
+        warmup: Some(Duration::from_millis(100)),
+        drain_timeout: None,
+    };
+    endpoint.begin_recovery_window_at(&lifecycle, 1_000);
+    assert_eq!(endpoint.recovery_start_ms(), 1_100);
+
+    assert!(matches!(
+        endpoint_lifecycle_state(&endpoint, &lifecycle, 1_099),
+        EndpointLifecycleState::Warming
+    ));
+    assert!(matches!(
+        endpoint_lifecycle_state(&endpoint, &lifecycle, 1_100),
+        EndpointLifecycleState::Ramping(progress) if progress == 0.0
+    ));
+    assert!(matches!(
+        endpoint_lifecycle_state(&endpoint, &lifecycle, 2_100),
+        EndpointLifecycleState::Ready
+    ));
+}

@@ -323,7 +323,7 @@ pub(super) fn endpoint_lifecycle_state(
         return EndpointLifecycleState::Ready;
     };
     let recovery_start = endpoint.recovery_start_ms();
-    if recovery_start == 0 || recovery_start >= now_ms {
+    if recovery_start == 0 || recovery_start > now_ms {
         return EndpointLifecycleState::Ready;
     }
     let elapsed_ms = now_ms.saturating_sub(recovery_start);
