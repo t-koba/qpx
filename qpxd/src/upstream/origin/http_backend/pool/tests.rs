@@ -332,3 +332,28 @@ async fn try_take_ready_h2_sender_prefers_reusable_connection_over_saturated_one
     assert!(Arc::ptr_eq(&selected.0, &reusable));
     Ok(())
 }
+
+#[tokio::test]
+async fn reserve_h2_slot_after_wait_reuses_connections_from_missed_notification() -> Result<()> {
+    let slot = test_https_origin_slot();
+    for _ in 0..MAX_POOLED_H2_CONNECTIONS_PER_ORIGIN {
+        let shared = Arc::new(SharedTlsH2OriginConnection {
+            sender: spawn_test_h2_sender().await?,
+            upstream_cert: UpstreamCertificateInfo::default(),
+            inflight_streams: Arc::new(AtomicUsize::new(0)),
+        });
+        slot.add_h2_connection(shared);
+    }
+    // A connection published before the waiter installs its notification must
+    // still be reused instead of stranding the checkout.
+    slot.h2_ready.notify_waiters();
+
+    let outcome = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        reserve_h2_slot_after_wait(&slot, "test-upstream"),
+    )
+    .await
+    .expect("pooled h2 connection should be reused without another notification");
+    assert!(matches!(outcome, H2SlotWaitOutcome::ReuseH2(_, _)));
+    Ok(())
+}

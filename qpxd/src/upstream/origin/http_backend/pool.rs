@@ -127,6 +127,12 @@ pub(super) enum HttpsConnectionAcquisition {
     H1(TlsHttp1OriginConnection),
 }
 
+enum H2SlotWaitOutcome<'a> {
+    Reserve(H2ConnectionReservation<'a>),
+    ReuseH2(Arc<SharedTlsH2OriginConnection>, SharedOriginH2Sender),
+    ReuseH1(TlsHttp1OriginConnection),
+}
+
 #[derive(Default)]
 struct H2PoolState {
     connections: Vec<Arc<SharedTlsH2OriginConnection>>,
@@ -889,18 +895,12 @@ pub(super) async fn acquire_https_connection(
         }
     }
 
-    let reservation = loop {
-        if let Some(reservation) = slot.try_reserve_h2_connection() {
-            break reservation;
-        }
-        let notified = slot.h2_ready.notified();
-        notified.await;
-        if let Some((shared, ready)) = wait_for_h2_sender(slot, connect_authority).await {
+    let reservation = match reserve_h2_slot_after_wait(slot, connect_authority).await {
+        H2SlotWaitOutcome::Reserve(reservation) => reservation,
+        H2SlotWaitOutcome::ReuseH2(shared, ready) => {
             return Ok(HttpsConnectionAcquisition::H2Ready { shared, ready });
         }
-        if let Some(entry) = take_reusable_tls_http1_connection(slot).await {
-            return Ok(HttpsConnectionAcquisition::H1(entry));
-        }
+        H2SlotWaitOutcome::ReuseH1(entry) => return Ok(HttpsConnectionAcquisition::H1(entry)),
     };
     let (tls, negotiated_h2, upstream_cert) =
         open_https_origin_stream(connect_authority, server_name, verify_upstream_cert, trust)
@@ -933,6 +933,35 @@ pub(super) async fn acquire_https_connection(
         write_buf: BytesMut::new(),
         upstream_cert,
     }))
+}
+
+async fn reserve_h2_slot_after_wait<'a>(
+    slot: &'a HttpsOriginSlot,
+    connect_authority: &str,
+) -> H2SlotWaitOutcome<'a> {
+    loop {
+        // Install the wait before checking pool state so a concurrent publish
+        // cannot fall into the gap between a failed reservation and the wait.
+        let notified = slot.h2_ready.notified();
+        if let Some(reservation) = slot.try_reserve_h2_connection() {
+            return H2SlotWaitOutcome::Reserve(reservation);
+        }
+        // A publication can also precede this call. Recheck before sleeping so
+        // ready connections are never left waiting for another notification.
+        if let Some((shared, ready)) = try_take_ready_h2_sender(slot, connect_authority).await {
+            return H2SlotWaitOutcome::ReuseH2(shared, ready);
+        }
+        if let Some(entry) = take_reusable_tls_http1_connection(slot).await {
+            return H2SlotWaitOutcome::ReuseH1(entry);
+        }
+        notified.await;
+        if let Some((shared, ready)) = wait_for_h2_sender(slot, connect_authority).await {
+            return H2SlotWaitOutcome::ReuseH2(shared, ready);
+        }
+        if let Some(entry) = take_reusable_tls_http1_connection(slot).await {
+            return H2SlotWaitOutcome::ReuseH1(entry);
+        }
+    }
 }
 
 async fn take_reusable_tls_http1_connection(
