@@ -289,40 +289,42 @@ fn spawn_tcp_response_reader(
     timeout_dur: Duration,
 ) {
     tokio::spawn(async move {
-        let mut seen = 0usize;
-        let mut buf = BytesMut::with_capacity(65536);
-        loop {
-            buf.clear();
-            buf.reserve(65536);
-            let read = tokio::select! {
-                read = timeout(timeout_dur, conn.stream.read_buf(&mut buf)) => {
-                    read.inspect_err(|_| sender.abort()).ok()
-                }
-                _ = tokio::time::sleep(IPC_DOWNSTREAM_ABORT_POLL_INTERVAL) => {
-                    if downstream_body_closed(&mut sender).await {
-                        None
-                    } else {
+        let read = timeout(timeout_dur, async {
+            let mut seen = 0usize;
+            let mut buf = BytesMut::with_capacity(65536);
+            loop {
+                buf.clear();
+                buf.reserve(65536);
+                let result = tokio::select! {
+                    read = conn.stream.read_buf(&mut buf) => read,
+                    _ = tokio::time::sleep(IPC_DOWNSTREAM_ABORT_POLL_INTERVAL) => {
+                        if downstream_body_closed(&mut sender).await {
+                            return Ok::<usize, std::io::Error>(0);
+                        }
                         continue;
                     }
+                };
+                let n = result?;
+                if n == 0 {
+                    return Ok::<usize, std::io::Error>(0);
                 }
-            };
-            match read {
-                None | Some(Ok(0)) | Some(Err(_)) => break,
-                Some(Ok(n)) => {
-                    let Some(next_seen) = seen.checked_add(n) else {
-                        sender.abort();
-                        break;
-                    };
-                    seen = next_seen;
-                    if max_response_bytes.is_some_and(|limit| seen > limit) {
-                        sender.abort();
-                        break;
-                    }
-                    if sender.send_data(buf.split().freeze()).await.is_err() {
-                        break;
-                    }
+                let Some(next_seen) = seen.checked_add(n) else {
+                    sender.abort();
+                    return Ok::<usize, std::io::Error>(0);
+                };
+                seen = next_seen;
+                if max_response_bytes.is_some_and(|limit| seen > limit) {
+                    sender.abort();
+                    return Ok::<usize, std::io::Error>(0);
+                }
+                if sender.send_data(buf.split().freeze()).await.is_err() {
+                    return Ok::<usize, std::io::Error>(0);
                 }
             }
+        })
+        .await;
+        if read.is_err() || read.as_ref().is_ok_and(|result| result.is_err()) {
+            sender.abort();
         }
     });
 }
@@ -362,4 +364,42 @@ pub(super) fn validate_ipc_response_status(status: u16) -> Result<StatusCode> {
         return Err(anyhow!("IPC response status is out of range: {status}"));
     }
     StatusCode::from_u16(status).map_err(|err| anyhow!("invalid IPC response status: {err}"))
+}
+
+#[cfg(test)]
+mod tcp_response_tests {
+    use super::*;
+    use crate::ipc_client::backend::IpcStream;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn silent_tcp_backend_hits_one_overall_body_timeout() {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test listener");
+        let client = tokio::net::TcpStream::connect(listener.local_addr().expect("addr"))
+            .await
+            .expect("connect");
+        let (server, _) = listener.accept().await.expect("accept");
+        let (sender, mut body) = Body::channel_with_capacity(4);
+        spawn_tcp_response_reader(
+            sender,
+            PooledIpcConnection {
+                stream: IpcStream::Tcp(client),
+                shm: None,
+                active_permit: None,
+            },
+            None,
+            Duration::from_millis(500),
+        );
+
+        let next = timeout(Duration::from_millis(1_200), body.data())
+            .await
+            .expect("body reader must report the timeout without the outer deadline");
+        assert!(
+            next.as_ref().is_some_and(|chunk| chunk.is_err()),
+            "silent backend should surface a body error, got {next:?}"
+        );
+        drop(server);
+    }
 }
