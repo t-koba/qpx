@@ -123,7 +123,7 @@ impl UdpBindings {
                 };
                 let listen = effective_http3_listen(http3.listen.as_deref(), &listener.listen);
                 let socket = previous
-                    .udp_socket_for_listen(previous_config, listen)
+                    .udp_socket_for_edge(previous_config, &listener.name, listen)
                     .map(|socket| {
                         socket.with_context(|| {
                             format!("failed to clone udp listener binding for {}", listener.name)
@@ -139,7 +139,7 @@ impl UdpBindings {
                 };
                 let listen = effective_http3_listen(http3.listen.as_deref(), &reverse_edge.listen);
                 let socket = previous
-                    .udp_socket_for_listen(previous_config, listen)
+                    .udp_socket_for_edge(previous_config, &reverse_edge.name, listen)
                     .map(|socket| {
                         socket.with_context(|| {
                             format!(
@@ -166,9 +166,48 @@ impl UdpBindings {
     }
 
     #[cfg(feature = "http3")]
-    fn udp_socket_for_listen(&self, config: &Config, listen: &str) -> Option<Result<UdpSocket>> {
-        // A configured port 0 is an instruction to allocate a fresh port, not an
-        // endpoint identity; reusing the old socket would give two edges one port.
+    fn udp_socket_for_edge(
+        &self,
+        config: &Config,
+        name: &str,
+        listen: &str,
+    ) -> Option<Result<UdpSocket>> {
+        // A listener that keeps its name and effective listen keeps its socket,
+        // including an ephemeral port: live sessions must survive the restart.
+        if let Some(listener) = config.ingress_edges().find(|edge| edge.name == name) {
+            let old_listen = listener
+                .http3
+                .as_ref()
+                .filter(|cfg| cfg.enabled)
+                .map(|cfg| effective_http3_listen(cfg.listen.as_deref(), &listener.listen));
+            if old_listen == Some(listen)
+                && let Some(socket) = self.listener_udp.get(name)
+            {
+                return Some(socket.try_clone().context("failed to clone udp listener"));
+            }
+        }
+        if let Some(reverse_edge) = config
+            .reverse_edge_configs()
+            .iter()
+            .find(|edge| edge.name == name)
+        {
+            let old_listen = reverse_edge
+                .http3
+                .as_ref()
+                .filter(|cfg| cfg.enabled)
+                .map(|cfg| effective_http3_listen(cfg.listen.as_deref(), &reverse_edge.listen));
+            if old_listen == Some(listen)
+                && let Some(socket) = self.reverse_udp.get(name)
+            {
+                return Some(
+                    socket
+                        .try_clone()
+                        .context("failed to clone udp reverse_edge"),
+                );
+            }
+        }
+        // Port 0 is not an endpoint identity: another configured edge with the
+        // same string would get the same port instead of its own allocation.
         if listen
             .parse::<SocketAddr>()
             .is_ok_and(|addr| addr.port() == 0)
@@ -478,5 +517,26 @@ mod tests {
             a.local_addr().expect("a addr"),
             b.local_addr().expect("b addr")
         );
+    }
+    #[test]
+    fn unchanged_ephemeral_hot_reload_preserves_udp_socket() {
+        let previous_config = config(&["a"]);
+        let previous = UdpBindings::bind(&previous_config).expect("initial bind");
+        let before = previous
+            .clone_listener("a")
+            .expect("clone before")
+            .expect("before socket")
+            .local_addr()
+            .expect("before addr");
+        let reloaded =
+            UdpBindings::bind_for_hot_reload(&previous_config, &previous_config, &previous)
+                .expect("hot reload bind");
+        let after = reloaded
+            .clone_listener("a")
+            .expect("clone after")
+            .expect("after socket")
+            .local_addr()
+            .expect("after addr");
+        assert_eq!(after, before);
     }
 }
