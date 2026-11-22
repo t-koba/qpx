@@ -277,3 +277,33 @@ async fn repeated_limit_reloads_do_not_overshoot_or_panic() {
     assert!(slot.try_acquire().is_err());
     drop((first, second, third));
 }
+
+#[test]
+fn unconfigured_failure_kind_breaks_forward_consecutive_streaks() {
+    let endpoint = Arc::new(ManagedUpstreamEndpoint::new(
+        parse_upstream_proxy_endpoint("http://127.0.0.1:3128").expect("endpoint"),
+    ));
+    let policy = PassiveHealthPolicy {
+        consecutive_5xx: 2,
+        consecutive_timeouts: 100,
+        consecutive_connect_errors: 100,
+        consecutive_resets: 0,
+        max_ejection: Duration::from_secs(30),
+        latency_threshold: None,
+        latency_min_samples: LATENCY_P95_DEFAULT_MIN_SAMPLES,
+    };
+
+    endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+    endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Reset);
+    endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+    assert!(
+        endpoint.is_healthy(now_millis()),
+        "an unconfigured reset interrupts the 5xx streak"
+    );
+
+    endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+    assert!(
+        !endpoint.is_healthy(now_millis()),
+        "two adjacent 5xx failures still eject"
+    );
+}

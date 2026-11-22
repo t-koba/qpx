@@ -165,10 +165,12 @@ impl ManagedUpstreamEndpoint {
             PassiveFailureKind::ConnectError => policy.consecutive_connect_errors,
             PassiveFailureKind::Reset => policy.consecutive_resets,
         };
+        // A failure of another kind interrupts consecutive streaks even when
+        // that kind has no configured threshold of its own.
+        self.passive.reset_except(kind);
         if threshold == 0 {
             return;
         }
-        self.passive.reset_except(kind);
         let count = self.passive.increment(kind);
         let reason = EjectionReason::from_passive_failure(kind);
         self.note_adaptive_failure(policy.max_ejection);
