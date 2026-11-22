@@ -72,13 +72,13 @@ pub fn redact_authority_userinfo(authority: &str) -> String {
 /// Redacts a request target using its HTTP method to distinguish CONNECT's
 /// authority form from generic URI references, then applies configured keys.
 pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) -> String {
+    if target.starts_with('/') {
+        // A leading `//` in an HTTP request target is origin-form path data
+        // for every method, not a URI network-path authority with userinfo.
+        return redact_query_fragment_keys(target, query_keys);
+    }
     if method != "CONNECT" {
         return redact_uri_query_keys(target, query_keys);
-    }
-    if target.starts_with('/') {
-        // Extended CONNECT carries a path in :path; even a leading `//` is
-        // still path data here, not a network-path authority.
-        return redact_query_fragment_keys(target, query_keys);
     }
 
     let target_before_suffix = target.split(['?', '#']).next().unwrap_or(target);
@@ -276,6 +276,15 @@ mod userinfo_tests {
             assert_eq!(redact_uri_query_keys(uri, &[]), uri);
             assert_eq!(redact_request_target("GET", uri, &[]), uri);
         }
+    }
+
+    #[test]
+    fn origin_form_double_slash_path_is_not_authority_userinfo() {
+        let keys = vec!["token".to_string()];
+        assert_eq!(
+            redact_request_target("GET", "//team@2026/report?token=sample", &keys),
+            "//team@2026/report?token=<redacted>"
+        );
     }
 
     #[test]
