@@ -67,6 +67,11 @@ pub(crate) fn requires_server_restart(old: &Config, new: &Config) -> bool {
         if old_reverse.name != new_reverse.name || old_reverse.listen != new_reverse.listen {
             return true;
         }
+        if crate::reverse::requires_tcp_listener(old_reverse)
+            != crate::reverse::requires_tcp_listener(new_reverse)
+        {
+            return true;
+        }
         if reverse_startup_signature(old_reverse) != reverse_startup_signature(new_reverse) {
             return true;
         }
@@ -179,5 +184,77 @@ fn xdp_signature(xdp: Option<&XdpConfig>) -> XdpSignature {
             xdp.trusted_peers.clone(),
         ),
         None => (false, String::new(), false, Vec::new()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use qpx_core::config::{EdgeConfig, ReverseEdgeConfig};
+
+    const PASSTHROUGH_ONLY: &str = r#"
+name: reverse
+listen: 127.0.0.1:0
+http3:
+  enabled: true
+  passthrough_upstreams:
+    - h3-passthrough
+"#;
+
+    fn config_with_reverse(edge: ReverseEdgeConfig) -> Config {
+        Config {
+            state_dir: None,
+            identity: Default::default(),
+            messages: Default::default(),
+            runtime: RuntimeConfig::default(),
+            telemetry: qpx_core::config::TelemetryConfig {
+                system_log: Default::default(),
+                access_log: Default::default(),
+                audit_log: Default::default(),
+                metrics: None,
+                otel: None,
+                exporter: None,
+            },
+            security: qpx_core::config::SecurityConfig {
+                auth: Default::default(),
+                identity_sources: Vec::new(),
+                decisions: qpx_core::config::DecisionConfig {
+                    services: Vec::new(),
+                },
+                destination: Default::default(),
+                named_sets: Vec::new(),
+                upstream_trust_profiles: Vec::new(),
+            },
+            http: Default::default(),
+            traffic: Default::default(),
+            acme: None,
+            edges: vec![EdgeConfig::Reverse(edge)],
+            upstreams: Vec::new(),
+            caches: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn adding_first_reverse_route_requires_server_restart() {
+        let old_edge: ReverseEdgeConfig = serde_yaml::from_str(PASSTHROUGH_ONLY).unwrap();
+        let old = config_with_reverse(old_edge.clone());
+        let mut new_edge = old_edge;
+        new_edge.routes = vec![
+            serde_yaml::from_str(
+                r#"
+match:
+  path:
+    - /
+target:
+  type: upstream
+  upstreams:
+    - http://127.0.0.1:8080
+  lb: round_robin
+"#,
+            )
+            .unwrap(),
+        ];
+        let new = config_with_reverse(new_edge);
+        assert!(requires_server_restart(&old, &new));
     }
 }
