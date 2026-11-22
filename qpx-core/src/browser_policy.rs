@@ -971,7 +971,9 @@ impl ContentSecurityPolicy {
         for raw_directive in value.split(';') {
             let raw_directive = raw_directive.trim();
             if raw_directive.is_empty() {
-                return Err(invalid(CONTENT_SECURITY_POLICY, "empty directive"));
+                // The serialized-policy parser ignores empty segments, so a
+                // trailing semicolon is not a malformed directive.
+                continue;
             }
             let mut parts = raw_directive.split_ascii_whitespace();
             let name = CspDirectiveName::parse(
@@ -2603,6 +2605,14 @@ mod tests {
         );
         assert!(ContentSecurityPolicy::parse("default-src 'self'; default-src *").is_err());
         assert!(ContentSecurityPolicy::parse("script-src 'unknown-keyword'").is_err());
+    }
+
+    #[test]
+    fn csp_skips_empty_directive_segments() {
+        let policy = ContentSecurityPolicy::parse("default-src 'self'; object-src 'none';")
+            .expect("trailing separator is allowed");
+        assert_eq!(policy.as_str(), "default-src 'self'; object-src 'none'");
+        assert!(ContentSecurityPolicy::parse("; ;").is_err());
     }
 
     #[test]
