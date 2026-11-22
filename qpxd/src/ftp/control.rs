@@ -372,17 +372,39 @@ pub(super) fn validate_pasv_data_endpoint(
     Ok(())
 }
 
+fn epsv_tuple_end(text: &str, start: usize) -> Result<usize> {
+    // With a non-')' delimiter, the first ')' closes the tuple. A ')' delimiter
+    // occupies all three leading delimiter positions, so its terminator is the
+    // ')' after the port field; trailing reply text is not part of the tuple.
+    if text.as_bytes().get(start + 1) != Some(&b')') {
+        return text[start + 1..]
+            .find(')')
+            .map(|offset| start + 1 + offset)
+            .ok_or_else(|| anyhow!("EPSV reply missing tuple terminator"));
+    }
+    let mut delimiters = 0;
+    for (index, byte) in text.as_bytes().iter().enumerate().skip(start + 1) {
+        if *byte != b')' {
+            continue;
+        }
+        delimiters += 1;
+        if delimiters == 3 {
+            let port_start = index + 1;
+            return text[port_start..]
+                .find(')')
+                .map(|offset| port_start + offset + 1)
+                .ok_or_else(|| anyhow!("EPSV reply missing tuple terminator"));
+        }
+    }
+    Err(anyhow!("EPSV reply missing tuple terminator"))
+}
+
 fn parse_epsv_port(reply: &FtpReply) -> Result<u16> {
     let text = reply.lines.join(" ");
     let start = text
         .find('(')
         .ok_or_else(|| anyhow!("EPSV reply missing tuple"))?;
-    // The tuple's delimiter may itself be ')', so the outer terminator is the
-    // last ')' rather than the first one after the opening parenthesis.
-    let end = text
-        .rfind(')')
-        .filter(|end| *end > start)
-        .ok_or_else(|| anyhow!("EPSV reply missing tuple terminator"))?;
+    let end = epsv_tuple_end(&text, start)?;
     let tuple = &text[start + 1..end];
     let bytes = tuple.as_bytes();
     let delimiter = *bytes
@@ -511,6 +533,24 @@ mod epsv_tests {
         FtpReply {
             code: 229,
             lines: vec![format!("Entering Extended Passive Mode ({tuple})")],
+        }
+    }
+
+    fn reply_line(line: &str) -> FtpReply {
+        FtpReply {
+            code: 229,
+            lines: vec![line.to_string()],
+        }
+    }
+
+    #[test]
+    fn epsv_ignores_trailing_reply_text() {
+        for line in [
+            "Entering Extended Passive Mode (|||6446|) ready :)",
+            "Entering Extended Passive Mode (|||6446|) (session ok)",
+            "Entering Extended Passive Mode ()))6446) ready :)",
+        ] {
+            assert_eq!(parse_epsv_port(&reply_line(line)).unwrap(), 6446, "{line}");
         }
     }
 
