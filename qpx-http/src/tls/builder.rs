@@ -89,6 +89,9 @@ mod imp {
 
         fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
             vec![
+                rustls::SignatureScheme::RSA_PSS_SHA256,
+                rustls::SignatureScheme::RSA_PSS_SHA384,
+                rustls::SignatureScheme::RSA_PSS_SHA512,
                 rustls::SignatureScheme::RSA_PKCS1_SHA256,
                 rustls::SignatureScheme::RSA_PKCS1_SHA384,
                 rustls::SignatureScheme::RSA_PKCS1_SHA512,
@@ -226,6 +229,26 @@ mod imp {
         }
         rustls::pki_types::ServerName::try_from(host.to_string())
             .map_err(|_| anyhow::anyhow!("invalid server name for TLS: {}", host))
+    }
+
+    #[cfg(test)]
+    mod no_verifier_tests {
+        use super::NoVerifier;
+
+        #[test]
+        fn advertises_tls13_rsa_pss_schemes() {
+            use rustls::SignatureScheme;
+            use rustls::client::danger::ServerCertVerifier as _;
+
+            let schemes = NoVerifier.supported_verify_schemes();
+            for scheme in [
+                SignatureScheme::RSA_PSS_SHA256,
+                SignatureScheme::RSA_PSS_SHA384,
+                SignatureScheme::RSA_PSS_SHA512,
+            ] {
+                assert!(schemes.contains(&scheme), "missing {scheme:?}");
+            }
+        }
     }
 }
 

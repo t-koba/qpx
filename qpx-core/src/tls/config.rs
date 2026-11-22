@@ -66,6 +66,9 @@ impl ServerCertVerifier for NoVerifier {
 
     fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
         vec![
+            rustls::SignatureScheme::RSA_PSS_SHA256,
+            rustls::SignatureScheme::RSA_PSS_SHA384,
+            rustls::SignatureScheme::RSA_PSS_SHA512,
             rustls::SignatureScheme::RSA_PKCS1_SHA256,
             rustls::SignatureScheme::RSA_PKCS1_SHA384,
             rustls::SignatureScheme::RSA_PKCS1_SHA512,
@@ -148,4 +151,24 @@ pub fn build_client_config(
             .set_certificate_verifier(Arc::new(NoVerifier));
     }
     Ok(Arc::new(config))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::NoVerifier;
+
+    #[test]
+    fn no_verifier_advertises_tls13_rsa_pss_schemes() {
+        use rustls::SignatureScheme;
+        use rustls::client::danger::ServerCertVerifier as _;
+
+        let schemes = NoVerifier.supported_verify_schemes();
+        for scheme in [
+            SignatureScheme::RSA_PSS_SHA256,
+            SignatureScheme::RSA_PSS_SHA384,
+            SignatureScheme::RSA_PSS_SHA512,
+        ] {
+            assert!(schemes.contains(&scheme), "missing {scheme:?}");
+        }
+    }
 }
