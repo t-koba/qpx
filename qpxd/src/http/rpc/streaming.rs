@@ -14,6 +14,7 @@ const DEFAULT_MAX_CONNECT_TRAILER_BYTES: u64 = 64 * 1024;
 #[derive(Debug)]
 pub(crate) struct ConnectFrameObserver {
     state: FrameParseState,
+    end_stream_complete: bool,
     max_message_bytes: Option<u64>,
     max_trailer_bytes: Option<u64>,
     summary: FramedBodySummary,
@@ -27,6 +28,7 @@ impl ConnectFrameObserver {
                 buf: [0; 5],
                 pos: 0,
             },
+            end_stream_complete: false,
             max_message_bytes,
             max_trailer_bytes,
             summary: FramedBodySummary::default(),
@@ -40,6 +42,11 @@ impl ConnectFrameObserver {
         while !chunk.is_empty()
             || matches!(self.state, FrameParseState::Payload { remaining: 0, .. })
         {
+            // The end-stream envelope terminates the stream: reject bytes in
+            // later chunks as well as extra bytes in the current chunk.
+            if self.end_stream_complete && !chunk.is_empty() {
+                return Err(anyhow!("connect frame after end-stream envelope").into());
+            }
             match &mut self.state {
                 FrameParseState::Header { buf, pos } => {
                     let take = (5 - *pos).min(chunk.len());
@@ -109,6 +116,7 @@ impl ConnectFrameObserver {
                         if let Some(trailer) = completed_trailer {
                             self.summary.trailers =
                                 Some(parse_connect_end_stream_metadata(&trailer)?);
+                            self.end_stream_complete = true;
                         }
                     }
                 }

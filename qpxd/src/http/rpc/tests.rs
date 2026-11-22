@@ -431,6 +431,43 @@ fn connect_streaming_observer_rejects_unknown_envelope_bits() {
     assert!(format!("{err}").contains("unsupported Connect envelope flags"));
 }
 
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
+fn connect_streaming_observer_rejects_envelopes_after_end_stream() {
+    fn end_stream(code: &str) -> Vec<u8> {
+        let envelope = format!(r#"{{"error":{{"code":"{code}","message":"busy"}}}}"#);
+        let mut out = Vec::with_capacity(5 + envelope.len());
+        out.push(0x02);
+        out.extend_from_slice(&(envelope.len() as u32).to_be_bytes());
+        out.extend_from_slice(envelope.as_bytes());
+        out
+    }
+
+    let first = end_stream("unavailable");
+    let second = end_stream("internal");
+
+    let mut observer = ConnectFrameObserver::new(None, None);
+    observer.feed(&first).expect("first end stream");
+    observer.feed(&[]).expect("empty feed");
+    let rejected = observer.feed(&second);
+    assert!(rejected.is_err(), "expect Err but got Ok");
+    let summary = observer.finish().expect("summary");
+    assert_eq!(
+        summary
+            .trailers
+            .as_ref()
+            .and_then(|trailers| trailers.get("connect-code"))
+            .and_then(|value| value.to_str().ok()),
+        Some("unavailable")
+    );
+
+    let mut concatenated = first;
+    concatenated.extend_from_slice(&second);
+    let mut observer = ConnectFrameObserver::new(None, None);
+    let rejected = observer.feed(&concatenated);
+    assert!(rejected.is_err(), "expect Err but got Ok");
+}
+
 #[test]
 fn grpc_web_text_observer_decodes_incrementally() {
     let encoded = BASE64.encode(frame_grpc_message(Bytes::from_static(b"hello")));
