@@ -378,6 +378,56 @@ async fn guard_streams_observed_multipart_without_full_bytes_materialization() {
     }
 }
 
+#[tokio::test]
+async fn guard_ignores_mime_looking_multipart_payload_lines() {
+    let body = bytes::Bytes::from(
+        b"--x\r\nContent-Disposition: form-data; name=\"a\"; filename=\"a.bin\"\r\n\
+         Content-Type: text/plain\r\n\r\n\
+         MIME snapshot:\r\n\
+         Content-Disposition: form-data; name=\"this-name-is-far-too-long\"\r\n\
+         --x--\r\n"
+            .to_vec(),
+    );
+    let profile = CompiledHttpGuardProfile {
+        profile: HttpGuardProfileConfig {
+            name: "multipart".to_string(),
+            normalize: Default::default(),
+            protocol_safety: Default::default(),
+            limits: Default::default(),
+            json: Default::default(),
+            multipart: qpx_core::config::HttpGuardMultipartConfig {
+                max_parts: Some(2),
+                max_name_bytes: Some(5),
+                max_filename_bytes: Some(5),
+            },
+        },
+    };
+    let req = http::Request::builder()
+        .uri("http://example.com/")
+        .header(
+            http::header::CONTENT_TYPE,
+            "multipart/form-data; boundary=x",
+        )
+        .body(Body::from(body))
+        .expect("request");
+    let req = crate::http::body::size::buffer_request_body_with_reason(
+        Request::from_http(req),
+        1024,
+        std::time::Duration::from_secs(1),
+        "test",
+    )
+    .await
+    .expect("buffer");
+
+    assert!(
+        profile
+            .evaluate_request_async(&req)
+            .await
+            .expect("guard")
+            .is_none()
+    );
+}
+
 #[test]
 fn guard_counts_separate_h3_cookie_fields() {
     let mut profile = strict_profile();

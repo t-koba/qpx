@@ -22,9 +22,9 @@ pub(super) fn validate_multipart_limits(
     let marker = format!("--{boundary}");
     let body = String::from_utf8_lossy(bytes.as_ref());
     let mut parts = 0usize;
-    for chunk in body.split(marker.as_str()) {
+    for (chunk_index, chunk) in body.split(marker.as_str()).enumerate() {
         let chunk = chunk.trim();
-        if chunk.is_empty() || chunk == "--" {
+        if chunk_index == 0 || chunk.is_empty() || chunk == "--" {
             continue;
         }
         parts += 1;
@@ -35,10 +35,16 @@ pub(super) fn validate_multipart_limits(
                 "multipart part count exceeds http_guard limit",
             ));
         }
+        let mut in_headers = true;
         for line in chunk.lines() {
-            if !line
-                .to_ascii_lowercase()
-                .starts_with("content-disposition:")
+            if line.trim().is_empty() {
+                in_headers = false;
+                continue;
+            }
+            if !in_headers
+                || !line
+                    .to_ascii_lowercase()
+                    .starts_with("content-disposition:")
             {
                 continue;
             }
@@ -83,6 +89,7 @@ pub(super) async fn validate_multipart_limits_reader(
         let mut reader = std::io::BufReader::new(reader);
         let mut line = Vec::new();
         let mut parts = 0usize;
+        let mut in_headers = false;
         loop {
             line.clear();
             if reader.read_until(b'\n', &mut line)? == 0 {
@@ -101,11 +108,17 @@ pub(super) async fn validate_multipart_limits_reader(
                         "multipart part count exceeds http_guard limit",
                     )));
                 }
+                in_headers = true;
                 continue;
             }
-            if !line
-                .get(..disposition.len())
-                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(disposition))
+            if line.trim_ascii().is_empty() {
+                in_headers = false;
+                continue;
+            }
+            if !in_headers
+                || !line
+                    .get(..disposition.len())
+                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case(disposition))
             {
                 continue;
             }
