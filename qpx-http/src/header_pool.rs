@@ -14,7 +14,7 @@ thread_local! {
 pub fn take(minimum_capacity: usize) -> HeaderMap {
     HEADER_MAPS.with_borrow_mut(|maps| {
         let mut map = maps.pop().unwrap_or_default();
-        map.reserve(minimum_capacity.saturating_sub(map.capacity()));
+        map.reserve(minimum_capacity.saturating_sub(map.len()));
         map
     })
 }
@@ -64,6 +64,16 @@ mod tests {
         let map = take(1);
         assert!(map.is_empty());
         assert!(map.capacity() >= capacity);
+    }
+
+    #[test]
+    fn take_grows_recycled_map_to_requested_capacity() {
+        HEADER_MAPS.with_borrow_mut(|maps| maps.clear());
+        let map = HeaderMap::with_capacity(8);
+        let minimum = map.capacity() + 1;
+        recycle(map);
+
+        assert!(take(minimum).capacity() >= minimum);
     }
 
     #[test]
