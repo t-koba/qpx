@@ -170,7 +170,7 @@ where
             }
             follow_handoff_blocks(&snapshot, queued)
         } else {
-            snapshot.blocks.clone()
+            snapshot.blocks()
         };
         for bytes in &handoff_blocks {
             write_stream_block(&mut writer, bytes).await?;
@@ -296,21 +296,12 @@ fn follow_handoff_blocks(
     snapshot: &HistorySnapshot,
     queued: Vec<SequencedBlock>,
 ) -> Vec<bytes::Bytes> {
-    let mut before = Vec::new();
-    let mut after = Vec::new();
-    for block in queued {
-        if snapshot.is_already_sent(block.seq) {
-            continue;
-        }
-        if snapshot.first_seq.is_some_and(|first| block.seq < first) {
-            before.push(block.bytes);
-        } else {
-            after.push(block.bytes);
-        }
-    }
-    before.extend(snapshot.blocks.iter().cloned());
-    before.extend(after);
-    before
+    let mut merged = Vec::with_capacity(snapshot.entries.len() + queued.len());
+    merged.extend(snapshot.entries.iter().cloned());
+    merged.extend(queued);
+    merged.sort_by_key(|block| block.seq);
+    merged.dedup_by_key(|block| block.seq);
+    merged.into_iter().map(|block| block.bytes).collect()
 }
 
 fn ip_allowed(peer: IpAddr, allow: &[IpCidr]) -> bool {
@@ -327,9 +318,10 @@ mod tests {
     #[test]
     fn follow_handoff_blocks_preserves_evicted_block_order() {
         let snapshot = HistorySnapshot {
-            blocks: vec![bytes::Bytes::from_static(b"B")],
-            first_seq: Some(1),
-            last_seq: Some(1),
+            entries: vec![SequencedBlock {
+                seq: 1,
+                bytes: bytes::Bytes::from_static(b"B"),
+            }],
         };
         let queued = vec![
             SequencedBlock {
@@ -349,6 +341,46 @@ mod tests {
                 bytes::Bytes::from_static(b"B")
             ],
             "handoff must stay ordered by sequence"
+        );
+    }
+
+    #[test]
+    fn follow_handoff_blocks_keeps_queued_block_from_history_gap() {
+        let snapshot = HistorySnapshot {
+            entries: vec![
+                SequencedBlock {
+                    seq: 0,
+                    bytes: bytes::Bytes::from_static(b"A"),
+                },
+                SequencedBlock {
+                    seq: 2,
+                    bytes: bytes::Bytes::from_static(b"C"),
+                },
+            ],
+        };
+        let queued = vec![
+            SequencedBlock {
+                seq: 0,
+                bytes: bytes::Bytes::from_static(b"A"),
+            },
+            SequencedBlock {
+                seq: 1,
+                bytes: bytes::Bytes::from_static(b"B"),
+            },
+            SequencedBlock {
+                seq: 2,
+                bytes: bytes::Bytes::from_static(b"C"),
+            },
+        ];
+
+        assert_eq!(
+            follow_handoff_blocks(&snapshot, queued),
+            vec![
+                bytes::Bytes::from_static(b"A"),
+                bytes::Bytes::from_static(b"B"),
+                bytes::Bytes::from_static(b"C")
+            ],
+            "a gap in timestamp-filtered history must not suppress a queued live block"
         );
     }
 
