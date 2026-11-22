@@ -77,6 +77,30 @@ pub(super) async fn recv_upstream_h2_response_with_interim(
     }
 }
 
+async fn connect_extended_upstream_addrs(
+    mut addrs: impl Iterator<Item = std::net::SocketAddr>,
+    timeout_dur: Duration,
+) -> Result<TcpStream> {
+    let first = addrs
+        .next()
+        .ok_or_else(|| anyhow!("failed to resolve extended CONNECT upstream"))?;
+    timeout(timeout_dur, async {
+        let mut last_error = None;
+        for addr in std::iter::once(first).chain(addrs) {
+            match TcpStream::connect(addr).await {
+                Ok(tcp) => return Ok(tcp),
+                Err(err) => last_error = Some(err),
+            }
+        }
+        match last_error {
+            Some(err) => Err(anyhow::Error::new(err)),
+            None => Err(anyhow!("failed to resolve extended CONNECT upstream")),
+        }
+    })
+    .await
+    .map_err(|_| anyhow!("extended CONNECT upstream connect timed out"))?
+}
+
 pub(super) async fn open_upstream_h2_extended_connect_stream(
     uri: &Uri,
     sanitized_headers: &Headers,
@@ -87,23 +111,17 @@ pub(super) async fn open_upstream_h2_extended_connect_stream(
     trust: Option<&CompiledUpstreamTlsTrust>,
 ) -> Result<H2ExtendedConnectUpstream> {
     let (connect_host, connect_port, use_tls) = parse_h2_extended_connect_upstream(uri, upstream)?;
-    let upstream_addr = match timeout(
+    let addrs = match timeout(
         timeout_dur,
         lookup_host((connect_host.as_str(), connect_port)),
     )
     .await
     {
-        Ok(Ok(mut addrs)) => addrs
-            .next()
-            .ok_or_else(|| anyhow!("failed to resolve extended CONNECT upstream"))?,
+        Ok(Ok(addrs)) => addrs,
         Ok(Err(err)) => return Err(err.into()),
         Err(_) => return Err(anyhow!("extended CONNECT upstream resolution timed out")),
     };
-    let tcp = match timeout(timeout_dur, TcpStream::connect(upstream_addr)).await {
-        Ok(Ok(tcp)) => tcp,
-        Ok(Err(err)) => return Err(err.into()),
-        Err(_) => return Err(anyhow!("extended CONNECT upstream connect timed out")),
-    };
+    let tcp = connect_extended_upstream_addrs(addrs, timeout_dur).await?;
     let _ = tcp.set_nodelay(true);
     let io: BoxTlsStream = if use_tls {
         let (tls, negotiated_h2) = match timeout(
@@ -493,5 +511,27 @@ fn reset_upstream_and_abort(
 fn abort_downstream(sender: &mut Option<qpx_http::body::Sender>) {
     if let Some(mut sender) = sender.take() {
         sender.abort();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn extended_connect_dial_falls_back_to_next_address() -> Result<()> {
+        let refused_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let refused_addr = refused_listener.local_addr()?;
+        drop(refused_listener);
+
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+        let live_addr = listener.local_addr()?;
+        let addrs = vec![refused_addr, live_addr];
+
+        let tcp =
+            connect_extended_upstream_addrs(addrs.into_iter(), Duration::from_secs(1)).await?;
+        assert_eq!(tcp.peer_addr()?, live_addr);
+        Ok(())
     }
 }
