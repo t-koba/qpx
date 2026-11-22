@@ -38,6 +38,7 @@ fn normalize_authority_host(host: &str) -> String {
     let mut host = host
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
+        .filter(|inner| inner.contains(':'))
         .unwrap_or(host)
         .to_string();
     host.make_ascii_lowercase();
@@ -181,6 +182,13 @@ mod tests {
             parse_authority_host_port_with_default("example.com:8443", None),
             Some(("example.com".to_string(), 8443))
         );
+    }
+
+    #[test]
+    fn authority_parser_preserves_brackets_for_colonless_ipvfuture() {
+        let (host, port) = parse_authority_host_port("[v1.example]:443", 443).expect("authority");
+
+        assert_eq!(format_authority_host_port(&host, port), "[v1.example]:443");
     }
 
     #[test]
