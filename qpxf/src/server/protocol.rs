@@ -557,6 +557,10 @@ where
         Ok(plan) => plan,
         Err(response) => {
             write_tcp_plain_response(&mut stream, &response, output_idle).await?;
+            // The TCP response body is delimited by EOF. Complete the response
+            // before waiting for request stdin, which the client may legitimately
+            // leave open once it sees the rejection.
+            let _ = stream.shutdown().await;
             let mut buf = [0u8; 65536];
             let mut drained = 0usize;
             loop {
@@ -721,6 +725,41 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn rejected_tcp_response_closes_write_half_before_stdin_drain() {
+        let config = serde_json::from_str::<crate::config::QpxfConfig>("{}").expect("config");
+        let router = Arc::new(crate::router::Router::new(&config).expect("router"));
+        let meta: qpx_core::ipc::meta::IpcRequestMeta = serde_json::from_value(serde_json::json!({
+            "method": "POST",
+            "uri": "/missing",
+            "server_protocol": "HTTP/1.1",
+            "headers": [],
+            "params": {}
+        }))
+        .expect("meta");
+        let ctx = TcpRequestContext {
+            router,
+            semaphore: Arc::new(Semaphore::new(1)),
+            input_idle: Duration::from_secs(60),
+            output_idle: Duration::from_secs(1),
+            max_params_bytes: 1024,
+            max_stdin_bytes: 1024,
+        };
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let task = tokio::spawn(handle_one_request_tcp(server, meta, ctx));
+
+        let mut response = Vec::new();
+        timeout(Duration::from_secs(1), client.read_to_end(&mut response))
+            .await
+            .expect("rejected response must complete without stdin EOF")
+            .expect("read response");
+        assert!(
+            String::from_utf8_lossy(&response).contains("no handler matched"),
+            "unexpected response: {response:?}"
+        );
+        task.abort();
+    }
 
     #[test]
     fn declared_stdin_length_rejects_oversized_chunk_before_executor_send() {
