@@ -19,6 +19,8 @@ use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Seek, Write};
 use std::path::{Component, Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::fs::File as TokioFile;
@@ -73,6 +75,8 @@ pub struct DiskCacheBackend {
     background_sweep_started: std::sync::Arc<AtomicBool>,
     indexed_flag: std::sync::Arc<AtomicBool>,
     state: std::sync::Arc<Mutex<DiskCacheState>>,
+    #[cfg(test)]
+    bookkeeping_waiters: std::sync::Arc<AtomicUsize>,
 }
 
 struct DiskCacheState {
@@ -317,6 +321,8 @@ impl DiskCacheBackend {
             background_sweep_started: std::sync::Arc::new(AtomicBool::new(false)),
             indexed_flag: std::sync::Arc::new(AtomicBool::new(false)),
             state: std::sync::Arc::new(Mutex::new(DiskCacheState::default())),
+            #[cfg(test)]
+            bookkeeping_waiters: std::sync::Arc::new(AtomicUsize::new(0)),
         };
         backend.ensure_background_sweep();
         Ok(backend)
@@ -846,8 +852,12 @@ impl DiskCacheBackend {
             current.as_ref().map_or((total_len, expires_at_ms), |read| {
                 (read.total_len, read.header.expires_at_ms)
             });
+        #[cfg(test)]
+        self.bookkeeping_waiters.fetch_add(1, Ordering::SeqCst);
         {
             let mut state = self.state.lock().await;
+            #[cfg(test)]
+            self.bookkeeping_waiters.fetch_sub(1, Ordering::SeqCst);
             if let Some(old) = state.entries.insert(
                 id,
                 DiskCacheIndexEntry {
@@ -2577,11 +2587,9 @@ mod tests {
             .await
             .expect("get old index")
             .expect("old index");
-        let path = backend.path_for("ns", "index");
-
-        // Keep the writer from replacing the hot raw value while a reader
-        // observes the old one. The on-disk rename is the last step before
-        // the writer reaches the state lock, so it is a stable wake-up point.
+        // Hold the state lock while the writer waits for it. The waiter
+        // counter is incremented immediately before that wait, so decoding
+        // after observing it cannot race ahead of the writer's bookkeeping.
         let state = backend.state.lock().await;
         let writer = tokio::spawn({
             let backend = backend.clone();
@@ -2589,18 +2597,12 @@ mod tests {
             async move { backend.put("ns", "index", &replacement, 60).await }
         });
         tokio::time::timeout(Duration::from_secs(5), async {
-            while !fs::read(&path).is_ok_and(|bytes| {
-                bytes
-                    .windows(replacement.len())
-                    .any(|window| window == replacement)
-            }) {
+            while backend.bookkeeping_waiters.load(Ordering::SeqCst) == 0 {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
-            // Let the writer run up to the state lock before decoding.
-            tokio::time::sleep(Duration::from_millis(10)).await;
         })
         .await
-        .expect("writer reached the state lock");
+        .expect("writer reached the bookkeeping state lock");
 
         let decoded = backend
             .get_decoded_variant_index("ns", "index")
