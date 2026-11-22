@@ -1510,3 +1510,18 @@ async fn complete_request_body_still_recycles_upstream_connection() {
     );
     origin.await.expect("origin task");
 }
+
+#[tokio::test]
+async fn idle_connection_probe_sees_eof_without_coop_budget() {
+    let (mut idle, peer) = tokio::io::duplex(1);
+    drop(peer);
+
+    while tokio::task::coop::has_budget_remaining() {
+        tokio::task::coop::consume_budget().await;
+    }
+
+    assert!(
+        super::idle_connection_closed_or_dirty(&mut idle).await,
+        "a closed peer must not be reused just because the cooperative budget is exhausted"
+    );
+}
