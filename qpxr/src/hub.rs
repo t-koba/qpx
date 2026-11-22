@@ -60,8 +60,12 @@ impl HistorySnapshot {
     /// A FOLLOW client only needs to skip sequences actually present in the
     /// snapshot. Timestamp filtering can leave interior gaps, and history
     /// eviction can remove earlier blocks still queued in the live subscription.
+    /// History is append-only by sequence and filtering preserves that order,
+    /// so membership is a binary search rather than a scan of the whole history.
     pub(super) fn is_already_sent(&self, seq: u64) -> bool {
-        self.entries.iter().any(|entry| entry.seq == seq)
+        self.entries
+            .binary_search_by_key(&seq, |entry| entry.seq)
+            .is_ok()
     }
 
     pub(super) fn blocks(&self) -> Vec<Bytes> {
@@ -705,7 +709,16 @@ mod follow_handoff_tests {
                 .collect::<Vec<_>>(),
             vec![0, 2]
         );
+        assert!(
+            snapshot
+                .entries
+                .windows(2)
+                .all(|pair| pair[0].seq < pair[1].seq),
+            "history snapshot entries must stay ordered by sequence for sublinear FOLLOW lookup"
+        );
+        assert!(snapshot.is_already_sent(0));
         assert!(!snapshot.is_already_sent(1));
+        assert!(snapshot.is_already_sent(2));
     }
 
     #[test]
