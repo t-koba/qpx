@@ -25,8 +25,13 @@ pub(super) struct ReverseRequestTemplate {
 
 #[derive(Clone)]
 enum ReverseRequestTemplateBody {
-    Memory { chunks: Arc<[Bytes]> },
-    File { file: Arc<SpooledTemplateFile> },
+    Memory {
+        chunks: Arc<[Bytes]>,
+    },
+    File {
+        file: Arc<SpooledTemplateFile>,
+        len: usize,
+    },
 }
 
 struct SpooledTemplateFile {
@@ -80,6 +85,15 @@ impl ReverseRequestTemplate {
             headers: head.headers().clone(),
             body,
         })
+    }
+
+    pub(super) fn body_len(&self) -> usize {
+        match &self.body {
+            ReverseRequestTemplateBody::Memory { chunks } => {
+                chunks.iter().map(|chunk| chunk.len()).sum()
+            }
+            ReverseRequestTemplateBody::File { len, .. } => *len,
+        }
     }
 
     pub(super) fn build(&self) -> Result<OwnerRequest<Body>> {
@@ -156,7 +170,7 @@ impl ReverseRequestTemplateBody {
     fn build(&self) -> Body {
         match self {
             Self::Memory { chunks } => Body::replay_chunks(chunks.iter().cloned().collect(), None),
-            Self::File { file } => file.body(),
+            Self::File { file, .. } => file.body(),
         }
     }
 }
@@ -215,6 +229,7 @@ impl TemplateBodyRecorder {
             spool.close();
             return Ok(ReverseRequestTemplateBody::File {
                 file: Arc::new(SpooledTemplateFile { guard: spool }),
+                len: self.seen,
             });
         }
         Ok(ReverseRequestTemplateBody::Memory {
@@ -435,6 +450,7 @@ async fn collect_body_template(
         spool.close();
         return Ok(ReverseRequestTemplateBody::File {
             file: Arc::new(SpooledTemplateFile { guard: spool }),
+            len: seen,
         });
     }
     Ok(ReverseRequestTemplateBody::Memory {
@@ -625,7 +641,7 @@ mod tests {
                 .await
                 .expect("template");
         let path = match &template.body {
-            ReverseRequestTemplateBody::File { file } => file.guard.path().to_path_buf(),
+            ReverseRequestTemplateBody::File { file, .. } => file.guard.path().to_path_buf(),
             ReverseRequestTemplateBody::Memory { .. } => panic!("large template should spool"),
         };
         assert!(path.exists());
@@ -661,7 +677,7 @@ mod tests {
                 .await
                 .expect("template");
         let path = match &template.body {
-            ReverseRequestTemplateBody::File { file } => file.guard.path().to_path_buf(),
+            ReverseRequestTemplateBody::File { file, .. } => file.guard.path().to_path_buf(),
             ReverseRequestTemplateBody::Memory { .. } => panic!("large template should spool"),
         };
 
@@ -701,7 +717,7 @@ mod tests {
                 .await
                 .expect("template");
         let path = match &template.body {
-            ReverseRequestTemplateBody::File { file } => file.guard.path().to_path_buf(),
+            ReverseRequestTemplateBody::File { file, .. } => file.guard.path().to_path_buf(),
             ReverseRequestTemplateBody::Memory { .. } => panic!("large template should spool"),
         };
 

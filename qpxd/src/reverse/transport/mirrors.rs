@@ -155,7 +155,14 @@ pub(super) fn dispatch_mirrors(
         return;
     }
     let proxy_name = proxy_name.to_string();
+    let body_len = template.body_len();
     for mirror in mirror_upstreams {
+        if mirror
+            .max_mirror_body_bytes
+            .is_some_and(|limit| body_len > limit)
+        {
+            continue;
+        }
         let upstream = mirror.upstream;
         let req = match template.build() {
             Ok(req) => req,
@@ -339,6 +346,50 @@ mod tests {
         // no length and the request is not one that can be safely buffered.
         let signed = request_with_content_length("+16");
         assert!(!request_is_templateable(&signed, 16));
+    }
+
+    #[tokio::test]
+    async fn buffered_mirror_respects_target_body_cap() {
+        use crate::reverse::router::SelectedMirrorTarget;
+        use bytes::Bytes;
+        use std::sync::atomic::Ordering;
+
+        let request = OwnerRequest::from_http(
+            http::Request::builder()
+                .method(http::Method::PUT)
+                .uri("http://example.test/upload")
+                .header(CONTENT_LENGTH, "4")
+                .body(Body::replay(Bytes::from_static(b"body"), None))
+                .expect("request"),
+        );
+        let template = super::super::request_template::ReverseRequestTemplate::from_request(
+            request,
+            16,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("template");
+        let endpoint = Arc::new(UpstreamEndpoint::new("http://mirror-over-cap.test".into()));
+        let mirrors = vec![SelectedMirrorTarget {
+            upstream: endpoint.clone(),
+            max_mirror_body_bytes: Some(3),
+        }];
+
+        dispatch_mirrors(
+            Arc::new(crate::pool::PoolRegistry::new()),
+            &template,
+            mirrors,
+            Duration::from_secs(1),
+            HealthCheckRuntime::from_config(None),
+            EndpointLifecycleRuntime::default(),
+            None,
+            "test",
+        );
+        assert_eq!(
+            endpoint.inflight.load(Ordering::Relaxed),
+            0,
+            "over-cap mirror must not be scheduled"
+        );
     }
 
     #[test]
