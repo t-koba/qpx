@@ -21,6 +21,7 @@ pub(crate) struct AdaptiveEjection {
     failures: AtomicU32,
     latency_total_ms: AtomicU64,
     latency_samples: AtomicU32,
+    latency_lock: Mutex<()>,
     backoff_shift: AtomicU32,
 }
 
@@ -43,6 +44,7 @@ impl AdaptiveEjection {
             failures: AtomicU32::new(0),
             latency_total_ms: AtomicU64::new(0),
             latency_samples: AtomicU32::new(0),
+            latency_lock: Mutex::new(()),
             backoff_shift: AtomicU32::new(0),
         }
     }
@@ -96,15 +98,23 @@ impl AdaptiveEjection {
     /// too far.
     pub(crate) fn note_latency(&self, elapsed: Duration, threshold: Duration) -> bool {
         let sample = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
+        let _guard = self
+            .latency_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let samples = self
             .latency_samples
-            .fetch_add(1, Ordering::Relaxed)
+            .load(Ordering::Relaxed)
             .saturating_add(1);
-        self.latency_total_ms.fetch_add(sample, Ordering::Relaxed);
+        self.latency_samples.store(samples, Ordering::Relaxed);
+        let total_ms = self
+            .latency_total_ms
+            .load(Ordering::Relaxed)
+            .saturating_add(sample);
+        self.latency_total_ms.store(total_ms, Ordering::Relaxed);
         if samples < ADAPTIVE_MIN_SAMPLES {
             return false;
         }
-        let total_ms = self.latency_total_ms.load(Ordering::Relaxed);
         let avg_ms = total_ms / u64::from(samples.max(1));
         let threshold_ms = threshold.as_millis().min(u128::from(u64::MAX)) as u64;
         avg_ms >= threshold_ms.saturating_mul(ADAPTIVE_LATENCY_MULTIPLIER)
@@ -117,6 +127,7 @@ impl AdaptiveEjection {
             &self.failures,
             &self.latency_total_ms,
             &self.latency_samples,
+            &self.latency_lock,
             ADAPTIVE_MAX_SAMPLES,
         );
     }
@@ -125,6 +136,10 @@ impl AdaptiveEjection {
     pub(crate) fn reset(&self) {
         self.successes.store(0, Ordering::Relaxed);
         self.failures.store(0, Ordering::Relaxed);
+        let _guard = self
+            .latency_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         self.latency_total_ms.store(0, Ordering::Relaxed);
         self.latency_samples.store(0, Ordering::Relaxed);
     }
@@ -137,6 +152,7 @@ fn maybe_trim_adaptive_window(
     failures: &AtomicU32,
     latency_total_ms: &AtomicU64,
     latency_samples: &AtomicU32,
+    latency_lock: &Mutex<()>,
     max_samples: u32,
 ) {
     let success_count = successes.load(Ordering::Relaxed);
@@ -146,16 +162,19 @@ fn maybe_trim_adaptive_window(
     }
     successes.store(success_count / 2, Ordering::Relaxed);
     failures.store(failure_count / 2, Ordering::Relaxed);
-    latency_samples
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current / 2)
-        })
-        .ok();
-    latency_total_ms
-        .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-            Some(current / 2)
-        })
-        .ok();
+    let _guard = latency_lock
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let old_samples = latency_samples.load(Ordering::Relaxed);
+    let new_samples = old_samples / 2;
+    let new_total = if new_samples == 0 {
+        0
+    } else {
+        let old_total = latency_total_ms.load(Ordering::Relaxed);
+        (u128::from(old_total) * u128::from(new_samples) / u128::from(old_samples)) as u64
+    };
+    latency_samples.store(new_samples, Ordering::Relaxed);
+    latency_total_ms.store(new_total, Ordering::Relaxed);
 }
 
 /// Why an endpoint was ejected.
@@ -344,11 +363,13 @@ mod tests {
             let failures = AtomicU32::new(failure_count);
             let latency_total_ms = AtomicU64::new(101);
             let latency_samples = AtomicU32::new(37);
+            let latency_lock = Mutex::new(());
             maybe_trim_adaptive_window(
                 &successes,
                 &failures,
                 &latency_total_ms,
                 &latency_samples,
+                &latency_lock,
                 32,
             );
             assert_eq!(successes.load(Ordering::Relaxed), success_count);
@@ -365,11 +386,13 @@ mod tests {
             let failures = AtomicU32::new(18);
             let latency_total_ms = AtomicU64::new(101);
             let latency_samples = AtomicU32::new(36);
+            let latency_lock = Mutex::new(());
             maybe_trim_adaptive_window(
                 &successes,
                 &failures,
                 &latency_total_ms,
                 &latency_samples,
+                &latency_lock,
                 max_samples,
             );
             assert_eq!(successes.load(Ordering::Relaxed), 8);
@@ -380,12 +403,32 @@ mod tests {
     }
 
     #[test]
+    fn adaptive_window_trim_keeps_odd_sample_latency_average() {
+        let successes = AtomicU32::new(17);
+        let failures = AtomicU32::new(18);
+        let latency_total_ms = AtomicU64::new(3300);
+        let latency_samples = AtomicU32::new(33);
+        let latency_lock = Mutex::new(());
+        maybe_trim_adaptive_window(
+            &successes,
+            &failures,
+            &latency_total_ms,
+            &latency_samples,
+            &latency_lock,
+            32,
+        );
+        assert_eq!(latency_total_ms.load(Ordering::Relaxed), 1600);
+        assert_eq!(latency_samples.load(Ordering::Relaxed), 16);
+    }
+
+    #[test]
     fn adaptive_stats_reset_to_zero_without_changing_backoff() {
         let adaptive = AdaptiveEjection {
             successes: AtomicU32::new(17),
             failures: AtomicU32::new(18),
             latency_total_ms: AtomicU64::new(101),
             latency_samples: AtomicU32::new(36),
+            latency_lock: Mutex::new(()),
             backoff_shift: AtomicU32::new(3),
         };
         adaptive.reset();
@@ -488,5 +531,17 @@ mod tests {
         assert_eq!(counters.increment(PassiveFailureKind::Reset), 1);
         assert_eq!(counters.increment(PassiveFailureKind::Timeout), 1);
         assert_eq!(counters.increment(PassiveFailureKind::Http5xx), 1);
+    }
+
+    #[test]
+    fn adaptive_latency_trim_preserves_constant_stream_average() {
+        let adaptive = AdaptiveEjection::new();
+        for response in 1..=50 {
+            adaptive.note_success_and_maybe_trim();
+            assert!(
+                !adaptive.note_latency(Duration::from_millis(100), Duration::from_millis(51)),
+                "constant 100ms latency ejected on response {response}"
+            );
+        }
     }
 }
