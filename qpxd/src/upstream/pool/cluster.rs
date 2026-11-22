@@ -117,6 +117,31 @@ impl ManagedUpstreamEndpoint {
         unhealthy_until != 0 && unhealthy_until <= now_ms
     }
 
+    /// Atomically admit one selection, including the single-probe half-open
+    /// window. The counter is always tracked because half-open recovery needs
+    /// to know whether its probe is still in flight even without a configured
+    /// concurrency cap.
+    fn try_reserve(&self, now_ms: u64, max_concurrency: Option<usize>) -> bool {
+        let mut inflight = self.inflight.load(Ordering::Relaxed);
+        loop {
+            if !self.is_healthy(now_ms)
+                || (self.is_half_open(now_ms) && inflight != 0)
+                || max_concurrency.is_some_and(|max| inflight >= max)
+            {
+                return false;
+            }
+            match self.inflight.compare_exchange_weak(
+                inflight,
+                inflight + 1,
+                Ordering::AcqRel,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return true,
+                Err(actual) => inflight = actual,
+            }
+        }
+    }
+
     pub(super) fn mark_passive_success(&self) {
         let recovered = self.unhealthy_until_ms.swap(0, Ordering::Relaxed) != 0;
         self.passive.reset_all();
@@ -252,41 +277,30 @@ impl UpstreamProxyCluster {
     pub(crate) fn select(self: &Arc<Self>) -> Result<ResolvedUpstreamProxy> {
         self.spawn_discovery();
         let endpoints = self.endpoints.load_full();
-        let now_ms = now_millis();
-        let candidates = endpoints
-            .iter()
-            .filter(|endpoint| {
-                endpoint.is_healthy(now_ms)
-                    && (!endpoint.is_half_open(now_ms)
-                        || endpoint.inflight.load(Ordering::Relaxed) == 0)
-                    && self
-                        .max_concurrency
-                        .is_none_or(|max| endpoint.inflight.load(Ordering::Relaxed) < max)
-            })
-            .cloned()
-            .collect::<Vec<_>>();
-        let endpoint = if candidates.is_empty() {
+        if endpoints.is_empty() {
             return Err(anyhow!(
                 "no healthy upstream proxy endpoints available for {}",
                 self.key
             ));
-        } else {
-            let idx = self.rr_counter.fetch_add(1, Ordering::Relaxed) % candidates.len();
-            candidates[idx].clone()
-        };
-        let permit = self.max_concurrency.map(|_| EndpointConcurrencyPermit {
-            endpoint: endpoint.clone(),
-        });
-        if permit.is_some() {
-            endpoint.inflight.fetch_add(1, Ordering::Relaxed);
         }
-        Ok(ResolvedUpstreamProxy {
-            key: self.key.clone(),
-            endpoint,
-            trust: self.trust.clone(),
-            passive_health: self.passive_health.clone(),
-            _permit: permit,
-        })
+        let now_ms = now_millis();
+        let start = self.rr_counter.fetch_add(1, Ordering::Relaxed) % endpoints.len();
+        for offset in 0..endpoints.len() {
+            let endpoint = endpoints[(start + offset) % endpoints.len()].clone();
+            if endpoint.try_reserve(now_ms, self.max_concurrency) {
+                return Ok(ResolvedUpstreamProxy {
+                    key: self.key.clone(),
+                    endpoint: endpoint.clone(),
+                    trust: self.trust.clone(),
+                    passive_health: self.passive_health.clone(),
+                    _permit: Some(EndpointConcurrencyPermit { endpoint }),
+                });
+            }
+        }
+        Err(anyhow!(
+            "no healthy upstream proxy endpoints available for {}",
+            self.key
+        ))
     }
 
     fn spawn_discovery(self: &Arc<Self>) {
@@ -395,4 +409,41 @@ fn upstream_proxy_endpoint_identity(endpoint: &UpstreamProxyEndpoint) -> String 
         endpoint.logical_authority.as_deref().unwrap_or_default(),
         proxy_authorization
     )
+}
+
+#[cfg(test)]
+mod half_open_tests {
+    use super::*;
+
+    #[test]
+    fn half_open_allows_one_probe_without_concurrency_cap() {
+        let endpoint = Arc::new(ManagedUpstreamEndpoint::new(
+            parse_upstream_proxy_endpoint("http://127.0.0.1:3128").expect("endpoint"),
+        ));
+        endpoint
+            .unhealthy_until_ms
+            .store(now_millis().saturating_sub(1).max(1), Ordering::Relaxed);
+        let cluster = Arc::new(UpstreamProxyCluster {
+            key: Arc::<str>::from("half-open"),
+            static_endpoints: Arc::new(vec![endpoint.clone()]),
+            endpoints: ArcSwap::from_pointee(vec![endpoint]),
+            discovery: None,
+            trust: None,
+            discovery_started: AtomicBool::new(false),
+            passive_health: None,
+            max_concurrency: None,
+            rr_counter: AtomicUsize::new(0),
+        });
+
+        let first = cluster.select().expect("first half-open probe");
+        assert!(
+            cluster.select().is_err(),
+            "a second half-open probe must wait for the first to finish"
+        );
+        drop(first);
+        assert!(
+            cluster.select().is_ok(),
+            "a new probe is allowed after the first finishes"
+        );
+    }
 }
