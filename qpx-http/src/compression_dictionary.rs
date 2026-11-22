@@ -3,7 +3,7 @@
 use crate::structured_fields::{BareItem, ListEntry, parse_dictionary, parse_item};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
-use std::io::{Cursor, Error as IoError, ErrorKind, Read};
+use std::io::{Cursor, Error as IoError, ErrorKind, Read, Write};
 use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -268,10 +268,13 @@ pub fn encode_dcz(
     dictionary: &[u8],
     level: i32,
 ) -> Result<Vec<u8>, CompressionDictionaryError> {
-    let mut compressor = zstd::bulk::Compressor::with_dictionary(level, dictionary)
+    let mut encoder = zstd::stream::write::Encoder::with_ref_prefix(Vec::new(), level, dictionary)
         .map_err(|error| CompressionDictionaryError::Compression(error.to_string()))?;
-    let payload = compressor
-        .compress(content)
+    encoder
+        .write_all(content)
+        .map_err(|error| CompressionDictionaryError::Compression(error.to_string()))?;
+    let payload = encoder
+        .finish()
         .map_err(|error| CompressionDictionaryError::Compression(error.to_string()))?;
     let mut encoded = Vec::with_capacity(DCZ_MAGIC.len() + 32 + payload.len());
     encoded.extend_from_slice(&DCZ_MAGIC);
@@ -286,11 +289,22 @@ pub fn decode_dcz(
     max_output_bytes: usize,
 ) -> Result<Vec<u8>, CompressionDictionaryError> {
     let payload_offset = validate_encoded_dictionary_hash("dcz", encoded, dictionary)?;
-    let mut decompressor = zstd::bulk::Decompressor::with_dictionary(dictionary)
+    let decoder = zstd::stream::read::Decoder::with_ref_prefix(
+        Cursor::new(&encoded[payload_offset..]),
+        dictionary,
+    )
+    .map_err(|error| CompressionDictionaryError::Compression(error.to_string()))?;
+    let mut decoded = Vec::new();
+    decoder
+        .take(max_output_bytes.saturating_add(1) as u64)
+        .read_to_end(&mut decoded)
         .map_err(|error| CompressionDictionaryError::Compression(error.to_string()))?;
-    decompressor
-        .decompress(&encoded[payload_offset..], max_output_bytes)
-        .map_err(|error| CompressionDictionaryError::Compression(error.to_string()))
+    if decoded.len() > max_output_bytes {
+        return Err(CompressionDictionaryError::Compression(
+            "output exceeds limit".to_owned(),
+        ));
+    }
+    Ok(decoded)
 }
 
 pub fn encode_dcb(
@@ -433,6 +447,23 @@ mod tests {
         );
         assert!(decode_dcz(&encoded, dictionary, content.len() - 1).is_err());
         assert!(decode_dcz(&encoded, b"different dictionary", content.len()).is_err());
+    }
+
+    #[test]
+    fn dcz_round_trip_with_zstd_formatted_dictionary_magic() {
+        // ZSTD_MAGIC_DICTIONARY (0xEC30A437) in little-endian byte order.
+        let mut dictionary = 0xEC30_A437_u32.to_le_bytes().to_vec();
+        dictionary.extend_from_slice(
+            b"common response prefix and shared field names, values, and headers",
+        );
+        dictionary.resize(64, b'x');
+        let mut content = dictionary.clone();
+        content.extend_from_slice(b": value\n");
+        let encoded = encode_dcz(&content, &dictionary, 3).expect("encode dcz");
+        assert_eq!(
+            decode_dcz(&encoded, &dictionary, content.len()).expect("decode dcz"),
+            content
+        );
     }
 
     #[test]
