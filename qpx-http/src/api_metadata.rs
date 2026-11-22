@@ -226,7 +226,31 @@ fn valid_relation_type(value: &str) -> bool {
     // RFC 8288 extension relations are RFC 3986 URIs. `Url` also accepts IRIs
     // and values it silently normalizes, but this module emits the input
     // verbatim, so only accept ASCII URI characters here.
-    value.bytes().all(is_uri_char) && url::Url::parse(value).is_ok()
+    value.bytes().all(is_uri_char)
+        && has_valid_percent_escapes(value)
+        && url::Url::parse(value).is_ok()
+}
+
+/// `Url::parse` tolerates a bare `%` and malformed triplets. The serializer
+/// emits the relation verbatim, so reject anything that is not RFC 3986
+/// `pct-encoded` syntax.
+fn has_valid_percent_escapes(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            index += 1;
+            continue;
+        }
+        if index + 2 >= bytes.len()
+            || !bytes[index + 1].is_ascii_hexdigit()
+            || !bytes[index + 2].is_ascii_hexdigit()
+        {
+            return false;
+        }
+        index += 3;
+    }
+    true
 }
 
 /// RFC 3986 `unreserved / reserved / pct-encoded` characters, excluding
@@ -555,6 +579,26 @@ mod tests {
         );
         assert!(!valid_relation_type("not a uri: just words"));
         assert!(!valid_relation_type(":"));
+    }
+
+    #[test]
+    fn rejects_malformed_percent_escapes_in_uri_relation_type() {
+        for relation in [
+            "https://rels.example/a%",
+            "https://rels.example/a%G1",
+            "https://rels.example/a%2",
+        ] {
+            assert_eq!(
+                LinkValue::new("/v2", relation).err(),
+                Some(ApiMetadataError::InvalidLinkRelation),
+                "relation: {relation}"
+            );
+        }
+        let link = LinkValue::new("/v2", "https://rels.example/a%25").expect("valid escape");
+        assert_eq!(
+            link.serialize().expect("serialize"),
+            "</v2>; rel=\"https://rels.example/a%25\""
+        );
     }
 
     #[test]
