@@ -114,14 +114,24 @@ impl LdapAuthenticator {
         let mut out = Vec::new();
         for entry in groups {
             let entry = SearchEntry::construct(entry);
-            if let Some(values) = entry.attrs.get(&self.config.group_attr) {
-                for v in values {
-                    out.push(v.clone());
-                }
-            }
+            out.extend(
+                group_values(&entry, &self.config.group_attr)
+                    .iter()
+                    .cloned(),
+            );
         }
         Ok(Some(out))
     }
+}
+
+fn group_values<'a>(entry: &'a SearchEntry, attr: &str) -> &'a [String] {
+    // LDAP attribute descriptions are case-insensitive (RFC 4512 section 2.5).
+    entry
+        .attrs
+        .iter()
+        .find(|(name, _)| name.eq_ignore_ascii_case(attr))
+        .map(|(_, values)| values.as_slice())
+        .unwrap_or(&[])
 }
 
 pub(super) fn ldap_escape_filter_value(input: &str) -> String {
@@ -143,4 +153,22 @@ pub(super) fn ldap_escape_filter_value(input: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn group_values_matches_attribute_description_case_insensitively() {
+        let mut attrs = std::collections::HashMap::new();
+        attrs.insert("cn".to_string(), vec!["ops".to_string()]);
+        let entry = SearchEntry {
+            dn: "cn=ops,ou=groups,dc=example".to_string(),
+            attrs,
+            bin_attrs: std::collections::HashMap::new(),
+        };
+
+        assert_eq!(group_values(&entry, "CN"), ["ops"]);
+    }
 }
