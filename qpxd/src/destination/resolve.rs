@@ -544,13 +544,18 @@ pub(super) fn destination_ip(inputs: &DestinationInputs<'_>) -> Option<IpAddr> {
     inputs.ip.or_else(|| {
         inputs
             .host
-            .and_then(|value| value.trim().parse::<IpAddr>().ok())
-            .or_else(|| {
-                inputs
-                    .sni
-                    .and_then(|value| value.trim().parse::<IpAddr>().ok())
-            })
+            .and_then(parse_ip_literal)
+            .or_else(|| inputs.sni.and_then(parse_ip_literal))
     })
+}
+
+fn parse_ip_literal(value: &str) -> Option<IpAddr> {
+    let value = value.trim();
+    let value = value
+        .strip_prefix('[')
+        .and_then(|value| value.strip_suffix(']'))
+        .unwrap_or(value);
+    value.parse::<IpAddr>().ok()
 }
 
 fn infer_application(

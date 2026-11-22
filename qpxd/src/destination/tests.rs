@@ -299,3 +299,69 @@ fn inferred_application_respects_min_confidence_without_named_sets() {
     assert_eq!(result.application, None);
     assert_eq!(result.application_confidence, None);
 }
+
+#[test]
+fn classifier_matches_cidr_set_for_bracketed_ipv6_host() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "category:doc_ipv6".to_string(),
+        kind: NamedSetKind::Cidr,
+        values: vec!["2001:db8::/32".to_string()],
+        file: None,
+    }];
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let policy = CompiledDestinationResolutionPolicy::default();
+
+    let destination = classifier.classify(
+        &DestinationInputs {
+            host: Some("[2001:db8::1]"),
+            ip: None,
+            port: Some(80),
+            ..Default::default()
+        },
+        &policy,
+        true,
+    );
+    assert_eq!(destination.category.as_deref(), Some("doc_ipv6"));
+    assert_eq!(destination.category_source, Some("ip"));
+}
+
+#[test]
+fn destination_ip_accepts_bracketed_ipv6_host_and_sni() {
+    use super::resolve::destination_ip;
+
+    let host = DestinationInputs {
+        host: Some("[2001:db8::1]"),
+        ip: None,
+        ..Default::default()
+    };
+    assert_eq!(
+        destination_ip(&host),
+        Some("2001:db8::1".parse::<IpAddr>().expect("ip"))
+    );
+
+    let sni = DestinationInputs {
+        sni: Some("[2001:db8::2]"),
+        ..Default::default()
+    };
+    assert_eq!(
+        destination_ip(&sni),
+        Some("2001:db8::2".parse::<IpAddr>().expect("ip"))
+    );
+
+    let explicit = DestinationInputs {
+        host: Some("[2001:db8::1]"),
+        ip: Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10))),
+        ..Default::default()
+    };
+    assert_eq!(
+        destination_ip(&explicit),
+        Some(IpAddr::V4(Ipv4Addr::new(203, 0, 113, 10)))
+    );
+
+    let bracketed_name = DestinationInputs {
+        host: Some("[example.com]"),
+        ..Default::default()
+    };
+    assert_eq!(destination_ip(&bracketed_name), None);
+}
