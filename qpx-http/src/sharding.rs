@@ -11,7 +11,7 @@ pub fn modulo<T: Hash + ?Sized>(key: &T, shards: usize) -> usize {
 }
 
 pub fn modulo_u64(key: u64, shards: usize) -> usize {
-    (key as usize) % shards.max(1)
+    (key % shards.max(1) as u64) as usize
 }
 
 pub fn masked<T: Hash + ?Sized>(key: &T, mask: usize) -> usize {
@@ -75,6 +75,11 @@ mod tests {
     #[test]
     fn modulo_u64_selects_expected_shard() {
         assert_eq!(modulo_u64(67, 64), 3);
+    }
+
+    #[test]
+    fn modulo_u64_uses_the_full_key() {
+        assert_eq!(modulo_u64(1u64 << 32, 3), 1);
     }
 
     #[test]
