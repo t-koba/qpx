@@ -307,6 +307,43 @@ async fn guard_streams_observed_json_without_full_bytes_materialization() {
 }
 
 #[tokio::test]
+async fn guard_rejects_malformed_json_as_bad_request() {
+    let profile = CompiledHttpGuardProfile {
+        profile: HttpGuardProfileConfig {
+            name: "json".to_string(),
+            normalize: Default::default(),
+            protocol_safety: Default::default(),
+            limits: Default::default(),
+            json: qpx_core::config::HttpGuardJsonConfig {
+                max_depth: Some(2),
+                max_fields: None,
+            },
+            multipart: Default::default(),
+        },
+    };
+    let req = http::Request::builder()
+        .uri("http://example.com/")
+        .header(http::header::CONTENT_TYPE, "application/json")
+        .body(Body::from(r#"{"x":1,}"#))
+        .expect("request");
+    let req = crate::http::body::size::buffer_request_body_with_reason(
+        Request::from_http(req),
+        1024,
+        std::time::Duration::from_secs(1),
+        "test",
+    )
+    .await
+    .expect("buffer");
+
+    let reject = profile
+        .evaluate_request_async(&req)
+        .await
+        .expect("syntax error must not be an internal error")
+        .expect("malformed JSON must be rejected");
+    assert_eq!(reject.status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn guard_streams_observed_multipart_without_full_bytes_materialization() {
     let mut fixture =
         b"--x\r\nCoNtEnT-DiSpOsItIoN: form-data; NAME=\"upload\"; FILENAME=\"a.bin\"\r\n\r\n"

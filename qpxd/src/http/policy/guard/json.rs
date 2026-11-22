@@ -5,9 +5,7 @@ use qpx_core::config::HttpGuardProfileConfig;
 use serde::de::{DeserializeSeed, IgnoredAny, MapAccess, SeqAccess, Visitor};
 use std::fmt;
 
-#[cfg(test)]
-use super::bad_request;
-use super::{HttpGuardReject, payload_too_large};
+use super::{HttpGuardReject, bad_request, payload_too_large};
 
 fn is_json_content_type(content_type: &str) -> bool {
     content_type.starts_with("application/json") || content_type.contains("+json")
@@ -61,8 +59,18 @@ pub(super) async fn validate_json_limits_reader(
     }
     body.with_blocking_reader(move |reader| {
         let mut de = serde_json::Deserializer::from_reader(reader);
-        let stats = JsonStatsSeed.deserialize(&mut de)?;
-        de.end()?;
+        let invalid_body = || bad_request("invalid JSON body for http_guard profile");
+        let stats = match JsonStatsSeed.deserialize(&mut de) {
+            Ok(stats) => stats,
+            Err(err) if err.is_io() => return Err(err.into()),
+            Err(_) => return Ok(Some(invalid_body())),
+        };
+        if let Err(err) = de.end() {
+            if err.is_io() {
+                return Err(err.into());
+            }
+            return Ok(Some(invalid_body()));
+        }
         if let Some(limit) = profile.json.max_depth
             && stats.depth > limit
         {
