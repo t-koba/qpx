@@ -45,12 +45,7 @@ impl LinkValue {
         if self.target.is_empty() || !self.target.bytes().all(is_uri_char) {
             return Err(ApiMetadataError::InvalidLinkTarget);
         }
-        if self.relation.is_empty()
-            || self
-                .relation
-                .split_ascii_whitespace()
-                .any(|relation| !valid_relation_type(relation))
-        {
+        if !valid_relation_list(&self.relation) {
             return Err(ApiMetadataError::InvalidLinkRelation);
         }
         if let Some(media_type) = self.media_type.as_deref()
@@ -208,6 +203,30 @@ fn unix_seconds(value: SystemTime) -> Result<i64, ApiMetadataError> {
             .map(|seconds| -seconds)
             .map_err(|_| ApiMetadataError::DateRange),
     }
+}
+
+/// RFC 8288 `relation-types = relation-type *( 1*SP relation-type )`.
+/// Checking the whole list keeps whitespace separators out of the verbatim
+/// serialization and rejects an all-whitespace value.
+fn valid_relation_list(value: &str) -> bool {
+    if value.is_empty() || value.starts_with(' ') || value.ends_with(' ') {
+        return false;
+    }
+    let mut previous_space = false;
+    for byte in value.bytes() {
+        if byte == b' ' {
+            if previous_space {
+                return false;
+            }
+            previous_space = true;
+        } else {
+            if byte.is_ascii_whitespace() {
+                return false;
+            }
+            previous_space = false;
+        }
+    }
+    value.split(' ').all(valid_relation_type)
 }
 
 fn valid_relation_type(value: &str) -> bool {
@@ -598,6 +617,41 @@ mod tests {
         assert_eq!(
             link.serialize().expect("serialize"),
             "</v2>; rel=\"https://rels.example/a%25\""
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_relation_list_separators() {
+        for relation in [
+            "next\tprev",
+            "next\nprev",
+            "   ",
+            " next",
+            "next ",
+            "next  prev",
+        ] {
+            assert_eq!(
+                LinkValue::new("/v2", relation).err(),
+                Some(ApiMetadataError::InvalidLinkRelation),
+                "relation: {relation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn prepares_valid_multi_relation_link_bytes() {
+        let metadata = ApiMetadata {
+            links: vec![
+                LinkValue::new("/v2", "next https://rels.example/a%25")
+                    .expect("valid relation list"),
+            ],
+            ..Default::default()
+        };
+        let prepared = metadata.prepare().expect("prepare");
+        assert_eq!(prepared.links.len(), 1);
+        assert_eq!(
+            std::str::from_utf8(prepared.links[0].as_bytes()).expect("link bytes"),
+            "</v2>; rel=\"next https://rels.example/a%25\""
         );
     }
 
