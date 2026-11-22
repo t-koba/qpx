@@ -443,8 +443,40 @@ pub(crate) fn serialize_response_preview_async<R: ResponseCarrier>(
 }
 
 fn push_utf8_preview_chunks(out: &mut String, chunks: &[Bytes]) {
+    const INVALID: &str = "<non-utf8 body>";
+    // A body chunk boundary can split a multi-byte UTF-8 sequence. Carry the
+    // incomplete tail until the next chunk instead of flagging both halves.
+    let mut pending = Vec::new();
     for chunk in chunks {
-        out.push_str(std::str::from_utf8(chunk.as_ref()).unwrap_or("<non-utf8 body>"));
+        pending.extend_from_slice(chunk.as_ref());
+        loop {
+            match std::str::from_utf8(&pending) {
+                Ok(text) => {
+                    out.push_str(text);
+                    pending.clear();
+                    break;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    out.push_str(
+                        std::str::from_utf8(&pending[..valid]).expect("valid UTF-8 prefix"),
+                    );
+                    match error.error_len() {
+                        None => {
+                            pending.drain(..valid);
+                            break;
+                        }
+                        Some(len) => {
+                            out.push_str(INVALID);
+                            pending.drain(..valid + len);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        out.push_str(INVALID);
     }
 }
 

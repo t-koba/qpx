@@ -733,3 +733,31 @@ fn opaque_and_relative_uri_headers_are_preserved_but_authorities_are_redacted() 
         assert!(safe.contains(&format!("Origin: {scheme}://host\r\n")));
     }
 }
+
+#[tokio::test]
+async fn request_preview_preserves_utf8_split_across_body_chunks() {
+    let request = OwnerRequest::from_http(
+        http::Request::builder()
+            .method("POST")
+            .uri("/preview")
+            .version(http::Version::HTTP_11)
+            .body(Body::replay_chunks(
+                vec![Bytes::from_static(b"caf\xc3"), Bytes::from_static(b"\xa9!")],
+                None,
+            ))
+            .expect("valid request"),
+    );
+    let request = crate::http::body::size::buffer_request_body_with_reason(
+        request,
+        16,
+        std::time::Duration::from_secs(1),
+        "request.body",
+    )
+    .await
+    .expect("buffer request");
+
+    assert_eq!(
+        serialize_request_preview_async(&request).await,
+        "POST /preview HTTP/1.1\r\n\r\ncafé!".as_bytes(),
+    );
+}
