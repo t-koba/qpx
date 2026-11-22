@@ -54,12 +54,19 @@ pub(super) struct SequencedBlock {
 /// A history read plus the boundary FOLLOW needs for exactly-once handoff.
 pub(super) struct HistorySnapshot {
     pub(super) blocks: Vec<Bytes>,
+    pub(super) first_seq: Option<u64>,
     pub(super) last_seq: Option<u64>,
 }
 
 impl HistorySnapshot {
+    /// A FOLLOW client only needs to skip sequence numbers that were actually
+    /// in the snapshot. History eviction can remove earlier blocks that are
+    /// still queued in the live subscription; those must still be delivered.
     pub(super) fn is_already_sent(&self, seq: u64) -> bool {
-        self.last_seq.is_some_and(|last| seq <= last)
+        match (self.first_seq, self.last_seq) {
+            (Some(first), Some(last)) => (first..=last).contains(&seq),
+            _ => false,
+        }
     }
 }
 
@@ -202,15 +209,23 @@ impl ExporterHub {
         let min_ts =
             now_unix_nanos.saturating_sub(duration_as_saturating_nanos(self.history_limit_age));
         let state = self.history.read().await;
+        let mut first_seq = None;
         let mut last_seq = None;
         let blocks = state
             .history
             .iter()
             .filter(|item| item.ts_unix_nanos >= min_ts)
-            .inspect(|item| last_seq = Some(item.seq))
+            .inspect(|item| {
+                first_seq.get_or_insert(item.seq);
+                last_seq = Some(item.seq);
+            })
             .map(|item| item.bytes.clone())
             .collect();
-        HistorySnapshot { blocks, last_seq }
+        HistorySnapshot {
+            blocks,
+            first_seq,
+            last_seq,
+        }
     }
 
     pub(super) fn gc_sequences_locked(&self, state: &mut SequencesState, now_unix_nanos: u64) {
@@ -627,17 +642,55 @@ mod follow_handoff_tests {
         );
     }
 
+    #[tokio::test]
+    async fn follow_handoff_keeps_live_blocks_evicted_from_snapshot() {
+        let hub = ExporterHub::new(
+            None,
+            1024,
+            1,
+            Duration::from_secs(3600),
+            Arc::new(Vec::new()),
+            1024,
+        )
+        .expect("hub builds");
+        let now = follow_test_now();
+        let mut rx = hub.live_tx.subscribe();
+        hub.publish_encoded_block(now, Bytes::from_static(b"A"))
+            .await;
+        hub.publish_encoded_block(now, Bytes::from_static(b"B"))
+            .await;
+        let snapshot = hub.history_snapshot().await;
+        assert_eq!(snapshot.blocks, vec![Bytes::from_static(b"B")]);
+
+        let mut delivered = Vec::new();
+        for _ in 0..2 {
+            let block = rx.recv().await.expect("live block");
+            if snapshot.is_already_sent(block.seq) {
+                continue;
+            }
+            delivered.push(block.bytes);
+        }
+        assert_eq!(
+            delivered,
+            vec![Bytes::from_static(b"A")],
+            "live block evicted from snapshot must still be delivered"
+        );
+    }
+
     #[test]
     fn snapshot_boundary_skips_nothing_when_empty() {
         let empty = HistorySnapshot {
             blocks: Vec::new(),
+            first_seq: None,
             last_seq: None,
         };
         assert!(!empty.is_already_sent(0));
         let boundary = HistorySnapshot {
             blocks: Vec::new(),
+            first_seq: Some(7),
             last_seq: Some(7),
         };
+        assert!(!boundary.is_already_sent(6));
         assert!(boundary.is_already_sent(7));
         assert!(!boundary.is_already_sent(8));
     }
