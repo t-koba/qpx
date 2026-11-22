@@ -190,3 +190,27 @@ fn hot_reload_restarts_listeners_for_h3_transport_changes() {
         assert!(requires_server_restart(&old, &new));
     }
 }
+
+#[test]
+fn hot_reload_requires_server_restart_for_first_reverse_route() {
+    let mut old = base_config();
+    push_reverse(&mut old, reverse_edge(reverse_route("default")));
+    reverse_mut(&mut old, 0).routes.clear();
+    reverse_mut(&mut old, 0).http3 = Some(qpx_core::config::ReverseHttp3Config {
+        enabled: true,
+        listen: None,
+        passthrough_upstreams: vec!["h3-passthrough".to_string()],
+        passthrough_max_sessions: 1024,
+        passthrough_idle_timeout_secs: 30,
+        passthrough_max_new_sessions_per_sec: 100,
+        passthrough_min_client_bytes: 1024,
+        passthrough_max_amplification: 3,
+    });
+
+    let mut new = old.clone();
+    reverse_mut(&mut new, 0).routes = vec![reverse_route("default")];
+
+    ensure_hot_reload_compatible(&old, &new)
+        .expect("adding the first reverse route should be reload-safe with server restart");
+    assert!(requires_server_restart(&old, &new));
+}
