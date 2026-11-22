@@ -102,8 +102,11 @@ where
     /// Promptly release the key and wake waiters. Prefer this over relying on drop
     /// so waiters are released without an extra task hop.
     pub(crate) async fn finish(mut self) {
-        self.active = false;
+        // Keep the Drop cleanup armed until the key is actually released: if
+        // this future is canceled while waiting for the lock, Drop must still
+        // finish the key and wake followers.
         finish_key(&self.inflight, &self.key).await;
+        self.active = false;
     }
 }
 
@@ -230,5 +233,30 @@ mod tests {
         let b = flight.join(&2).await;
         assert!(matches!(a, FlightRole::Leader(_)));
         assert!(matches!(b, FlightRole::Leader(_)));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn canceling_pending_finish_releases_key_and_wakes_follower() {
+        let flight = SingleFlight::<u32>::new();
+        let FlightRole::Leader(leader) = flight.join(&1).await else {
+            panic!("expected leader");
+        };
+        let FlightRole::Follower(follower) = flight.join(&1).await else {
+            panic!("expected follower");
+        };
+
+        let held = flight.inflight.lock().await;
+        let mut finish = Box::pin(leader.finish());
+        assert!(futures_util::poll!(finish.as_mut()).is_pending());
+        drop(finish);
+        drop(held);
+
+        tokio::time::timeout(Duration::from_secs(1), follower)
+            .await
+            .expect("canceled finish must wake its follower");
+        let FlightRole::Leader(next) = flight.join(&1).await else {
+            panic!("canceled finish must release its key");
+        };
+        next.finish().await;
     }
 }
