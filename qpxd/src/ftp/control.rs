@@ -382,16 +382,20 @@ fn parse_epsv_port(reply: &FtpReply) -> Result<u16> {
         .map(|offset| start + 1 + offset)
         .ok_or_else(|| anyhow!("EPSV reply missing tuple terminator"))?;
     let tuple = &text[start + 1..end];
-    let mut parts = tuple.split('|');
-    let _empty = parts.next();
-    let _af = parts.next();
-    let _empty = parts.next();
-    let port = parts
+    let delimiter = tuple
+        .chars()
         .next()
-        .ok_or_else(|| anyhow!("EPSV reply missing port"))?
+        .ok_or_else(|| anyhow!("EPSV reply missing delimiter"))?;
+    if !delimiter.is_ascii_graphic() {
+        return Err(anyhow!("EPSV reply delimiter is not printable ASCII"));
+    }
+    let fields: Vec<_> = tuple[delimiter.len_utf8()..].split(delimiter).collect();
+    if fields.len() != 4 || !fields[3].is_empty() {
+        return Err(anyhow!("EPSV reply has an invalid delimiter layout"));
+    }
+    fields[2]
         .parse::<u16>()
-        .map_err(|err| anyhow!("invalid EPSV port: {err}"))?;
-    Ok(port)
+        .map_err(|err| anyhow!("invalid EPSV port: {err}"))
 }
 
 fn parse_pasv_addr(reply: &FtpReply) -> Result<SocketAddr> {
@@ -476,4 +480,27 @@ pub(super) fn active_data_peer_allowed(
     actual_peer: std::net::IpAddr,
 ) -> bool {
     expected_peer == actual_peer
+}
+
+#[cfg(test)]
+mod epsv_tests {
+    use super::*;
+
+    fn reply(tuple: &str) -> FtpReply {
+        FtpReply {
+            code: 229,
+            lines: vec![format!("Entering Extended Passive Mode ({tuple})")],
+        }
+    }
+
+    #[test]
+    fn epsv_accepts_reply_delimiter() {
+        assert_eq!(parse_epsv_port(&reply("|||6446|")).unwrap(), 6446);
+        assert_eq!(parse_epsv_port(&reply("!!!6446!")).unwrap(), 6446);
+    }
+
+    #[test]
+    fn epsv_rejects_mixed_delimiters() {
+        assert!(parse_epsv_port(&reply("!||6446|")).is_err());
+    }
 }
