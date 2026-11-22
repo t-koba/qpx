@@ -198,11 +198,12 @@ fn is_csp_host_source(value: &str) -> bool {
     {
         return false;
     }
+    // A trailing `/` is a valid path-absolute root path, so an empty
+    // remainder after the authority is allowed; forbidden bytes are not.
     path.is_none_or(|path| {
-        !path.is_empty()
-            && !path.bytes().any(|byte| {
-                byte.is_ascii_whitespace() || matches!(byte, b';' | b',' | b'"' | b'\'')
-            })
+        !path
+            .bytes()
+            .any(|byte| byte.is_ascii_whitespace() || matches!(byte, b';' | b',' | b'"' | b'\''))
     })
 }
 
@@ -2602,6 +2603,13 @@ mod tests {
         );
         assert!(ContentSecurityPolicy::parse("default-src 'self'; default-src *").is_err());
         assert!(ContentSecurityPolicy::parse("script-src 'unknown-keyword'").is_err());
+    }
+
+    #[test]
+    fn csp_accepts_host_source_with_root_path() {
+        let value = "img-src https://static.example.test/";
+        let policy = ContentSecurityPolicy::parse(value).expect("valid root-path CSP");
+        assert_eq!(policy.as_str(), value);
     }
 
     #[test]
