@@ -1282,12 +1282,17 @@ pub(crate) fn replace_header_regex(
     pattern: &regex::Regex,
     replacement: &str,
 ) -> bool {
-    let Some(value) = headers.get(name).and_then(|v| v.to_str().ok()) else {
+    let Some(original) = headers.get(name) else {
         return false;
     };
+    let Some(value) = original.to_str().ok() else {
+        return false;
+    };
+    let sensitive = original.is_sensitive();
     let replaced = pattern.replace_all(value, replacement);
     match HeaderValue::from_str(replaced.as_ref()) {
-        Ok(value) => {
+        Ok(mut value) => {
+            value.set_sensitive(sensitive);
             headers.insert(name.clone(), value);
             false
         }
@@ -1583,3 +1588,25 @@ macro_rules! message_accessors {
 }
 message_accessors!(Request);
 message_accessors!(Response);
+
+#[cfg(test)]
+mod tests {
+    use super::replace_header_regex;
+    use http::HeaderMap;
+    use http::header::{HeaderName, HeaderValue};
+
+    #[test]
+    fn regex_replacement_preserves_sensitivity() {
+        let name = HeaderName::from_static("x-trace");
+        let mut headers = HeaderMap::new();
+        let mut original = HeaderValue::from_static("secret=old");
+        original.set_sensitive(true);
+        headers.append(name.clone(), original);
+
+        let pattern = regex::Regex::new("old").unwrap();
+        assert!(!replace_header_regex(&mut headers, &name, &pattern, "new"));
+        let value = headers.get(&name).unwrap();
+        assert_eq!(value.as_bytes(), b"secret=new");
+        assert!(value.is_sensitive());
+    }
+}
