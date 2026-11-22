@@ -255,10 +255,12 @@ impl UpstreamEndpoint {
             PassiveFailureKind::ConnectError => policy.consecutive_connect_errors,
             PassiveFailureKind::Reset => policy.consecutive_resets,
         };
+        // A failure of another kind interrupts consecutive streaks even when
+        // that kind has no configured threshold of its own.
+        self.passive.reset_except(kind);
         if threshold == 0 {
             return;
         }
-        self.passive.reset_except(kind);
         let count = self.passive.increment(kind);
         let reason = EjectionReason::from_passive_failure(kind);
         self.note_adaptive_failure(policy.ejection_base, policy.ejection_max, reason);
@@ -637,6 +639,30 @@ mod tests {
         assert!(endpoint.should_retain_draining(first.saturating_sub(1)));
         assert!(!endpoint.should_retain_draining(first));
         assert!(!endpoint.should_retain_draining(first.saturating_add(1)));
+    }
+
+    #[test]
+    fn unconfigured_failure_kind_breaks_other_consecutive_streaks() {
+        let endpoint = UpstreamEndpoint::new("http://example".to_string());
+        let mut policy = bounded_policy();
+        policy.consecutive_5xx = 2;
+        policy.consecutive_resets = 0;
+
+        endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+        endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Reset);
+        endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+        assert_eq!(
+            endpoint.unhealthy_until_ms.load(Ordering::Relaxed),
+            0,
+            "an unconfigured reset interrupts the 5xx streak"
+        );
+
+        endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::Http5xx);
+        assert_ne!(
+            endpoint.unhealthy_until_ms.load(Ordering::Relaxed),
+            0,
+            "two adjacent 5xx failures still eject"
+        );
     }
 }
 
