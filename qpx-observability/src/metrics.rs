@@ -94,6 +94,11 @@ fn start_metrics_inner(
     let max_concurrent = config.max_concurrent_connections.max(1);
     let semaphore = std::sync::Arc::new(Semaphore::new(max_concurrent));
 
+    // Check before installing process-global state: a startup that fails for
+    // a missing runtime must remain retryable after the caller enters Tokio.
+    let runtime = tokio::runtime::Handle::try_current()
+        .context("metrics endpoint requires running Tokio runtime")?;
+
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     metrics::set_global_recorder(recorder)
@@ -101,8 +106,6 @@ fn start_metrics_inner(
     crate::set_metrics_enabled(true);
     let render_cache = Arc::new(AsyncMutex::new(MetricsRenderCache::default()));
 
-    let runtime = tokio::runtime::Handle::try_current()
-        .context("metrics endpoint requires running Tokio runtime")?;
     Ok(runtime.spawn(async move {
         let listener = match inherited_listener {
             Some(listener) => {
