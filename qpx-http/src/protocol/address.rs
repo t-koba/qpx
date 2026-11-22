@@ -70,7 +70,7 @@ fn bracketed_host_is_ip_literal(host: &str) -> bool {
 }
 
 fn validate_strict_authority(input: &str) -> Option<&str> {
-    let input = input.trim();
+    let input = input.trim_matches(|char| char == ' ' || char == '\t');
     if input.is_empty()
         || input.contains('@')
         || input.contains("://")
@@ -130,6 +130,15 @@ mod tests {
         assert!(parse_authority_host_port("user@example.com:443", 443).is_none());
         assert!(parse_authority_host_port("https://example.com:443", 443).is_none());
         assert!(parse_authority_host_port("example.com:443/path", 443).is_none());
+    }
+
+    #[test]
+    fn authority_parser_rejects_non_ascii_whitespace_padding() {
+        assert!(parse_authority_host_port("a\u{00a0}", 80).is_none());
+        assert_eq!(
+            parse_authority_host_port(" \texample.com\t ", 443),
+            Some(("example.com".to_string(), 443))
+        );
     }
 
     #[test]
