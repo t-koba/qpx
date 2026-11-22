@@ -15,6 +15,19 @@ pub(crate) fn render_match_plan(
     for compiled_edge in plan.edges.iter() {
         match compiled_edge {
             runtime::CompiledEdge::Reverse(reverse) if reverse.name.as_ref() == request.edge => {
+                for route in reverse.tls_passthrough_routes.iter() {
+                    if route.matches(&request.ctx) {
+                        output.push_str(&format!("edge: {}\n", reverse.name));
+                        output.push_str("kind: reverse\n");
+                        output.push_str(&format!("route: {}\n", route.name));
+                        append_match_trace(
+                            &mut output,
+                            &route.matcher.matches_with_trace(&request.ctx),
+                        );
+                        super::append_reverse_target(&mut output, "target", &route.target);
+                        return Ok(output);
+                    }
+                }
                 for route in reverse.routes.iter() {
                     if route.matches(&request.ctx) {
                         output.push_str(&format!("edge: {}\n", reverse.name));
@@ -26,19 +39,6 @@ pub(crate) fn render_match_plan(
                         );
                         super::append_reverse_target(&mut output, "target", &route.target);
                         super::append_execution_plan(&mut output, "execution_plan", &route.plan);
-                        return Ok(output);
-                    }
-                }
-                for route in reverse.tls_passthrough_routes.iter() {
-                    if route.matches(&request.ctx) {
-                        output.push_str(&format!("edge: {}\n", reverse.name));
-                        output.push_str("kind: reverse\n");
-                        output.push_str(&format!("route: {}\n", route.name));
-                        append_match_trace(
-                            &mut output,
-                            &route.matcher.matches_with_trace(&request.ctx),
-                        );
-                        super::append_reverse_target(&mut output, "target", &route.target);
                         return Ok(output);
                     }
                 }

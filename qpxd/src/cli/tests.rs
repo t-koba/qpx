@@ -335,6 +335,56 @@ fn match_renderer_uses_compiled_matchers() {
 }
 
 #[test]
+#[cfg(feature = "tls-rustls")]
+fn match_renderer_prefers_tls_passthrough_over_http_catch_all() {
+    let state = runtime_state_from_yaml(
+        "passthrough-priority",
+        r#"edges:
+- kind: reverse
+  name: tls-edge
+  listen: 127.0.0.1:0
+  tls:
+    certificates:
+    - sni: fallback.example.com
+      cert: /tmp/qpx-test.crt
+      key: /tmp/qpx-test.key
+  routes:
+  - name: fallback
+    match: {}
+    target:
+      type: upstream
+      upstreams: [http://127.0.0.1:8080]
+  tls_passthrough_routes:
+  - match:
+      dst_port: [443]
+      sni: [db.example.com]
+    upstreams: [127.0.0.1:8443]
+"#,
+    );
+
+    let output = render_test_match_plan(
+        state.plan.as_ref(),
+        "tls-edge",
+        qpx_core::rules::RuleMatchContext {
+            src_ip: Some("203.0.113.7".parse().expect("ip")),
+            dst_port: Some(443),
+            sni: Some("db.example.com"),
+            ..Default::default()
+        },
+    )
+    .expect("match render");
+
+    assert!(
+        output.contains("route: tls_passthrough[0]\n"),
+        "expected passthrough route, got:\n{output}"
+    );
+    assert!(
+        !output.contains("route: fallback\n"),
+        "HTTP catch-all must not shadow passthrough:\n{output}"
+    );
+}
+
+#[test]
 fn match_renderer_reports_reverse_forward_and_transparent_reasons() {
     let state = runtime_state_from_yaml(
         "trace",
