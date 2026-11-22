@@ -206,27 +206,23 @@ fn unix_seconds(value: SystemTime) -> Result<i64, ApiMetadataError> {
 }
 
 /// RFC 8288 `relation-types = relation-type *( 1*SP relation-type )`.
-/// Checking the whole list keeps whitespace separators out of the verbatim
+/// `1*SP` is one or more SP, so consecutive spaces are valid separators.
+/// Checking the whole list keeps other whitespace out of the verbatim
 /// serialization and rejects an all-whitespace value.
 fn valid_relation_list(value: &str) -> bool {
     if value.is_empty() || value.starts_with(' ') || value.ends_with(' ') {
         return false;
     }
-    let mut previous_space = false;
-    for byte in value.bytes() {
-        if byte == b' ' {
-            if previous_space {
-                return false;
-            }
-            previous_space = true;
-        } else {
-            if byte.is_ascii_whitespace() {
-                return false;
-            }
-            previous_space = false;
-        }
+    if value
+        .bytes()
+        .any(|byte| byte != b' ' && byte.is_ascii_whitespace())
+    {
+        return false;
     }
-    value.split(' ').all(valid_relation_type)
+    value
+        .split(' ')
+        .filter(|member| !member.is_empty())
+        .all(valid_relation_type)
 }
 
 fn valid_relation_type(value: &str) -> bool {
@@ -622,14 +618,7 @@ mod tests {
 
     #[test]
     fn rejects_invalid_relation_list_separators() {
-        for relation in [
-            "next\tprev",
-            "next\nprev",
-            "   ",
-            " next",
-            "next ",
-            "next  prev",
-        ] {
+        for relation in ["next\tprev", "next\nprev", "   ", " next", "next "] {
             assert_eq!(
                 LinkValue::new("/v2", relation).err(),
                 Some(ApiMetadataError::InvalidLinkRelation),
@@ -652,6 +641,20 @@ mod tests {
         assert_eq!(
             std::str::from_utf8(prepared.links[0].as_bytes()).expect("link bytes"),
             "</v2>; rel=\"next https://rels.example/a%25\""
+        );
+    }
+
+    #[test]
+    fn prepares_multi_space_relation_list_verbatim() {
+        let metadata = ApiMetadata {
+            links: vec![LinkValue::new("/v2", "next  prev").expect("valid relation list")],
+            ..Default::default()
+        };
+        let prepared = metadata.prepare().expect("prepare");
+        assert_eq!(prepared.links.len(), 1);
+        assert_eq!(
+            std::str::from_utf8(prepared.links[0].as_bytes()).expect("link bytes"),
+            "</v2>; rel=\"next  prev\""
         );
     }
 
