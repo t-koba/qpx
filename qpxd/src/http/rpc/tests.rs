@@ -572,6 +572,12 @@ fn grpc_timeout_parser_and_formatter_round_trip_common_units() {
 
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[test]
+fn format_grpc_timeout_keeps_exact_sub_millisecond_budget() {
+    assert_eq!(format_grpc_timeout(Duration::from_micros(1500)), "1500u");
+}
+
+#[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
+#[test]
 fn grpc_deadline_prefers_client_timeout_when_shorter() {
     use qpx_core::http_message::{Headers, OrdinaryHeaderName};
     let started = Instant::now();

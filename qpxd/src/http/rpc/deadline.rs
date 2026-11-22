@@ -117,6 +117,14 @@ pub(crate) fn format_grpc_timeout(duration: Duration) -> String {
         return "1n".to_string();
     }
     let nanos = duration.as_nanos().max(1);
+    for (unit, quantum) in [("m", 1_000_000_u128), ("u", 1_000_u128), ("n", 1_u128)] {
+        if nanos.is_multiple_of(quantum) {
+            let value = nanos / quantum;
+            if (1..=MAX_DIGITS).contains(&value) {
+                return format!("{value}{unit}");
+            }
+        }
+    }
     for (unit, quantum) in [
         ("m", 1_000_000_u128),
         ("u", 1_000_u128),
