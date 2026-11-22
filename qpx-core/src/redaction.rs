@@ -73,9 +73,13 @@ pub fn redact_authority_userinfo(authority: &str) -> String {
 /// authority form from generic URI references, then applies configured keys.
 pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) -> String {
     if target.starts_with('/') {
-        // A leading `//` in an HTTP request target is origin-form path data
-        // for every method, not a URI network-path authority with userinfo.
-        return redact_query_fragment_keys(target, query_keys);
+        // A leading `//` is normally origin-form path data, not a URI
+        // network-path authority. Keep bare '@' path data intact, but do not
+        // let credential-shaped `user:pass@host` text reach logs.
+        if !has_credential_shaped_prefix(target) {
+            return redact_query_fragment_keys(target, query_keys);
+        }
+        return redact_uri_query_keys(target, query_keys);
     }
     if method != "CONNECT" {
         return redact_uri_query_keys(target, query_keys);
@@ -92,6 +96,16 @@ pub fn redact_request_target(method: &str, target: &str, query_keys: &[String]) 
         // turn its authority userinfo into ordinary URI data.
         redact_query_fragment_keys(&redact_authority_userinfo(target), query_keys)
     }
+}
+
+fn has_credential_shaped_prefix(target: &str) -> bool {
+    let Some(rest) = target.strip_prefix("//") else {
+        return false;
+    };
+    let segment = rest.split(['/', '?', '#']).next().unwrap_or(rest);
+    segment
+        .rfind('@')
+        .is_some_and(|at| segment[..at].contains(':'))
 }
 
 fn is_valid_uri_scheme(scheme: &str) -> bool {
@@ -284,6 +298,19 @@ mod userinfo_tests {
         assert_eq!(
             redact_request_target("GET", "//team@2026/report?token=sample", &keys),
             "//team@2026/report?token=<redacted>"
+        );
+    }
+
+    #[test]
+    fn credential_shaped_double_slash_target_redacts_userinfo() {
+        let keys = vec!["token".to_string()];
+        assert_eq!(
+            redact_request_target(
+                "GET",
+                "//synthetic-user:synthetic-pass@host:bad/file?token=sample",
+                &keys
+            ),
+            "//host:bad/file?token=<redacted>"
         );
     }
 
