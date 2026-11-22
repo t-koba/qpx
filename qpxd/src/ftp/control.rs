@@ -377,23 +377,44 @@ fn parse_epsv_port(reply: &FtpReply) -> Result<u16> {
     let start = text
         .find('(')
         .ok_or_else(|| anyhow!("EPSV reply missing tuple"))?;
-    let end = text[start + 1..]
-        .find(')')
-        .map(|offset| start + 1 + offset)
+    // The tuple's delimiter may itself be ')', so the outer terminator is the
+    // last ')' rather than the first one after the opening parenthesis.
+    let end = text
+        .rfind(')')
+        .filter(|end| *end > start)
         .ok_or_else(|| anyhow!("EPSV reply missing tuple terminator"))?;
     let tuple = &text[start + 1..end];
-    let delimiter = tuple
-        .chars()
-        .next()
+    let bytes = tuple.as_bytes();
+    let delimiter = *bytes
+        .first()
         .ok_or_else(|| anyhow!("EPSV reply missing delimiter"))?;
     if !delimiter.is_ascii_graphic() {
         return Err(anyhow!("EPSV reply delimiter is not printable ASCII"));
     }
-    let fields: Vec<_> = tuple[delimiter.len_utf8()..].split(delimiter).collect();
-    if fields.len() != 4 || !fields[3].is_empty() {
-        return Err(anyhow!("EPSV reply has an invalid delimiter layout"));
+    // RFC 2428 defines the tuple positionally: <d><af><d><addr><d><port><d>.
+    // Splitting would lose a port that contains the delimiter when the server
+    // picks a digit, so stop after the two field separators and take the final
+    // delimiter as the port terminator.
+    let mut separators = 0;
+    let mut port_start = None;
+    for (index, byte) in bytes.iter().enumerate().skip(1) {
+        if *byte == delimiter {
+            separators += 1;
+            if separators == 2 {
+                port_start = Some(index + 1);
+                break;
+            }
+        }
     }
-    fields[2]
+    let port_start =
+        port_start.ok_or_else(|| anyhow!("EPSV reply has an invalid delimiter layout"))?;
+    let port_end = bytes
+        .len()
+        .checked_sub(1)
+        .filter(|end| *end >= port_start && bytes[*end] == delimiter)
+        .ok_or_else(|| anyhow!("EPSV reply has an invalid delimiter layout"))?;
+    std::str::from_utf8(&bytes[port_start..port_end])
+        .map_err(|err| anyhow!("invalid EPSV port: {err}"))?
         .parse::<u16>()
         .map_err(|err| anyhow!("invalid EPSV port: {err}"))
 }
@@ -497,6 +518,13 @@ mod epsv_tests {
     fn epsv_accepts_reply_delimiter() {
         assert_eq!(parse_epsv_port(&reply("|||6446|")).unwrap(), 6446);
         assert_eq!(parse_epsv_port(&reply("!!!6446!")).unwrap(), 6446);
+    }
+
+    #[test]
+    fn epsv_accepts_delimiters_that_appear_in_port_or_are_parentheses() {
+        assert_eq!(parse_epsv_port(&reply("66664466")).unwrap(), 6446);
+        assert_eq!(parse_epsv_port(&reply(")))6446)")).unwrap(), 6446);
+        assert_eq!(parse_epsv_port(&reply("(((6446(")).unwrap(), 6446);
     }
 
     #[test]
