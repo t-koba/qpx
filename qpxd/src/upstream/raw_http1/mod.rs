@@ -7,7 +7,7 @@ use qpx_core::http_content_length::declared_content_length as parse_declared_con
 use qpx_core::tls::UpstreamCertificateInfo;
 use qpx_http::body::Body;
 use std::fmt;
-use std::future::{Future, poll_fn};
+use std::future::poll_fn;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::Poll;
@@ -266,19 +266,15 @@ where
 {
     let mut byte = [0_u8; 1];
     let mut read_buf = ReadBuf::new(&mut byte);
-    poll_fn(|cx| {
-        // A poll cancelled for cooperative-budget exhaustion is not a quiet
-        // stream: report only a real Pending from the socket as reusable.
-        let probe = tokio::task::coop::unconstrained(poll_fn(|cx| {
-            Pin::new(&mut *stream).poll_read(cx, &mut read_buf)
-        }));
-        let mut probe = std::pin::pin!(probe);
-        match Future::poll(probe.as_mut(), cx) {
+    // A poll cancelled for cooperative-budget exhaustion is not a quiet
+    // stream: report only a real Pending from the socket as reusable.
+    tokio::task::unconstrained(poll_fn(|cx| {
+        match Pin::new(&mut *stream).poll_read(cx, &mut read_buf) {
             Poll::Ready(Ok(())) => Poll::Ready(true),
             Poll::Ready(Err(_)) => Poll::Ready(true),
             Poll::Pending => Poll::Ready(false),
         }
-    })
+    }))
     .await
 }
 
