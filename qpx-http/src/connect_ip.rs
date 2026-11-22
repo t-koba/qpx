@@ -112,10 +112,46 @@ impl ConnectIpPacketPolicy {
     }
 
     pub fn allows_destination_range(&self, start: IpAddr, end: IpAddr) -> bool {
-        self.destination_cidrs
-            .iter()
-            .any(|cidr| cidr.contains(&start) && cidr.contains(&end))
+        let (start_v6, start) = address_ordinal(start);
+        let (end_v6, end) = address_ordinal(end);
+        if start_v6 != end_v6 || start > end {
+            return false;
+        }
+        let mut cursor = start;
+        loop {
+            let covered_until = self
+                .destination_cidrs
+                .iter()
+                .map(cidr_ordinal_bounds)
+                .filter(|(v6, first, last)| *v6 == start_v6 && *first <= cursor && *last >= cursor)
+                .map(|(_, _, last)| last)
+                .max();
+            match covered_until {
+                Some(last) if last >= end => return true,
+                Some(last) => cursor = last + 1,
+                None => return false,
+            }
+        }
     }
+}
+
+fn address_ordinal(address: IpAddr) -> (bool, u128) {
+    match address {
+        IpAddr::V4(address) => (false, u32::from(address) as u128),
+        IpAddr::V6(address) => (true, u128::from(address)),
+    }
+}
+
+fn cidr_ordinal_bounds(cidr: &cidr::IpCidr) -> (bool, u128, u128) {
+    let (is_v6, first) = address_ordinal(cidr.first_address());
+    let bits = if is_v6 { 128 } else { 32 };
+    let host_bits = bits - cidr.network_length().min(bits);
+    let host_mask = if host_bits == 128 {
+        u128::MAX
+    } else {
+        (1u128 << host_bits) - 1
+    };
+    (is_v6, first, first | host_mask)
 }
 
 fn parse_ip_packet(packet: &[u8]) -> Result<ValidatedIpPacket, ConnectIpCodecError> {
@@ -433,5 +469,27 @@ mod tests {
             policy.validate(&packet),
             Err(ConnectIpCodecError::InvalidPacket)
         );
+    }
+
+    #[test]
+    fn destination_range_can_span_adjacent_allowed_cidrs() {
+        let policy = ConnectIpPacketPolicy::new(
+            vec!["192.0.2.0/24".parse().unwrap()],
+            vec![
+                "198.51.100.0/25".parse().unwrap(),
+                "198.51.100.128/25".parse().unwrap(),
+            ],
+            1280,
+        )
+        .unwrap();
+
+        assert!(policy.allows_destination_range(
+            "198.51.100.126".parse().unwrap(),
+            "198.51.100.129".parse().unwrap(),
+        ));
+        assert!(!policy.allows_destination_range(
+            "198.51.100.126".parse().unwrap(),
+            "203.0.113.1".parse().unwrap(),
+        ));
     }
 }
