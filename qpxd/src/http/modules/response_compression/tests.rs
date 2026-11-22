@@ -1119,3 +1119,16 @@ async fn owned_compression_preserves_metadata_trailers_and_body_errors() {
         }
     }
 }
+
+#[test]
+fn compression_wildcard_matches_media_type_case_insensitively() {
+    for (value, expected) in [
+        ("text/plain; charset=utf-8", true),
+        ("Text/Plain; charset=utf-8", true),
+        ("textual/plain", false),
+    ] {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static(value));
+        assert_eq!(content_type_allowed(&headers, &[]), expected, "{value}");
+    }
+}

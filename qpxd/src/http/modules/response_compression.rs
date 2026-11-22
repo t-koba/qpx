@@ -507,10 +507,10 @@ fn content_type_allowed(headers: &impl OrdinaryHeaderMut, configured: &[String])
 
 fn mime_pattern_matches(pattern: &str, content_type: &str) -> bool {
     if let Some(prefix) = pattern.strip_suffix("/*") {
+        // RFC 9110 media type and subtype tokens are case-insensitive.
         return content_type
-            .strip_prefix(prefix)
-            .map(|suffix| suffix.starts_with('/'))
-            .unwrap_or(false);
+            .split_once('/')
+            .is_some_and(|(major, _)| major.eq_ignore_ascii_case(prefix));
     }
     pattern.eq_ignore_ascii_case(content_type)
 }
