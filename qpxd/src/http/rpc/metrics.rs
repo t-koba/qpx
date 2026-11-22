@@ -24,7 +24,21 @@ pub(crate) fn emit_inspected_body_metrics(
     )
     .increment(summary.message_count as u64);
     counter!(
+        "qpx_rpc_messages_total",
+        "direction" => direction,
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string()
+    )
+    .increment(summary.message_count as u64);
+    counter!(
         "qpx_grpc_message_bytes_total",
+        "direction" => direction,
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string()
+    )
+    .increment(summary.message_bytes);
+    counter!(
+        "qpx_rpc_message_bytes_total",
         "direction" => direction,
         "listener" => listener.to_string(),
         "protocol" => protocol.to_string()
@@ -35,6 +49,13 @@ pub(crate) fn emit_inspected_body_metrics(
 pub(crate) fn emit_inspected_status(listener: &str, protocol: &str, status: &str) {
     counter!(
         "qpx_grpc_status_total",
+        "listener" => listener.to_string(),
+        "protocol" => protocol.to_string(),
+        "status" => status.to_string()
+    )
+    .increment(1);
+    counter!(
+        "qpx_rpc_status_total",
         "listener" => listener.to_string(),
         "protocol" => protocol.to_string(),
         "status" => status.to_string()

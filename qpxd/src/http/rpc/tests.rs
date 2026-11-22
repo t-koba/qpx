@@ -1455,3 +1455,181 @@ fn rpc_protocol_from_content_type_requires_media_type_boundary() {
         None
     );
 }
+
+/// Policy-inspected RPC metrics must be visible under the documented
+/// `qpx_rpc_*` names as well as the legacy `qpx_grpc_*` names.
+mod inspected_metrics {
+    use crate::http::rpc::frame::FramedBodySummary;
+    use crate::http::rpc::metrics::{emit_inspected_body_metrics, emit_inspected_status};
+    use metrics::{
+        Counter, CounterFn, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::{Arc, Mutex};
+
+    /// A counter's identity: its name and its sorted labels.
+    #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct CounterKey {
+        name: String,
+        labels: Vec<(String, String)>,
+    }
+
+    /// A recorder that keeps every counter it is handed, so a test can see
+    /// exactly which metric names and labels were emitted.
+    #[derive(Clone, Default)]
+    struct RecordingRecorder {
+        counters: Arc<Mutex<BTreeMap<CounterKey, u64>>>,
+    }
+
+    impl RecordingRecorder {
+        fn counters_named(&self, name: &str) -> Vec<(CounterKey, u64)> {
+            let counters = self
+                .counters
+                .lock()
+                .expect("the recorder lock is not poisoned");
+            counters
+                .iter()
+                .filter(|(key, _)| key.name == name)
+                .map(|(key, value)| (key.clone(), *value))
+                .collect()
+        }
+    }
+
+    struct RecordingCounter {
+        key: CounterKey,
+        counters: Arc<Mutex<BTreeMap<CounterKey, u64>>>,
+    }
+
+    impl CounterFn for RecordingCounter {
+        fn increment(&self, value: u64) {
+            let mut counters = self
+                .counters
+                .lock()
+                .expect("the recorder lock is not poisoned");
+            *counters.entry(self.key.clone()).or_insert(0) += value;
+        }
+
+        fn absolute(&self, value: u64) {
+            let mut counters = self
+                .counters
+                .lock()
+                .expect("the recorder lock is not poisoned");
+            counters.insert(self.key.clone(), value);
+        }
+    }
+
+    impl Recorder for RecordingRecorder {
+        fn describe_counter(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {
+        }
+
+        fn describe_gauge(&self, _key: KeyName, _unit: Option<Unit>, _description: SharedString) {}
+
+        fn describe_histogram(
+            &self,
+            _key: KeyName,
+            _unit: Option<Unit>,
+            _description: SharedString,
+        ) {
+        }
+
+        fn register_counter(&self, key: &Key, _metadata: &Metadata<'_>) -> Counter {
+            let mut labels: Vec<_> = key
+                .labels()
+                .map(|label| (label.key().to_owned(), label.value().to_owned()))
+                .collect();
+            labels.sort();
+            Counter::from_arc(Arc::new(RecordingCounter {
+                key: CounterKey {
+                    name: key.name().to_owned(),
+                    labels,
+                },
+                counters: Arc::clone(&self.counters),
+            }))
+        }
+
+        fn register_gauge(&self, _key: &Key, _metadata: &Metadata<'_>) -> Gauge {
+            Gauge::noop()
+        }
+
+        fn register_histogram(&self, _key: &Key, _metadata: &Metadata<'_>) -> Histogram {
+            Histogram::noop()
+        }
+    }
+
+    fn expected(name: &str, labels: &[(&str, &str)], value: u64) -> Vec<(CounterKey, u64)> {
+        let mut sorted: Vec<_> = labels
+            .iter()
+            .map(|(key, value)| ((*key).to_owned(), (*value).to_owned()))
+            .collect();
+        sorted.sort();
+        vec![(
+            CounterKey {
+                name: name.to_owned(),
+                labels: sorted,
+            },
+            value,
+        )]
+    }
+
+    #[test]
+    fn inspected_body_metrics_emit_both_message_counter_names() {
+        let recorder = RecordingRecorder::default();
+        let summary = FramedBodySummary {
+            message_count: 3,
+            message_bytes: 42,
+            trailers: None,
+        };
+        metrics::with_local_recorder(&recorder, || {
+            emit_inspected_body_metrics("response", "inspection-listener", "grpc_web", &summary);
+        });
+
+        let labels = [
+            ("direction", "response"),
+            ("listener", "inspection-listener"),
+            ("protocol", "grpc_web"),
+        ];
+        let mismatches: Vec<_> = [
+            ("qpx_grpc_messages_total", 3),
+            ("qpx_rpc_messages_total", 3),
+            ("qpx_grpc_message_bytes_total", 42),
+            ("qpx_rpc_message_bytes_total", 42),
+        ]
+        .into_iter()
+        .filter_map(|(name, value)| {
+            let got = recorder.counters_named(name);
+            let wanted = expected(name, &labels, value);
+            (got != wanted).then(|| format!("{name}: got {got:?}, wanted {wanted:?}"))
+        })
+        .collect();
+        assert!(
+            mismatches.is_empty(),
+            "inspected bodies must emit every legacy and documented counter: {mismatches:?}"
+        );
+    }
+
+    #[test]
+    fn inspected_status_emits_both_status_counter_names() {
+        let recorder = RecordingRecorder::default();
+        metrics::with_local_recorder(&recorder, || {
+            emit_inspected_status("inspection-listener", "connect", "deadline_exceeded");
+        });
+
+        let labels = [
+            ("listener", "inspection-listener"),
+            ("protocol", "connect"),
+            ("status", "deadline_exceeded"),
+        ];
+        let mismatches: Vec<_> = ["qpx_grpc_status_total", "qpx_rpc_status_total"]
+            .into_iter()
+            .filter_map(|name| {
+                let got = recorder.counters_named(name);
+                let wanted = expected(name, &labels, 1);
+                (got != wanted).then(|| format!("{name}: got {got:?}, wanted {wanted:?}"))
+            })
+            .collect();
+        assert!(
+            mismatches.is_empty(),
+            "inspected status must emit every legacy and documented counter: {mismatches:?}"
+        );
+    }
+}
