@@ -162,12 +162,7 @@ where
     if matches!(mode, StreamMode::History | StreamMode::Follow) {
         let snapshot = hub.history_snapshot().await;
         let handoff_blocks = if matches!(mode, StreamMode::Follow) {
-            let mut queued = Vec::new();
-            if let Some(rx) = live_rx.as_mut() {
-                while let Ok(block) = rx.try_recv() {
-                    queued.push(block);
-                }
-            }
+            let queued = live_rx.as_mut().map(drain_live_handoff).unwrap_or_default();
             follow_handoff_blocks(&snapshot, queued)
         } else {
             snapshot.blocks()
@@ -290,6 +285,23 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         .zip(b_digest.iter())
         .fold(0u8, |acc, (x, y)| acc | (x ^ y))
         == 0
+}
+
+/// Drains the buffered live handoff without waiting for new publications.
+fn drain_live_handoff(rx: &mut broadcast::Receiver<SequencedBlock>) -> Vec<SequencedBlock> {
+    use broadcast::error::TryRecvError;
+
+    let mut queued = Vec::new();
+    loop {
+        match rx.try_recv() {
+            Ok(block) => queued.push(block),
+            // Lagged advances the cursor to the oldest still-buffered block;
+            // those survivors belong in the ordered initial handoff too.
+            Err(TryRecvError::Lagged(_)) => continue,
+            Err(TryRecvError::Empty | TryRecvError::Closed) => break,
+        }
+    }
+    queued
 }
 
 /// Builds the ordered first batch for FOLLOW: live blocks older than the
@@ -457,5 +469,37 @@ mod tests {
     fn constant_time_eq_rejects_different_lengths() {
         assert!(!constant_time_eq("short", "longer"));
         assert!(!constant_time_eq("a", ""));
+    }
+
+    #[test]
+    fn follow_handoff_keeps_surviving_live_blocks_after_broadcast_lag() {
+        let (tx, mut rx) = broadcast::channel::<SequencedBlock>(2);
+        // The receiver never reads until after the buffer has overflowed.
+        for seq in 0..5u64 {
+            tx.send(SequencedBlock {
+                seq,
+                bytes: bytes::Bytes::from(vec![seq as u8]),
+            })
+            .expect("live publication");
+        }
+
+        let snapshot = HistorySnapshot {
+            entries: vec![0, 2]
+                .into_iter()
+                .map(|seq| SequencedBlock {
+                    seq,
+                    bytes: bytes::Bytes::from(vec![seq as u8]),
+                })
+                .collect(),
+        };
+        let queued = drain_live_handoff(&mut rx);
+        let handoff = follow_handoff_blocks(&snapshot, queued);
+
+        let seqs: Vec<u64> = handoff.iter().map(|bytes| bytes[0] as u64).collect();
+        assert_eq!(
+            seqs,
+            vec![0, 2, 3, 4],
+            "surviving live entries must merge with gapped history in publication order"
+        );
     }
 }
