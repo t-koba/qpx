@@ -194,19 +194,26 @@ impl H3PooledConnection {
     }
 
     async fn wait_for_inflight_below(&self, threshold: usize, timeout_dur: Duration) -> bool {
-        if self.inflight_streams.load(Ordering::Relaxed) < threshold {
-            return true;
-        }
-        timeout(timeout_dur, async {
-            loop {
-                self.inflight_below_threshold.notified().await;
-                if self.inflight_streams.load(Ordering::Relaxed) < threshold {
-                    return;
-                }
-            }
-        })
+        timeout(
+            timeout_dur,
+            wait_until_notified(&self.inflight_below_threshold, || {
+                self.inflight_streams.load(Ordering::Relaxed) < threshold
+            }),
+        )
         .await
         .is_ok()
+    }
+}
+
+async fn wait_until_notified(notify: &Notify, mut ready: impl FnMut() -> bool) {
+    loop {
+        // Install the wait first: a capacity release between the check and the
+        // wait would otherwise be lost and strand this checkout until timeout.
+        let notified = notify.notified();
+        if ready() {
+            return;
+        }
+        notified.await;
     }
 }
 
@@ -1153,5 +1160,34 @@ mod tests {
         );
 
         forget_alt_svc_h3_endpoint(&origin).await;
+    }
+
+    #[tokio::test]
+    async fn wait_until_notified_observes_release_before_wait_is_installed() {
+        use futures_util::future::poll_fn;
+        use std::task::Poll;
+        use tokio::sync::Notify as TestNotify;
+
+        let notify = TestNotify::new();
+        let count = AtomicUsize::new(1);
+        let mut first = true;
+        let mut wait = Box::pin(wait_until_notified(&notify, || {
+            let sampled = count.load(Ordering::Relaxed);
+            if first {
+                first = false;
+                count.store(0, Ordering::Relaxed);
+                notify.notify_waiters();
+            }
+            sampled == 0
+        }));
+        let completed = poll_fn(|cx| match wait.as_mut().poll(cx) {
+            Poll::Ready(()) => Poll::Ready(true),
+            Poll::Pending => Poll::Ready(false),
+        })
+        .await;
+        assert!(
+            completed,
+            "capacity release before the wait must be observed"
+        );
     }
 }
