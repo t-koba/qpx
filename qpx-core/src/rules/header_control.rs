@@ -155,10 +155,21 @@ fn compile_header_set(
     raw: &std::collections::HashMap<String, String>,
     context: &str,
 ) -> Result<Vec<(http::header::HeaderName, http::HeaderValue)>> {
+    let mut entries: Vec<_> = raw.iter().collect();
+    entries.sort_by_key(|(a, _)| *a);
     let mut out = Vec::with_capacity(raw.len());
-    for (name, value) in raw {
-        let name = http::header::HeaderName::from_bytes(name.as_bytes())
-            .map_err(|_| anyhow::anyhow!("{context}: invalid header name: {name}"))?;
+    let mut seen: std::collections::HashMap<http::header::HeaderName, &str> =
+        std::collections::HashMap::new();
+    for (raw_name, value) in entries {
+        let name = http::header::HeaderName::from_bytes(raw_name.as_bytes())
+            .map_err(|_| anyhow::anyhow!("{context}: invalid header name: {raw_name}"))?;
+        if let Some(&first) = seen.get(&name) {
+            return Err(anyhow::anyhow!(
+                "{context}: conflicting header-name aliases \"{first}\" and \"{raw_name}\""
+            )
+            .into());
+        }
+        seen.insert(name.clone(), raw_name.as_str());
         let value = http::HeaderValue::from_str(value.as_str())
             .map_err(|_| anyhow::anyhow!("{context}: invalid header value for {name}"))?;
         out.push((name, value));
@@ -464,5 +475,40 @@ mod tests {
                 .is_empty()
         );
         assert_eq!(response_headers.declared_content_length(), Ok(Some(7)));
+    }
+
+    fn assert_case_alias_collision_rejected(insert: fn(&mut HeaderControl, &str, &str)) {
+        let mut raw = empty_control();
+        insert(&mut raw, "X-Mode", "first");
+        insert(&mut raw, "x-mode", "second");
+        assert!(CompiledHeaderControl::compile(&raw).is_err());
+    }
+
+    #[test]
+    fn compile_rejects_case_aliases_in_request_set() {
+        assert_case_alias_collision_rejected(|raw, name, value| {
+            raw.request_set.insert(name.to_string(), value.to_string());
+        });
+    }
+
+    #[test]
+    fn compile_rejects_case_aliases_in_request_add() {
+        assert_case_alias_collision_rejected(|raw, name, value| {
+            raw.request_add.insert(name.to_string(), value.to_string());
+        });
+    }
+
+    #[test]
+    fn compile_rejects_case_aliases_in_response_set() {
+        assert_case_alias_collision_rejected(|raw, name, value| {
+            raw.response_set.insert(name.to_string(), value.to_string());
+        });
+    }
+
+    #[test]
+    fn compile_rejects_case_aliases_in_response_add() {
+        assert_case_alias_collision_rejected(|raw, name, value| {
+            raw.response_add.insert(name.to_string(), value.to_string());
+        });
     }
 }
