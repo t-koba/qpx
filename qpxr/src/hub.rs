@@ -57,22 +57,47 @@ pub(super) struct HistorySnapshot {
 }
 
 impl HistorySnapshot {
+    pub(super) fn blocks(&self) -> Vec<Bytes> {
+        self.entries
+            .iter()
+            .map(|entry| entry.bytes.clone())
+            .collect()
+    }
+
+    /// Called after the handoff writes finish: keeps only the sequence
+    /// membership FOLLOW needs for overlap suppression and releases every
+    /// cloned payload so an evicted capture is no longer pinned by this
+    /// subscription.
+    pub(super) fn into_boundary(self) -> FollowBoundary {
+        let max_seq = self.entries.last().map(|entry| entry.seq);
+        FollowBoundary {
+            seqs: self.entries.into_iter().map(|entry| entry.seq).collect(),
+            max_seq,
+        }
+    }
+}
+
+/// Sequence-only state left after the FOLLOW handoff. It can suppress
+/// duplicates from the pre-read subscription without owning capture bytes.
+pub(super) struct FollowBoundary {
+    seqs: Vec<u64>,
+    max_seq: Option<u64>,
+}
+
+impl FollowBoundary {
     /// A FOLLOW client only needs to skip sequences actually present in the
     /// snapshot. Timestamp filtering can leave interior gaps, and history
     /// eviction can remove earlier blocks still queued in the live subscription.
     /// History is append-only by sequence and filtering preserves that order,
     /// so membership is a binary search rather than a scan of the whole history.
     pub(super) fn is_already_sent(&self, seq: u64) -> bool {
-        self.entries
-            .binary_search_by_key(&seq, |entry| entry.seq)
-            .is_ok()
+        self.seqs.binary_search(&seq).is_ok()
     }
 
-    pub(super) fn blocks(&self) -> Vec<Bytes> {
-        self.entries
-            .iter()
-            .map(|entry| entry.bytes.clone())
-            .collect()
+    /// Live publications are ordered by seq, so one past the handoff maximum
+    /// means no later publication can belong to the snapshot.
+    pub(super) fn is_past(&self, seq: u64) -> bool {
+        self.max_seq.is_none_or(|max| seq > max)
     }
 }
 
@@ -621,19 +646,20 @@ mod follow_handoff_tests {
             .await;
         let snapshot = hub.history_snapshot().await;
         assert_eq!(snapshot.entries.len(), 1);
+        let mut full = snapshot.blocks();
+        let boundary = snapshot.into_boundary();
         hub.publish_encoded_block(now, Bytes::from_static(b"B"))
             .await;
         // Drain exactly the two live publications with the FOLLOW skip.
         let mut delivered = Vec::new();
         for _ in 0..2 {
             let block = rx.recv().await.expect("live block");
-            if snapshot.is_already_sent(block.seq) {
+            if boundary.is_already_sent(block.seq) {
                 continue;
             }
             delivered.push(block.bytes);
         }
         assert_eq!(delivered, vec![Bytes::from_static(b"B")]);
-        let mut full = snapshot.blocks();
         full.extend(delivered);
         assert_eq!(
             full,
@@ -660,11 +686,12 @@ mod follow_handoff_tests {
             .await;
         let snapshot = hub.history_snapshot().await;
         assert_eq!(snapshot.blocks(), vec![Bytes::from_static(b"B")]);
+        let boundary = snapshot.into_boundary();
 
         let mut delivered = Vec::new();
         for _ in 0..2 {
             let block = rx.recv().await.expect("live block");
-            if snapshot.is_already_sent(block.seq) {
+            if boundary.is_already_sent(block.seq) {
                 continue;
             }
             delivered.push(block.bytes);
@@ -716,25 +743,89 @@ mod follow_handoff_tests {
                 .all(|pair| pair[0].seq < pair[1].seq),
             "history snapshot entries must stay ordered by sequence for sublinear FOLLOW lookup"
         );
-        assert!(snapshot.is_already_sent(0));
-        assert!(!snapshot.is_already_sent(1));
-        assert!(snapshot.is_already_sent(2));
+        let boundary = snapshot.into_boundary();
+        assert!(boundary.is_already_sent(0));
+        assert!(!boundary.is_already_sent(1));
+        assert!(boundary.is_already_sent(2));
+        assert!(!boundary.is_past(2));
+        assert!(boundary.is_past(3));
     }
 
     #[test]
     fn snapshot_boundary_skips_nothing_when_empty() {
         let empty = HistorySnapshot {
             entries: Vec::new(),
-        };
+        }
+        .into_boundary();
         assert!(!empty.is_already_sent(0));
+        assert!(empty.is_past(0));
         let boundary = HistorySnapshot {
             entries: vec![SequencedBlock {
                 seq: 7,
                 bytes: Bytes::from_static(b"G"),
             }],
-        };
+        }
+        .into_boundary();
         assert!(!boundary.is_already_sent(6));
         assert!(boundary.is_already_sent(7));
         assert!(!boundary.is_already_sent(8));
+        assert!(!boundary.is_past(7));
+        assert!(boundary.is_past(8));
+    }
+}
+
+#[cfg(test)]
+mod follow_boundary_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct TrackedPayload {
+        data: [u8; 32],
+        drops: Arc<AtomicUsize>,
+    }
+
+    impl AsRef<[u8]> for TrackedPayload {
+        fn as_ref(&self) -> &[u8] {
+            &self.data
+        }
+    }
+
+    impl Drop for TrackedPayload {
+        fn drop(&mut self) {
+            self.drops.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    #[test]
+    fn follow_boundary_conversion_releases_payloads_and_keeps_sequences() {
+        let drops = Arc::new(AtomicUsize::new(0));
+        let snapshot = HistorySnapshot {
+            entries: [0u64, 2, 5]
+                .into_iter()
+                .map(|seq| SequencedBlock {
+                    seq,
+                    bytes: Bytes::from_owner(TrackedPayload {
+                        data: [seq as u8; 32],
+                        drops: drops.clone(),
+                    }),
+                })
+                .collect(),
+        };
+        let handoff = snapshot.blocks();
+        assert_eq!(drops.load(Ordering::SeqCst), 0, "handoff owns its clones");
+
+        let boundary = snapshot.into_boundary();
+        drop(handoff);
+
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            3,
+            "post-handoff boundary must not retain payload allocations"
+        );
+        assert!(!boundary.is_already_sent(1));
+        assert!(boundary.is_already_sent(2));
+        assert!(!boundary.is_already_sent(6));
+        assert!(!boundary.is_past(5));
+        assert!(boundary.is_past(6));
     }
 }

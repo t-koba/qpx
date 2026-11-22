@@ -1,5 +1,5 @@
 use crate::TlsAcceptor;
-use crate::hub::{ExporterHub, HistorySnapshot, SequencedBlock};
+use crate::hub::{ExporterHub, FollowBoundary, HistorySnapshot, SequencedBlock};
 use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 use qpx_core::exporter::STREAM_PREFACE_LINE;
@@ -158,7 +158,7 @@ where
     } else {
         None
     };
-    let mut follow_boundary = None;
+    let mut follow_boundary: Option<FollowBoundary> = None;
     if matches!(mode, StreamMode::History | StreamMode::Follow) {
         let snapshot = hub.history_snapshot().await;
         let handoff_blocks = if matches!(mode, StreamMode::Follow) {
@@ -176,17 +176,20 @@ where
             write_stream_block(&mut writer, bytes).await?;
         }
         if matches!(mode, StreamMode::Follow) {
-            follow_boundary = Some(snapshot);
+            follow_boundary = Some(snapshot.into_boundary());
         }
     }
     if let Some(mut rx) = live_rx {
         loop {
             match rx.recv().await {
                 Ok(block) => {
-                    if let Some(boundary) = &follow_boundary
-                        && boundary.is_already_sent(block.seq)
-                    {
-                        continue;
+                    let clear_boundary = match &follow_boundary {
+                        Some(boundary) if boundary.is_already_sent(block.seq) => continue,
+                        Some(boundary) if boundary.is_past(block.seq) => true,
+                        _ => false,
+                    };
+                    if clear_boundary {
+                        follow_boundary = None;
                     }
                     write_stream_block(&mut writer, &block.bytes).await?;
                 }
