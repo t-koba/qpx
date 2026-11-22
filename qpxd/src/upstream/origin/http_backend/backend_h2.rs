@@ -67,9 +67,33 @@ pub(super) async fn send_h2_request_with_sender(
     *request.version_mut() = ::http::Version::HTTP_2;
 
     let (mut response, mut send_stream) = sender.send_request(request, false)?;
-    stream_request_body_to_h2(&mut body, &mut send_stream, declared_length).await?;
-    let (interim, response) = recv_h2_response_with_interim(&mut response).await?;
-    let response = h2_response_to_owner_with_inflight(response, inflight)?;
+    let mut upload = tokio::spawn(async move {
+        stream_request_body_to_h2(&mut body, &mut send_stream, declared_length).await
+    });
+    let mut recv = Box::pin(recv_h2_response_with_interim(&mut response));
+    let mut upload_error = None;
+    let (interim, response) = poll_fn(|cx| {
+        if !upload.is_finished()
+            && let Poll::Ready(joined) = Pin::new(&mut upload).poll(cx)
+        {
+            upload_error = Some(match joined {
+                Ok(Ok(())) => return recv.as_mut().poll(cx),
+                Ok(Err(err)) => err,
+                Err(err) => anyhow!("HTTP/2 request upload task failed: {err}"),
+            });
+        }
+        if let Some(err) = upload_error.take() {
+            return Poll::Ready(Err(err));
+        }
+        recv.as_mut().poll(cx)
+    })
+    .await?;
+    let mut response = h2_response_to_owner_with_inflight(response, inflight)?;
+    if !upload.is_finished() {
+        // A final response can precede upload EOF. Keep the upload alive with
+        // the response body so it is aborted with the exchange, not forgotten.
+        response.body_mut().retain_resource(upload);
+    }
     Ok(Http1ResponseWithInterim {
         interim,
         response,
@@ -280,6 +304,61 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("</app.css>; rel=preload")
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn final_h2_response_does_not_wait_for_request_upload() -> Result<()> {
+        use std::time::Duration;
+        use tokio::time::timeout;
+
+        let (client_io, server_io) = tokio::io::duplex(4096);
+        let (client, client_connection) = h2::client::handshake(client_io).await?;
+        tokio::spawn(async move {
+            let _ = client_connection.await;
+        });
+
+        let server_task = tokio::spawn(async move {
+            let mut server_connection = h2::server::handshake(server_io).await?;
+            let (_request, mut respond) =
+                server_connection.accept().await.expect("accept request")?;
+            let response = ::http::Response::builder()
+                .status(::http::StatusCode::FORBIDDEN)
+                .body(())
+                .expect("final response");
+            let mut send_stream = respond.send_response(response, false)?;
+            send_stream.send_data(Bytes::from_static(b"denied"), true)?;
+            poll_fn(|cx| match server_connection.poll_closed(cx) {
+                Poll::Ready(Ok(())) => Poll::Ready(()),
+                Poll::Ready(Err(err)) => panic!("server connection failed: {err}"),
+                Poll::Pending => Poll::Pending,
+            })
+            .await;
+            Ok::<_, anyhow::Error>(())
+        });
+
+        let (upload_sender, body) = Body::channel();
+        let request = hyper::Request::builder()
+            .method("POST")
+            .uri("https://origin.test/upload")
+            .body(body)?;
+        let exchange = timeout(
+            Duration::from_secs(2),
+            send_h2_request_with_sender(request, client, None, None),
+        )
+        .await
+        .expect("final response must arrive before upload EOF")?;
+        assert_eq!(exchange.response.status(), ::http::StatusCode::FORBIDDEN);
+        let bytes = timeout(
+            Duration::from_secs(2),
+            qpx_http::body::to_bytes(exchange.response.into_head_and_body().1),
+        )
+        .await
+        .expect("response body must be readable before upload EOF")?;
+        assert_eq!(bytes.as_ref(), b"denied");
+
+        drop(upload_sender);
+        server_task.await??;
         Ok(())
     }
 }
