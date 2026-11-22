@@ -1,5 +1,5 @@
 use crate::TlsAcceptor;
-use crate::hub::ExporterHub;
+use crate::hub::{ExporterHub, HistorySnapshot, SequencedBlock};
 use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 use qpx_core::exporter::STREAM_PREFACE_LINE;
@@ -153,7 +153,7 @@ where
     // Subscribe before reading history: publications during the transfer
     // stay in the live buffer, and the snapshot boundary below drops the
     // overlap, so nothing falls between snapshot and subscription.
-    let live_rx = if matches!(mode, StreamMode::Live | StreamMode::Follow) {
+    let mut live_rx = if matches!(mode, StreamMode::Live | StreamMode::Follow) {
         Some(hub.live_tx.subscribe())
     } else {
         None
@@ -161,8 +161,19 @@ where
     let mut follow_boundary = None;
     if matches!(mode, StreamMode::History | StreamMode::Follow) {
         let snapshot = hub.history_snapshot().await;
-        for block in &snapshot.blocks {
-            write_stream_block(&mut writer, block).await?;
+        let handoff_blocks = if matches!(mode, StreamMode::Follow) {
+            let mut queued = Vec::new();
+            if let Some(rx) = live_rx.as_mut() {
+                while let Ok(block) = rx.try_recv() {
+                    queued.push(block);
+                }
+            }
+            follow_handoff_blocks(&snapshot, queued)
+        } else {
+            snapshot.blocks.clone()
+        };
+        for bytes in &handoff_blocks {
+            write_stream_block(&mut writer, bytes).await?;
         }
         if matches!(mode, StreamMode::Follow) {
             follow_boundary = Some(snapshot);
@@ -278,6 +289,30 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
         == 0
 }
 
+/// Builds the ordered first batch for FOLLOW: live blocks older than the
+/// snapshot's first block, then history, then newer live blocks. Blocks that
+/// are already in the history snapshot are dropped instead of duplicated.
+fn follow_handoff_blocks(
+    snapshot: &HistorySnapshot,
+    queued: Vec<SequencedBlock>,
+) -> Vec<bytes::Bytes> {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    for block in queued {
+        if snapshot.is_already_sent(block.seq) {
+            continue;
+        }
+        if snapshot.first_seq.is_some_and(|first| block.seq < first) {
+            before.push(block.bytes);
+        } else {
+            after.push(block.bytes);
+        }
+    }
+    before.extend(snapshot.blocks.iter().cloned());
+    before.extend(after);
+    before
+}
+
 fn ip_allowed(peer: IpAddr, allow: &[IpCidr]) -> bool {
     if allow.is_empty() {
         return true;
@@ -288,6 +323,34 @@ fn ip_allowed(peer: IpAddr, allow: &[IpCidr]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follow_handoff_blocks_preserves_evicted_block_order() {
+        let snapshot = HistorySnapshot {
+            blocks: vec![bytes::Bytes::from_static(b"B")],
+            first_seq: Some(1),
+            last_seq: Some(1),
+        };
+        let queued = vec![
+            SequencedBlock {
+                seq: 0,
+                bytes: bytes::Bytes::from_static(b"A"),
+            },
+            SequencedBlock {
+                seq: 1,
+                bytes: bytes::Bytes::from_static(b"B"),
+            },
+        ];
+
+        assert_eq!(
+            follow_handoff_blocks(&snapshot, queued),
+            vec![
+                bytes::Bytes::from_static(b"A"),
+                bytes::Bytes::from_static(b"B")
+            ],
+            "handoff must stay ordered by sequence"
+        );
+    }
 
     #[test]
     fn parse_mode_accepts_follow() {
