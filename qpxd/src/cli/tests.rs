@@ -385,6 +385,53 @@ fn match_renderer_prefers_tls_passthrough_over_http_catch_all() {
 }
 
 #[test]
+#[cfg(feature = "tls-rustls")]
+fn match_renderer_keeps_plain_http_on_http_route_without_sni() {
+    let state = runtime_state_from_yaml(
+        "plain-http-no-sni",
+        r#"edges:
+- kind: reverse
+  name: tls-edge
+  listen: 127.0.0.1:0
+  tls:
+    certificates:
+    - sni: fallback.example.com
+      cert: /tmp/qpx-test.crt
+      key: /tmp/qpx-test.key
+  routes:
+  - name: app
+    match:
+      host: [app.example.com]
+    target:
+      type: upstream
+      upstreams: [http://127.0.0.1:8080]
+  tls_passthrough_routes:
+  - match: {}
+    upstreams: [127.0.0.1:8443]
+"#,
+    );
+
+    let output = render_test_match_plan(
+        state.plan.as_ref(),
+        "tls-edge",
+        qpx_core::rules::RuleMatchContext {
+            host: Some("app.example.com"),
+            ..Default::default()
+        },
+    )
+    .expect("match render");
+
+    assert!(
+        output.contains("route: app\n"),
+        "expected HTTP route, got:\n{output}"
+    );
+    assert!(
+        !output.contains("route: tls_passthrough[0]\n"),
+        "passthrough must not shadow plain HTTP without SNI:\n{output}"
+    );
+}
+
+#[test]
 fn match_renderer_reports_reverse_forward_and_transparent_reasons() {
     let state = runtime_state_from_yaml(
         "trace",
