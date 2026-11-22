@@ -22,6 +22,7 @@ pub enum EnvSubstError {
 }
 
 /// Expands `${NAME}` and `${NAME:-default}` expressions using process env.
+/// The default form applies when `NAME` is unset or empty.
 pub fn expand_env(input: &str) -> Result<String> {
     expand_env_with(input, |key| env::var(key).ok())
 }
@@ -41,12 +42,11 @@ pub(crate) fn expand_env_with(
             .ok_or(EnvSubstError::VariableCaptureMissing)?
             .as_str();
         let default = caps.get(2).map(|m| m.as_str());
-        let value = match lookup(key) {
-            Some(v) => v,
-            None => match default {
-                Some(d) => d.to_string(),
-                None => return Err(EnvSubstError::MissingVariable(key.to_string())),
-            },
+        let value = match (lookup(key), default) {
+            (Some(value), _) if !value.is_empty() => value,
+            (_, Some(default)) => default.to_string(),
+            (Some(value), None) => value,
+            (None, None) => return Err(EnvSubstError::MissingVariable(key.to_string())),
         };
         out.push_str(&value);
         last = m.end();
@@ -88,6 +88,26 @@ mod tests {
     fn uses_default_when_unset() {
         let result = expand_env_from("${QPX_TEST_ENVSUBST_UNSET:-fallback}", &[]).unwrap();
         assert_eq!(result, "fallback");
+    }
+
+    #[test]
+    fn uses_default_when_variable_is_empty() {
+        let result = expand_env_from(
+            "${QPX_TEST_ENVSUBST_EMPTY:-fallback}",
+            &[("QPX_TEST_ENVSUBST_EMPTY", "")],
+        )
+        .unwrap();
+        assert_eq!(result, "fallback");
+    }
+
+    #[test]
+    fn keeps_empty_value_without_default() {
+        let result = expand_env_from(
+            "${QPX_TEST_ENVSUBST_EMPTY}",
+            &[("QPX_TEST_ENVSUBST_EMPTY", "")],
+        )
+        .unwrap();
+        assert_eq!(result, "");
     }
 
     #[test]
