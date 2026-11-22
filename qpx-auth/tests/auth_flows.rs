@@ -74,6 +74,36 @@ async fn basic_auth_challenges_invalid_local_credentials() {
     );
 }
 
+#[cfg(all(feature = "basic-auth", feature = "digest-auth"))]
+#[tokio::test]
+async fn challenge_omits_digest_when_local_provider_is_not_required() {
+    let auth = Authenticator::new(&local_config(), "qpx").expect("authenticator");
+
+    let outcome = auth
+        .authenticate_proxy(
+            None,
+            &Headers::new(),
+            &["ldap".to_string()],
+            "GET",
+            "/resource",
+        )
+        .await
+        .expect("authenticate");
+    let AuthOutcome::Challenge(challenge) = outcome else {
+        panic!("missing credentials should be challenged");
+    };
+    assert_eq!(
+        challenge.header_values.len(),
+        1,
+        "only Basic should be advertised when Digest cannot authenticate"
+    );
+    assert!(
+        challenge.header_values[0].starts_with("Basic "),
+        "unexpected challenge: {:?}",
+        challenge.header_values
+    );
+}
+
 #[cfg(feature = "digest-auth")]
 #[tokio::test]
 async fn digest_auth_allows_rfc7616_sha256_response_from_challenge() {

@@ -175,7 +175,9 @@ impl Authenticator {
                     required_providers = ?required_providers,
                 );
             }
-            return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
+            return Ok(AuthOutcome::Challenge(
+                self.build_challenge(false, required_providers)?,
+            ));
         }
 
         #[cfg(feature = "basic-auth")]
@@ -209,7 +211,9 @@ impl Authenticator {
                         required_providers = ?required_providers,
                     );
                 }
-                return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
+                return Ok(AuthOutcome::Challenge(
+                    self.build_challenge(false, required_providers)?,
+                ));
             }
         }
 
@@ -247,7 +251,9 @@ impl Authenticator {
                                     required_providers = ?required_providers,
                                 );
                             }
-                            return Ok(AuthOutcome::Challenge(self.build_challenge(true)?));
+                            return Ok(AuthOutcome::Challenge(
+                                self.build_challenge(true, required_providers)?,
+                            ));
                         }
                         DigestAuthResult::Invalid => {}
                     }
@@ -267,7 +273,9 @@ impl Authenticator {
                     required_providers = ?required_providers,
                 );
             }
-            return Ok(AuthOutcome::Challenge(self.build_challenge(false)?));
+            return Ok(AuthOutcome::Challenge(
+                self.build_challenge(false, required_providers)?,
+            ));
         }
 
         if tracing::enabled!(target: "audit_log", Level::INFO) {
@@ -282,7 +290,9 @@ impl Authenticator {
                 required_providers = ?required_providers,
             );
         }
-        Ok(AuthOutcome::Challenge(self.build_challenge(false)?))
+        Ok(AuthOutcome::Challenge(
+            self.build_challenge(false, required_providers)?,
+        ))
     }
 
     #[cfg(feature = "basic-auth")]
@@ -435,7 +445,11 @@ impl Authenticator {
     }
 
     #[cfg(any(feature = "basic-auth", feature = "digest-auth"))]
-    fn build_challenge(&self, stale: bool) -> AuthResult<AuthChallenge> {
+    fn build_challenge(
+        &self,
+        stale: bool,
+        required_providers: &[String],
+    ) -> AuthResult<AuthChallenge> {
         let mut headers = Vec::new();
         let escaped_realm = escape_quoted_header_value(self.realm.as_str());
         #[cfg(feature = "basic-auth")]
@@ -444,6 +458,9 @@ impl Authenticator {
             escaped_realm
         ));
         #[cfg(feature = "digest-auth")]
+        if required_providers
+            .iter()
+            .any(|provider| provider == "local")
         {
             let challenge = self
                 .nonces
@@ -455,6 +472,8 @@ impl Authenticator {
                 escaped_realm, challenge.nonce, challenge.opaque, stale_param
             ));
         }
+        #[cfg(not(feature = "digest-auth"))]
+        let _ = required_providers;
         Ok(AuthChallenge {
             header_values: headers,
             stale,
