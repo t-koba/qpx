@@ -717,6 +717,31 @@ async fn grpc_local_response_emits_trailers() {
 }
 
 #[tokio::test]
+async fn grpc_web_local_response_lowercases_custom_trailer_names() {
+    let response = build_rpc_local_response(
+        &RpcLocalResponseConfig {
+            protocol: "grpc_web".to_string(),
+            status: Some("7".to_string()),
+            message: None,
+            http_status: Some(200),
+            headers: HashMap::new(),
+            trailers: HashMap::from([("X-Edge-Result".to_string(), "denied".to_string())]),
+        },
+        b"",
+    )
+    .expect("response");
+    let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(
+        text.contains("x-edge-result: denied\r\n"),
+        "gRPC-Web trailers must use lowercase names: {text:?}"
+    );
+    assert!(!text.contains("X-Edge-Result"), "{text:?}");
+}
+
+#[tokio::test]
 async fn grpc_web_local_response_emits_trailer_frame() {
     let response = build_rpc_local_response(
         &RpcLocalResponseConfig {

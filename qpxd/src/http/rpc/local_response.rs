@@ -169,7 +169,11 @@ fn build_grpc_web_body(config: &RpcLocalResponseConfig, payload: &[u8]) -> Resul
         trailers.extend_from_slice(b"\r\n");
     }
     for (name, value) in &config.trailers {
-        trailers.extend_from_slice(name.as_bytes());
+        // gRPC-Web requires lowercase trailer names in the body frame even
+        // though HTTP/1 field names may be mixed case. HeaderName validation
+        // also rejects names that cannot be encoded in a trailer block.
+        let name = http::header::HeaderName::from_bytes(name.as_bytes())?;
+        trailers.extend_from_slice(name.as_str().as_bytes());
         trailers.extend_from_slice(b": ");
         trailers.extend_from_slice(value.as_bytes());
         trailers.extend_from_slice(b"\r\n");
