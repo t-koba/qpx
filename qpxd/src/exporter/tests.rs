@@ -761,3 +761,10 @@ async fn request_preview_preserves_utf8_split_across_body_chunks() {
         "POST /preview HTTP/1.1\r\n\r\ncafé!".as_bytes(),
     );
 }
+
+#[test]
+fn invalid_utf8_preview_emits_one_marker_for_an_invalid_heavy_body() {
+    let mut out = String::new();
+    push_utf8_preview_chunks(&mut out, &[Bytes::from(vec![0xff; 4096])]);
+    assert_eq!(out, "<non-utf8 body>");
+}
