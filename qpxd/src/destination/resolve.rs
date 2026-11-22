@@ -92,15 +92,21 @@ impl DestinationClassifier {
             ));
         }
         let inferred_application = infer_application(inputs.scheme, inputs.port, inputs.alpn);
-        if self.application.is_empty()
+        let inferred_confidence = score_for_source(
+            DestinationEvidenceKind::Application,
+            DestinationEvidenceSource::Heuristic,
+        );
+        let inferred_eligible = policy
+            .min_confidence
+            .application
+            .is_none_or(|min| inferred_confidence >= min);
+        if inferred_eligible
+            && self.application.is_empty()
             && let Some(label) = inferred_application
         {
             out.application = Some(shared_inferred_application(label));
             out.application_source = Some(DestinationEvidenceSource::Heuristic.as_str());
-            out.application_confidence = Some(score_for_source(
-                DestinationEvidenceKind::Application,
-                DestinationEvidenceSource::Heuristic,
-            ));
+            out.application_confidence = Some(inferred_confidence);
             if include_trace {
                 let candidate = DestinationCandidate {
                     label: label.to_string(),
@@ -126,10 +132,7 @@ impl DestinationClassifier {
         if let Some(label) = inferred_application {
             application.push(DestinationCandidate {
                 label: label.to_string(),
-                confidence: score_for_source(
-                    DestinationEvidenceKind::Application,
-                    DestinationEvidenceSource::Heuristic,
-                ),
+                confidence: inferred_confidence,
                 source: DestinationEvidenceSource::Heuristic,
                 class: DestinationEvidenceClass::Heuristic,
             });

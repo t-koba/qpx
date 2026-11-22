@@ -1,5 +1,5 @@
 use super::*;
-use qpx_core::config::{Config, NamedSetConfig, NamedSetKind};
+use qpx_core::config::{Config, DestinationResolutionPolicyConfig, NamedSetConfig, NamedSetKind};
 use std::net::{IpAddr, Ipv4Addr};
 
 fn base_config() -> Config {
@@ -283,4 +283,19 @@ fn destination_metadata_apply_to_rule_context_leaves_defaults_for_empty() {
     assert_eq!(ctx.destination_application, None);
     assert_eq!(ctx.destination_application_source, None);
     assert_eq!(ctx.destination_application_confidence, None);
+}
+
+#[test]
+fn inferred_application_respects_min_confidence_without_named_sets() {
+    let mut config = DestinationResolutionPolicyConfig::default();
+    config.min_confidence.application = Some(41);
+    let policy = CompiledDestinationResolutionPolicy::from_config(&config);
+    let inputs = DestinationInputs {
+        port: Some(443),
+        ..Default::default()
+    };
+
+    let result = DestinationClassifier::default().classify(&inputs, &policy, false);
+    assert_eq!(result.application, None);
+    assert_eq!(result.application_confidence, None);
 }
