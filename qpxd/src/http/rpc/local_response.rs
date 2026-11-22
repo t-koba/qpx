@@ -118,11 +118,23 @@ fn build_connect_local_response(config: &RpcLocalResponseConfig) -> Result<Respo
     Ok(response)
 }
 
+/// Configuration accepts a leading `+` in numeric gRPC status codes because
+/// Rust's integer parser does, but the wire format requires decimal digits.
+fn canonical_grpc_status(status: Option<&str>) -> String {
+    match status {
+        Some(value) => match value.parse::<u16>() {
+            Ok(code) => code.to_string(),
+            Err(_) => value.to_string(),
+        },
+        None => "0".to_string(),
+    }
+}
+
 fn build_grpc_body(config: &RpcLocalResponseConfig, payload: &[u8]) -> Result<Body> {
     let mut trailers = HeaderMap::new();
     trailers.insert(
         http::header::HeaderName::from_static("grpc-status"),
-        http::HeaderValue::from_str(config.status.as_deref().unwrap_or("0"))?,
+        http::HeaderValue::from_str(&canonical_grpc_status(config.status.as_deref()))?,
     );
     if let Some(message) = config.message.as_deref() {
         let encoded =
@@ -158,7 +170,7 @@ fn build_grpc_web_body(config: &RpcLocalResponseConfig, payload: &[u8]) -> Resul
 
     let mut trailers = Vec::new();
     trailers.extend_from_slice(b"grpc-status: ");
-    trailers.extend_from_slice(config.status.as_deref().unwrap_or("0").as_bytes());
+    trailers.extend_from_slice(canonical_grpc_status(config.status.as_deref()).as_bytes());
     trailers.extend_from_slice(b"\r\n");
     if let Some(message) = config.message.as_deref() {
         let encoded =

@@ -814,6 +814,60 @@ async fn grpc_web_local_response_emits_trailer_frame() {
     );
 }
 
+#[tokio::test]
+async fn grpc_local_response_canonicalizes_numeric_status() {
+    let response = build_rpc_local_response(
+        &RpcLocalResponseConfig {
+            protocol: "grpc".to_string(),
+            status: Some("+7".to_string()),
+            message: None,
+            http_status: Some(200),
+            headers: HashMap::new(),
+            trailers: HashMap::new(),
+        },
+        b"",
+    )
+    .expect("response");
+    let mut body = response.into_head_and_body().1;
+    assert!(body.data().await.is_none());
+    let trailers = body.trailers().await.expect("trailers").expect("present");
+    assert_eq!(
+        trailers
+            .get("grpc-status")
+            .and_then(|value| value.to_str().ok()),
+        Some("7")
+    );
+}
+
+#[tokio::test]
+async fn grpc_web_local_response_canonicalizes_numeric_status() {
+    let response = build_rpc_local_response(
+        &RpcLocalResponseConfig {
+            protocol: "grpc_web".to_string(),
+            status: Some("+7".to_string()),
+            message: None,
+            http_status: Some(200),
+            headers: HashMap::new(),
+            trailers: HashMap::new(),
+        },
+        b"",
+    )
+    .expect("response");
+    let bytes = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
+    let mut observer = GrpcFrameObserver::grpc_web(false, None, None);
+    observer.feed(&bytes).expect("feed");
+    let summary = observer.finish().expect("summary");
+    let trailers = summary.trailers.expect("trailers");
+    assert_eq!(
+        trailers
+            .get("grpc-status")
+            .and_then(|value| value.to_str().ok()),
+        Some("7")
+    );
+}
+
 #[cfg(any(feature = "http3-backend-h3", feature = "http3-backend-qpx"))]
 #[tokio::test]
 async fn grpc_web_deadline_response_uses_body_trailer_frame() {
