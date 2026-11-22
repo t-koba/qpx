@@ -24,7 +24,7 @@ pub(super) struct DnsHttpsRecord {
     pub(super) owner_name: String,
     pub(super) priority: u16,
     pub(super) target: Option<String>,
-    pub(super) alpn: Vec<String>,
+    pub(super) alpn: Vec<Vec<u8>>,
     pub(super) port: Option<u16>,
     pub(super) ipv4_hints: Vec<Ipv4Addr>,
     pub(super) ipv6_hints: Vec<Ipv6Addr>,
@@ -288,9 +288,7 @@ fn parse_https_svc_param(key: u16, value: &[u8], record: &mut DnsHttpsRecord) ->
                 if end > value.len() {
                     return Err(anyhow!("HTTPS DNS alpn value truncated"));
                 }
-                record
-                    .alpn
-                    .push(std::str::from_utf8(&value[offset..end])?.to_string());
+                record.alpn.push(value[offset..end].to_vec());
                 offset = end;
             }
         }
@@ -502,8 +500,19 @@ mod tests {
         let records = parse_https_records(response.as_slice())?;
         assert_eq!(records.len(), 1);
         assert_eq!(records[0].port, Some(443));
-        assert_eq!(records[0].alpn, vec!["h3".to_string()]);
+        assert_eq!(records[0].alpn, vec![b"h3".to_vec()]);
         assert!(records[0].svc_param_keys.contains(&65001));
+        Ok(())
+    }
+
+    #[test]
+    fn https_parser_keeps_h3_alongside_non_utf8_alpn_id() -> Result<()> {
+        let alpn = [1, 0xff, 2, b'h', b'3'];
+        let rdata = https_rdata(1, &[(1, &alpn)], &[]);
+        let response = response_with_https_rdatalist(vec![(30, rdata)]);
+        let records = parse_https_records(response.as_slice())?;
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].alpn, vec![vec![0xff], b"h3".to_vec()]);
         Ok(())
     }
 

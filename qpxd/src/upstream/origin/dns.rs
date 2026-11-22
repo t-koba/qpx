@@ -322,7 +322,7 @@ async fn resolve_https_h3_endpoints(
         if !record
             .alpn
             .iter()
-            .any(|alpn| alpn.eq_ignore_ascii_case("h3") || alpn.starts_with("h3-"))
+            .any(|alpn| alpn.eq_ignore_ascii_case(b"h3") || alpn.starts_with(b"h3-"))
         {
             continue;
         }
