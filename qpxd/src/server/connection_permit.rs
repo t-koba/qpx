@@ -23,10 +23,12 @@ pub(crate) async fn acquire_connection_permit(
     }
 }
 
-/// Accept the next TCP stream after acquiring one connection permit.
+/// Accept the next TCP stream, then acquire one connection permit for it.
 ///
-/// Shutdown updates and listener errors preserve the acceptor's retry/stop
-/// behavior while ensuring every accepted stream carries its capacity permit.
+/// An idle listener must not hold a shared permit while waiting for a client,
+/// or it can starve other acceptors sharing the same semaphore. Shutdown
+/// updates and listener errors preserve the acceptor's retry/stop behavior
+/// while ensuring every accepted stream carries its capacity permit.
 pub(crate) async fn accept_tcp_with_connection_permit(
     listener: &TcpListener,
     semaphore: &Arc<Semaphore>,
@@ -110,7 +112,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn shutdown_while_waiting_to_accept_releases_the_permit() {
+    async fn shutdown_while_waiting_to_accept_stops_without_connection() {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let semaphore = Arc::new(Semaphore::new(1));
         let (sender, mut shutdown) = watch::channel(false);
