@@ -60,9 +60,13 @@ pub fn precondition_is_missing(method: &Method, headers: &Headers) -> bool {
 
 fn has_valid_if_match(headers: &Headers) -> bool {
     let name = OrdinaryHeaderName::try_from(http::header::IF_MATCH).expect("ordinary header");
-    headers
-        .get_all(&name)
-        .any(|value| is_valid_if_match(value.as_bytes()))
+    let mut present = false;
+    let mut valid = true;
+    for value in headers.get_all(&name) {
+        present = true;
+        valid &= is_valid_if_match(value.as_bytes());
+    }
+    present && valid
 }
 
 fn is_valid_if_match(value: &[u8]) -> bool {
@@ -89,13 +93,17 @@ fn is_valid_if_match(value: &[u8]) -> bool {
 fn has_valid_if_unmodified_since(headers: &Headers) -> bool {
     let name =
         OrdinaryHeaderName::try_from(http::header::IF_UNMODIFIED_SINCE).expect("ordinary header");
-    headers.get_all(&name).any(|value| {
-        value
+    let mut present = false;
+    let mut valid = true;
+    for value in headers.get_all(&name) {
+        present = true;
+        valid &= value
             .to_str()
             .ok()
             .and_then(|date| httpdate::parse_http_date(date).ok())
-            .is_some()
-    })
+            .is_some();
+    }
+    present && valid
 }
 
 fn trim_ows(mut value: &[u8]) -> &[u8] {
@@ -180,6 +188,27 @@ mod tests {
             qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_MATCH).unwrap(),
             "W/\"v1\"".parse().unwrap(),
         );
+        assert!(precondition_is_missing(&Method::PUT, &headers));
+    }
+
+    #[test]
+    fn duplicate_conditional_fields_do_not_mask_invalid_members() {
+        let mut headers = qpx_core::http_message::Headers::new();
+        let if_match =
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_MATCH).unwrap();
+        headers.append(if_match.clone(), "\"a\"".parse().unwrap());
+        headers.append(if_match, "garbage".parse().unwrap());
+        assert!(precondition_is_missing(&Method::PUT, &headers));
+
+        let mut headers = qpx_core::http_message::Headers::new();
+        let if_unmodified_since =
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_UNMODIFIED_SINCE)
+                .unwrap();
+        headers.append(
+            if_unmodified_since.clone(),
+            "Sat, 11 Jul 2026 00:00:00 GMT".parse().unwrap(),
+        );
+        headers.append(if_unmodified_since, "garbage".parse().unwrap());
         assert!(precondition_is_missing(&Method::PUT, &headers));
     }
 }
