@@ -44,6 +44,31 @@ fn normalize_authority_host(host: &str) -> String {
     host
 }
 
+fn bracketed_host_is_ip_literal(host: &str) -> bool {
+    let Some(inner) = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+    else {
+        return false;
+    };
+    if inner.parse::<std::net::Ipv6Addr>().is_ok() {
+        return true;
+    }
+    // RFC 3986 IPvFuture: "v" 1*HEXDIG "." 1*( unreserved / sub-delims / ":" ).
+    let Some(rest) = inner.strip_prefix('v').or_else(|| inner.strip_prefix('V')) else {
+        return false;
+    };
+    let hex_len = rest.bytes().take_while(u8::is_ascii_hexdigit).count();
+    if hex_len == 0 || rest.as_bytes().get(hex_len) != Some(&b'.') {
+        return false;
+    }
+    let tail = &rest[hex_len + 1..];
+    !tail.is_empty()
+        && tail
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=:".contains(&byte))
+}
+
 fn validate_strict_authority(input: &str) -> Option<&str> {
     let input = input.trim();
     if input.is_empty()
@@ -58,6 +83,9 @@ fn validate_strict_authority(input: &str) -> Option<&str> {
 
     if input.starts_with('[') {
         let close = input.find(']')?;
+        if !bracketed_host_is_ip_literal(&input[..=close]) {
+            return None;
+        }
         let rest = &input[close + 1..];
         return match rest {
             "" => Some(input),
@@ -125,6 +153,16 @@ mod tests {
         );
         assert!(parse_authority_host_port("example.com:http", 443).is_none());
         assert!(parse_authority_host_port("[2001:db8::1]:https", 443).is_none());
+    }
+
+    #[test]
+    fn authority_parser_rejects_bracketed_dns_names() {
+        assert!(parse_authority_host_port("[example.com]", 443).is_none());
+        assert!(parse_authority_host_port("[example.com]:8443", 443).is_none());
+        assert_eq!(
+            parse_authority_host_port("[v1.fe80::1]:8443", 443),
+            Some(("v1.fe80::1".to_string(), 8443))
+        );
     }
 
     #[test]
