@@ -177,7 +177,8 @@ pub fn open_secure_output_file(path: &Path) -> Result<File> {
     Ok(file)
 }
 
-fn open_secure_new_file(path: &Path) -> Result<File> {
+/// Opens `path` for secure output only when the path does not already exist.
+pub fn open_secure_new_file(path: &Path) -> Result<File> {
     let mut options = OpenOptions::new();
     options.create_new(true).write(true).read(true);
     open_secure_options(&mut options, path)

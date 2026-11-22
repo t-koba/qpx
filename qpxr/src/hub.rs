@@ -275,20 +275,33 @@ impl RotatingFileSink {
     }
 
     fn rotate(&mut self) -> Result<()> {
-        self.index = self.index.saturating_add(1);
-        let now = time::OffsetDateTime::from(std::time::SystemTime::now());
-        let filename = format!(
-            "capture-{:04}{:02}{:02}{:02}{:02}{:02}-{:06}.pcapng",
-            now.year(),
-            now.month() as u8,
-            now.day(),
-            now.hour(),
-            now.minute(),
-            now.second(),
-            self.index
-        );
-        let path = self.dir.join(filename);
-        self.file = open_secure_file(&path)?;
+        self.rotate_at(time::OffsetDateTime::from(std::time::SystemTime::now()))
+    }
+
+    fn rotate_at(&mut self, now: time::OffsetDateTime) -> Result<()> {
+        let mut index = self.index;
+        let (index, file) = loop {
+            let next = index
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("capture file index exhausted"))?;
+            let path = self.dir.join(capture_file_name(now, next));
+            match qpx_core::secure_file::open_secure_new_file(&path) {
+                Ok(file) => break (next, file),
+                Err(qpx_core::secure_file::SecureFileError::Open { source, .. })
+                    if source.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    index = next;
+                }
+                Err(err) => {
+                    return Err(anyhow!(
+                        "failed to create secure pcapng file {}: {err}",
+                        path.display()
+                    ));
+                }
+            }
+        };
+        self.index = index;
+        self.file = file;
         self.current_size = 0;
         self.file.write_all(&self.preface)?;
         self.file.flush()?;
@@ -296,6 +309,19 @@ impl RotatingFileSink {
         self.blocks_since_flush = 0;
         Ok(())
     }
+}
+
+fn capture_file_name(now: time::OffsetDateTime, index: u64) -> String {
+    format!(
+        "capture-{:04}{:02}{:02}{:02}{:02}{:02}-{:06}.pcapng",
+        now.year(),
+        now.month() as u8,
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second(),
+        index
+    )
 }
 
 fn system_now_unix_nanos() -> u64 {
@@ -468,6 +494,42 @@ mod tests {
             duration_as_saturating_nanos(Duration::from_secs(u64::MAX)),
             u64::MAX
         );
+    }
+
+    #[test]
+    fn rotation_preserves_an_existing_capture_file() {
+        static TEST_DIR_COUNTER: std::sync::atomic::AtomicU64 =
+            std::sync::atomic::AtomicU64::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "qpxr-rotation-{}-{}",
+            std::process::id(),
+            TEST_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        let _ = fs::remove_dir_all(&dir);
+        ensure_dir_secure(&dir).expect("secure test dir");
+        let now = time::OffsetDateTime::from_unix_timestamp(1_700_000_000).expect("timestamp");
+        let existing = dir.join(capture_file_name(now, 1));
+        fs::write(&existing, b"previous capture").expect("precreate capture");
+        let mut sink = RotatingFileSink {
+            dir: dir.clone(),
+            rotate_bytes: 1024,
+            current_size: 0,
+            index: 0,
+            file: open_secure_file(&dir.join(".bootstrap.tmp")).expect("bootstrap file"),
+            preface: Arc::new(b"preface".to_vec()),
+            blocks_since_flush: 0,
+        };
+
+        sink.rotate_at(now).expect("rotate");
+
+        assert_eq!(
+            fs::read(&existing).expect("existing capture"),
+            b"previous capture"
+        );
+        let next = dir.join(capture_file_name(now, 2));
+        assert_eq!(fs::read(&next).expect("new capture"), b"preface");
+        assert_eq!(sink.index, 2);
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
