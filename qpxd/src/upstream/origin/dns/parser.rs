@@ -215,6 +215,8 @@ pub(super) fn parse_https_records(response: &[u8]) -> Result<Vec<DnsHttpsRecord>
             svc_param_keys: HashSet::new(),
             ttl_secs: answer.ttl,
         };
+        // RFC 9460: AliasMode recipients must ignore any SvcParams present.
+        let alias_mode = record.priority == 0;
         let mut last_key = None::<u16>;
         while offset + 4 <= answer.rdata.len() {
             let key = u16::from_be_bytes([answer.rdata[offset], answer.rdata[offset + 1]]);
@@ -229,20 +231,16 @@ pub(super) fn parse_https_records(response: &[u8]) -> Result<Vec<DnsHttpsRecord>
             if end > answer.rdata.len() {
                 return Err(anyhow!("HTTPS DNS SvcParam truncated"));
             }
-            parse_https_svc_param(key, &answer.rdata[offset..end], &mut record)?;
+            if !alias_mode {
+                parse_https_svc_param(key, &answer.rdata[offset..end], &mut record)?;
+            }
             offset = end;
         }
         if offset != answer.rdata.len() {
             return Err(anyhow!("HTTPS DNS SvcParam truncated"));
         }
-        if record.priority == 0 {
-            if record.target.is_some()
-                && record.alpn.is_empty()
-                && record.port.is_none()
-                && record.ipv4_hints.is_empty()
-                && record.ipv6_hints.is_empty()
-                && record.mandatory.is_empty()
-            {
+        if alias_mode {
+            if record.target.is_some() {
                 records.push(record);
             }
             continue;
@@ -617,6 +615,22 @@ mod tests {
         let rdata = https_rdata(1, &[(0, &missing), (1, &alpn_h3_value())], &[]);
         let response = response_with_https_rdatalist(vec![(30, rdata)]);
         assert!(parse_https_records(response.as_slice())?.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn https_alias_ignores_svcparam_values() -> Result<()> {
+        let mut rdata = 0u16.to_be_bytes().to_vec();
+        encode_dns_name("alias.example", &mut rdata)?;
+        rdata.extend_from_slice(&3u16.to_be_bytes()); // key 3: port
+        rdata.extend_from_slice(&2u16.to_be_bytes());
+        rdata.extend_from_slice(&8443u16.to_be_bytes());
+        let response = response_with_https_rdatalist(vec![(30, rdata)]);
+
+        let records = parse_https_records(response.as_slice())?;
+        assert_eq!(records.len(), 1, "SvcParams must be ignored in AliasMode");
+        assert_eq!(records[0].target.as_deref(), Some("alias.example"));
+        assert_eq!(records[0].port, None);
         Ok(())
     }
 }
