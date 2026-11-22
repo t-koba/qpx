@@ -46,6 +46,61 @@ pub(crate) fn request_upgrade(pid: u32) -> Result<()> {
     Ok(())
 }
 
+async fn spawn_ready_process<F>(
+    mut command: std::process::Command,
+    timeout: std::time::Duration,
+    after_spawn: F,
+) -> Result<()>
+where
+    F: FnOnce(u32) -> Result<()>,
+{
+    use std::io::Read;
+
+    let mut pipe_fds = [0; 2];
+    // SAFETY: pipe_fds points to two valid i32 slots for libc to initialize.
+    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
+        return Err(anyhow!(
+            "failed to create upgrade readiness pipe: {}",
+            std::io::Error::last_os_error()
+        ));
+    }
+    // SAFETY: pipe succeeded and ownership of this read fd is transferred exactly once.
+    let read_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
+    // SAFETY: pipe succeeded and ownership of this write fd is transferred exactly once.
+    let write_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
+    set_cloexec(write_fd.as_raw_fd(), false)?;
+    command.env(ENV_READY_FD, write_fd.as_raw_fd().to_string());
+
+    let child = command.spawn().context("failed to spawn upgraded child")?;
+    // The child inherited its own write end. Keeping the parent's copy would
+    // hide EOF when the child exits before writing the readiness byte.
+    drop(write_fd);
+    after_spawn(child.id())?;
+
+    let readiness = tokio::time::timeout(
+        timeout,
+        tokio::task::spawn_blocking(move || {
+            let mut file = std::fs::File::from(read_fd);
+            let mut buf = [0u8; 1];
+            let n = file.read(&mut buf)?;
+            if n == 1 && buf[0] == b'1' {
+                Ok(())
+            } else {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "upgrade child exited before signaling readiness",
+                ))
+            }
+        }),
+    )
+    .await;
+    readiness
+        .context("upgrade child readiness timed out")?
+        .context("upgrade child readiness failed")?
+        .context("upgrade child readiness failed")?;
+    Ok(())
+}
+
 pub(crate) async fn spawn_upgraded_child(
     tcp_bindings: &crate::tcp_bindings::TcpBindings,
     udp_bindings: &crate::udp_bindings::UdpBindings,
@@ -55,8 +110,6 @@ pub(crate) async fn spawn_upgraded_child(
     >,
     config: &qpx_core::config::Config,
 ) -> Result<()> {
-    use std::io::Read;
-
     let tcp_handoff = tcp_bindings.prepare_handoff(config)?;
     let udp_handoff = udp_bindings.prepare_handoff(config)?;
     let crate::tcp_bindings::TcpBindingHandoff {
@@ -89,20 +142,6 @@ pub(crate) async fn spawn_upgraded_child(
         );
     }
 
-    let mut pipe_fds = [0; 2];
-    // SAFETY: pipe_fds points to two valid i32 slots for libc to initialize.
-    if unsafe { libc::pipe(pipe_fds.as_mut_ptr()) } != 0 {
-        return Err(anyhow!(
-            "failed to create upgrade readiness pipe: {}",
-            std::io::Error::last_os_error()
-        ));
-    }
-    // SAFETY: pipe succeeded and ownership of this read fd is transferred exactly once.
-    let read_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[0]) };
-    // SAFETY: pipe succeeded and ownership of this write fd is transferred exactly once.
-    let write_fd = unsafe { OwnedFd::from_raw_fd(pipe_fds[1]) };
-    set_cloexec(write_fd.as_raw_fd(), false)?;
-
     let current_exe = std::env::current_exe().context("failed to resolve current executable")?;
     let mut child = std::process::Command::new(current_exe);
     child.args(std::env::args_os().skip(1));
@@ -127,51 +166,21 @@ pub(crate) async fn spawn_upgraded_child(
             &quic_brokers.env_value,
         );
     }
-    child.env(ENV_READY_FD, write_fd.as_raw_fd().to_string());
 
-    let _keep_pipe_alive = write_fd;
     let _keep_socket_fds = kept_fds;
-    let child = match child.spawn() {
-        Ok(child) => child,
-        Err(err) => {
-            if let Some(handoff) = &udp_session_handoff {
-                crate::udp_session_handoff::UdpSessionRestoreState::cleanup_handoff_file(handoff);
-            }
-            return Err(err).context("failed to spawn upgraded child");
+    let result = spawn_ready_process(child, READY_TIMEOUT, |child_id| {
+        if let Some(handoff) = &udp_session_handoff {
+            crate::udp_session_handoff::UdpSessionRestoreState::finalize_handoff_for_child(
+                handoff, child_id,
+            )?;
         }
-    };
-    if let Some(handoff) = &udp_session_handoff {
-        crate::udp_session_handoff::UdpSessionRestoreState::finalize_handoff_for_child(
-            handoff,
-            child.id(),
-        )?;
-    }
-
-    let readiness = tokio::time::timeout(
-        READY_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            let mut file = std::fs::File::from(read_fd);
-            let mut buf = [0u8; 1];
-            let n = file.read(&mut buf)?;
-            if n == 1 && buf[0] == b'1' {
-                Ok(())
-            } else {
-                Err(std::io::Error::new(
-                    std::io::ErrorKind::UnexpectedEof,
-                    "upgrade child exited before signaling readiness",
-                ))
-            }
-        }),
-    )
+        Ok(())
+    })
     .await;
     if let Some(handoff) = &udp_session_handoff {
         crate::udp_session_handoff::UdpSessionRestoreState::cleanup_handoff_file(handoff);
     }
-    readiness
-        .context("upgrade child readiness timed out")?
-        .context("upgrade child readiness failed")?
-        .context("upgrade child readiness failed")?;
-    Ok(())
+    result
 }
 
 pub(crate) fn take_ready_notifier_from_env() -> Result<Option<ReadyNotifier>> {
@@ -250,6 +259,32 @@ mod tests {
             read_task.await.expect("join").expect("read"),
             b'1',
             "parent should observe child readiness byte"
+        );
+    }
+
+    #[tokio::test]
+    async fn child_writing_readiness_byte_succeeds() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "printf 1 > /dev/fd/$QPX_UPGRADE_READY_FD"]);
+        spawn_ready_process(command, std::time::Duration::from_millis(500), |_| Ok(()))
+            .await
+            .expect("readiness byte should be observed");
+    }
+
+    #[tokio::test]
+    async fn child_exiting_before_readiness_reports_eof() {
+        let mut command = std::process::Command::new("sh");
+        command.args(["-c", "exit 1"]);
+        let err = spawn_ready_process(command, std::time::Duration::from_millis(500), |_| Ok(()))
+            .await
+            .expect_err("child should fail before writing readiness");
+        assert!(
+            err.chain().any(|cause| {
+                cause
+                    .downcast_ref::<std::io::Error>()
+                    .is_some_and(|io| io.kind() == std::io::ErrorKind::UnexpectedEof)
+            }),
+            "expected UnexpectedEof, got {err:#}"
         );
     }
 }
