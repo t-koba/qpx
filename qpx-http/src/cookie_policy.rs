@@ -291,7 +291,7 @@ pub fn parse_cookie_header(value: &str) -> Result<Vec<CookiePair>> {
     }
     value
         .split(';')
-        .map(|pair| parse_cookie_pair(pair.trim()))
+        .map(|pair| parse_cookie_pair(pair.trim_matches([' ', '\t'])))
         .collect()
 }
 
@@ -367,6 +367,13 @@ mod tests {
         let cookies = parse_cookie_header("sid=abc; theme=dark").unwrap();
         assert_eq!(cookies[0].name, "sid");
         assert_eq!(cookies[1].value, "dark");
+    }
+
+    #[test]
+    fn rejects_non_ascii_whitespace_between_cookie_pairs() {
+        assert!(parse_cookie_header("a=1;\u{00a0}b=2").is_err());
+        assert!(parse_cookie_header("a=1;\u{2003}b=2").is_err());
+        assert_eq!(parse_cookie_header("a=1;\tb=2").unwrap().len(), 2);
     }
 
     #[test]
