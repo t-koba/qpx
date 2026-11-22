@@ -90,6 +90,7 @@ pub(crate) fn inspect_response(
     response: &Response<Body>,
 ) -> impl std::future::Future<Output = RpcMatchContext> + Send + 'static {
     let request = request.clone();
+    let status = response.status();
     let headers = response.headers().clone();
     let observed_size = observed_response_size(response);
     let observed_trailers = observed_response_trailers(response).cloned();
@@ -114,17 +115,20 @@ pub(crate) fn inspect_response(
             .ok()
             .flatten(),
         };
-        let connect_status_body = if matches!(protocol.as_deref(), Some("connect")) {
-            match observed_body.as_ref() {
-                Some(body) => body
-                    .read_prefix(CONNECT_STATUS_BODY_PREFIX_BYTES)
-                    .await
-                    .ok(),
-                None => None,
-            }
-        } else {
-            None
-        };
+        // Unary JSON error bodies are only sent with non-2xx statuses; a
+        // successful body may have ordinary fields named code and message.
+        let connect_status_body =
+            if !status.is_success() && matches!(protocol.as_deref(), Some("connect")) {
+                match observed_body.as_ref() {
+                    Some(body) => body
+                        .read_prefix(CONNECT_STATUS_BODY_PREFIX_BYTES)
+                        .await
+                        .ok(),
+                    None => None,
+                }
+            } else {
+                None
+            };
         let trailers = observed_trailers.or_else(|| {
             body_summary
                 .as_ref()

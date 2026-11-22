@@ -1079,6 +1079,7 @@ mod connect_inspection_tests {
     #[tokio::test]
     async fn unary_connect_error_keeps_body_status() {
         let response = http::Response::builder()
+            .status(StatusCode::SERVICE_UNAVAILABLE)
             .header(http::header::CONTENT_TYPE, "application/json")
             .header("connect-protocol-version", "1")
             .body(Body::from(r#"{"code":"unavailable","message":"busy"}"#))
@@ -1096,6 +1097,30 @@ mod connect_inspection_tests {
         assert_eq!(inspected.protocol.as_deref(), Some("connect"));
         assert_eq!(inspected.status.as_deref(), Some("unavailable"));
         assert_eq!(inspected.message.as_deref(), Some("busy"));
+    }
+
+    #[tokio::test]
+    async fn unary_connect_success_ignores_body_code_and_message() {
+        let response = http::Response::builder()
+            .header(http::header::CONTENT_TYPE, "application/json")
+            .header("connect-protocol-version", "1")
+            .body(Body::from(
+                r#"{"code":"unavailable","message":"inventory state"}"#,
+            ))
+            .expect("response");
+
+        let response = buffer_response_body(
+            qpx_core::http_message::Response::from_http(response),
+            1024,
+            Duration::from_secs(1),
+        )
+        .await
+        .expect("buffered");
+        let ctx = connect_request_ctx().await;
+        let inspected = inspect_response(&ctx, &response).await;
+        assert_eq!(inspected.protocol.as_deref(), Some("connect"));
+        assert_eq!(inspected.status, None);
+        assert_eq!(inspected.message, None);
     }
 
     async fn inspect_buffered_connect_request(
