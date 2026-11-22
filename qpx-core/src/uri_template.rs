@@ -654,7 +654,9 @@ fn encode_value(value: &str, allow_reserved: bool) -> String {
             }
         }
         let slice = &value[index..index + character.len_utf8()];
-        encoded.push_str(&utf8_percent_encode(slice, RESERVED_ENCODE_SET).to_string());
+        for chunk in utf8_percent_encode(slice, RESERVED_ENCODE_SET) {
+            encoded.push_str(chunk);
+        }
     }
     encoded
 }
@@ -691,6 +693,15 @@ mod tests {
             .expand(|_| Some("a b".to_string()))
             .expect("expand");
         assert_eq!(expanded, "/items?q=a%20b");
+    }
+
+    #[test]
+    fn reserved_expansions_encode_multibyte_chars_between_percent_triplets() {
+        let expanded = UriTemplate::parse("{+value}")
+            .expect("template")
+            .expand(|_| Some("café%20x%zz".to_string()))
+            .expect("expand");
+        assert_eq!(expanded, "caf%C3%A9%20x%25zz");
     }
 
     #[test]
