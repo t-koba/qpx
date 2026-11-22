@@ -28,9 +28,7 @@ pub(crate) async fn send_via_upstream_proxy(
     let slot = pool.slot_for(&pool_key).await;
 
     let _permit = slot
-        .semaphore
-        .clone()
-        .acquire_owned()
+        .acquire()
         .await
         .map_err(|_| anyhow!("upstream proxy concurrency limiter closed"))?;
 

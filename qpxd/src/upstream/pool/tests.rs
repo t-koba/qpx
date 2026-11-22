@@ -1,5 +1,6 @@
 use super::cluster::{ManagedUpstreamEndpoint, PassiveHealthPolicy, UpstreamProxyCluster};
 use super::send::upstream_proxy_pool_key;
+use super::sender_pool::UpstreamProxyPool;
 use crate::runtime::now_millis;
 use crate::upstream::health::LATENCY_P95_DEFAULT_MIN_SAMPLES;
 use crate::upstream::health::PassiveFailureKind;
@@ -197,4 +198,82 @@ fn cluster_adaptive_failure_rate_ejects_endpoint() {
         endpoint.mark_passive_failure(Some(&policy), PassiveFailureKind::ConnectError);
     }
     assert!(!endpoint.is_healthy(now_millis()));
+}
+
+#[tokio::test]
+async fn existing_endpoint_slot_adopts_increased_concurrency_limit() {
+    let pool = UpstreamProxyPool::new();
+    pool.set_max_concurrent_per_endpoint(1);
+    let initial = pool.slot_for("existing").await;
+    let first = initial.try_acquire().expect("initial permit");
+    assert!(initial.try_acquire().is_err());
+
+    pool.set_max_concurrent_per_endpoint(2);
+    let existing = pool.slot_for("existing").await;
+    assert!(Arc::ptr_eq(&initial, &existing));
+    let fresh = pool.slot_for("fresh").await;
+    let fresh_first = fresh.try_acquire().expect("fresh first permit");
+    let fresh_second = fresh.try_acquire().expect("fresh second permit");
+    assert!(fresh.try_acquire().is_err());
+
+    let existing_second = existing.try_acquire();
+    assert!(
+        existing_second.is_ok(),
+        "existing endpoint slot remained at the old concurrency limit after reload"
+    );
+    drop((first, existing_second, fresh_first, fresh_second));
+}
+
+#[tokio::test]
+async fn existing_endpoint_slot_adopts_decreased_concurrency_limit_with_held_permits() {
+    let pool = UpstreamProxyPool::new();
+    pool.set_max_concurrent_per_endpoint(4);
+    let initial = pool.slot_for("shrinking").await;
+    let mut held: Vec<_> = (0..4)
+        .map(|_| initial.try_acquire().expect("initial permit"))
+        .collect();
+    assert_eq!(initial.semaphore.available_permits(), 0);
+
+    pool.set_max_concurrent_per_endpoint(1);
+    let slot = pool.slot_for("shrinking").await;
+    assert!(slot.try_acquire().is_err());
+    assert_eq!(slot.semaphore.available_permits(), 0);
+
+    let released = held.remove(0);
+    drop(released);
+    assert_eq!(
+        slot.semaphore.available_permits(),
+        0,
+        "released permit must be forgotten while the limiter shrinks"
+    );
+    drop(held);
+
+    let only = slot.try_acquire().expect("single permit after shrink");
+    assert!(slot.try_acquire().is_err());
+    drop(only);
+}
+
+#[tokio::test]
+async fn repeated_limit_reloads_do_not_overshoot_or_panic() {
+    let pool = UpstreamProxyPool::new();
+    pool.set_max_concurrent_per_endpoint(4);
+    let slot = pool.slot_for("reloads").await;
+    let mut held: Vec<_> = (0..4)
+        .map(|_| slot.try_acquire().expect("initial permit"))
+        .collect();
+
+    pool.set_max_concurrent_per_endpoint(1);
+    let _ = pool.slot_for("reloads").await;
+    pool.set_max_concurrent_per_endpoint(3);
+    let _ = pool.slot_for("reloads").await;
+    drop(held.remove(0));
+    assert_eq!(slot.semaphore.available_permits(), 0);
+    drop(held);
+    assert_eq!(slot.semaphore.available_permits(), 3);
+
+    let first = slot.try_acquire().expect("first permit");
+    let second = slot.try_acquire().expect("second permit");
+    let third = slot.try_acquire().expect("third permit");
+    assert!(slot.try_acquire().is_err());
+    drop((first, second, third));
 }
