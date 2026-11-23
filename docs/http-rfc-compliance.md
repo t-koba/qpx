@@ -91,7 +91,7 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | RFC | Classification | Implemented contract | Evidence |
 |---|---|---|---|
 | 5789 | native | PATCH semantics, invalidation, `Accept-Patch` | `protocol::method`, RFC contract suite |
-| 10008 | native | safe/idempotent QUERY, `Accept-Query`, content-derived cache key; never 0-RTT | `accept_query` tests, `query_cache_key_includes_content_metadata` |
+| 10008 | native | safe/idempotent QUERY, `Accept-Query`, content-derived cache key; never 0-RTT | `accept_query` tests, `query_cache_digest_includes_content_and_representation_metadata`, `query_content_digest_selects_variant_without_fragmenting_primary_index`, `query_is_safe_idempotent_and_content_keyed` |
 | 6585 | native | 428 policy, 429, 431, CAPPORT-only 511 | qpxd protocol/config tests and RFC contract suite |
 | 7725 | native | policy-generated 451 with legal-information `Link` | API metadata and local-response contract tests |
 | 8297 | native | generation and relay of 103 across supported HTTP paths; raw reverse HTTP/1 emits hints before waiting for the final head | informational-response RFC scenarios and downstream/origin handshake regression |
