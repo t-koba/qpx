@@ -159,10 +159,16 @@ where
         None
     };
     let mut follow_boundary: Option<FollowBoundary> = None;
+    let mut pending_live = None;
     if matches!(mode, StreamMode::History | StreamMode::Follow) {
         let snapshot = hub.history_snapshot().await;
+        let max_seq = snapshot.entries.last().map(|entry| entry.seq);
         let handoff_blocks = if matches!(mode, StreamMode::Follow) {
-            let queued = live_rx.as_mut().map(drain_live_handoff).unwrap_or_default();
+            let (queued, pending) = live_rx
+                .as_mut()
+                .map(|rx| drain_live_handoff(rx, Some(max_seq.unwrap_or(0)), || {}))
+                .unwrap_or_default();
+            pending_live = pending;
             follow_handoff_blocks(&snapshot, queued)
         } else {
             snapshot.blocks()
@@ -176,21 +182,24 @@ where
     }
     if let Some(mut rx) = live_rx {
         loop {
-            match rx.recv().await {
-                Ok(block) => {
-                    let clear_boundary = match &follow_boundary {
-                        Some(boundary) if boundary.is_already_sent(block.seq) => continue,
-                        Some(boundary) if boundary.is_past(block.seq) => true,
-                        _ => false,
-                    };
-                    if clear_boundary {
-                        follow_boundary = None;
-                    }
-                    write_stream_block(&mut writer, &block.bytes).await?;
+            let block = if let Some(block) = pending_live.take() {
+                block
+            } else {
+                match rx.recv().await {
+                    Ok(block) => block,
+                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(broadcast::error::RecvError::Closed) => break,
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                Err(broadcast::error::RecvError::Closed) => break,
+            };
+            let clear_boundary = match &follow_boundary {
+                Some(boundary) if boundary.is_already_sent(block.seq) => continue,
+                Some(boundary) if boundary.is_past(block.seq) => true,
+                _ => false,
+            };
+            if clear_boundary {
+                follow_boundary = None;
             }
+            write_stream_block(&mut writer, &block.bytes).await?;
         }
     }
     Ok(())
@@ -288,20 +297,33 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 }
 
 /// Drains the buffered live handoff without waiting for new publications.
-fn drain_live_handoff(rx: &mut broadcast::Receiver<SequencedBlock>) -> Vec<SequencedBlock> {
+fn drain_live_handoff(
+    rx: &mut broadcast::Receiver<SequencedBlock>,
+    max_seq: Option<u64>,
+    mut before_recv: impl FnMut(),
+) -> (Vec<SequencedBlock>, Option<SequencedBlock>) {
     use broadcast::error::TryRecvError;
 
     let mut queued = Vec::new();
     loop {
+        before_recv();
         match rx.try_recv() {
-            Ok(block) => queued.push(block),
+            Ok(block) => {
+                // Publications made after the history snapshot belong to the
+                // live stream. Keep the first one so the caller can emit it
+                // after the handoff instead of dropping it from the channel.
+                if max_seq.is_some_and(|max| block.seq > max) {
+                    return (queued, Some(block));
+                }
+                queued.push(block);
+            }
             // Lagged advances the cursor to the oldest still-buffered block;
             // those survivors belong in the ordered initial handoff too.
             Err(TryRecvError::Lagged(_)) => continue,
             Err(TryRecvError::Empty | TryRecvError::Closed) => break,
         }
     }
-    queued
+    (queued, None)
 }
 
 /// Builds the ordered first batch for FOLLOW: live blocks older than the
@@ -329,6 +351,42 @@ fn ip_allowed(peer: IpAddr, allow: &[IpCidr]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn follow_handoff_drain_does_not_collect_new_publications() {
+        let (tx, mut rx) = broadcast::channel::<SequencedBlock>(32);
+        for seq in 0..3 {
+            tx.send(SequencedBlock {
+                seq,
+                bytes: bytes::Bytes::from_static(b"initial"),
+            })
+            .expect("initial publication");
+        }
+        let published = std::sync::atomic::AtomicUsize::new(0);
+        let publisher = tx.clone();
+        let (queued, pending) = drain_live_handoff(&mut rx, Some(2), || {
+            let offset = published.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if offset < 4 {
+                publisher
+                    .send(SequencedBlock {
+                        seq: 3 + offset as u64,
+                        bytes: bytes::Bytes::from_static(b"during handoff"),
+                    })
+                    .expect("publication during handoff");
+            }
+        });
+
+        assert_eq!(
+            queued.iter().map(|block| block.seq).collect::<Vec<_>>(),
+            vec![0, 1, 2],
+            "only the pre-existing live buffer belongs in the initial handoff"
+        );
+        assert_eq!(
+            pending.map(|block| block.seq),
+            Some(3),
+            "the boundary-crossing publication must stay in the live stream"
+        );
+    }
 
     #[test]
     fn follow_handoff_blocks_preserves_evicted_block_order() {
@@ -484,7 +542,7 @@ mod tests {
         }
 
         let snapshot = HistorySnapshot {
-            entries: vec![0, 2]
+            entries: vec![0, 2, 3, 4]
                 .into_iter()
                 .map(|seq| SequencedBlock {
                     seq,
@@ -492,7 +550,11 @@ mod tests {
                 })
                 .collect(),
         };
-        let queued = drain_live_handoff(&mut rx);
+        let (queued, pending) = drain_live_handoff(&mut rx, Some(4), || {});
+        assert!(
+            pending.is_none(),
+            "lagged survivors are inside the snapshot"
+        );
         let handoff = follow_handoff_blocks(&snapshot, queued);
 
         let seqs: Vec<u64> = handoff.iter().map(|bytes| bytes[0] as u64).collect();
