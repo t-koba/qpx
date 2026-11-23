@@ -112,7 +112,7 @@ cargo build --release -p qpxd --no-default-features
 - `init <reverse-basic|forward-egress|transparent-linux|ipc-gateway|trusted-identity-decision-service>`
 - `schema --format <json|yaml>`
 - `explain --config <file>... [--format <text|json>] [--edge <name>] [--route <name>]`
-- `match --config <file>... --edge <name> [--src-ip <ip>] [--dst-port <port>] [--sni <name>] [--host <name>] [--method <method>] [--path <path>]`
+- `match --config <file>... --edge <name> [--src-ip <ip>] [--dst-port <port>] [--sni <name>] [--tls] [--host <name>] [--method <method>] [--path <path>]`
 - `gen-ca --state-dir <dir>` when built with `tls-rustls`
 - `upgrade --pid <pid>`
 
