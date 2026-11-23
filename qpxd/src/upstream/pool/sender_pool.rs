@@ -32,7 +32,7 @@ pub(crate) struct UpstreamProxySlotPermit {
 }
 
 impl UpstreamProxySlotPermit {
-    fn release(&mut self, after_release: impl FnOnce()) {
+    fn release(&mut self, before_unlock: impl FnOnce()) {
         let Some(permit) = self.permit.take() else {
             return;
         };
@@ -48,8 +48,8 @@ impl UpstreamProxySlotPermit {
             // a permit that is about to become available again.
             drop(permit);
         }
+        before_unlock();
         drop(limiter);
-        after_release();
     }
 
     #[cfg(test)]
@@ -197,8 +197,20 @@ mod shrink_tests {
         let slot = Arc::new(UpstreamProxySlot::new(2));
         let mut released = slot.try_acquire().expect("first permit");
         let still_active = slot.try_acquire().expect("second permit");
+        let observer = slot.clone();
 
-        released.release_with_hook(|| slot.reconcile_limit(1));
+        released.release_with_hook(|| {
+            assert!(
+                observer.limiter.try_lock().is_err(),
+                "limiter must stay locked until the released permit is visible"
+            );
+            assert_eq!(
+                observer.semaphore.available_permits(),
+                1,
+                "returned permit must be visible before reconciliation can observe the slot"
+            );
+        });
+        slot.reconcile_limit(1);
 
         assert_eq!(
             slot.semaphore.available_permits(),
