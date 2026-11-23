@@ -305,6 +305,9 @@ fn drain_live_handoff(
     use broadcast::error::TryRecvError;
 
     let mut queued = Vec::new();
+    // One extra attempt lets the loop observe the first post-snapshot block
+    // after the whole in-range sequence space has been consumed.
+    let mut remaining = max_seq.map(|max| max.saturating_add(2)).unwrap_or(2);
     loop {
         before_recv();
         match rx.try_recv() {
@@ -316,10 +319,21 @@ fn drain_live_handoff(
                     return (queued, Some(block));
                 }
                 queued.push(block);
+                remaining = remaining.saturating_sub(1);
+                if remaining == 0 {
+                    break;
+                }
             }
             // Lagged advances the cursor to the oldest still-buffered block;
-            // those survivors belong in the ordered initial handoff too.
-            Err(TryRecvError::Lagged(_)) => continue,
+            // those survivors belong in the ordered initial handoff too. A
+            // lag still consumes budget: a busy publisher must not keep the
+            // handoff from reaching replay by making every receive lag.
+            Err(TryRecvError::Lagged(_)) => {
+                remaining = remaining.saturating_sub(1);
+                if remaining == 0 {
+                    break;
+                }
+            }
             Err(TryRecvError::Empty | TryRecvError::Closed) => break,
         }
     }
@@ -386,6 +400,36 @@ mod tests {
             Some(3),
             "the boundary-crossing publication must stay in the live stream"
         );
+    }
+
+    #[test]
+    fn follow_handoff_lag_exhausts_the_snapshot_budget() {
+        let (tx, mut rx) = broadcast::channel::<SequencedBlock>(2);
+        let publisher = tx.clone();
+        let calls = std::cell::Cell::new(0u64);
+
+        let (queued, pending) = drain_live_handoff(&mut rx, Some(1), || {
+            let call = calls.get() + 1;
+            calls.set(call);
+            if call <= 8 {
+                for offset in 0..3 {
+                    publisher
+                        .send(SequencedBlock {
+                            seq: 10 + (call - 1) * 3 + offset,
+                            bytes: bytes::Bytes::from_static(b"during handoff"),
+                        })
+                        .expect("publication during handoff");
+                }
+            }
+        });
+
+        assert!(
+            calls.get() <= 3,
+            "repeated lag must exhaust the fixed handoff budget, got {} receives",
+            calls.get()
+        );
+        assert!(queued.is_empty(), "no in-range block survived the lag");
+        assert_eq!(pending.map(|block| block.seq), None);
     }
 
     #[test]
