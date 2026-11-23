@@ -4,6 +4,9 @@ use crate::runtime;
 
 pub(crate) struct MatchPlanRequest<'a> {
     pub(crate) edge: &'a str,
+    /// Whether the modeled connection carries a TLS ClientHello. SNI is
+    /// optional in a ClientHello, so this is distinct from `ctx.sni`.
+    pub(crate) tls: bool,
     pub(crate) ctx: qpx_core::rules::RuleMatchContext<'a>,
 }
 
@@ -15,7 +18,11 @@ pub(crate) fn render_match_plan(
     for compiled_edge in plan.edges.iter() {
         match compiled_edge {
             runtime::CompiledEdge::Reverse(reverse) if reverse.name.as_ref() == request.edge => {
-                if request.ctx.sni.is_some() {
+                // The runtime evaluates passthrough whenever a ClientHello is
+                // present; SNI is optional inside one. Model that with the
+                // explicit transport flag, keeping SNI presence as an implicit
+                // signal for backward compatibility.
+                if request.tls || request.ctx.sni.is_some() {
                     for route in reverse.tls_passthrough_routes.iter() {
                         if route.matches(&request.ctx) {
                             output.push_str(&format!("edge: {}\n", reverse.name));

@@ -48,6 +48,9 @@ pub(crate) enum Command {
         dst_port: Option<u16>,
         #[arg(long)]
         sni: Option<String>,
+        /// Model a TLS ClientHello (with or without SNI) when choosing a route.
+        #[arg(long)]
+        tls: bool,
         #[arg(long)]
         host: Option<String>,
         #[arg(long)]
@@ -92,6 +95,7 @@ pub(crate) struct MatchConfigRequest {
     pub(crate) src_ip: Option<IpAddr>,
     pub(crate) dst_port: Option<u16>,
     pub(crate) sni: Option<String>,
+    pub(crate) tls: bool,
     pub(crate) host: Option<String>,
     pub(crate) method: Option<String>,
     pub(crate) path: Option<String>,

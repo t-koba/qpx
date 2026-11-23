@@ -16,7 +16,16 @@ fn render_test_match_plan(
     edge: &str,
     ctx: qpx_core::rules::RuleMatchContext<'_>,
 ) -> Result<String> {
-    render_match_plan(plan, crate::cli_render::MatchPlanRequest { edge, ctx })
+    render_test_match_plan_with_tls(plan, edge, ctx, false)
+}
+
+fn render_test_match_plan_with_tls(
+    plan: &RuntimePlan,
+    edge: &str,
+    ctx: qpx_core::rules::RuleMatchContext<'_>,
+    tls: bool,
+) -> Result<String> {
+    render_match_plan(plan, crate::cli_render::MatchPlanRequest { edge, ctx, tls })
 }
 
 #[test]
@@ -428,6 +437,54 @@ fn match_renderer_keeps_plain_http_on_http_route_without_sni() {
     assert!(
         !output.contains("route: tls_passthrough[0]\n"),
         "passthrough must not shadow plain HTTP without SNI:\n{output}"
+    );
+}
+
+#[test]
+#[cfg(feature = "tls-rustls")]
+fn match_renderer_uses_passthrough_for_tls_without_sni() {
+    let state = runtime_state_from_yaml(
+        "tls-no-sni",
+        r#"edges:
+- kind: reverse
+  name: tls-edge
+  listen: 127.0.0.1:0
+  tls:
+    certificates:
+    - sni: fallback.example.com
+      cert: /tmp/qpx-test.crt
+      key: /tmp/qpx-test.key
+  routes:
+  - name: app
+    match:
+      host: [app.example.com]
+    target:
+      type: upstream
+      upstreams: [http://127.0.0.1:8080]
+  tls_passthrough_routes:
+  - match: {}
+    upstreams: [127.0.0.1:8443]
+"#,
+    );
+
+    let output = render_test_match_plan_with_tls(
+        state.plan.as_ref(),
+        "tls-edge",
+        qpx_core::rules::RuleMatchContext {
+            host: Some("app.example.com"),
+            ..Default::default()
+        },
+        true,
+    )
+    .expect("match render");
+
+    assert!(
+        output.contains("route: tls_passthrough[0]\n"),
+        "a TLS ClientHello without SNI must select passthrough:\n{output}"
+    );
+    assert!(
+        !output.contains("route: app\n"),
+        "the HTTP route must not shadow a TLS ClientHello:\n{output}"
     );
 }
 

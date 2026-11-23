@@ -147,6 +147,7 @@ pub(crate) fn match_config(
             &plan,
             crate::cli_render::MatchPlanRequest {
                 edge: &request.edge,
+                tls: request.tls,
                 ctx: qpx_core::rules::RuleMatchContext {
                     src_ip: request.src_ip,
                     dst_port: request.dst_port,
