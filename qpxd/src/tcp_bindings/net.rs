@@ -158,6 +158,7 @@ fn default_parallelism() -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
     use super::*;
 
     #[cfg(unix)]
