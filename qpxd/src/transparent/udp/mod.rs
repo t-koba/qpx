@@ -358,6 +358,7 @@ async fn restore_transparent_udp_sessions(
             socket,
             idle_timeout,
             run_started,
+            None,
         );
         session.relay_task.attach(relay_task);
         next_session_id = next_session_id.max(restored.session_id.wrapping_add(1));
@@ -365,6 +366,7 @@ async fn restore_transparent_udp_sessions(
     Ok(next_session_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_transparent_udp_relay(
     listener_socket: Arc<UdpSocket>,
     sessions: Arc<SharedSessionIndex>,
@@ -373,6 +375,7 @@ fn spawn_transparent_udp_relay(
     udp_recv: Arc<UdpSocket>,
     idle_timeout: Duration,
     run_started: Instant,
+    mut timeout_observer: Option<tokio::sync::oneshot::Sender<bool>>,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut recv_buf = vec![0u8; 65535];
@@ -394,9 +397,12 @@ fn spawn_transparent_udp_relay(
                         // listener's expiry sweep.
                         Err(_) => {
                             let now_ms = run_started.elapsed().as_millis() as u64;
-                            if now_ms.saturating_sub(session.last_seen_ms())
-                                > idle_timeout.as_millis() as u64
-                            {
+                            let expired = now_ms.saturating_sub(session.last_seen_ms())
+                                > idle_timeout.as_millis() as u64;
+                            if let Some(observer) = timeout_observer.take() {
+                                let _ = observer.send(expired);
+                            }
+                            if expired {
                                 break;
                             }
                             continue;

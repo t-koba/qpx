@@ -413,6 +413,7 @@ async fn upstream_receive_timeout_keeps_recently_active_client_session() {
     sessions.insert(7, session.clone());
 
     let idle_timeout = Duration::from_millis(500);
+    let (timeout_tx, timeout_rx) = tokio::sync::oneshot::channel();
     let relay = spawn_transparent_udp_relay(
         listener_socket,
         sessions.clone(),
@@ -421,6 +422,7 @@ async fn upstream_receive_timeout_keeps_recently_active_client_session() {
         upstream_socket,
         idle_timeout,
         run_started,
+        Some(timeout_tx),
     );
 
     // Let the relay register its first recv timeout at virtual time zero
@@ -428,11 +430,13 @@ async fn upstream_receive_timeout_keeps_recently_active_client_session() {
     tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_millis(200)).await;
     session.mark_client_seen(run_started.elapsed().as_millis() as u64);
-    // Cross the relay's first 500 ms receive timeout. Virtual time fires the
-    // timer deterministically; yielding lets the relay handle it before the
-    // assertion instead of racing with the test task.
+    // Cross the relay's first 500 ms receive timeout. The observer is the
+    // barrier: its notification proves the relay reached the timeout branch
+    // before the assertion runs.
     tokio::time::advance(Duration::from_millis(301)).await;
-    tokio::task::yield_now().await;
+    let _observed_decision = tokio::time::timeout(Duration::from_secs(5), timeout_rx)
+        .await
+        .expect("relay timeout observation");
 
     assert!(sessions.session(7).is_some());
     let _ = session.close_tx.send(true);
