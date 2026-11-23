@@ -2436,10 +2436,14 @@ mod tests {
             .map(Request::from_http)
             .unwrap();
         assert_eq!(service.handle(mkcol, &context).unwrap().status(), 201);
-        for (name, body) in [
-            ("review#draft.txt", "hash"),
-            ("question?draft.txt", "question"),
-        ] {
+        // `?` is a reserved filename character on Windows, so that case is only
+        // exercised where the filesystem permits it.
+        let cases = [
+            ("review#draft.txt", "hash", "review%23draft.txt"),
+            #[cfg(not(windows))]
+            ("question?draft.txt", "question", "question%3Fdraft.txt"),
+        ];
+        for (name, body, _) in cases {
             let resource =
                 ResourceId::from_literal(&format!("/docs/{name}")).expect("literal name");
             assert!(service.store.put(&resource, body.as_bytes(), None).unwrap());
@@ -2454,16 +2458,18 @@ mod tests {
             .unwrap();
         let response = service.handle(propfind, &context).unwrap();
         let body = String::from_utf8(response.into_head_and_body().1).unwrap();
-        assert!(body.contains("<D:href>/docs/review%23draft.txt</D:href>"));
-        assert!(body.contains("<D:href>/docs/question%3Fdraft.txt</D:href>"));
+        for (_, _, expected_href) in cases {
+            assert!(
+                body.contains(&format!("<D:href>/docs/{expected_href}</D:href>")),
+                "unexpected multistatus: {body}"
+            );
+        }
 
-        for (href, body) in [
-            ("/docs/review%23draft.txt", "hash"),
-            ("/docs/question%3Fdraft.txt", "question"),
-        ] {
+        for (_, body, expected_href) in cases {
+            let href = format!("/docs/{expected_href}");
             let get = http::Request::builder()
                 .method("GET")
-                .uri(href)
+                .uri(href.as_str())
                 .body(Vec::new())
                 .map(Request::from_http)
                 .unwrap();
