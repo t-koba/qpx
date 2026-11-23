@@ -31,8 +31,8 @@ pub(crate) struct UpstreamProxySlotPermit {
     permit: Option<OwnedSemaphorePermit>,
 }
 
-impl Drop for UpstreamProxySlotPermit {
-    fn drop(&mut self) {
+impl UpstreamProxySlotPermit {
+    fn release(&mut self, after_release: impl FnOnce()) {
         let Some(permit) = self.permit.take() else {
             return;
         };
@@ -43,9 +43,24 @@ impl Drop for UpstreamProxySlotPermit {
             // mistake this permit for one still available to hand out.
             permit.forget();
         } else {
-            drop(limiter);
+            // Return while the limiter is locked too: a reconcile that observes
+            // the permit before it is handed back would record shrink debt for
+            // a permit that is about to become available again.
             drop(permit);
         }
+        drop(limiter);
+        after_release();
+    }
+
+    #[cfg(test)]
+    fn release_with_hook(&mut self, hook: impl FnOnce()) {
+        self.release(hook);
+    }
+}
+
+impl Drop for UpstreamProxySlotPermit {
+    fn drop(&mut self) {
+        self.release(|| {});
     }
 }
 
@@ -176,6 +191,26 @@ impl UpstreamProxyPool {
 mod shrink_tests {
     use super::*;
     use std::sync::Mutex;
+
+    #[test]
+    fn release_racing_shrink_cannot_readmit_above_new_cap() {
+        let slot = Arc::new(UpstreamProxySlot::new(2));
+        let mut released = slot.try_acquire().expect("first permit");
+        let still_active = slot.try_acquire().expect("second permit");
+
+        released.release_with_hook(|| slot.reconcile_limit(1));
+
+        assert_eq!(
+            slot.semaphore.available_permits(),
+            0,
+            "shrink must consume the released permit rather than leaving it available"
+        );
+        assert!(
+            slot.try_acquire().is_err(),
+            "the active request must keep the new cap full"
+        );
+        drop(still_active);
+    }
 
     #[test]
     fn shrink_accounts_for_permits_stolen_after_availability_read() {
