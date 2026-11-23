@@ -7,3 +7,5 @@ controllen = "controllen"
 wrk = "wrk"
 # Windows SDDL SID abbreviation (Built-in Administrators).
 ba = "ba"
+# UTF-8 cafe test fixtures split across byte boundaries.
+caf = "caf"
