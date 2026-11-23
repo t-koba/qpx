@@ -425,19 +425,23 @@ async fn upstream_receive_timeout_keeps_recently_active_client_session() {
         Some(timeout_tx),
     );
 
-    // Let the relay register its first recv timeout at virtual time zero
-    // before advancing; otherwise its deadline starts from the advanced time.
-    tokio::task::yield_now().await;
-    tokio::time::advance(Duration::from_millis(200)).await;
+    // Auto-advance moves the paused clock only while every task is parked, so
+    // sleeping lets the spawned relay poll its select! and arm its first 500 ms
+    // receive deadline at virtual time zero before the clock moves. A bare
+    // yield_now() cannot guarantee the relay runs before the jump.
+    tokio::time::sleep(Duration::from_millis(200)).await;
     session.mark_client_seen(run_started.elapsed().as_millis() as u64);
-    // Cross the relay's first 500 ms receive timeout. The observer is the
-    // barrier: its notification proves the relay reached the timeout branch
-    // before the assertion runs.
-    tokio::time::advance(Duration::from_millis(301)).await;
-    let _observed_decision = tokio::time::timeout(Duration::from_secs(5), timeout_rx)
+    // Waiting on the observer drives auto-advance to the relay's first 500 ms
+    // timeout. Its value is the relay's decision and its delivery proves the
+    // timeout branch ran before we inspect the index.
+    let observed_decision = tokio::time::timeout(Duration::from_secs(5), timeout_rx)
         .await
-        .expect("relay timeout observation");
-
+        .expect("relay timeout observation")
+        .expect("relay timeout observer");
+    assert!(
+        !observed_decision,
+        "recent client activity must keep the session alive"
+    );
     assert!(sessions.session(7).is_some());
     let _ = session.close_tx.send(true);
     relay.await.expect("relay task");
