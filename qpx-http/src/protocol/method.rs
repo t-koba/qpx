@@ -76,18 +76,35 @@ fn is_valid_if_match(value: &[u8]) -> bool {
     if value.is_empty() {
         return false;
     }
-    value.split(|byte| *byte == b',').all(|tag| {
-        let tag = trim_ows(tag);
-        let Some(inner) = tag
-            .strip_prefix(b"\"")
-            .and_then(|tag| tag.strip_suffix(b"\""))
-        else {
-            return false;
-        };
-        inner
-            .iter()
-            .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte) || *byte >= 0x80)
-    })
+    // A comma is a list separator only between entity tags; etagc includes
+    // 0x2C, so it may appear inside a quoted opaque tag (RFC 9110 8.8.3).
+    let mut start = 0;
+    let mut in_quotes = false;
+    for (index, byte) in value.iter().enumerate() {
+        match byte {
+            b'"' => in_quotes = !in_quotes,
+            b',' if !in_quotes => {
+                if !is_valid_entity_tag(trim_ows(&value[start..index])) {
+                    return false;
+                }
+                start = index + 1;
+            }
+            _ => {}
+        }
+    }
+    !in_quotes && is_valid_entity_tag(trim_ows(&value[start..]))
+}
+
+fn is_valid_entity_tag(tag: &[u8]) -> bool {
+    let Some(inner) = tag
+        .strip_prefix(b"\"")
+        .and_then(|tag| tag.strip_suffix(b"\""))
+    else {
+        return false;
+    };
+    inner
+        .iter()
+        .all(|byte| *byte == 0x21 || (0x23..=0x7e).contains(byte) || *byte >= 0x80)
 }
 
 fn has_valid_if_unmodified_since(headers: &Headers) -> bool {
@@ -187,6 +204,26 @@ mod tests {
         headers.insert(
             qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_MATCH).unwrap(),
             "W/\"v1\"".parse().unwrap(),
+        );
+        assert!(precondition_is_missing(&Method::PUT, &headers));
+    }
+
+    #[test]
+    fn quoted_if_match_tag_may_contain_a_comma() {
+        let mut headers = qpx_core::http_message::Headers::new();
+        headers.insert(
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_MATCH).unwrap(),
+            "\"a,b\"".parse().unwrap(),
+        );
+        assert!(!precondition_is_missing(&Method::PUT, &headers));
+    }
+
+    #[test]
+    fn unbalanced_quote_in_if_match_is_still_invalid() {
+        let mut headers = qpx_core::http_message::Headers::new();
+        headers.insert(
+            qpx_core::http_message::OrdinaryHeaderName::try_from(http::header::IF_MATCH).unwrap(),
+            "\"a,b".parse().unwrap(),
         );
         assert!(precondition_is_missing(&Method::PUT, &headers));
     }
