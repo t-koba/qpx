@@ -4,7 +4,7 @@
 //! ## HTTP/1 Hyper header-byte limit (mechanism vs policy)
 //!
 //! Hyper owns the wire mechanics (`Builder::max_header_size` for the H1 server
-//! and client builders, hyper 1.12.0); qpx owns configurability and defaults.
+//! and client builders); qpx owns configurability and defaults.
 //! The policy input is the existing `limits.header_bytes` guard knob
 //! (`qpx-core` `HttpGuardLimitsConfig`, validated `>= 1` when set). This module
 //! only derives the transport bound from it:
