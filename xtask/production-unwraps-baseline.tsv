@@ -10,7 +10,8 @@ qpx-http/src/body/spool.rs	handle_mut	expect	1
 qpx-http/src/client_cert.rs	client_cert_chain_name	expect	1
 qpx-http/src/client_cert.rs	client_cert_name	expect	1
 qpx-http/src/connect_ip.rs	decode_address	expect	1
-qpx-http/src/protocol/method.rs	precondition_is_missing	expect	2
+qpx-http/src/protocol/method.rs	has_valid_if_match	expect	1
+qpx-http/src/protocol/method.rs	has_valid_if_unmodified_since	expect	1
 qpx-http/src/protocol/semantics.rs	append_via_for_version	expect	1
 qpx-http/src/protocol/semantics.rs	connection_nominated_header_names	expect	1
 qpx-http/src/protocol/semantics.rs	parse_host_header	expect	1
@@ -50,11 +51,13 @@ qpxd-cache/src/lookup_ops.rs	ord	expect	1
 qpxd-cache/src/store.rs	ord	expect	1
 qpxd-cache/src/types/cached_headers.rs	ord	expect	1
 qpxd-cache/src/vary.rs	ord	expect	1
+qpxd/src/exporter/mod.rs	push_utf8_preview_chunks	expect	1
 qpxd/src/forward/h3/qpx/connect_upstream.rs	open_upstream_qpx_connect_udp_stream	expect	1
 qpxd/src/forward/h3/qpx/handler.rs	handle_http_request	expect	1
 qpxd/src/http/codec/h1.rs	finish_parsed_http1_request	expect	1
 qpxd/src/http/dispatch/cache.rs	buffer_query_for_cache_key	expect	1
 qpxd/src/http/modules/response_compression.rs	ord	expect	1
+qpxd/src/http/modules/response_compression/accept.rs	parse_quality	expect	1
 qpxd/src/http/modules/subrequest/mod.rs	run_built_request	expect	1
 qpxd/src/http/policy/guard.rs	evaluate_request_body_async	expect	1
 qpxd/src/http/policy/guard.rs	validate_invalid_framing	expect	2
@@ -81,6 +84,7 @@ qpxd/src/http/rpc/protocol.rs	request_content_type	expect	1
 qpxd/src/http/rpc/protocol.rs	request_rpc_protocol	expect	1
 qpxd/src/http3/listener.rs	handle_stream	expect	2
 qpxd/src/http3/listener.rs	parse_expect_continue	expect	1
+qpxd/src/http3/listener/scheduler.rs	run_priority_scheduler	expect	1
 qpxd/src/policy_context/bearer.rs	dpop_header_name	expect	1
 qpxd/src/policy_context/identity.rs	from_request_parts	expect	1
 qpxd/src/policy_context/identity.rs	strip_untrusted_identity_headers	expect	1
@@ -104,6 +108,8 @@ qpxd/src/reverse/transport/request_template.rs	request_may_have_body	expect	1
 qpxd/src/transparent/destination.rs	resolve_http_target	expect	1
 qpxd/src/upstream/connect.rs	build_upstream_connect_request	expect	3
 qpxd/src/upstream/http1.rs	ensure_host_header	expect	1
+qpxd/src/upstream/origin/dns.rs	query_raw_dns_with	expect	1
+qpxd/src/upstream/origin/http_backend/backend_h2.rs	send_h2_request_with_sender	expect	1
 qpxd/src/upstream/origin/http_backend/h3_pool/alt_svc.rs	request_can_use_alt_svc_h3	expect	1
 qpxd/src/upstream/origin/http_backend/mod.rs	prepare_origin_request_head	expect	1
 qpxd/src/upstream/origin/http_backend/mod.rs	prepare_proxy_http1_request	expect	1
