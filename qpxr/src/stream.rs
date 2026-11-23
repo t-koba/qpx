@@ -1,5 +1,7 @@
 use crate::TlsAcceptor;
-use crate::hub::{ExporterHub, FollowBoundary, HistorySnapshot, SequencedBlock};
+use crate::hub::{
+    ExporterHub, FollowBoundary, HistorySnapshot, LIVE_CHANNEL_CAPACITY, SequencedBlock,
+};
 use anyhow::{Result, anyhow};
 use cidr::IpCidr;
 use qpx_core::exporter::STREAM_PREFACE_LINE;
@@ -166,7 +168,7 @@ where
         let handoff_blocks = if matches!(mode, StreamMode::Follow) {
             let (queued, pending) = live_rx
                 .as_mut()
-                .map(|rx| drain_live_handoff(rx, Some(max_seq), || {}))
+                .map(|rx| drain_live_handoff(rx, Some(max_seq), LIVE_CHANNEL_CAPACITY, || {}))
                 .unwrap_or_default();
             pending_live = pending;
             follow_handoff_blocks(&snapshot, queued)
@@ -300,14 +302,16 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
 fn drain_live_handoff(
     rx: &mut broadcast::Receiver<SequencedBlock>,
     max_seq: Option<u64>,
+    budget: usize,
     mut before_recv: impl FnMut(),
 ) -> (Vec<SequencedBlock>, Option<SequencedBlock>) {
     use broadcast::error::TryRecvError;
 
     let mut queued = Vec::new();
-    // One extra attempt lets the loop observe the first post-snapshot block
-    // after the whole in-range sequence space has been consumed.
-    let mut remaining = max_seq.map(|max| max.saturating_add(2)).unwrap_or(2);
+    // One extra attempt lets the loop observe the first post-snapshot block.
+    // The budget is the ring capacity, not the lifetime publication sequence:
+    // no more than that many blocks can be buffered for the initial merge.
+    let mut remaining = budget.saturating_add(1);
     loop {
         before_recv();
         match rx.try_recv() {
@@ -378,7 +382,7 @@ mod tests {
         }
         let published = std::sync::atomic::AtomicUsize::new(0);
         let publisher = tx.clone();
-        let (queued, pending) = drain_live_handoff(&mut rx, Some(2), || {
+        let (queued, pending) = drain_live_handoff(&mut rx, Some(2), 32, || {
             let offset = published.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if offset < 4 {
                 publisher
@@ -408,7 +412,7 @@ mod tests {
         let publisher = tx.clone();
         let calls = std::cell::Cell::new(0u64);
 
-        let (queued, pending) = drain_live_handoff(&mut rx, Some(1), || {
+        let (queued, pending) = drain_live_handoff(&mut rx, Some(1), 2, || {
             let call = calls.get() + 1;
             calls.set(call);
             if call <= 8 {
@@ -433,6 +437,36 @@ mod tests {
     }
 
     #[test]
+    fn follow_handoff_lag_budget_is_independent_of_sequence_number() {
+        let (tx, mut rx) = broadcast::channel::<SequencedBlock>(2);
+        let capacity = 2usize;
+        let publisher = tx.clone();
+        let calls = std::cell::Cell::new(0u64);
+        let max_seq = 20_000u64;
+
+        let (_queued, _pending) = drain_live_handoff(&mut rx, Some(max_seq), capacity, || {
+            let call = calls.get() + 1;
+            calls.set(call);
+            if call <= 8 {
+                for offset in 0..3 {
+                    publisher
+                        .send(SequencedBlock {
+                            seq: max_seq - 3 + (call - 1) * 3 + offset,
+                            bytes: bytes::Bytes::from_static(b"during handoff"),
+                        })
+                        .expect("publication during handoff");
+                }
+            }
+        });
+
+        assert!(
+            calls.get() <= capacity as u64 + 1,
+            "handoff must be bounded by ring capacity, not lifetime sequence: {} receives",
+            calls.get()
+        );
+    }
+
+    #[test]
     fn follow_handoff_merges_unretained_pre_snapshot_blocks() {
         let (tx, mut rx) = broadcast::channel::<SequencedBlock>(16);
         for (seq, payload) in [(41, b"A"), (42, b"B"), (43, b"C")] {
@@ -447,7 +481,8 @@ mod tests {
             published_seq: 42,
         };
 
-        let (queued, pending) = drain_live_handoff(&mut rx, Some(snapshot.published_seq), || {});
+        let (queued, pending) =
+            drain_live_handoff(&mut rx, Some(snapshot.published_seq), 16, || {});
         assert_eq!(
             queued.iter().map(|block| block.seq).collect::<Vec<_>>(),
             vec![41, 42],
@@ -633,7 +668,7 @@ mod tests {
                 })
                 .collect(),
         };
-        let (queued, pending) = drain_live_handoff(&mut rx, Some(4), || {});
+        let (queued, pending) = drain_live_handoff(&mut rx, Some(4), 16, || {});
         assert!(
             pending.is_none(),
             "lagged survivors are inside the snapshot"

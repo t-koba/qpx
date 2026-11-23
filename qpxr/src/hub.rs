@@ -43,6 +43,10 @@ struct HistoryItem {
     bytes: Bytes,
 }
 
+/// Capacity of the live broadcast ring. It also bounds FOLLOW's initial
+/// handoff work, independent of the lifetime publication sequence.
+pub(super) const LIVE_CHANNEL_CAPACITY: usize = 4096;
+
 /// A live publication tagged with its history position so FOLLOW can skip
 /// the overlap between its pre-read subscription and its snapshot.
 #[derive(Clone, Debug)]
@@ -152,7 +156,7 @@ impl ExporterHub {
             }
             None => None,
         };
-        let (live_tx, _) = broadcast::channel::<SequencedBlock>(4096);
+        let (live_tx, _) = broadcast::channel::<SequencedBlock>(LIVE_CHANNEL_CAPACITY);
         Ok(Self {
             sequences: Arc::new(Mutex::new(SequencesState {
                 sequences: HashMap::new(),
