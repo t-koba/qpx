@@ -15,10 +15,9 @@ use anyhow::{Result, anyhow};
 use qpx_core::config::ActionKind;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::time::{Duration, timeout};
+use tokio::time::{Duration, Instant, timeout};
 
 mod rule_eval;
 

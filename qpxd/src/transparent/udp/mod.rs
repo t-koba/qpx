@@ -12,10 +12,9 @@ use anyhow::{Context, Result, anyhow};
 use qpx_core::config::IngressEdgeConfig;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
 use tokio::net::UdpSocket;
 use tokio::sync::watch;
-use tokio::time::{Duration, MissedTickBehavior, timeout};
+use tokio::time::{Duration, Instant, MissedTickBehavior, timeout};
 use tracing::{info, warn};
 
 mod dispatch;
@@ -124,7 +123,7 @@ pub(super) async fn run_transparent_udp_listener(
                 }
             }
             recv = recv_transparent_datagram(socket.as_ref(), &mut buf) => {
-                let started = Instant::now();
+                let started = std::time::Instant::now();
                 let (n, client_addr, original_target) = recv?;
                 let packet = &buf[..n];
                 let target_key = original_target

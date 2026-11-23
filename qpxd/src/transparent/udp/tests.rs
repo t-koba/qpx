@@ -387,7 +387,7 @@ async fn transparent_session_index_maintenance_paths() {
     assert!(index.drain_all().is_empty());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn upstream_receive_timeout_keeps_recently_active_client_session() {
     let listener_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("listener"));
     let upstream_socket = Arc::new(UdpSocket::bind("127.0.0.1:0").await.expect("upstream"));
@@ -423,9 +423,16 @@ async fn upstream_receive_timeout_keeps_recently_active_client_session() {
         run_started,
     );
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Let the relay register its first recv timeout at virtual time zero
+    // before advancing; otherwise its deadline starts from the advanced time.
+    tokio::task::yield_now().await;
+    tokio::time::advance(Duration::from_millis(200)).await;
     session.mark_client_seen(run_started.elapsed().as_millis() as u64);
-    tokio::time::sleep(Duration::from_millis(400)).await;
+    // Cross the relay's first 500 ms receive timeout. Virtual time fires the
+    // timer deterministically; yielding lets the relay handle it before the
+    // assertion instead of racing with the test task.
+    tokio::time::advance(Duration::from_millis(301)).await;
+    tokio::task::yield_now().await;
 
     assert!(sessions.session(7).is_some());
     let _ = session.close_tx.send(true);
