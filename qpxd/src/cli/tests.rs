@@ -343,6 +343,7 @@ fn match_renderer_uses_compiled_matchers() {
     assert!(missed.contains("route: <no match>"));
 }
 
+#[cfg(feature = "tls-rustls")]
 fn match_transport_precedence_state() -> RuntimeState {
     runtime_state_from_yaml(
         "transport-precedence",
