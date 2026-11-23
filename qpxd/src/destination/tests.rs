@@ -464,3 +464,79 @@ fn string_named_set_accepts_uppercase_regex_prefix() {
         "REGEX: must be recognized case-insensitively and match lowercased evidence"
     );
 }
+
+#[test]
+fn domain_named_set_regex_classifies_raw_host() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "category:domain-non-digit".to_string(),
+        kind: NamedSetKind::Domain,
+        values: vec![r"re:^api\D+\.example\.test$".to_string()],
+        file: None,
+    }];
+
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let policy = CompiledDestinationResolutionPolicy::default();
+    let matched = classifier.classify(
+        &DestinationInputs {
+            host: Some("apixyz.example.test"),
+            ..Default::default()
+        },
+        &policy,
+        false,
+    );
+    assert_eq!(matched.category.as_deref(), Some("domain-non-digit"));
+    assert_eq!(matched.category_source, Some("host"));
+    assert_eq!(matched.category_confidence, Some(100));
+
+    let rejected = classifier.classify(
+        &DestinationInputs {
+            host: Some("api123.example.test"),
+            ..Default::default()
+        },
+        &policy,
+        false,
+    );
+    assert_eq!(
+        rejected.category, None,
+        "a digit suffix must not be classified by the \\D class"
+    );
+}
+
+#[test]
+fn string_named_set_regex_classifies_raw_string_evidence() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "application:upper-token".to_string(),
+        kind: NamedSetKind::String,
+        values: vec![r"re:^[A-Z]{3}-\d{4}$".to_string()],
+        file: None,
+    }];
+
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let policy = CompiledDestinationResolutionPolicy::default();
+    let matched = classifier.classify(
+        &DestinationInputs {
+            cert_issuer: Some("ABC-1234"),
+            ..Default::default()
+        },
+        &policy,
+        false,
+    );
+    assert_eq!(matched.application.as_deref(), Some("upper-token"));
+    assert_eq!(matched.application_source, Some("cert_issuer"));
+    assert_eq!(matched.application_confidence, Some(76));
+
+    let rejected = classifier.classify(
+        &DestinationInputs {
+            cert_issuer: Some("AB1-1234"),
+            ..Default::default()
+        },
+        &policy,
+        false,
+    );
+    assert_eq!(
+        rejected.application, None,
+        "a digit in the token prefix must not match [A-Z]{{3}}"
+    );
+}
