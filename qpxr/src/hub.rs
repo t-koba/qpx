@@ -54,6 +54,9 @@ pub(super) struct SequencedBlock {
 /// A history read plus the boundary FOLLOW needs for exactly-once handoff.
 pub(super) struct HistorySnapshot {
     pub(super) entries: Vec<SequencedBlock>,
+    /// Last publication sequence observed while the history lock was held,
+    /// including blocks that history did not retain.
+    pub(super) published_seq: u64,
 }
 
 impl HistorySnapshot {
@@ -69,10 +72,9 @@ impl HistorySnapshot {
     /// cloned payload so an evicted capture is no longer pinned by this
     /// subscription.
     pub(super) fn into_boundary(self) -> FollowBoundary {
-        let max_seq = self.entries.last().map(|entry| entry.seq);
         FollowBoundary {
             seqs: self.entries.into_iter().map(|entry| entry.seq).collect(),
-            max_seq,
+            max_seq: Some(self.published_seq),
         }
     }
 }
@@ -249,7 +251,10 @@ impl ExporterHub {
                 bytes: item.bytes.clone(),
             })
             .collect();
-        HistorySnapshot { entries }
+        HistorySnapshot {
+            entries,
+            published_seq: state.next_seq.saturating_sub(1),
+        }
     }
 
     pub(super) fn gc_sequences_locked(&self, state: &mut SequencesState, now_unix_nanos: u64) {
@@ -755,15 +760,18 @@ mod follow_handoff_tests {
     fn snapshot_boundary_skips_nothing_when_empty() {
         let empty = HistorySnapshot {
             entries: Vec::new(),
+            published_seq: 0,
         }
         .into_boundary();
         assert!(!empty.is_already_sent(0));
-        assert!(empty.is_past(0));
+        assert!(!empty.is_past(0));
+        assert!(empty.is_past(1));
         let boundary = HistorySnapshot {
             entries: vec![SequencedBlock {
                 seq: 7,
                 bytes: Bytes::from_static(b"G"),
             }],
+            published_seq: 7,
         }
         .into_boundary();
         assert!(!boundary.is_already_sent(6));
@@ -800,6 +808,7 @@ mod follow_boundary_tests {
     fn follow_boundary_conversion_releases_payloads_and_keeps_sequences() {
         let drops = Arc::new(AtomicUsize::new(0));
         let snapshot = HistorySnapshot {
+            published_seq: 5,
             entries: [0u64, 2, 5]
                 .into_iter()
                 .map(|seq| SequencedBlock {

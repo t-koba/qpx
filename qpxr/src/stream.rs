@@ -162,11 +162,11 @@ where
     let mut pending_live = None;
     if matches!(mode, StreamMode::History | StreamMode::Follow) {
         let snapshot = hub.history_snapshot().await;
-        let max_seq = snapshot.entries.last().map(|entry| entry.seq);
+        let max_seq = snapshot.published_seq;
         let handoff_blocks = if matches!(mode, StreamMode::Follow) {
             let (queued, pending) = live_rx
                 .as_mut()
-                .map(|rx| drain_live_handoff(rx, Some(max_seq.unwrap_or(0)), || {}))
+                .map(|rx| drain_live_handoff(rx, Some(max_seq), || {}))
                 .unwrap_or_default();
             pending_live = pending;
             follow_handoff_blocks(&snapshot, queued)
@@ -433,8 +433,45 @@ mod tests {
     }
 
     #[test]
+    fn follow_handoff_merges_unretained_pre_snapshot_blocks() {
+        let (tx, mut rx) = broadcast::channel::<SequencedBlock>(16);
+        for (seq, payload) in [(41, b"A"), (42, b"B"), (43, b"C")] {
+            tx.send(SequencedBlock {
+                seq,
+                bytes: bytes::Bytes::from_static(payload),
+            })
+            .expect("publication");
+        }
+        let snapshot = HistorySnapshot {
+            entries: Vec::new(),
+            published_seq: 42,
+        };
+
+        let (queued, pending) = drain_live_handoff(&mut rx, Some(snapshot.published_seq), || {});
+        assert_eq!(
+            queued.iter().map(|block| block.seq).collect::<Vec<_>>(),
+            vec![41, 42],
+            "surviving pre-snapshot live blocks must be part of the handoff"
+        );
+        assert_eq!(pending.map(|block| block.seq), Some(43));
+        assert_eq!(
+            follow_handoff_blocks(&snapshot, queued),
+            vec![
+                bytes::Bytes::from_static(b"A"),
+                bytes::Bytes::from_static(b"B")
+            ]
+        );
+
+        let boundary = snapshot.into_boundary();
+        assert!(!boundary.is_already_sent(41));
+        assert!(!boundary.is_past(42));
+        assert!(boundary.is_past(43));
+    }
+
+    #[test]
     fn follow_handoff_blocks_preserves_evicted_block_order() {
         let snapshot = HistorySnapshot {
+            published_seq: 1,
             entries: vec![SequencedBlock {
                 seq: 1,
                 bytes: bytes::Bytes::from_static(b"B"),
@@ -464,6 +501,7 @@ mod tests {
     #[test]
     fn follow_handoff_blocks_keeps_queued_block_from_history_gap() {
         let snapshot = HistorySnapshot {
+            published_seq: 2,
             entries: vec![
                 SequencedBlock {
                     seq: 0,
@@ -586,6 +624,7 @@ mod tests {
         }
 
         let snapshot = HistorySnapshot {
+            published_seq: 4,
             entries: vec![0, 2, 3, 4]
                 .into_iter()
                 .map(|seq| SequencedBlock {
