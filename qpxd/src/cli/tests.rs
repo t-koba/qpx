@@ -343,61 +343,9 @@ fn match_renderer_uses_compiled_matchers() {
     assert!(missed.contains("route: <no match>"));
 }
 
-#[test]
-#[cfg(feature = "tls-rustls")]
-fn match_renderer_prefers_tls_passthrough_over_http_catch_all() {
-    let state = runtime_state_from_yaml(
-        "passthrough-priority",
-        r#"edges:
-- kind: reverse
-  name: tls-edge
-  listen: 127.0.0.1:0
-  tls:
-    certificates:
-    - sni: fallback.example.com
-      cert: /tmp/qpx-test.crt
-      key: /tmp/qpx-test.key
-  routes:
-  - name: fallback
-    match: {}
-    target:
-      type: upstream
-      upstreams: [http://127.0.0.1:8080]
-  tls_passthrough_routes:
-  - match:
-      dst_port: [443]
-      sni: [db.example.com]
-    upstreams: [127.0.0.1:8443]
-"#,
-    );
-
-    let output = render_test_match_plan(
-        state.plan.as_ref(),
-        "tls-edge",
-        qpx_core::rules::RuleMatchContext {
-            src_ip: Some("203.0.113.7".parse().expect("ip")),
-            dst_port: Some(443),
-            sni: Some("db.example.com"),
-            ..Default::default()
-        },
-    )
-    .expect("match render");
-
-    assert!(
-        output.contains("route: tls_passthrough[0]\n"),
-        "expected passthrough route, got:\n{output}"
-    );
-    assert!(
-        !output.contains("route: fallback\n"),
-        "HTTP catch-all must not shadow passthrough:\n{output}"
-    );
-}
-
-#[test]
-#[cfg(feature = "tls-rustls")]
-fn match_renderer_keeps_plain_http_on_http_route_without_sni() {
-    let state = runtime_state_from_yaml(
-        "plain-http-no-sni",
+fn match_transport_precedence_state() -> RuntimeState {
+    runtime_state_from_yaml(
+        "transport-precedence",
         r#"edges:
 - kind: reverse
   name: tls-edge
@@ -414,11 +362,53 @@ fn match_renderer_keeps_plain_http_on_http_route_without_sni() {
     target:
       type: upstream
       upstreams: [http://127.0.0.1:8080]
+  - name: fallback
+    match: {}
+    target:
+      type: upstream
+      upstreams: [http://127.0.0.1:8081]
   tls_passthrough_routes:
-  - match: {}
+  - match:
+      dst_port: [443]
+      sni: [db.example.com]
     upstreams: [127.0.0.1:8443]
+  - match: {}
+    upstreams: [127.0.0.1:8444]
 "#,
+    )
+}
+
+#[test]
+#[cfg(feature = "tls-rustls")]
+fn match_renderer_prefers_tls_passthrough_over_http_catch_all() {
+    let state = match_transport_precedence_state();
+
+    let output = render_test_match_plan(
+        state.plan.as_ref(),
+        "tls-edge",
+        qpx_core::rules::RuleMatchContext {
+            src_ip: Some("203.0.113.7".parse().expect("ip")),
+            dst_port: Some(443),
+            sni: Some("db.example.com"),
+            ..Default::default()
+        },
+    )
+    .expect("match render");
+
+    assert!(
+        output.contains("route: tls_passthrough[0]\n"),
+        "expected SNI-constrained passthrough route, got:\n{output}"
     );
+    assert!(
+        !output.contains("route: fallback\n"),
+        "HTTP catch-all must not shadow passthrough:\n{output}"
+    );
+}
+
+#[test]
+#[cfg(feature = "tls-rustls")]
+fn match_renderer_keeps_plain_http_on_http_route_without_sni() {
+    let state = match_transport_precedence_state();
 
     let output = render_test_match_plan(
         state.plan.as_ref(),
@@ -435,37 +425,15 @@ fn match_renderer_keeps_plain_http_on_http_route_without_sni() {
         "expected HTTP route, got:\n{output}"
     );
     assert!(
-        !output.contains("route: tls_passthrough[0]\n"),
-        "passthrough must not shadow plain HTTP without SNI:\n{output}"
+        !output.contains("route: tls_passthrough"),
+        "passthrough must not shadow plain HTTP without a ClientHello:\n{output}"
     );
 }
 
 #[test]
 #[cfg(feature = "tls-rustls")]
 fn match_renderer_uses_passthrough_for_tls_without_sni() {
-    let state = runtime_state_from_yaml(
-        "tls-no-sni",
-        r#"edges:
-- kind: reverse
-  name: tls-edge
-  listen: 127.0.0.1:0
-  tls:
-    certificates:
-    - sni: fallback.example.com
-      cert: /tmp/qpx-test.crt
-      key: /tmp/qpx-test.key
-  routes:
-  - name: app
-    match:
-      host: [app.example.com]
-    target:
-      type: upstream
-      upstreams: [http://127.0.0.1:8080]
-  tls_passthrough_routes:
-  - match: {}
-    upstreams: [127.0.0.1:8443]
-"#,
-    );
+    let state = match_transport_precedence_state();
 
     let output = render_test_match_plan_with_tls(
         state.plan.as_ref(),
@@ -479,8 +447,8 @@ fn match_renderer_uses_passthrough_for_tls_without_sni() {
     .expect("match render");
 
     assert!(
-        output.contains("route: tls_passthrough[0]\n"),
-        "a TLS ClientHello without SNI must select passthrough:\n{output}"
+        output.contains("route: tls_passthrough[1]\n"),
+        "a TLS ClientHello without SNI must select the catch-all passthrough:\n{output}"
     );
     assert!(
         !output.contains("route: app\n"),
