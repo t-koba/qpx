@@ -146,8 +146,10 @@ fn regex_skips_nontextual_first_content_length_and_collapses_on_no_match() {
     headers.append_content_length_value(HeaderValue::from_static("5"));
     assert!(control.apply_request_owned(&mut headers).is_empty());
     let mut expected = Headers::new();
-    expected.set_content_length_value(HeaderValue::from_static("bad"));
-    assert_eq!(headers, expected); // successful no-match still collapses, resets sensitivity
+    let mut preserved = HeaderValue::from_static("bad");
+    preserved.set_sensitive(true);
+    expected.set_content_length_value(preserved);
+    assert_eq!(headers, expected); // collapse keeps the first occurrence and its sensitivity
     assert!(headers.declared_content_length().is_err()); // no implicit validation/canonicalization
 }
 
