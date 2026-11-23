@@ -762,6 +762,29 @@ mod tests {
     use super::*;
     use qpx_core::http_message::OrdinaryHeaderMut;
 
+    /// Wait for a background cache writeback to publish the hot entry.
+    ///
+    /// The writeback runs in a detached task that streams the mirrored body
+    /// into the disk backend and commits a redb index (the fixture's commit
+    /// lock has a 1.5s timeout per attempt). Under the all-features parallel
+    /// test load the whole pipeline can take longer than a short fixed poll,
+    /// so bound the wait by wall-clock time instead of a tight iteration count.
+    /// Returning `None` after the deadline keeps the fail-closed expectation.
+    async fn wait_for_published_raw_cache_hit(
+        fast: &CacheHitFastPath,
+    ) -> Option<OwnerResponse<Body>> {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            if let Some(response) = try_raw_cache_hit_response(fast) {
+                return Some(response);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return None;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+
     #[test]
     fn raw_cache_hit_headers_reject_authorization_case_insensitively() {
         let host = httparse::Header {
@@ -1527,16 +1550,9 @@ mod tests {
 
         // Wait for the background writeback to publish the hot entry.
         let fast = prepared.cache_hit.as_ref().expect("fast path data");
-        let mut hit_response = None;
-        for _ in 0..300 {
-            if let Some(response) = try_raw_cache_hit_response(fast) {
-                hit_response = Some(response);
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
-        let hit_response =
-            hit_response.expect("background writeback never published the hot entry");
+        let hit_response = wait_for_published_raw_cache_hit(fast)
+            .await
+            .expect("background writeback never published the hot entry");
         let (hit_status, hit_headers, hit_body) = {
             let (parts, body) = hit_response.into_http_for_library().into_parts();
             let body = qpx_http::body::to_bytes(body).await.expect("hit body");
@@ -1789,16 +1805,8 @@ mod tests {
             }
         }
         let fast = prepared.cache_hit.as_ref().expect("fast path data");
-        let mut published = false;
-        for _ in 0..300 {
-            if try_raw_cache_hit_response(fast).is_some() {
-                published = true;
-                break;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-        }
         assert!(
-            published,
+            wait_for_published_raw_cache_hit(fast).await.is_some(),
             "background writeback never published the hot entry"
         );
 
