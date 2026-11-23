@@ -404,7 +404,7 @@ fn domain_named_set_regex_preserves_character_class_case() {
 }
 
 #[test]
-fn string_named_set_regex_preserves_character_class_case() {
+fn string_named_set_regex_preserves_digit_class_with_lowercased_evidence() {
     let mut config = base_config();
     config.security.named_sets = vec![NamedSetConfig {
         name: "application:upper-token".to_string(),
@@ -416,11 +416,51 @@ fn string_named_set_regex_preserves_character_class_case() {
     let classifier = DestinationClassifier::from_config(&config).expect("classifier");
     let patterns = &classifier.application[0].patterns;
     assert!(
-        patterns.matches_text("ABC-1234"),
-        "an uppercase class must be preserved in a string named-set regex"
+        patterns.matches_text("abc-1234"),
+        "resolve.rs supplies lowercased evidence, so [A-Z] must match case-insensitively"
     );
     assert!(
-        !patterns.matches_text("abc-1234"),
-        "lowercase text must not match a preserved [A-Z] class"
+        !patterns.matches_text("ab1-1234"),
+        "the digit class must still reject a non-letter token"
+    );
+}
+
+#[test]
+fn domain_named_set_accepts_uppercase_re_prefix() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "category:uppercase-re-prefix".to_string(),
+        kind: NamedSetKind::Domain,
+        values: vec![r"RE:^api\D+\.example\.test$".to_string()],
+        file: None,
+    }];
+
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let patterns = &classifier.category[0].patterns;
+    assert!(
+        patterns.matches_text("apixyz.example.test"),
+        "RE: must be recognized case-insensitively and preserve \\D"
+    );
+    assert!(
+        !patterns.matches_text("api123.example.test"),
+        "a digit suffix must not match the \\D class"
+    );
+}
+
+#[test]
+fn string_named_set_accepts_uppercase_regex_prefix() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "application:uppercase-regex-prefix".to_string(),
+        kind: NamedSetKind::String,
+        values: vec![r"REGEX:^[A-Z]{3}-\d{4}$".to_string()],
+        file: None,
+    }];
+
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let patterns = &classifier.application[0].patterns;
+    assert!(
+        patterns.matches_text("abc-1234"),
+        "REGEX: must be recognized case-insensitively and match lowercased evidence"
     );
 }

@@ -2,7 +2,7 @@ use anyhow::Result;
 use cidr::IpCidr;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use qpx_core::config::{Config, NamedSetKind};
-use regex::Regex;
+use regex::{Regex, RegexBuilder};
 use std::collections::HashSet;
 use std::fs;
 use std::net::IpAddr;
@@ -121,7 +121,11 @@ impl PatternSet {
             }
             match kind {
                 NamedSetKind::Regex => {
-                    regex.push(Regex::new(normalize_regex_pattern(value))?);
+                    regex.push(
+                        RegexBuilder::new(normalize_regex_pattern(value))
+                            .case_insensitive(true)
+                            .build()?,
+                    );
                 }
                 NamedSetKind::Cidr => {
                     cidr.push(value.parse()?);
@@ -132,7 +136,7 @@ impl PatternSet {
                     // applies only to literal, suffix and glob entries. Folding
                     // case first would rewrite classes such as `\D` to `\d`.
                     if let Some(pattern) = extract_regex_pattern(value) {
-                        regex.push(Regex::new(pattern)?);
+                        regex.push(RegexBuilder::new(pattern).case_insensitive(true).build()?);
                         continue;
                     }
                     let normalized = value.trim_end_matches('.').to_ascii_lowercase();
@@ -151,9 +155,10 @@ impl PatternSet {
                 }
                 _ => {
                     // Same rule as the domain branch: an explicit regex body is
-                    // compiled verbatim, so its character classes keep their case.
+                    // compiled case-insensitively from the raw value, so its
+                    // character classes keep their meaning.
                     if let Some(pattern) = extract_regex_pattern(value) {
-                        regex.push(Regex::new(pattern)?);
+                        regex.push(RegexBuilder::new(pattern).case_insensitive(true).build()?);
                         continue;
                     }
                     let normalized = value.to_ascii_lowercase();
