@@ -380,3 +380,47 @@ fn domain_named_set_compiles_explicit_regex_pattern() {
     let patterns = &classifier.category[0].patterns;
     assert!(patterns.matches_text("www.example.test"));
 }
+
+#[test]
+fn domain_named_set_regex_preserves_character_class_case() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "category:non-digit-suffix".to_string(),
+        kind: NamedSetKind::Domain,
+        values: vec![r"re:^api\D+\.example\.test$".to_string()],
+        file: None,
+    }];
+
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let patterns = &classifier.category[0].patterns;
+    assert!(
+        patterns.matches_text("apixyz.example.test"),
+        "a non-digit suffix must match the compiled \\D class"
+    );
+    assert!(
+        !patterns.matches_text("api123.example.test"),
+        "a digit suffix must not match; lowercasing \\D into \\d inverts the class"
+    );
+}
+
+#[test]
+fn string_named_set_regex_preserves_character_class_case() {
+    let mut config = base_config();
+    config.security.named_sets = vec![NamedSetConfig {
+        name: "application:upper-token".to_string(),
+        kind: NamedSetKind::String,
+        values: vec![r"re:^[A-Z]{3}-\d{4}$".to_string()],
+        file: None,
+    }];
+
+    let classifier = DestinationClassifier::from_config(&config).expect("classifier");
+    let patterns = &classifier.application[0].patterns;
+    assert!(
+        patterns.matches_text("ABC-1234"),
+        "an uppercase class must be preserved in a string named-set regex"
+    );
+    assert!(
+        !patterns.matches_text("abc-1234"),
+        "lowercase text must not match a preserved [A-Z] class"
+    );
+}

@@ -127,6 +127,14 @@ impl PatternSet {
                     cidr.push(value.parse()?);
                 }
                 NamedSetKind::Domain => {
+                    // Detect the explicit regex prefix on the original value: the
+                    // pattern body keeps its case, while DNS normalization below
+                    // applies only to literal, suffix and glob entries. Folding
+                    // case first would rewrite classes such as `\D` to `\d`.
+                    if let Some(pattern) = extract_regex_pattern(value) {
+                        regex.push(Regex::new(pattern)?);
+                        continue;
+                    }
                     let normalized = value.trim_end_matches('.').to_ascii_lowercase();
                     if let Some(rest) = normalized.strip_prefix("*.")
                         && !rest.is_empty()
@@ -135,19 +143,21 @@ impl PatternSet {
                         suffix.push(rest.to_string());
                         continue;
                     }
-                    if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
-                        regex.push(Regex::new(pattern)?);
-                    } else if is_exact_pattern(normalized.as_str()) {
+                    if is_exact_pattern(normalized.as_str()) {
                         exact.insert(normalized);
                     } else {
                         glob_values.push(normalized);
                     }
                 }
                 _ => {
-                    let normalized = value.to_ascii_lowercase();
-                    if let Some(pattern) = extract_regex_pattern(normalized.as_str()) {
+                    // Same rule as the domain branch: an explicit regex body is
+                    // compiled verbatim, so its character classes keep their case.
+                    if let Some(pattern) = extract_regex_pattern(value) {
                         regex.push(Regex::new(pattern)?);
-                    } else if is_exact_pattern(normalized.as_str()) {
+                        continue;
+                    }
+                    let normalized = value.to_ascii_lowercase();
+                    if is_exact_pattern(normalized.as_str()) {
                         exact.insert(normalized);
                     } else {
                         glob_values.push(normalized);
