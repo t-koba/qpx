@@ -1766,7 +1766,7 @@ mod tests {
         tokio::pin!(pending_timer);
         let mut pending_timeout = ReusablePendingTimeout::new(pending_timer.as_mut());
         let mut session = crate::upstream::origin::PreparedPlainHttp1Session::default();
-        let _miss = dispatch_prepared(
+        let miss = dispatch_prepared(
             prepared,
             &reverse,
             &conn,
@@ -1774,6 +1774,20 @@ mod tests {
             &mut pending_timeout,
         )
         .await;
+        // The miss body is the primary side of the cache writeback tee. Drain
+        // it so the mirrored writeback is fully fed before we wait for the hot
+        // entry; dropping the primary closes its sender and can abort the
+        // mirror under load, leaving the entry unpublished.
+        match miss {
+            PreparedRawHttp1Response::InMemory(_) => {}
+            PreparedRawHttp1Response::Generic(_, response) => {
+                let (_, body) = response.into_head_and_body();
+                let _ = qpx_http::body::to_bytes(body).await.expect("miss body");
+            }
+            PreparedRawHttp1Response::Direct(_) => {
+                panic!("cache MISS must not take the direct relay path")
+            }
+        }
         let fast = prepared.cache_hit.as_ref().expect("fast path data");
         let mut published = false;
         for _ in 0..300 {
