@@ -203,6 +203,7 @@ async fn cached_head_hit_preserves_stored_representation_length() {
         .status(StatusCode::OK)
         .header(CACHE_CONTROL, "public, max-age=60")
         .header(CONTENT_LENGTH, "123")
+        .header(ETAG, "\"v1\"")
         .body(Body::empty())
         .expect("response");
     let backends = backend_map();
@@ -234,6 +235,40 @@ async fn cached_head_hit_preserves_stored_representation_length() {
         LookupOutcome::Hit(response) => response,
         _ => panic!("expected cache hit"),
     };
+    assert_eq!(
+        crate::tests::wire_headers(response.headers())
+            .get(CONTENT_LENGTH)
+            .and_then(|value| value.to_str().ok()),
+        Some("123")
+    );
+    let body = qpx_http::body::to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("body");
+    assert!(body.is_empty());
+
+    let conditional_req = qpx_core::http_message::Request::from_http(
+        http::Request::builder()
+            .method(Method::HEAD)
+            .uri("http://example.com/head-length")
+            .header(HOST, "example.com")
+            .header("if-none-match", "\"v1\"")
+            .body(())
+            .expect("conditional head request"),
+    );
+    let out = lookup(
+        &conditional_req,
+        &head_key,
+        &policy(),
+        &backends,
+        &test_revalidations(),
+    )
+    .await
+    .expect("conditional lookup");
+    let response = match out {
+        LookupOutcome::Hit(response) => response,
+        _ => panic!("expected cache hit for conditional HEAD"),
+    };
+    assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
     assert_eq!(
         crate::tests::wire_headers(response.headers())
             .get(CONTENT_LENGTH)

@@ -134,6 +134,17 @@ pub fn not_modified_from_envelope(
     // A backend-decoded envelope has no inline body, so the replay body length
     // is not the representation length. A 304 describes the selected
     // representation even though this message itself carries no body.
+    let head_response = *request_method == Method::HEAD;
+    let declared_length = if head_response {
+        envelope.headers.declared_content_length()
+    } else {
+        None
+    };
+    let content_length_override = if head_response {
+        declared_length
+    } else {
+        Some(envelope.body_len)
+    };
     let mut response = build_response(BuildResponseParams {
         envelope,
         now_ms,
@@ -141,9 +152,14 @@ pub fn not_modified_from_envelope(
         body: Body::empty(),
         body_len: envelope.body_len,
         status_override: Some(StatusCode::NOT_MODIFIED),
-        content_length_override: Some(envelope.body_len),
+        content_length_override,
         content_range: None,
     })?;
+    if head_response && declared_length.is_none() {
+        // A HEAD-populated entry stores no body, so its body length would put
+        // a misleading zero on the wire. An absent declaration stays absent.
+        response.headers_mut().remove_content_length();
+    }
     qpx_http::protocol::semantics::normalize_response_for_request(request_method, &mut response);
     Ok(response)
 }
@@ -337,6 +353,27 @@ mod tests {
         .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
         assert!(response.headers().get(&ord("content-digest")).is_none());
+    }
+
+    #[test]
+    fn head_304_without_a_valid_declaration_omits_content_length() {
+        for values in [vec![], vec!["+42"], vec!["42, 43"]] {
+            let envelope = envelope_with_headers(
+                values
+                    .iter()
+                    .map(|value| ("content-length".to_string(), (*value).to_string()))
+                    .collect(),
+            );
+            let response =
+                not_modified_from_envelope(&Method::HEAD, &envelope, 0, "HIT").expect("head 304");
+            assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+            assert!(
+                crate::tests::wire_headers(response.headers())
+                    .get(http::header::CONTENT_LENGTH)
+                    .is_none(),
+                "stored values {values:?} must not put a zero length on the wire"
+            );
+        }
     }
 
     #[test]
