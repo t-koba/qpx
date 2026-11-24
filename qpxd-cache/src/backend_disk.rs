@@ -87,7 +87,7 @@ struct DiskCacheState {
     total_bytes: u64,
     entries: HashMap<DiskCacheFileId, DiskCacheIndexEntry>,
     hot_bytes: u64,
-    hot_entries: LruCache<PathBuf, HotCacheEntry>,
+    hot_entries: LruCache<DiskCacheFileId, HotCacheEntry>,
 }
 
 impl Default for DiskCacheState {
@@ -113,6 +113,9 @@ struct DiskCacheIndexEntry {
 
 struct HotCacheEntry {
     // Co-located metadata and body share a path, but never logical identity.
+    // The path is retained so eviction can invalidate the lock-free recent
+    // index without re-deriving it from the LRU key.
+    path: PathBuf,
     key: std::sync::Arc<str>,
     value: Bytes,
     expires_at_ms: u64,
@@ -497,20 +500,23 @@ impl DiskCacheBackend {
         path: PathBuf,
         now: u64,
     ) -> HotCacheLookup {
+        let Some(id) = cache_file_id_from_path(&self.root, &path) else {
+            return HotCacheLookup::Miss(path);
+        };
         let mut state = self.state.lock().await;
         let expired = state
             .hot_entries
-            .peek(&path)
+            .peek(&id)
             .is_some_and(|entry| entry.expires_at_ms <= now);
         if expired {
-            if let Some(entry) = state.hot_entries.pop(&path) {
+            if let Some(entry) = state.hot_entries.pop(&id) {
                 state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
             }
             return HotCacheLookup::Miss(path);
         }
         let value = state
             .hot_entries
-            .get(&path)
+            .get(&id)
             .filter(|entry| entry.key.as_ref() == key)
             .map(|entry| (entry.value.clone(), entry.expires_at_ms, entry.body_offset));
         drop(state);
@@ -708,14 +714,18 @@ impl DiskCacheBackend {
             body_offset,
             file: open_zero_copy_source(key, &path, value_len),
         };
+        let Some(id) = cache_file_id_from_path(&self.root, &path) else {
+            return;
+        };
         let mut state = self.state.lock().await;
-        if let Some(previous) = state.hot_entries.pop(&path) {
+        if let Some(previous) = state.hot_entries.pop(&id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(previous.value.len() as u64);
         }
         state.hot_bytes = state.hot_bytes.saturating_add(value_len);
         state.hot_entries.put(
-            path,
+            id,
             HotCacheEntry {
+                path,
                 key: std::sync::Arc::from(key),
                 value,
                 expires_at_ms,
@@ -726,11 +736,11 @@ impl DiskCacheBackend {
         while state.hot_bytes > self.hot_max_bytes
             || state.hot_entries.len() > DISK_CACHE_HOT_MAX_ENTRIES
         {
-            let Some((evicted_path, evicted)) = state.hot_entries.pop_lru() else {
+            let Some((_, evicted)) = state.hot_entries.pop_lru() else {
                 state.hot_bytes = 0;
                 break;
             };
-            evicted_paths.push(evicted_path);
+            evicted_paths.push(evicted.path);
             state.hot_bytes = state.hot_bytes.saturating_sub(evicted.value.len() as u64);
         }
         drop(state);
@@ -739,8 +749,11 @@ impl DiskCacheBackend {
 
     async fn hot_remove(&self, path: &Path) {
         self.hot_recent_remove(path);
+        let Some(id) = cache_file_id_from_path(&self.root, path) else {
+            return;
+        };
         let mut state = self.state.lock().await;
-        if let Some(entry) = state.hot_entries.pop(path) {
+        if let Some(entry) = state.hot_entries.pop(&id) {
             state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
         }
     }
@@ -778,13 +791,13 @@ impl DiskCacheBackend {
         }
         self.hot_recent_remove(path);
         let mut state = self.state.lock().await;
-        if let Some(entry) = state.hot_entries.pop(path) {
-            state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
-        }
-        if let Some(id) = cache_file_id_from_path(&self.root, path)
-            && let Some(entry) = state.entries.remove(&id)
-        {
-            state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
+        if let Some(id) = cache_file_id_from_path(&self.root, path) {
+            if let Some(entry) = state.hot_entries.pop(&id) {
+                state.hot_bytes = state.hot_bytes.saturating_sub(entry.value.len() as u64);
+            }
+            if let Some(entry) = state.entries.remove(&id) {
+                state.total_bytes = state.total_bytes.saturating_sub(entry.total_len);
+            }
         }
         Ok(())
     }
@@ -2540,6 +2553,181 @@ mod tests {
                 .expect("get deleted")
                 .is_none()
         );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn hot_lru_hits_by_file_id_without_recent_entry() {
+        let dir = temp_dir("hot-lru-file-id");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let path = backend.path_for("ns", "body-key");
+        backend
+            .hot_insert(
+                "ns",
+                "body-key",
+                path.clone(),
+                Bytes::from_static(b"body"),
+                now_ms() + 60_000,
+                0,
+            )
+            .await;
+        // Force the lookup through the LRU rather than the lock-free index.
+        backend
+            .hot_recent
+            .store(std::sync::Arc::new(RecentHotCache::default()));
+        {
+            let state = backend.state.lock().await;
+            let id = cache_file_id("ns", "body-key");
+            assert_eq!(state.hot_entries.len(), 1);
+            assert_eq!(
+                state
+                    .hot_entries
+                    .peek(&id)
+                    .map(|entry| entry.path.as_path()),
+                Some(path.as_path())
+            );
+        }
+        match backend
+            .hot_get_from_lru("ns", "body-key", path.clone(), now_ms())
+            .await
+        {
+            HotCacheLookup::Hit { value, .. } => assert_eq!(value.as_ref(), b"body"),
+            HotCacheLookup::Miss(_) => panic!("expected a hit keyed by the file id"),
+        }
+
+        // A non-canonical path cannot derive an id and must miss without
+        // touching the stored entry.
+        let misplaced = dir.join("wrong.qpxc");
+        match backend
+            .hot_get_from_lru("ns", "body-key", misplaced.clone(), now_ms())
+            .await
+        {
+            HotCacheLookup::Miss(missed) => assert_eq!(missed, misplaced),
+            HotCacheLookup::Hit { .. } => panic!("invalid path must miss"),
+        }
+        assert_eq!(backend.state.lock().await.hot_entries.len(), 1);
+
+        backend.hot_remove(&path).await;
+        assert_eq!(backend.state.lock().await.hot_bytes, 0);
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn co_located_metadata_replaces_body_in_one_file_id_slot() {
+        let dir = temp_dir("hot-lru-co-located");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let path = backend.path_for("ns", "body-key");
+        let expires_at_ms = now_ms() + 60_000;
+        backend
+            .hot_insert(
+                "ns",
+                "body-key",
+                path.clone(),
+                Bytes::from(vec![b'b'; 32]),
+                expires_at_ms,
+                0,
+            )
+            .await;
+        backend
+            .hot_insert(
+                "ns",
+                "meta-key",
+                path.clone(),
+                Bytes::from(vec![b'm'; 8]),
+                expires_at_ms,
+                0,
+            )
+            .await;
+        {
+            let state = backend.state.lock().await;
+            assert_eq!(state.hot_entries.len(), 1);
+            assert_eq!(state.hot_bytes, 8);
+            let entry = state
+                .hot_entries
+                .peek(&cache_file_id("ns", "body-key"))
+                .expect("single slot for the shared path");
+            assert_eq!(entry.key.as_ref(), "meta-key");
+            assert_eq!(entry.path, path);
+            assert_eq!(entry.value.as_ref(), b"mmmmmmmm");
+        }
+        match backend
+            .hot_get_from_lru("ns", "meta-key", path.clone(), now_ms())
+            .await
+        {
+            HotCacheLookup::Hit { value, .. } => assert_eq!(value.len(), 8),
+            HotCacheLookup::Miss(_) => panic!("metadata must remain hot"),
+        }
+        match backend
+            .hot_get_from_lru("ns", "body-key", path, now_ms())
+            .await
+        {
+            HotCacheLookup::Miss(_) => {}
+            HotCacheLookup::Hit { .. } => panic!("body must not alias the metadata entry"),
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn hot_lru_eviction_invalidates_recent_entry_by_stored_path() {
+        let dir = temp_dir("hot-lru-eviction");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let first = backend.path_for("ns", "first");
+        let second = backend.path_for("ns", "second");
+        let value = Bytes::from(vec![b'x'; 600 * 1024]);
+        let expires_at_ms = now_ms() + 60_000;
+        backend
+            .hot_insert("ns", "first", first, value.clone(), expires_at_ms, 0)
+            .await;
+        backend
+            .hot_insert("ns", "second", second.clone(), value, expires_at_ms, 0)
+            .await;
+
+        let now = now_ms();
+        let recent = backend.hot_recent.load();
+        assert!(recent_hot_entry(&recent, "ns", "first", now).is_none());
+        assert!(recent_hot_entry(&recent, "ns", "second", now).is_some());
+        {
+            let state = backend.state.lock().await;
+            assert_eq!(state.hot_entries.len(), 1);
+            assert_eq!(state.hot_bytes, 600 * 1024);
+            assert_eq!(
+                state
+                    .hot_entries
+                    .peek(&cache_file_id("ns", "second"))
+                    .map(|entry| entry.path.as_path()),
+                Some(second.as_path())
+            );
+        }
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn shared_mode_keeps_hot_lru_empty() {
+        let dir = temp_dir("hot-lru-shared");
+        let mut config = cfg(dir.clone(), 1024 * 1024);
+        config.writer_mode = qpx_core::config::CacheWriterMode::Shared;
+        let backend = DiskCacheBackend::new(config).expect("shared backend");
+        let path = backend.path_for("ns", "key");
+        backend
+            .hot_insert(
+                "ns",
+                "key",
+                path.clone(),
+                Bytes::from_static(b"shared"),
+                now_ms() + 60_000,
+                0,
+            )
+            .await;
+        {
+            let state = backend.state.lock().await;
+            assert!(state.hot_entries.is_empty());
+            assert_eq!(state.hot_bytes, 0);
+        }
+        match backend.hot_get("ns", "key").await {
+            HotCacheLookup::Miss(missed) => assert_eq!(missed, path),
+            HotCacheLookup::Hit { .. } => panic!("shared mode must bypass hot caches"),
+        }
         let _ = fs::remove_dir_all(dir);
     }
 
