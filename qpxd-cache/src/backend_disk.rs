@@ -123,6 +123,8 @@ struct HotCacheEntry {
 struct RecentHotCacheEntry {
     namespace: std::sync::Arc<str>,
     key: std::sync::Arc<str>,
+    // Co-located metadata and body entries share this canonical file id;
+    // invalidation must remove every recent-hot entry with the same id.
     id: DiskCacheFileId,
     path: PathBuf,
     value: Bytes,
