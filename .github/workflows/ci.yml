@@ -849,6 +849,24 @@ jobs:
             run_clippy qpx-acme "${feats}"
           done
 
+          # qpx-http: TLS backend (none|tls-rustls|tls-native) x HTTP/3 mode
+          # (off|http3|h3 backend|qpx backend); backend features imply http3.
+          for feats in \
+            "" \
+            "tls-rustls" \
+            "tls-native" \
+            "http3" \
+            "http3,tls-rustls" \
+            "http3,tls-native" \
+            "http3-backend-h3" \
+            "http3-backend-h3,tls-rustls" \
+            "http3-backend-h3,tls-native" \
+            "http3-backend-qpx" \
+            "http3-backend-qpx,tls-rustls" \
+            "http3-backend-qpx,tls-native"; do
+            run_clippy qpx-http "${feats}"
+          done
+
           # qpxd-cache: TLS backend (none|tls-rustls|tls-native)
           for feats in "" "tls-rustls" "tls-native"; do
             run_clippy qpxd-cache "${feats}"
