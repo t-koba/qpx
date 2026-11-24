@@ -401,6 +401,8 @@ require .github/workflows/ci.yml 'cargo clippy --workspace --all-targets --locke
 require .github/workflows/ci.yml 'cargo clippy -p "${pkg}" --locked --all-targets --no-default-features --features "${features}" -- -D warnings'
 require .github/workflows/ci.yml '"http3-backend-qpx"'
 require .github/workflows/ci.yml '"http3-backend-h3,http3-backend-qpx,mitm,acme"'
+require .github/workflows/ci.yml 'run_clippy qpxd-cache "${feats}"'
+require .github/workflows/ci.yml 'qpx-wasm qpx-h3 qpx-webdav qpx-observability xtask'
 require .github/workflows/ci.yml 'cargo install cargo-machete --version 0.6.0 --locked'
 require .github/workflows/ci.yml 'cargo machete'
 require .github/workflows/ci.yml 'cargo audit'

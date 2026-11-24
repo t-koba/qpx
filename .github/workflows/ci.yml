@@ -849,6 +849,11 @@ jobs:
             run_clippy qpx-acme "${feats}"
           done
 
+          # qpxd-cache: TLS backend (none|tls-rustls|tls-native)
+          for feats in "" "tls-rustls" "tls-native"; do
+            run_clippy qpxd-cache "${feats}"
+          done
+
           # qpxd:
           # - tls backend: none | tls-native | tls-rustls
           # - HTTP/3 defaults to h3; qpx takes precedence when both backend features are present
@@ -889,7 +894,7 @@ jobs:
           run_clippy qpxf "wasm"
 
           # featureless crates
-          for pkg in qpx-wasm qpx-h3 qpx-observability xtask; do
+          for pkg in qpx-wasm qpx-h3 qpx-webdav qpx-observability xtask; do
             run_plain "${pkg}"
           done
 
