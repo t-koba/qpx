@@ -44,6 +44,9 @@ const DISK_CACHE_RECENT_ENTRIES: usize = 256;
 const DISK_CACHE_RECENT_SHARDS: usize = 16;
 const DISK_CACHE_RECENT_ENTRIES_PER_SHARD: usize =
     DISK_CACHE_RECENT_ENTRIES / DISK_CACHE_RECENT_SHARDS;
+// Each slot is a small set-associative bucket so co-published objects (index,
+// metadata, body) survive hash collisions. Total bound: 16 * 16 * 4 = 1024.
+const DISK_CACHE_RECENT_WAYS: usize = 4;
 const DISK_CACHE_DECODED_SLOTS: usize = 256;
 const DISK_CACHE_ZERO_COPY_MIN_BYTES: u64 = 64 * 1024;
 const HOT_SLOT_OFFSET_BASIS: u64 = 0xcbf29ce484222325;
@@ -132,9 +135,11 @@ struct RecentHotCache {
     shards: Vec<std::sync::Arc<RecentHotCacheShard>>,
 }
 
+type RecentHotBucket = [Option<RecentHotCacheEntry>; DISK_CACHE_RECENT_WAYS];
+
 #[derive(Clone)]
 struct RecentHotCacheShard {
-    entries: Vec<Option<RecentHotCacheEntry>>,
+    entries: Vec<RecentHotBucket>,
 }
 
 impl Default for RecentHotCache {
@@ -143,7 +148,9 @@ impl Default for RecentHotCache {
             shards: (0..DISK_CACHE_RECENT_SHARDS)
                 .map(|_| {
                     std::sync::Arc::new(RecentHotCacheShard {
-                        entries: vec![None; DISK_CACHE_RECENT_ENTRIES_PER_SHARD],
+                        entries: (0..DISK_CACHE_RECENT_ENTRIES_PER_SHARD)
+                            .map(|_| std::array::from_fn(|_| None))
+                            .collect(),
                     })
                 })
                 .collect(),
@@ -472,10 +479,7 @@ impl DiskCacheBackend {
             return None;
         }
         let recent = self.hot_recent.load();
-        let entry = recent_hot_entry_at(&recent, hot_slot(namespace, key))?;
-        if entry.namespace.as_ref() != namespace || entry.key.as_ref() != key {
-            return None;
-        }
+        let entry = recent_hot_entry_by_key(&recent, namespace, key)?;
         if entry.expires_at_ms <= now {
             return Some(HotCacheLookup::Miss(entry.path.clone()));
         }
@@ -792,15 +796,17 @@ impl DiskCacheBackend {
             let mut shards = current.shards.clone();
             if !removed.is_empty() {
                 for slot in 0..DISK_CACHE_RECENT_ENTRIES {
-                    if recent_hot_entry_at(current, slot)
-                        .is_some_and(|candidate| removed.iter().any(|path| path == &candidate.path))
-                    {
-                        *recent_hot_entry_mut(&mut shards, slot) = None;
+                    for way in recent_hot_bucket_mut(&mut shards, slot).iter_mut() {
+                        if way.as_ref().is_some_and(|candidate| {
+                            removed.iter().any(|path| path == &candidate.path)
+                        }) {
+                            *way = None;
+                        }
                     }
                 }
             }
             let slot = hot_slot(entry.namespace.as_ref(), entry.key.as_ref());
-            *recent_hot_entry_mut(&mut shards, slot) = Some(entry.clone());
+            recent_hot_upsert(recent_hot_bucket_mut(&mut shards, slot), entry.clone());
             RecentHotCache { shards }
         });
     }
@@ -811,7 +817,7 @@ impl DiskCacheBackend {
             .load()
             .shards
             .iter()
-            .flat_map(|shard| shard.entries.iter().flatten())
+            .flat_map(|shard| shard.entries.iter().flatten().flatten())
             .any(|entry| entry.path == path)
         {
             return;
@@ -821,8 +827,10 @@ impl DiskCacheBackend {
         self.hot_recent.rcu(|current| {
             let mut shards = current.shards.clone();
             for slot in 0..DISK_CACHE_RECENT_ENTRIES {
-                if recent_hot_entry_at(current, slot).is_some_and(|entry| entry.path == path) {
-                    *recent_hot_entry_mut(&mut shards, slot) = None;
+                for way in recent_hot_bucket_mut(&mut shards, slot).iter_mut() {
+                    if way.as_ref().is_some_and(|entry| entry.path == path) {
+                        *way = None;
+                    }
                 }
             }
             RecentHotCache { shards }
@@ -1629,35 +1637,64 @@ fn hot_body_stream(
     Some(CachedBodyStream::from_body_for_backend(len, body))
 }
 
+fn recent_hot_matches(entry: &RecentHotCacheEntry, namespace: &str, key: &str) -> bool {
+    entry.namespace.as_ref() == namespace && entry.key.as_ref() == key
+}
+
 fn recent_hot_entry<'a>(
     recent: &'a RecentHotCache,
     namespace: &str,
     key: &str,
     now: u64,
 ) -> Option<&'a RecentHotCacheEntry> {
-    let entry = recent_hot_entry_at(recent, hot_slot(namespace, key))?;
-    (entry.namespace.as_ref() == namespace
-        && entry.key.as_ref() == key
-        && entry.expires_at_ms > now)
-        .then_some(entry)
+    recent_hot_entry_by_key(recent, namespace, key).filter(|entry| entry.expires_at_ms > now)
 }
 
-fn recent_hot_entry_at(recent: &RecentHotCache, slot: usize) -> Option<&RecentHotCacheEntry> {
+fn recent_hot_entry_by_key<'a>(
+    recent: &'a RecentHotCache,
+    namespace: &str,
+    key: &str,
+) -> Option<&'a RecentHotCacheEntry> {
+    recent_hot_bucket_at(recent, hot_slot(namespace, key))?
+        .iter()
+        .flatten()
+        .find(|entry| recent_hot_matches(entry, namespace, key))
+}
+
+fn recent_hot_bucket_at(recent: &RecentHotCache, slot: usize) -> Option<&RecentHotBucket> {
     let shard = recent
         .shards
         .get(slot / DISK_CACHE_RECENT_ENTRIES_PER_SHARD)?;
     shard
         .entries
-        .get(slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD)?
-        .as_ref()
+        .get(slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD)
 }
 
-fn recent_hot_entry_mut(
+fn recent_hot_bucket_mut(
     shards: &mut [std::sync::Arc<RecentHotCacheShard>],
     slot: usize,
-) -> &mut Option<RecentHotCacheEntry> {
+) -> &mut RecentHotBucket {
     let shard = std::sync::Arc::make_mut(&mut shards[slot / DISK_CACHE_RECENT_ENTRIES_PER_SHARD]);
     &mut shard.entries[slot % DISK_CACHE_RECENT_ENTRIES_PER_SHARD]
+}
+
+fn recent_hot_upsert(bucket: &mut RecentHotBucket, entry: RecentHotCacheEntry) {
+    if let Some(way) = bucket.iter().position(|candidate| {
+        candidate
+            .as_ref()
+            .is_some_and(|candidate| recent_hot_matches(candidate, &entry.namespace, &entry.key))
+    }) {
+        bucket[way] = Some(entry);
+        return;
+    }
+    if let Some(way) = bucket.iter().position(Option::is_none) {
+        bucket[way] = Some(entry);
+        return;
+    }
+    // Bucket full: distribute evictions with the upper hash bits instead of
+    // keeping per-way state in the RCU snapshot.
+    let hash = hot_hash(entry.namespace.as_ref(), entry.key.as_ref());
+    bucket[(hash >> 32) as usize % DISK_CACHE_RECENT_WAYS] = Some(entry);
 }
 
 fn hot_response_candidate(entry: &HotResponseEntry) -> Option<CachedResponseCandidate> {
@@ -1671,7 +1708,7 @@ fn hot_response_candidate(entry: &HotResponseEntry) -> Option<CachedResponseCand
     Some(CachedResponseCandidate::new(entry.envelope.clone(), body))
 }
 
-fn hot_slot(namespace: &str, key: &str) -> usize {
+fn hot_hash(namespace: &str, key: &str) -> u64 {
     let mut hash = HOT_SLOT_OFFSET_BASIS;
     for byte in namespace
         .as_bytes()
@@ -1683,7 +1720,11 @@ fn hot_slot(namespace: &str, key: &str) -> usize {
         hash ^= u64::from(byte);
         hash = hash.wrapping_mul(HOT_SLOT_PRIME);
     }
-    (hash as usize) % DISK_CACHE_RECENT_ENTRIES
+    hash
+}
+
+fn hot_slot(namespace: &str, key: &str) -> usize {
+    hot_hash(namespace, key) as usize % DISK_CACHE_RECENT_ENTRIES
 }
 
 fn open_zero_copy_source(key: &str, path: &Path, body_len: u64) -> Option<std::sync::Arc<File>> {
@@ -2914,8 +2955,12 @@ mod tests {
         );
         let mut updated_recent = (**backend.hot_recent.load()).clone();
         let updated_entry =
-            recent_hot_entry_mut(&mut updated_recent.shards, hot_slot("ns", variant_key))
-                .as_mut()
+            recent_hot_bucket_mut(&mut updated_recent.shards, hot_slot("ns", variant_key))
+                .iter_mut()
+                .find_map(|way| {
+                    way.as_mut()
+                        .filter(|entry| recent_hot_matches(entry, "ns", variant_key))
+                })
                 .expect("hot metadata");
         updated_entry.value = updated_metadata;
         {
@@ -2965,6 +3010,78 @@ mod tests {
                 .get_response_candidate("ns", "index", "obj:default", now_ms())
                 .expect("get deleted candidate")
                 .is_none()
+        );
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn disk_backend_hot_response_candidate_survives_recent_slot_collision() {
+        let dir = temp_dir("hot-response-slot-collision");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        let index_key = "index";
+        let variant_key = "obj:primary:cf";
+        let body_key = cache_body_storage_key(variant_key);
+        assert_eq!(hot_slot("ns", index_key), hot_slot("ns", variant_key));
+        assert_ne!(hot_slot("ns", index_key), hot_slot("ns", body_key.as_str()));
+        let envelope = CachedResponseEnvelope {
+            status: 200,
+            headers: crate::types::CachedHeaders::from_pairs(Vec::new()),
+            body: CachedBody::default(),
+            body_len: 7,
+            stored_at_ms: 1,
+            initial_age_secs: 0,
+            response_delay_secs: 0,
+            freshness_lifetime_secs: 60,
+            vary_headers: Vec::new(),
+            vary_values: Vec::new(),
+            response_directives: Default::default(),
+            response_header_values: Default::default(),
+        };
+        backend
+            .put_object(
+                "ns",
+                body_key.as_str(),
+                &CachedBody::from_bytes(Bytes::from_static(b"payload")),
+                60,
+            )
+            .await
+            .expect("put body");
+        backend
+            .put(
+                "ns",
+                variant_key,
+                &super::super::types::encode_cached_response_metadata(&envelope)
+                    .expect("encode metadata"),
+                60,
+            )
+            .await
+            .expect("put metadata");
+        backend
+            .put(
+                "ns",
+                index_key,
+                &serde_json::to_vec(&VariantIndex {
+                    variants: vec![variant_key.to_string()],
+                })
+                .expect("encode index"),
+                60,
+            )
+            .await
+            .expect("put index");
+
+        let mut candidate = backend
+            .get_response_candidate("ns", index_key, "obj:default", now_ms())
+            .expect("get candidate")
+            .expect("candidate must survive colliding index and metadata keys");
+        assert_eq!(
+            candidate
+                .body
+                .body
+                .data()
+                .await
+                .expect("body")
+                .expect("bytes"),
+            Bytes::from_static(b"payload")
         );
         let _ = fs::remove_dir_all(dir);
     }
