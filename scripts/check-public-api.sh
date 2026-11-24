@@ -45,6 +45,8 @@ check_crate() {
   fi
 }
 
+# RetryBudgetConfig exposes explicit `retry_percent` and `burst_tokens` bounds for reverse-route
+# retry budgets, replacing the reserved ratio/min_retry_tokens fields that were never accepted.
 # RuntimeConfig also exposes downstream H3 receive/send window policy as three u64 fields,
 # downstream H3 bidirectional and unidirectional stream caps as usize fields, downstream
 # QUIC connection-migration policy as a bool, and downstream H2 server header-list and
@@ -63,7 +65,7 @@ check_crate() {
 # AcmeDnsHookConfig exposes `timeout_secs` (default 60) to bound DNS challenge hooks.
 # qpx-core intentionally exposes `canonical_fields_for_serialization`, the narrow
 # owner-based header serialization API used by IPC request metadata.
-check_crate qpx-core 2fb2dc31d715e1540874476fa7dd8accdb04fa5800f1db0aa255ea70873270f0
+check_crate qpx-core 3676f3412e28763a1f06be49d48c937d1af5902445dec71685507d44e4d0572c
 check_crate qpx-auth 7ec39677db4cf2709526b71d89f3eaac1cf469f38109ab8ef0bb5b4cfda29ca3
 check_crate qpx-h3 24b3e088e981e7d045d04b3a6fa8461fda1f78d10443de0796ac7ac3adc23b8b
 check_crate qpx-acme 437ee44d007ac282cf2216fa00cb602dfd1a0daf6846f62376fa6cb35831442a
