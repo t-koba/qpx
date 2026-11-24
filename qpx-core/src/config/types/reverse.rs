@@ -358,13 +358,11 @@ pub struct ResilienceRetryConfig {
     pub budget: Option<RetryBudgetConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RetryBudgetConfig {
-    #[serde(default)]
-    pub ratio: Option<u32>,
-    #[serde(default)]
-    pub min_retry_tokens: Option<u32>,
+    pub retry_percent: u32,
+    pub burst_tokens: u32,
 }
 
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq, Default)]

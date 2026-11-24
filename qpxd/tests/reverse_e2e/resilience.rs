@@ -337,3 +337,131 @@ edges:
     assert!(qpxd.child.try_wait()?.is_none());
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn explicit_retry_budget_finances_retries_only_from_first_attempt_successes() -> Result<()> {
+    let dir = temp_dir("qpxd-explicit-retry-budget")?;
+    let cfg = dir.join("reverse-route.yaml");
+    let hits = Arc::new(AtomicUsize::new(0));
+    let listener = StdTcpListener::bind(("127.0.0.1", 0)).context("bind backend")?;
+    listener.set_nonblocking(true)?;
+    let origin_addr = listener.local_addr()?;
+    // Cold 503, four qualifying 200s, a 503 retried into a 200, then a 503
+    // that must not be retried by the success of the preceding retry.
+    let statuses = Arc::new([
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::OK,
+        StatusCode::OK,
+        StatusCode::OK,
+        StatusCode::OK,
+        StatusCode::SERVICE_UNAVAILABLE,
+        StatusCode::OK,
+        StatusCode::SERVICE_UNAVAILABLE,
+    ]);
+    let service_hits = hits.clone();
+    let service = service_fn(move |_req| {
+        let hits = service_hits.clone();
+        let statuses = statuses.clone();
+        async move {
+            let idx = hits.fetch_add(1, Ordering::Relaxed);
+            let status = statuses
+                .get(idx)
+                .copied()
+                .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(full_body("origin"))
+                    .expect("response"),
+            )
+        }
+    });
+    spawn_http1_service(listener, service).await;
+
+    let (port, mut qpxd) =
+        spawn_qpxd_on_random_port(&cfg, dir.join("reverse-route.log"), |port| {
+            format!(
+                r#"upstreams:
+- name: origin
+  url: http://{origin_addr}
+runtime:
+  acceptor_tasks_per_listener: 1
+  reuse_port: false
+edges:
+- kind: reverse
+  name: reverse
+  listen: 127.0.0.1:{port}
+  routes:
+  - name: app
+    streaming_requirement: preferred
+    match:
+      host:
+      - reverse.local
+      path:
+      - /app/*
+    resilience:
+      retry:
+        attempts: 2
+        backoff_ms: 0
+        budget:
+          retry_percent: 25
+          burst_tokens: 4
+    timeout_ms: 1000
+    target:
+      type: upstream
+      upstreams:
+      - origin"#
+            )
+        })?;
+
+    let client = test_client();
+    let uri: hyper::Uri = format!("http://127.0.0.1:{port}/app/test").parse()?;
+    let mut request = || {
+        let child = format!(
+            "child status: {:?}{}",
+            qpxd.child.try_wait(),
+            qpxd.log_tail()
+        );
+        let client = &client;
+        let uri = uri.clone();
+        async move {
+            client
+                .request(
+                    Request::builder()
+                        .method("GET")
+                        .uri(uri.clone())
+                        .header("host", "reverse.local")
+                        .body(empty_body())?,
+                )
+                .await
+                .with_context(|| format!("reverse request to {port}; {child}"))
+        }
+    };
+
+    let cold = request().await?;
+    assert_eq!(cold.status(), StatusCode::SERVICE_UNAVAILABLE);
+    collect_body(cold.into_body()).await?;
+    wait_for_counter(&hits, 1).await?;
+    assert_eq!(hits.load(Ordering::Relaxed), 1);
+
+    for expected_hits in 2..=5 {
+        let success = request().await?;
+        assert_eq!(success.status(), StatusCode::OK);
+        collect_body(success.into_body()).await?;
+        wait_for_counter(&hits, expected_hits).await?;
+        assert_eq!(hits.load(Ordering::Relaxed), expected_hits);
+    }
+
+    let financed = request().await?;
+    assert_eq!(financed.status(), StatusCode::OK);
+    collect_body(financed.into_body()).await?;
+    wait_for_counter(&hits, 7).await?;
+    assert_eq!(hits.load(Ordering::Relaxed), 7);
+
+    let unfunded = request().await?;
+    assert_eq!(unfunded.status(), StatusCode::SERVICE_UNAVAILABLE);
+    collect_body(unfunded.into_body()).await?;
+    wait_for_counter(&hits, 8).await?;
+    assert_eq!(hits.load(Ordering::Relaxed), 8);
+    Ok(())
+}

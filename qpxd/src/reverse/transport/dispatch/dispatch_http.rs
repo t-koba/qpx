@@ -140,6 +140,7 @@ pub(super) async fn dispatch_reverse_http_route<R: ReverseTerminalResponse>(
         }
         match response {
             Ok(Ok((interim, resp, upstream_cert))) => {
+                let upstream_status = resp.status();
                 let resp = http_modules.on_upstream_response(resp).await?;
                 let classified_response_destination;
                 let response_destination = if upstream_cert.is_some()
@@ -186,6 +187,7 @@ pub(super) async fn dispatch_reverse_http_route<R: ReverseTerminalResponse>(
                     selected_upstream: selected_upstream.as_ref(),
                     started,
                     interim,
+                    upstream_status,
                     response: resp,
                     upstream_cert: upstream_cert.as_ref(),
                     export_session: export_session.as_ref(),

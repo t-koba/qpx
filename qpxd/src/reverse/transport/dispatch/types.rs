@@ -7,7 +7,7 @@ use crate::reverse::router::{HttpRoute, SelectedMirrorTarget};
 use crate::reverse::transport::request_template::{ReverseReplayRecorder, ReverseRequestTemplate};
 use crate::reverse::transport::{InterimList, ReverseConnInfo};
 use crate::runtime::{self, Runtime};
-use hyper::{Method, Response};
+use hyper::{Method, Response, StatusCode};
 use qpx_core::http_message::{Headers, Request as OwnerRequest, Response as OwnerResponse};
 use qpx_core::rules::CompiledHeaderControl;
 use qpx_http::body::Body;
@@ -382,6 +382,7 @@ pub(super) struct ReverseSuccessInput<'a> {
     pub(super) upstream_cert: Option<&'a qpx_core::tls::UpstreamCertificateInfo>,
     pub(super) interim: InterimList,
     pub(super) started: Option<Instant>,
+    pub(super) upstream_status: StatusCode,
     pub(super) response: OwnerResponse<Body>,
     pub(super) export_session: Option<&'a crate::exporter::ExportSession>,
 }

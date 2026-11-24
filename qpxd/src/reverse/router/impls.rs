@@ -24,7 +24,7 @@ use arc_swap::ArcSwap;
 use qpx_core::config::ReverseTlsPassthroughRouteConfig;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::config::UpstreamConfig;
-use qpx_core::config::{PathRewriteConfig, ReverseRouteConfig};
+use qpx_core::config::{PathRewriteConfig, RetryBudgetConfig, ReverseRouteConfig};
 use qpx_core::http_message::Request as OwnerRequest;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use qpx_core::prefilter::StringInterner;
@@ -36,7 +36,7 @@ use std::net::IpAddr;
 use std::sync::Arc;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use std::sync::atomic::AtomicUsize;
-use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use tokio::sync::watch;
 use tokio::time::Duration;
 use tracing::warn;
@@ -45,30 +45,64 @@ mod http_route;
 
 impl RetryBudgetRuntime {
     pub(in crate::reverse) fn new(retry_attempts: usize) -> Arc<Self> {
-        let burst = retry_attempts.saturating_sub(1).max(1) as isize;
+        let seed = retry_attempts.saturating_sub(1).max(1) as u64;
         Arc::new(Self {
-            balance: AtomicIsize::new(burst),
-            max_balance: burst.saturating_mul(8),
+            balance: AtomicU64::new(seed),
+            cap: seed.saturating_mul(8),
+            retry_cost: 1,
+            credit_per_success: 1,
+            explicit: false,
+        })
+    }
+
+    pub(in crate::reverse) fn from_config(
+        retry_attempts: usize,
+        config: Option<&RetryBudgetConfig>,
+    ) -> Arc<Self> {
+        let Some(config) = config else {
+            return Self::new(retry_attempts);
+        };
+        Arc::new(Self {
+            balance: AtomicU64::new(0),
+            cap: u64::from(config.burst_tokens) * 100,
+            retry_cost: 100,
+            credit_per_success: u64::from(config.retry_percent),
+            explicit: true,
         })
     }
 
     pub(in crate::reverse) fn try_consume_retry(&self) -> bool {
         self.balance
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                (current > 0).then_some(current - 1)
+                current.checked_sub(self.retry_cost)
             })
             .is_ok()
     }
 
-    pub(in crate::reverse) fn record_success(&self) {
-        if self.balance.load(Ordering::Relaxed) >= self.max_balance {
+    fn credit(&self, units: u64) {
+        if self.balance.load(Ordering::Relaxed) >= self.cap {
             return;
         }
         let _ = self
             .balance
             .try_update(Ordering::Relaxed, Ordering::Relaxed, |current| {
-                Some((current + 1).min(self.max_balance))
+                Some(current.saturating_add(units).min(self.cap))
             });
+    }
+
+    // Legacy credit path: one token per qualifying response when no explicit
+    // budget was configured. Explicit budgets are credited only from the
+    // common first-attempt success tail.
+    pub(in crate::reverse) fn record_success(&self) {
+        if !self.explicit {
+            self.credit(1);
+        }
+    }
+
+    pub(in crate::reverse) fn record_budget_success(&self) {
+        if self.explicit {
+            self.credit(self.credit_per_success);
+        }
     }
 }
 
@@ -365,6 +399,11 @@ impl RoutePolicy {
                 .as_ref()
                 .map(resilience_retry_runtime)
                 .unwrap_or((1, 0, false, 64 * 1024));
+        let retry_budget = config
+            .resilience
+            .as_ref()
+            .and_then(|resilience| resilience.retry.as_ref())
+            .and_then(|retry| retry.budget.as_ref());
         let passive_health = config.resilience.as_ref().map(resilience_to_passive_health);
         let max_upstream_concurrency = config
             .resilience
@@ -376,6 +415,7 @@ impl RoutePolicy {
             retry_backoff_ms,
             retry_body_replay,
             retry_body_threshold_bytes,
+            retry_budget,
             timeout_ms: config.timeout_ms,
             health_check: config.health_check.as_ref(),
             passive_health,
@@ -394,6 +434,11 @@ impl RoutePolicy {
                 .as_ref()
                 .map(resilience_retry_runtime)
                 .unwrap_or((1, 0, false, 64 * 1024));
+        let retry_budget = config
+            .resilience
+            .as_ref()
+            .and_then(|resilience| resilience.retry.as_ref())
+            .and_then(|retry| retry.budget.as_ref());
         let passive_health = config.resilience.as_ref().map(resilience_to_passive_health);
         let max_upstream_concurrency = config
             .resilience
@@ -405,6 +450,7 @@ impl RoutePolicy {
             retry_backoff_ms,
             retry_body_replay,
             retry_body_threshold_bytes,
+            retry_budget,
             timeout_ms: config.timeout_ms,
             health_check: config.health_check.as_ref(),
             passive_health,
@@ -433,7 +479,7 @@ impl RoutePolicy {
             retry_backoff: Duration::from_millis(parts.retry_backoff_ms),
             retry_body_replay: parts.retry_body_replay,
             retry_body_threshold_bytes: parts.retry_body_threshold_bytes,
-            retry_budget: RetryBudgetRuntime::new(parts.retry_attempts),
+            retry_budget: RetryBudgetRuntime::from_config(parts.retry_attempts, parts.retry_budget),
             timeout: Duration::from_millis(parts.timeout_ms.unwrap_or(30_000)),
             passive_health: parts.passive_health,
             lifecycle: EndpointLifecycleRuntime::from_config(parts.lifecycle),
@@ -449,6 +495,7 @@ struct RoutePolicyParts<'a> {
     retry_backoff_ms: u64,
     retry_body_replay: bool,
     retry_body_threshold_bytes: usize,
+    retry_budget: Option<&'a RetryBudgetConfig>,
     timeout_ms: Option<u64>,
     health_check: Option<&'a qpx_core::config::HealthCheckConfig>,
     passive_health: Option<PassiveHealthRuntime>,

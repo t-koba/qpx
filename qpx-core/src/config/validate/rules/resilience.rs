@@ -147,10 +147,18 @@ fn validate_resilience_fields(resilience: &ResilienceConfig, context: &str) -> R
                 "{context} resilience.retry.retry_body_threshold_bytes must be >= 1"
             ));
         }
-        if retry.budget.is_some() {
-            return Err(anyhow!(
-                "{context} resilience.retry.budget is not supported: retry tokens derive from attempts"
-            ));
+        if let Some(budget) = retry.budget.as_ref() {
+            if !(1..=100).contains(&budget.retry_percent) {
+                return Err(anyhow!(
+                    "{context} resilience.retry.budget.retry_percent must be in 1..=100"
+                ));
+            }
+            const MAX_BURST_TOKENS: u32 = u32::MAX / 100;
+            if !(1..=MAX_BURST_TOKENS).contains(&budget.burst_tokens) {
+                return Err(anyhow!(
+                    "{context} resilience.retry.budget.burst_tokens must be in 1..={MAX_BURST_TOKENS}"
+                ));
+            }
         }
     }
     if matches!(resilience.max_upstream_concurrency, Some(0)) {
@@ -453,30 +461,58 @@ mod affinity_key_tests {
 }
 
 #[cfg(test)]
-mod unsupported_knob_tests {
+mod retry_budget_validation_tests {
     use super::*;
-    use crate::config::{
-        AdaptiveThresholdConfig, EjectionConfig, HalfOpenConfig, LatencyThresholdConfig,
-        OutlierDetectionConfig, ResilienceConfig, ResilienceRetryConfig, RetryBudgetConfig,
-    };
+    use crate::config::{ResilienceConfig, ResilienceRetryConfig, RetryBudgetConfig};
 
-    #[test]
-    fn discarded_resilience_knobs_are_rejected() {
-        let budget = ResilienceConfig {
+    fn resilience(retry_percent: u32, burst_tokens: u32) -> ResilienceConfig {
+        ResilienceConfig {
             retry: Some(ResilienceRetryConfig {
-                attempts: 3,
-                retry_body_threshold_bytes: 1024,
+                attempts: 2,
+                retry_body_threshold_bytes: 64 * 1024,
                 budget: Some(RetryBudgetConfig {
-                    ratio: Some(20),
-                    min_retry_tokens: Some(10),
+                    retry_percent,
+                    burst_tokens,
                 }),
                 ..Default::default()
             }),
             ..Default::default()
-        };
-        let err = validate_resilience_fields(&budget, "test").expect_err("budget");
-        assert!(err.to_string().contains("not supported"), "{err}");
+        }
+    }
 
+    #[test]
+    fn budget_bounds_are_inclusive_at_both_ends() {
+        for (percent, burst) in [(1, 1), (25, 4), (100, 1), (100, u32::MAX / 100)] {
+            validate_resilience_fields(&resilience(percent, burst), "test")
+                .expect("valid retry budget");
+        }
+    }
+
+    #[test]
+    fn budget_one_step_outside_bounds_is_rejected() {
+        for (percent, burst, field) in [
+            (0, 4, "retry_percent"),
+            (101, 4, "retry_percent"),
+            (25, 0, "burst_tokens"),
+            (25, u32::MAX / 100 + 1, "burst_tokens"),
+        ] {
+            let err =
+                validate_resilience_fields(&resilience(percent, burst), "test").expect_err(field);
+            assert!(err.to_string().contains(field), "{err}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod unsupported_knob_tests {
+    use super::*;
+    use crate::config::{
+        AdaptiveThresholdConfig, EjectionConfig, HalfOpenConfig, LatencyThresholdConfig,
+        OutlierDetectionConfig, ResilienceConfig, ResilienceRetryConfig,
+    };
+
+    #[test]
+    fn discarded_resilience_knobs_are_rejected() {
         let success_rate = ResilienceConfig {
             outlier_detection: Some(OutlierDetectionConfig {
                 success_rate: Some(AdaptiveThresholdConfig {

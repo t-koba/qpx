@@ -9,7 +9,7 @@ use crate::upstream::origin::OriginEndpoint;
 use qpx_core::config::ReverseTlsPassthroughRouteConfig;
 use qpx_core::config::{
     EdgeConfig, HealthCheckConfig, MatchConfig, ResilienceConfig, ResilienceRetryConfig,
-    ReverseRouteConfig,
+    RetryBudgetConfig, ReverseRouteConfig,
 };
 use std::sync::atomic::Ordering;
 
@@ -590,6 +590,120 @@ fn expect_router_error(result: Result<ReverseRouter>) -> anyhow::Error {
         Ok(_) => panic!("router construction should fail"),
         Err(err) => err,
     }
+}
+
+#[test]
+fn explicit_retry_budget_credits_retry_percent_units() {
+    let config = RetryBudgetConfig {
+        retry_percent: 25,
+        burst_tokens: 2,
+    };
+    let budget = RetryBudgetRuntime::from_config(2, Some(&config));
+    assert!(!budget.try_consume_retry());
+    for _ in 0..3 {
+        budget.record_budget_success();
+    }
+    assert!(!budget.try_consume_retry());
+    budget.record_budget_success();
+    assert!(budget.try_consume_retry());
+    assert!(!budget.try_consume_retry());
+    for _ in 0..4 {
+        budget.record_budget_success();
+    }
+    assert!(budget.try_consume_retry());
+    assert!(!budget.try_consume_retry());
+
+    let full = RetryBudgetConfig {
+        retry_percent: 100,
+        burst_tokens: 2,
+    };
+    let budget = RetryBudgetRuntime::from_config(2, Some(&full));
+    assert!(!budget.try_consume_retry());
+    budget.record_budget_success();
+    assert!(budget.try_consume_retry());
+    budget.record_budget_success();
+    budget.record_budget_success();
+    assert!(budget.try_consume_retry());
+    assert!(budget.try_consume_retry());
+    assert!(!budget.try_consume_retry());
+}
+
+#[test]
+fn explicit_retry_budget_caps_drained_balance_and_ignores_legacy_credit() {
+    let config = RetryBudgetConfig {
+        retry_percent: 100,
+        burst_tokens: 1,
+    };
+    let budget = RetryBudgetRuntime::from_config(2, Some(&config));
+    for _ in 0..5 {
+        budget.record_budget_success();
+    }
+    budget.record_success();
+    assert!(budget.try_consume_retry());
+    assert!(!budget.try_consume_retry());
+    budget.record_budget_success();
+    assert!(budget.try_consume_retry());
+    assert!(!budget.try_consume_retry());
+}
+
+#[test]
+fn omitted_retry_budget_keeps_attempt_seeded_credit() {
+    let budget = RetryBudgetRuntime::new(3);
+    assert!(budget.try_consume_retry());
+    assert!(budget.try_consume_retry());
+    assert!(!budget.try_consume_retry());
+    budget.record_success();
+    assert!(budget.try_consume_retry());
+    assert!(!budget.try_consume_retry());
+    for _ in 0..16 {
+        budget.record_success();
+    }
+    for _ in 0..16 {
+        assert!(budget.try_consume_retry());
+    }
+    assert!(!budget.try_consume_retry());
+}
+
+#[test]
+fn explicit_retry_budget_handles_max_accepted_burst() {
+    let max_burst = u32::MAX / 100;
+    let config = RetryBudgetConfig {
+        retry_percent: 100,
+        burst_tokens: max_burst,
+    };
+    let budget = RetryBudgetRuntime::from_config(2, Some(&config));
+    for _ in 0..=max_burst {
+        budget.record_budget_success();
+    }
+    for _ in 0..max_burst {
+        assert!(budget.try_consume_retry());
+    }
+    assert!(!budget.try_consume_retry());
+}
+
+#[test]
+fn explicit_retry_budget_grants_exactly_cap_under_concurrency() {
+    let config = RetryBudgetConfig {
+        retry_percent: 100,
+        burst_tokens: 4,
+    };
+    let budget = RetryBudgetRuntime::from_config(2, Some(&config));
+    for _ in 0..4 {
+        budget.record_budget_success();
+    }
+    let granted = AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..16 {
+            let budget = budget.as_ref();
+            let granted = &granted;
+            scope.spawn(move || {
+                while budget.try_consume_retry() {
+                    granted.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+        }
+    });
+    assert_eq!(granted.load(Ordering::Relaxed), 4);
 }
 
 #[test]

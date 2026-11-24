@@ -21,7 +21,7 @@ use std::collections::HashMap;
 #[cfg(any(feature = "tls-rustls", feature = "tls-native"))]
 use std::net::IpAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicUsize};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use tokio::sync::watch;
 use tokio::time::{Duration, timeout};
 
@@ -97,8 +97,11 @@ pub(super) struct SelectedMirrorTarget {
 
 #[derive(Debug)]
 pub(super) struct RetryBudgetRuntime {
-    balance: AtomicIsize,
-    max_balance: isize,
+    balance: AtomicU64,
+    cap: u64,
+    retry_cost: u64,
+    credit_per_success: u64,
+    explicit: bool,
 }
 
 #[derive(Debug)]

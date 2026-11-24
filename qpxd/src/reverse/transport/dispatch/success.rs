@@ -45,9 +45,16 @@ pub(super) async fn handle_reverse_success<R: ReverseTerminalResponse>(
         upstream_cert,
         interim,
         started,
+        upstream_status,
         response: resp,
         export_session,
     } = input;
+    // The original upstream head, before module and response-rule rewrites, is
+    // the only credit source for an explicit retry budget. Typed IPC has no
+    // selected upstream but still carries a genuine primary response here.
+    if attempt_idx == 0 && (200..400).contains(&upstream_status.as_u16()) {
+        route.policy.retry_budget.record_budget_success();
+    }
     let response_rule = apply_dispatch_response_rules(DispatchResponseRuleInput {
         rule: ResponseRuleInput {
             route,
@@ -416,6 +423,11 @@ edges:
                         upstream_cert: None,
                         interim,
                         started: Some(tokio::time::Instant::now()),
+                        upstream_status: if is_error {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        } else {
+                            StatusCode::OK
+                        },
                         response: qpx_core::http_message::Response::from_http(
                             Response::builder()
                                 .status(if is_error { 503 } else { 200 })

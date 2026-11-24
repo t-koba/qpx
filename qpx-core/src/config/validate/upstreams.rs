@@ -2,7 +2,7 @@ use anyhow::{Result, anyhow};
 use std::collections::{HashMap, HashSet};
 
 use super::super::types::{
-    CacheBackendConfig, Config, UpstreamDiscoveryKind, UpstreamTlsTrustConfig,
+    CacheBackendConfig, Config, UpstreamConfig, UpstreamDiscoveryKind, UpstreamTlsTrustConfig,
 };
 use super::UPSTREAM_URL_SCHEMES;
 use super::rules::validate_resilience_config;
@@ -114,6 +114,21 @@ pub(super) fn validate_cache_backends(backends: &[CacheBackendConfig]) -> Result
     Ok(cache_backends)
 }
 
+fn validate_upstream_retry_budget(upstream: &UpstreamConfig) -> Result<()> {
+    if upstream
+        .resilience
+        .as_ref()
+        .and_then(|resilience| resilience.retry.as_ref())
+        .is_some_and(|retry| retry.budget.is_some())
+    {
+        return Err(anyhow!(
+            "upstream {} resilience.retry.budget is only supported on reverse routes",
+            upstream.name
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn validate_upstream_configs(
     config: &Config,
     upstream_trust_profiles: &HashSet<String>,
@@ -221,6 +236,7 @@ pub(super) fn validate_upstream_configs(
                 }
             }
         }
+        validate_upstream_retry_budget(upstream)?;
         validate_resilience_config(
             upstream.resilience.as_ref(),
             &format!("upstream {}", upstream.name),
@@ -350,7 +366,27 @@ pub(super) fn validate_upstream_tls_trust_config(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CacheWriterMode;
+    use crate::config::{CacheWriterMode, UpstreamConfig};
+
+    #[test]
+    fn upstream_retry_budget_is_rejected() {
+        let upstream: UpstreamConfig = serde_json::from_value(serde_json::json!({
+            "name": "origin",
+            "url": "http://127.0.0.1:8080",
+            "resilience": {
+                "retry": {
+                    "attempts": 2,
+                    "budget": { "retry_percent": 25, "burst_tokens": 2 }
+                }
+            }
+        }))
+        .expect("upstream config");
+        let err = validate_upstream_retry_budget(&upstream).expect_err("budget");
+        assert!(
+            err.to_string().contains("only supported on reverse routes"),
+            "{err}"
+        );
+    }
 
     #[test]
     fn cache_writer_mode_defaults_and_validation() {

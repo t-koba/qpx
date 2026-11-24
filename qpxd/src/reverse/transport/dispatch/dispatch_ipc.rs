@@ -140,6 +140,7 @@ pub(super) async fn dispatch_reverse_ipc_route<R: ReverseTerminalResponse>(
         .await;
         match response {
             Ok(Ok(resp)) => {
+                let upstream_status = resp.status();
                 let resp = http_modules.on_upstream_response(resp).await?;
                 match handle_reverse_success::<R>(ReverseSuccessInput {
                     base,
@@ -171,6 +172,7 @@ pub(super) async fn dispatch_reverse_ipc_route<R: ReverseTerminalResponse>(
                     upstream_cert: None,
                     interim: InterimList::new(),
                     started,
+                    upstream_status,
                     response: resp,
                     export_session: export_session.as_ref(),
                 })

@@ -222,3 +222,102 @@ fn load_config_allows_reverse_backends_mirrors_headers_and_regex_rewrite() {
             .is_some()
     );
 }
+
+fn retry_budget_config(retry: &str) -> String {
+    format!(
+        r#"edges:
+- kind: reverse
+  name: reverse
+  listen: 127.0.0.1:19080
+  routes:
+  - match: {{}}
+    target:
+      type: local_response
+      response:
+        status: 200
+        body: ok
+    resilience:
+      retry:
+{retry}"#
+    )
+}
+
+#[test]
+fn load_config_accepts_explicit_retry_budget_bounds_and_attempts_one() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("retry-budget.yaml");
+    for (percent, burst, attempts) in [(1, 1, 2), (100, 42_949_672, 4), (25, 4, 1)] {
+        write_config(
+            &cfg,
+            &retry_budget_config(&format!(
+                "        attempts: {attempts}\n        budget:\n          retry_percent: {percent}\n          burst_tokens: {burst}\n"
+            )),
+        )
+        .expect("write");
+        let loaded = load_config(&cfg).expect("valid retry budget");
+        let retry = loaded.reverse_edge_configs()[0].routes[0]
+            .resilience
+            .as_ref()
+            .and_then(|resilience| resilience.retry.as_ref())
+            .expect("retry");
+        let budget = retry.budget.as_ref().expect("budget");
+        assert_eq!(
+            (budget.retry_percent, budget.burst_tokens),
+            (percent, burst)
+        );
+        assert_eq!(retry.attempts, attempts);
+    }
+    write_config(&cfg, &retry_budget_config("        attempts: 2\n")).expect("write");
+    load_config(&cfg).expect("omitted budget keeps the default policy");
+    fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn load_config_rejects_retry_budget_outside_bounds() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("retry-budget-invalid.yaml");
+    for (percent, burst, field) in [
+        (0, 4, "retry_percent"),
+        (101, 4, "retry_percent"),
+        (25, 0, "burst_tokens"),
+        (25, 42_949_673, "burst_tokens"),
+    ] {
+        write_config(
+            &cfg,
+            &retry_budget_config(&format!(
+                "        attempts: 2\n        budget:\n          retry_percent: {percent}\n          burst_tokens: {burst}\n"
+            )),
+        )
+        .expect("write");
+        let error = load_config(&cfg).expect_err("out-of-bounds budget must fail");
+        assert!(error.to_string().contains(field), "{error}");
+    }
+    fs::remove_dir_all(&dir).expect("cleanup");
+}
+
+#[test]
+fn load_config_rejects_old_and_unknown_retry_budget_fields() {
+    let dir = unique_tmp_dir();
+    fs::create_dir_all(&dir).expect("mkdir");
+    let cfg = dir.join("retry-budget-unknown.yaml");
+    for budget in [
+        "          ratio: 20\n          min_retry_tokens: 4\n",
+        "          retry_percent: 25\n          burst_tokens: 4\n          ratio: 20\n",
+        "          retry_percent: 25\n",
+    ] {
+        write_config(
+            &cfg,
+            &retry_budget_config(&format!("        attempts: 2\n        budget:\n{budget}")),
+        )
+        .expect("write");
+        let error = load_config(&cfg).expect_err("unknown or incomplete budget must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("unknown field") || message.contains("missing field"),
+            "{message}"
+        );
+    }
+    fs::remove_dir_all(&dir).expect("cleanup");
+}
