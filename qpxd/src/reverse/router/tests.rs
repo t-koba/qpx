@@ -11,7 +11,7 @@ use qpx_core::config::{
     EdgeConfig, HealthCheckConfig, MatchConfig, ResilienceConfig, ResilienceRetryConfig,
     RetryBudgetConfig, ReverseRouteConfig,
 };
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 fn empty_pool() -> Arc<UpstreamEndpointSet> {
     UpstreamEndpointSet::new(
@@ -671,14 +671,38 @@ fn explicit_retry_budget_handles_max_accepted_burst() {
         retry_percent: 100,
         burst_tokens: max_burst,
     };
-    let budget = RetryBudgetRuntime::from_config(2, Some(&config));
-    for _ in 0..=max_burst {
-        budget.record_budget_success();
-    }
-    for _ in 0..max_burst {
-        assert!(budget.try_consume_retry());
-    }
-    assert!(!budget.try_consume_retry());
+    let configured = RetryBudgetRuntime::from_config(2, Some(&config));
+    let cap = u64::from(max_burst) * 100;
+    assert_eq!(configured.cap, cap);
+    assert_eq!(configured.retry_cost, 100);
+    assert_eq!(configured.credit_per_success, 100);
+
+    // Seed directly at the boundaries: the maximum burst is checked by the
+    // cap arithmetic above, not by millions of atomic updates.
+    let at_cap = Arc::new(RetryBudgetRuntime {
+        balance: AtomicU64::new(cap),
+        cap,
+        retry_cost: configured.retry_cost,
+        credit_per_success: configured.credit_per_success,
+        explicit: true,
+    });
+    at_cap.record_budget_success();
+    assert_eq!(at_cap.balance.load(Ordering::Relaxed), cap);
+    assert!(at_cap.try_consume_retry());
+    assert_eq!(at_cap.balance.load(Ordering::Relaxed), cap - 100);
+
+    let near_exhaustion = Arc::new(RetryBudgetRuntime {
+        balance: AtomicU64::new(50),
+        cap,
+        retry_cost: configured.retry_cost,
+        credit_per_success: configured.credit_per_success,
+        explicit: true,
+    });
+    assert!(!near_exhaustion.try_consume_retry());
+    near_exhaustion.record_budget_success();
+    assert!(near_exhaustion.try_consume_retry());
+    assert_eq!(near_exhaustion.balance.load(Ordering::Relaxed), 50);
+    assert!(!near_exhaustion.try_consume_retry());
 }
 
 #[test]
