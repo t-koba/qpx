@@ -1024,6 +1024,13 @@ impl DiskCacheBackend {
         {
             return Ok(Some(entry.value.clone()));
         }
+        // Revalidated metadata is published as a standalone object. It must
+        // win over the response trailer: the trailer still carries the
+        // pre-revalidation envelope, and a missing hot-recent entry must not
+        // resurrect it.
+        if let Some(value) = self.get(namespace, key).await? {
+            return Ok(Some(value));
+        }
         let body_key = cache_body_storage_key(key);
         let path = self.path_for(namespace, body_key.as_str());
         // Inline like open_valid: the header and trailer reads are two small
@@ -3132,6 +3139,44 @@ mod tests {
         })
         .expect("encode metadata")
         .into()
+    }
+
+    #[tokio::test]
+    async fn revalidated_metadata_object_wins_over_stale_trailer() {
+        let dir = temp_dir("revalidated-metadata-object");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .put_response(
+                "ns",
+                "variant",
+                Body::from(Bytes::from_static(b"0123456789")),
+                BodyStreamWriteOptions {
+                    max_body_bytes: 1024,
+                    body_read_timeout: Duration::from_secs(1),
+                    ttl_secs: 60,
+                },
+                Box::new(|_| Ok(metadata_raw(4).to_vec())),
+            )
+            .await
+            .expect("store response with trailer metadata");
+        backend
+            .put("ns", "variant", &metadata_raw(9), 60)
+            .await
+            .expect("publish revalidated metadata");
+        backend.hot_recent_remove(&backend.path_for("ns", "variant"));
+
+        let raw = backend
+            .read_response_metadata("ns", "variant")
+            .await
+            .expect("read metadata")
+            .expect("revalidated metadata must remain readable");
+        assert_eq!(
+            decode_cached_response_metadata(raw)
+                .expect("decode metadata")
+                .body_len,
+            9
+        );
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
