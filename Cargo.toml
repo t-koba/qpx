@@ -90,7 +90,6 @@ instant-acme = { version = "0.8.4", default-features = false }
 # HTTP
 hyper = { version = "1", default-features = false, features = ["client", "server", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["client", "client-legacy", "server", "http1", "http2", "tokio"] }
-tower-service = "0.3"
 http = "1"
 http-body = "1"
 http-body-util = { version = "0.1", features = ["channel"] }
