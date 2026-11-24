@@ -1797,12 +1797,18 @@ fn cache_file_id_from_path(root: &Path, path: &Path) -> Option<DiskCacheFileId> 
             .checked_add(decode_hex_nibble(pair[1])?)?;
     }
     let id = DiskCacheFileId(digest);
-    let expected = cache_file_id_hex(id);
-    let expected_path = root
-        .join(&expected[0..2])
-        .join(&expected[2..4])
-        .join(format!("{expected}.{DISK_CACHE_FILE_EXT}"));
-    (expected_path == path).then_some(id)
+    // The stem is already the canonical lowercase hex of the id, so comparing
+    // the two directory components and the root avoids re-encoding it into a
+    // temporary string and rebuilding the whole path for every validation.
+    let parent = path.parent()?;
+    let grandparent = parent.parent()?;
+    if parent.file_name().and_then(|name| name.to_str()) != Some(&encoded[2..4])
+        || grandparent.file_name().and_then(|name| name.to_str()) != Some(&encoded[0..2])
+        || grandparent.parent() != Some(root)
+    {
+        return None;
+    }
+    Some(id)
 }
 
 fn decode_hex_nibble(value: u8) -> Option<u8> {
@@ -3540,6 +3546,17 @@ mod tests {
             .join(&encoded[2..4])
             .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
         assert_eq!(cache_file_id_from_path(&dir, &misplaced), None);
+        let nested = dir
+            .join("extra")
+            .join(&encoded[0..2])
+            .join(&encoded[2..4])
+            .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
+        assert_eq!(cache_file_id_from_path(&dir, &nested), None);
+        let uppercase = dir
+            .join(encoded[0..2].to_ascii_uppercase())
+            .join(&encoded[2..4])
+            .join(format!("{encoded}.{DISK_CACHE_FILE_EXT}"));
+        assert_eq!(cache_file_id_from_path(&dir, &uppercase), None);
         let _ = fs::remove_dir_all(dir);
     }
 
