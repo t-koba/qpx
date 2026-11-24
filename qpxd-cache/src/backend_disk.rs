@@ -2056,8 +2056,12 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
     // process-wide memo of verified parents keeps repeat writes off the
     // mkdir/stat path. The walk itself is the security boundary (symlink and
     // type checks), so only full successful walks are memoized.
-    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
-        && ensured.lock().expect("ensured dir lock").contains(path)
+    let ensured = ENSURED_PRIVATE_DIRS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    if ensured
+        .lock()
+        .expect("ensured dir lock")
+        .contains(path.as_os_str().as_encoded_bytes())
     {
         return Ok(());
     }
@@ -2100,11 +2104,10 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
             }
         }
     }
-    if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
-        && let Ok(mut set) = ensured.lock()
+    if let Ok(mut set) = ensured.lock()
         && set.len() < ENSURED_PRIVATE_DIR_LIMIT
     {
-        set.insert(path.to_path_buf());
+        set.insert(path.as_os_str().as_encoded_bytes().to_vec());
     }
     Ok(())
 }
@@ -2112,7 +2115,7 @@ fn ensure_private_dir(path: &Path) -> Result<()> {
 /// Verified private disk-cache parents. The guard walks directories afresh on
 /// first use, so entries are trusted for the lifetime of the process only.
 static ENSURED_PRIVATE_DIRS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashSet<PathBuf>>,
+    std::sync::Mutex<std::collections::HashSet<Vec<u8>>>,
 > = std::sync::OnceLock::new();
 const ENSURED_PRIVATE_DIR_LIMIT: usize = 4096;
 
@@ -2122,7 +2125,7 @@ fn invalidate_ensured_dir(dir: &Path) {
     if let Some(ensured) = ENSURED_PRIVATE_DIRS.get()
         && let Ok(mut set) = ensured.lock()
     {
-        set.remove(dir);
+        set.remove(dir.as_os_str().as_encoded_bytes());
     }
 }
 
@@ -2222,6 +2225,105 @@ mod tests {
         let error = ensure_private_dir(&target).expect_err("reject parent traversal");
         assert!(error.to_string().contains("parent traversal"));
         assert!(!child.exists());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn private_directory_memo_recognizes_ensured_path_bytes() {
+        let root = temp_dir("memo-encoded-bytes");
+        let target = root.join("objects").join("ab");
+
+        ensure_private_dir(&target).expect("create private directory");
+        assert!(
+            ENSURED_PRIVATE_DIRS
+                .get()
+                .expect("memo initialized")
+                .lock()
+                .expect("memo lock")
+                .contains(target.as_os_str().as_encoded_bytes()),
+            "ensured path must be memoized as encoded bytes"
+        );
+
+        // A memo hit skips the directory walk: removing the ensured directory
+        // must not be silently repaired by a second ensure call.
+        fs::remove_dir_all(&target).expect("remove ensured directory");
+        ensure_private_dir(&target).expect("memoized path must be accepted");
+        assert!(
+            !target.exists(),
+            "memo hit must not re-run the directory guard"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn invalidate_ensured_dir_forces_a_fresh_directory_walk() {
+        let root = temp_dir("memo-invalidation");
+        let target = root.join("objects").join("ab");
+        let key = target.as_os_str().as_encoded_bytes().to_vec();
+
+        ensure_private_dir(&target).expect("create private directory");
+        assert!(
+            ENSURED_PRIVATE_DIRS
+                .get()
+                .expect("memo initialized")
+                .lock()
+                .expect("memo lock")
+                .contains(&key)
+        );
+        invalidate_ensured_dir(&target);
+        assert!(
+            !ENSURED_PRIVATE_DIRS
+                .get()
+                .expect("memo initialized")
+                .lock()
+                .expect("memo lock")
+                .contains(&key),
+            "invalidation must drop the memoized path bytes"
+        );
+
+        // With the entry gone, the next call must walk and rebuild the tree.
+        fs::remove_dir_all(&target).expect("remove ensured directory");
+        ensure_private_dir(&target).expect("re-walk after invalidation");
+        assert!(
+            target.is_dir(),
+            "fresh walk must recreate the removed directory"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn private_directory_creation_still_rejects_symlink_components_and_traversal() {
+        use std::os::unix::fs::symlink;
+
+        let root = temp_dir("symlink-component");
+        let real = root.join("real");
+        fs::create_dir(&real).expect("create symlink target");
+        let link = root.join("link");
+        symlink(&real, &link).expect("create symlink component");
+        let target = link.join("objects");
+
+        let error = ensure_private_dir(&target).expect_err("reject symlinked component");
+        assert!(
+            error
+                .to_string()
+                .contains("refusing symlinked disk cache path component")
+        );
+        assert!(!target.exists());
+        assert!(
+            !ENSURED_PRIVATE_DIRS
+                .get()
+                .expect("memo initialized")
+                .lock()
+                .expect("memo lock")
+                .contains(target.as_os_str().as_encoded_bytes()),
+            "a rejected path must never be memoized"
+        );
+
+        let traversal = link.join("..").join("objects");
+        let error = ensure_private_dir(&traversal).expect_err("reject parent traversal");
+        assert!(error.to_string().contains("parent traversal"));
+        assert!(!root.join("objects").exists());
         let _ = fs::remove_dir_all(root);
     }
 
