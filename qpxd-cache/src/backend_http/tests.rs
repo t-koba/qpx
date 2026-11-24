@@ -268,7 +268,7 @@ async fn spawn_lease_gateway() -> (
     Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
     tokio::task::JoinHandle<()>,
 ) {
-    let (endpoint, leases, _applied, _deleted, server) =
+    let (endpoint, leases, _applied, _deleted, _renewed, server) =
         spawn_lease_gateway_with(CreateFault::None).await;
     (endpoint, leases, server)
 }
@@ -281,6 +281,7 @@ async fn spawn_lease_gateway_with(
 ) -> (
     String,
     Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
     tokio::sync::mpsc::UnboundedReceiver<String>,
     tokio::sync::mpsc::UnboundedReceiver<String>,
     tokio::task::JoinHandle<()>,
@@ -300,6 +301,7 @@ async fn spawn_lease_gateway_with(
     let server_expiries = expiries.clone();
     let (applied_tx, applied_rx) = mpsc::unbounded_channel();
     let (deleted_tx, deleted_rx) = mpsc::unbounded_channel();
+    let (renewed_tx, renewed_rx) = mpsc::unbounded_channel();
     let fault = Arc::new(std::sync::Mutex::new(fault));
     let server = tokio::spawn(async move {
         while let Ok((mut stream, _)) = listener.accept().await {
@@ -307,6 +309,7 @@ async fn spawn_lease_gateway_with(
             let expiries = server_expiries.clone();
             let applied = applied_tx.clone();
             let deleted = deleted_tx.clone();
+            let renewed = renewed_tx.clone();
             let fault = fault.clone();
             tokio::spawn(async move {
                 // The gateway honors the client's bound and clears an expired
@@ -459,6 +462,7 @@ async fn spawn_lease_gateway_with(
                                         std::time::Instant::now()
                                             + std::time::Duration::from_millis(ttl_ms),
                                     );
+                                    let _ = renewed.send(path.clone());
                                     "HTTP/1.1 204 No Content\r\ncontent-length: 0\r\n\r\n".to_string()
                                 } else {
                                     "HTTP/1.1 412 Precondition Failed\r\ncontent-length: 0\r\n\r\n".to_string()
@@ -509,6 +513,7 @@ async fn spawn_lease_gateway_with(
         leases,
         applied_rx,
         deleted_rx,
+        renewed_rx,
         server,
     )
 }
@@ -628,7 +633,7 @@ async fn http_local_only_coordination_is_explicitly_opt_in() {
 
 #[tokio::test]
 async fn http_lost_create_reply_is_released_and_fences_the_stale_holder() {
-    let (endpoint, leases, mut applied, mut deleted, server) =
+    let (endpoint, leases, mut applied, mut deleted, _renewed, server) =
         spawn_lease_gateway_with(CreateFault::DropReply).await;
     let first = backend_at(endpoint.clone(), 500, "http-a");
     let second = backend_at(endpoint.clone(), 500, "http-b");
@@ -691,7 +696,7 @@ async fn http_lost_create_reply_is_released_and_fences_the_stale_holder() {
 
 #[tokio::test]
 async fn cancelled_http_acquisition_releases_the_applied_lease() {
-    let (endpoint, leases, mut applied, mut deleted, server) =
+    let (endpoint, leases, mut applied, mut deleted, _renewed, server) =
         spawn_lease_gateway_with(CreateFault::HangReply).await;
     let backend = backend_at(endpoint.clone(), 2000, "http-a");
 
@@ -817,8 +822,9 @@ async fn expired_http_lease_is_reclaimable_and_fences_the_old_holder() {
 
 #[tokio::test]
 async fn http_heartbeat_keeps_a_live_writer_lease_past_its_initial_ttl() {
-    let (endpoint, leases, server) = spawn_lease_gateway().await;
-    let first = backend_at_with_ttl(endpoint.clone(), 500, 60, "http-a");
+    let (endpoint, leases, _applied, _deleted, mut renewed, server) =
+        spawn_lease_gateway_with(CreateFault::None).await;
+    let first = backend_at_with_ttl(endpoint.clone(), 500, 300, "http-a");
     let second = backend_at(endpoint, 500, "http-b");
 
     let held = first
@@ -826,7 +832,14 @@ async fn http_heartbeat_keeps_a_live_writer_lease_past_its_initial_ttl() {
         .await
         .expect("first lease")
         .expect("backend lease");
-    tokio::time::sleep(Duration::from_millis(150)).await;
+    // Two observed renewals prove the heartbeat ran after acquisition. Waiting
+    // for the gateway's own signal avoids a fixed sleep racing the lease TTL.
+    for _ in 0..2 {
+        tokio::time::timeout(Duration::from_secs(5), renewed.recv())
+            .await
+            .expect("heartbeat renewed the lease")
+            .expect("renewal signal");
+    }
     held.validate().await.expect("heartbeat renewed the lease");
     assert_eq!(leases.lock().expect("lease map").len(), 1);
     let denied = second
