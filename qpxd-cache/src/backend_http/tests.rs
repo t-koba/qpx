@@ -827,19 +827,26 @@ async fn http_heartbeat_keeps_a_live_writer_lease_past_its_initial_ttl() {
     let first = backend_at_with_ttl(endpoint.clone(), 500, 300, "http-a");
     let second = backend_at(endpoint, 500, "http-b");
 
+    let acquired_at = std::time::Instant::now();
     let held = first
         .lock_commit("ns", "primary-a")
         .await
         .expect("first lease")
         .expect("backend lease");
-    // Two observed renewals prove the heartbeat ran after acquisition. Waiting
-    // for the gateway's own signal avoids a fixed sleep racing the lease TTL.
-    for _ in 0..2 {
+    // The heartbeat interval is TTL/3, so four observed renewals place the
+    // assertions beyond the lease's original expiry. Waiting for the gateway's
+    // own signal avoids a fixed sleep racing the TTL, and the elapsed-time
+    // assertion keeps this test from passing before that deadline.
+    for _ in 0..4 {
         tokio::time::timeout(Duration::from_secs(5), renewed.recv())
             .await
             .expect("heartbeat renewed the lease")
             .expect("renewal signal");
     }
+    assert!(
+        acquired_at.elapsed() >= Duration::from_millis(300),
+        "heartbeat test ended before the original lease expiry"
+    );
     held.validate().await.expect("heartbeat renewed the lease");
     assert_eq!(leases.lock().expect("lease map").len(), 1);
     let denied = second
