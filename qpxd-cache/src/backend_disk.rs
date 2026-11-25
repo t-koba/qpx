@@ -2361,10 +2361,7 @@ mod tests {
                     body_read_timeout: Duration::from_secs(1),
                     ttl_secs: 60,
                 },
-                Box::new(|len| {
-                    assert_eq!(len, 10);
-                    Ok(Vec::new())
-                }),
+                Box::new(|_| panic!("metadata must not be encoded for an over-limit body")),
             )
             .await
             .expect_err("reject body over limit");
