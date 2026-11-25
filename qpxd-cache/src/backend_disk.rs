@@ -3,8 +3,8 @@ mod commit;
 
 use super::types::{
     BodyStreamWriteOptions, CacheBackend, CachedBody, CachedBodyStream, CachedResponseCandidate,
-    CachedResponseEnvelope, CommitLease, MetadataEncoder, VariantIndex, bounded_cache_body_stream,
-    cache_body_storage_key, decode_cached_response_metadata, is_cache_body_storage_key,
+    CachedResponseEnvelope, CommitLease, MetadataEncoder, VariantIndex, cache_body_storage_key,
+    decode_cached_response_metadata, is_cache_body_storage_key,
 };
 use anyhow::{Context, Result, anyhow};
 use arc_swap::{ArcSwap, ArcSwapOption};
@@ -1025,14 +1025,10 @@ impl DiskCacheBackend {
             .parent()
             .ok_or_else(|| anyhow!("disk cache path missing parent: {}", path.display()))?;
         ensure_private_dir(parent)?;
-        let (body, len_rx) =
-            bounded_cache_body_stream(body, options.max_body_bytes, options.body_read_timeout);
         let cached =
             CachedBody::from_body_limited(body, options.max_body_bytes, options.body_read_timeout)
                 .await?;
-        let len = len_rx
-            .await
-            .map_err(|_| anyhow!("disk cache body writer closed"))??;
+        let len = cached.len();
         let metadata = match metadata {
             Some((meta_key, encode)) => Some((meta_key, Bytes::from(encode(len)?))),
             None => None,
@@ -2349,6 +2345,45 @@ mod tests {
         assert!(error.to_string().contains("parent traversal"));
         assert!(!root.join("objects").exists());
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[tokio::test]
+    async fn disk_response_body_limit_publishes_no_object_or_metadata() {
+        let dir = temp_dir("response-body-limit");
+        let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
+        backend
+            .put_response(
+                "ns",
+                "variant",
+                Body::from(Bytes::from_static(b"0123456789")),
+                BodyStreamWriteOptions {
+                    max_body_bytes: 4,
+                    body_read_timeout: Duration::from_secs(1),
+                    ttl_secs: 60,
+                },
+                Box::new(|len| {
+                    assert_eq!(len, 10);
+                    Ok(Vec::new())
+                }),
+            )
+            .await
+            .expect_err("reject body over limit");
+        assert!(
+            backend
+                .get("ns", &cache_body_storage_key("variant"))
+                .await
+                .expect("get body")
+                .is_none()
+        );
+        assert!(
+            backend
+                .read_response_metadata("ns", "variant")
+                .await
+                .expect("metadata")
+                .is_none()
+        );
+        assert!(collect_cache_files(&dir).expect("cache files").is_empty());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[tokio::test]
