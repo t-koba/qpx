@@ -2351,7 +2351,7 @@ mod tests {
     async fn disk_response_body_limit_publishes_no_object_or_metadata() {
         let dir = temp_dir("response-body-limit");
         let backend = DiskCacheBackend::new(cfg(dir.clone(), 1024 * 1024)).expect("backend");
-        backend
+        let err = backend
             .put_response(
                 "ns",
                 "variant",
@@ -2365,6 +2365,10 @@ mod tests {
             )
             .await
             .expect_err("reject body over limit");
+        assert!(
+            err.to_string().contains("exceeds configured limit"),
+            "unexpected error: {err}"
+        );
         assert!(
             backend
                 .get("ns", &cache_body_storage_key("variant"))
