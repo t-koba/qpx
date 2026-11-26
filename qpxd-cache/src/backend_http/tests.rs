@@ -261,6 +261,33 @@ enum CreateFault {
     HangReply,
 }
 
+/// Test-only clock for the gateway's lease expiry checks. It follows wall
+/// time until a test pins it to a chosen instant, so lease deadlines can be
+/// crossed without waiting on the scheduler.
+#[derive(Clone)]
+struct GatewayClock {
+    pinned: Arc<std::sync::Mutex<Option<std::time::Instant>>>,
+}
+
+impl GatewayClock {
+    fn real() -> Self {
+        Self {
+            pinned: Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    fn now(&self) -> std::time::Instant {
+        self.pinned
+            .lock()
+            .expect("gateway clock")
+            .unwrap_or_else(std::time::Instant::now)
+    }
+
+    fn pin(&self, at: std::time::Instant) {
+        *self.pinned.lock().expect("gateway clock") = Some(at);
+    }
+}
+
 /// HTTP gateway implementing only the writer-lease contract: conditional
 /// create (`If-None-Match: *`) and conditional release (`If-Match: <etag>`).
 async fn spawn_lease_gateway() -> (
@@ -269,15 +296,30 @@ async fn spawn_lease_gateway() -> (
     tokio::task::JoinHandle<()>,
 ) {
     let (endpoint, leases, _applied, _deleted, _renewed, server) =
-        spawn_lease_gateway_with(CreateFault::None).await;
+        spawn_lease_gateway_with_clock(CreateFault::None, GatewayClock::real()).await;
     (endpoint, leases, server)
 }
 
 /// Same gateway, with a deterministic ambiguous-create fault and channels that
 /// announce the applied token and each token-checked deletion.
-#[allow(clippy::type_complexity)]
 async fn spawn_lease_gateway_with(
     fault: CreateFault,
+) -> (
+    String,
+    Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::sync::mpsc::UnboundedReceiver<String>,
+    tokio::task::JoinHandle<()>,
+) {
+    spawn_lease_gateway_with_clock(fault, GatewayClock::real()).await
+}
+
+/// Fixture with the gateway's expiry clock under the test's control.
+#[allow(clippy::type_complexity)]
+async fn spawn_lease_gateway_with_clock(
+    fault: CreateFault,
+    clock: GatewayClock,
 ) -> (
     String,
     Arc<std::sync::Mutex<std::collections::HashMap<String, String>>>,
@@ -311,6 +353,7 @@ async fn spawn_lease_gateway_with(
             let deleted = deleted_tx.clone();
             let renewed = renewed_tx.clone();
             let fault = fault.clone();
+            let clock = clock.clone();
             tokio::spawn(async move {
                 // The gateway honors the client's bound and clears an expired
                 // lease before evaluating any conditional operation.
@@ -318,11 +361,9 @@ async fn spawn_lease_gateway_with(
                     leases: &mut std::collections::HashMap<String, String>,
                     expiries: &mut std::collections::HashMap<String, std::time::Instant>,
                     path: &str,
+                    now: std::time::Instant,
                 ) {
-                    if expiries
-                        .get(path)
-                        .is_some_and(|at| *at <= std::time::Instant::now())
-                    {
+                    if expiries.get(path).is_some_and(|at| *at <= now) {
                         leases.remove(path);
                         expiries.remove(path);
                     }
@@ -406,7 +447,7 @@ async fn spawn_lease_gateway_with(
                         let mut leases = leases.lock().expect("lease map");
                         {
                             let mut expiries = expiries.lock().expect("lease expiries");
-                            live(&mut leases, &mut expiries, &path);
+                            live(&mut leases, &mut expiries, &path, clock.now());
                         }
                         match method.as_str() {
                             "PUT"
@@ -422,7 +463,7 @@ async fn spawn_lease_gateway_with(
                                             .expect("lease ttl header");
                                         expiries.lock().expect("lease expiries").insert(
                                             path.clone(),
-                                            std::time::Instant::now()
+                                            clock.now()
                                                 + std::time::Duration::from_millis(ttl_ms),
                                         );
                                         entry.insert(token.clone());
@@ -459,7 +500,7 @@ async fn spawn_lease_gateway_with(
                                         .expect("lease ttl header");
                                     expiries.lock().expect("lease expiries").insert(
                                         path.clone(),
-                                        std::time::Instant::now()
+                                        clock.now()
                                             + std::time::Duration::from_millis(ttl_ms),
                                     );
                                     let _ = renewed.send(path.clone());
@@ -469,7 +510,7 @@ async fn spawn_lease_gateway_with(
                                 }
                             }
                             "GET" => {
-                                live(&mut leases, &mut expiries.lock().expect("lease expiries"), &path);
+                                live(&mut leases, &mut expiries.lock().expect("lease expiries"), &path, clock.now());
                                 match leases.get(&path) {
                                     Some(token) => format!(
                                         "HTTP/1.1 200 OK\r\ncontent-length: {}\r\n\r\n{}",
@@ -481,7 +522,7 @@ async fn spawn_lease_gateway_with(
                             "DELETE" => {
                                 {
                                     let mut expiries = expiries.lock().expect("lease expiries");
-                                    live(&mut leases, &mut expiries, &path);
+                                    live(&mut leases, &mut expiries, &path, clock.now());
                                 }
                                 let expected = format!(
                                     "\"{}\"",
@@ -822,31 +863,47 @@ async fn expired_http_lease_is_reclaimable_and_fences_the_old_holder() {
 
 #[tokio::test]
 async fn http_heartbeat_keeps_a_live_writer_lease_past_its_initial_ttl() {
+    const TTL_MS: u64 = 300;
+    let ttl = Duration::from_millis(TTL_MS);
+    let heartbeat = crate::util::writer_lease_renewal_interval(TTL_MS).expect("heartbeat interval");
+    let clock = GatewayClock::real();
     let (endpoint, leases, _applied, _deleted, mut renewed, server) =
-        spawn_lease_gateway_with(CreateFault::None).await;
-    let first = backend_at_with_ttl(endpoint.clone(), 500, 300, "http-a");
+        spawn_lease_gateway_with_clock(CreateFault::None, clock.clone()).await;
+    let first = backend_at_with_ttl(endpoint.clone(), 500, TTL_MS, "http-a");
     let second = backend_at(endpoint, 500, "http-b");
 
-    let acquired_at = std::time::Instant::now();
+    // Pin the gateway's clock before acquisition: no scheduler delay can let
+    // the lease expire while this test waits for renewal handshakes.
+    clock.pin(std::time::Instant::now());
     let held = first
         .lock_commit("ns", "primary-a")
         .await
         .expect("first lease")
         .expect("backend lease");
-    // The heartbeat interval is TTL/3, so four observed renewals place the
-    // assertions beyond the lease's original expiry. Waiting for the gateway's
-    // own signal avoids a fixed sleep racing the TTL, and the elapsed-time
-    // assertion keeps this test from passing before that deadline.
-    for _ in 0..4 {
+    let acquired_at = clock.now();
+    // Move virtual time by one heartbeat tick before any renewal is stamped,
+    // so the first two renewals push the deadline past the original one.
+    clock.pin(acquired_at + heartbeat);
+    for _ in 0..2 {
         tokio::time::timeout(Duration::from_secs(5), renewed.recv())
             .await
             .expect("heartbeat renewed the lease")
             .expect("renewal signal");
     }
+    // Cross the original deadline by clock, not by wall-clock margin. Drop
+    // any renewal already queued so the next handshake is observed after the
+    // jump; the two earlier renewals keep the lease live at this instant.
+    while renewed.try_recv().is_ok() {}
+    let original_deadline = acquired_at + ttl;
+    clock.pin(original_deadline);
     assert!(
-        acquired_at.elapsed() >= Duration::from_millis(300),
-        "heartbeat test ended before the original lease expiry"
+        clock.now() >= original_deadline,
+        "heartbeat test did not cross the original lease expiry"
     );
+    tokio::time::timeout(Duration::from_secs(5), renewed.recv())
+        .await
+        .expect("heartbeat renewed the lease at the original deadline")
+        .expect("renewal signal");
     held.validate().await.expect("heartbeat renewed the lease");
     assert_eq!(leases.lock().expect("lease map").len(), 1);
     let denied = second
