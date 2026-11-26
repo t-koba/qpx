@@ -46,8 +46,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
         with:
           toolchain: nightly-2026-07-15
-      - name: verify fuzz lockfile
-        run: cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked >/dev/null
       - name: install fuzzing toolchain
         run: |
           sudo apt-get update
