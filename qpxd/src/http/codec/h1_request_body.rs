@@ -92,7 +92,10 @@ where
             .split(|b| *b == b';')
             .next()
             .ok_or_else(|| anyhow!("invalid chunk-size line"))?;
-        let size_str = std::str::from_utf8(size_token)?.trim();
+        if size_token.is_empty() || !size_token.iter().all(|b| b.is_ascii_hexdigit()) {
+            return Err(anyhow!("invalid chunk-size: expected 1*HEXDIG"));
+        }
+        let size_str = std::str::from_utf8(size_token)?;
         let size = usize::from_str_radix(size_str, 16)
             .map_err(|_| anyhow!("invalid chunk-size: {}", size_str))?;
         total_body_bytes = total_body_bytes
@@ -627,6 +630,40 @@ mod tests {
 
         result.expect("balanced quoted extension");
         assert!(body.trailers().await.expect("trailers").is_none());
+        assert!(body.data().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn chunked_rejects_non_hexdig_chunk_sizes() {
+        for bytes in [
+            &b"+1\r\nA\r\n0\r\n\r\n"[..],
+            &b" 1\r\nA\r\n0\r\n\r\n"[..],
+            &b"1 \r\nA\r\n0\r\n\r\n"[..],
+            &b"\r\n\r\n"[..],
+        ] {
+            let (result, mut body) = forward_buffered(bytes).await;
+
+            let err = result.expect_err("non-HEXDIG chunk size must be rejected");
+            assert!(err.to_string().contains("invalid chunk-size"), "{err}");
+            assert!(matches!(body.data().await, Some(Err(_))));
+        }
+    }
+
+    #[tokio::test]
+    async fn chunked_accepts_uppercase_and_leading_zero_chunk_sizes() {
+        let (result, mut body) =
+            forward_buffered(b"0002\r\nAB\r\nA\r\n0123456789\r\n0\r\n\r\n").await;
+
+        let (_, leftover) = result.expect("valid HEXDIG chunk sizes");
+        assert!(leftover.is_empty());
+        assert_eq!(
+            body.data().await.expect("first chunk").expect("data"),
+            &b"AB"[..]
+        );
+        assert_eq!(
+            body.data().await.expect("second chunk").expect("data"),
+            &b"0123456789"[..]
+        );
         assert!(body.data().await.is_none());
     }
 
