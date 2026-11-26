@@ -52,6 +52,11 @@ where
     Ok((read_half, read_buf))
 }
 
+/// Re-frames a client chunked body into freshly encoded chunks.
+///
+/// The chunk-size line and trailer block must have unambiguous CRLF framing:
+/// bare LF bytes and unterminated quoted chunk extensions are rejected rather
+/// than forwarded with a different framing boundary.
 pub(crate) async fn forward_chunked_request_body<R>(
     read_half: R,
     read_buf: BytesMut,
@@ -82,6 +87,7 @@ where
     let mut total_body_bytes = 0u64;
     loop {
         let line = read_crlf_line(&mut read_half, &mut read_buf, read_timeout).await?;
+        validate_chunk_size_line(&line)?;
         let size_token = line
             .split(|b| *b == b';')
             .next()
@@ -123,6 +129,58 @@ where
         )
         .await?;
     }
+}
+
+/// Validate a chunk-size line before its hex prefix is parsed.
+///
+/// `read_crlf_line` stops at the first CRLF, so an embedded CR or LF would let
+/// an extension hide a second framing boundary. A quoted extension must also
+/// close; otherwise a parser that tolerates the line could disagree with one
+/// that treats the quote as continuing into the next line.
+fn validate_chunk_size_line(line: &[u8]) -> Result<()> {
+    if line.contains(&b'\r') || line.contains(&b'\n') {
+        return Err(anyhow!("invalid chunk-size line: embedded CR or LF"));
+    }
+    let Some(extension) = line
+        .iter()
+        .position(|byte| *byte == b';')
+        .map(|index| &line[index + 1..])
+    else {
+        return Ok(());
+    };
+
+    let mut quoted = false;
+    let mut escaped = false;
+    for byte in extension {
+        if quoted && escaped {
+            escaped = false;
+        } else if quoted && *byte == b'\\' {
+            escaped = true;
+        } else if *byte == b'"' {
+            quoted = !quoted;
+        }
+    }
+    if quoted {
+        return Err(anyhow!(
+            "invalid chunk-size line: unterminated quoted string"
+        ));
+    }
+    Ok(())
+}
+
+/// Whether the slice has an LF that is not part of a CRLF.
+fn has_bare_lf(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r'))
+}
+
+fn reject_bare_lf_trailers(bytes: &[u8]) -> Result<()> {
+    if has_bare_lf(bytes) {
+        return Err(anyhow!("invalid HTTP/1 request trailers: bare LF"));
+    }
+    Ok(())
 }
 
 async fn forward_chunk_payload_segmented<R>(
@@ -202,6 +260,9 @@ where
         let mut headers = [httparse::EMPTY_HEADER; 128];
         match httparse::parse_headers(buf.as_ref(), &mut headers)? {
             httparse::Status::Complete((consumed, parsed)) => {
+                // Only the consumed block is trailers; later bytes may belong
+                // to the next pipelined request.
+                reject_bare_lf_trailers(&buf[..consumed])?;
                 if parsed.is_empty() {
                     buf.advance(consumed);
                     return Ok(None);
@@ -211,6 +272,9 @@ where
                 return Ok(Some(trailers));
             }
             httparse::Status::Partial => {
+                // No complete trailer block yet, so the whole buffer is still
+                // part of it and must use CRLF line endings.
+                reject_bare_lf_trailers(buf.as_ref())?;
                 let need = buf.len().saturating_add(1);
                 fill_buffer_capped(reader, buf, need, MAX_HEADER_BYTES, read_timeout).await?
             }
@@ -513,5 +577,128 @@ mod tests {
                 drop(client);
             })
         });
+    }
+
+    type BufferedResult = std::result::Result<(tokio::io::Empty, BytesMut), anyhow::Error>;
+
+    /// Run the parser on a fully preloaded body with no transport reads.
+    async fn forward_buffered(bytes: &'static [u8]) -> (BufferedResult, Body) {
+        let (sender, body) = Body::channel();
+        let result = tokio::time::timeout(
+            Duration::from_millis(500),
+            forward_chunked_request_body(
+                tokio::io::empty(),
+                BytesMut::from(bytes),
+                sender,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("buffered chunked parse did not finish within test timeout");
+        (result, body)
+    }
+
+    #[tokio::test]
+    async fn chunked_rejects_unterminated_quoted_chunk_extension() {
+        let (result, mut body) =
+            forward_buffered(b"0;x=\"\r\n\r\nGET /next HTTP/1.1\r\nHost: example.test\r\n\r\n")
+                .await;
+
+        let err = result.expect_err("unterminated quoted extension must be rejected");
+        assert!(err.to_string().contains("invalid chunk-size line"), "{err}");
+        assert!(
+            matches!(body.data().await, Some(Err(_))),
+            "the body must not complete successfully"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunked_rejects_backslash_before_unterminated_quote() {
+        let (result, mut body) = forward_buffered(b"0;x=\\\"\r\n\r\n").await;
+
+        let err = result.expect_err("backslash outside quoted string must not hide the quote");
+        assert!(err.to_string().contains("invalid chunk-size line"), "{err}");
+        assert!(matches!(body.data().await, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn chunked_accepts_balanced_quoted_chunk_extension() {
+        let (result, mut body) = forward_buffered(b"0;x=\"ok\"\r\n\r\n").await;
+
+        result.expect("balanced quoted extension");
+        assert!(body.trailers().await.expect("trailers").is_none());
+        assert!(body.data().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn chunked_rejects_bare_lf_in_chunk_size_line() {
+        let (result, mut body) = forward_buffered(b"0;x=\"a\nb\"\r\n\r\n").await;
+
+        let err = result.expect_err("bare LF in chunk-size line must be rejected");
+        assert!(err.to_string().contains("invalid chunk-size line"), "{err}");
+        assert!(matches!(body.data().await, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn chunked_accepts_plain_and_extended_chunk_size_lines() {
+        let (result, mut body) = forward_buffered(
+            b"2\r\nAB\r\n2;name=value\r\nCD\r\n2;name=\"value with spaces\"\r\nEF\r\n0\r\n\r\n",
+        )
+        .await;
+
+        let (_, leftover) = result.expect("valid chunk-size lines");
+        assert!(leftover.is_empty());
+        for expected in [&b"AB"[..], &b"CD"[..], &b"EF"[..]] {
+            assert_eq!(
+                body.data().await.expect("chunk data").expect("body data"),
+                expected
+            );
+        }
+        assert!(body.data().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn chunked_rejects_bare_lf_in_trailers() {
+        let (result, mut body) = forward_buffered(b"0\r\nX: y\n\r\n").await;
+
+        let err = result.expect_err("bare LF trailer must be rejected");
+        let message = err.to_string();
+        assert!(message.contains("bare LF"), "{message}");
+        assert!(
+            message.contains("invalid HTTP/1 request trailers"),
+            "{message}"
+        );
+        assert!(matches!(body.data().await, Some(Err(_))));
+    }
+
+    #[tokio::test]
+    async fn chunked_accepts_crlf_trailers() {
+        let (result, mut body) = forward_buffered(b"0\r\nX: y\r\n\r\n").await;
+
+        let (_, leftover) = result.expect("CRLF trailers");
+        assert!(leftover.is_empty());
+        let trailers = body
+            .trailers()
+            .await
+            .expect("trailers")
+            .expect("trailer block");
+        assert_eq!(trailers["x"], "y");
+    }
+
+    #[tokio::test]
+    async fn chunked_checks_only_the_consumed_trailer_block_for_bare_lf() {
+        let next_request = &b"GET /next HTTP/1.1\r\nHost: example.test\n\r\n"[..];
+        let (result, mut body) =
+            forward_buffered(b"0\r\nX: y\r\n\r\nGET /next HTTP/1.1\r\nHost: example.test\n\r\n")
+                .await;
+
+        let (_, leftover) = result.expect("bare LF in the next request is not trailers");
+        assert_eq!(leftover.as_ref(), next_request);
+        let trailers = body
+            .trailers()
+            .await
+            .expect("trailers")
+            .expect("trailer block");
+        assert_eq!(trailers["x"], "y");
     }
 }
