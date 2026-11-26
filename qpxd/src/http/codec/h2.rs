@@ -39,11 +39,13 @@ pub(crate) const H2_MAX_HEADER_LIST_SIZE: u32 = 128 * 1024;
 // so the count ceiling is the fail-closed default; per-route guard
 // `header_count` remains the policy knob for stricter limits.
 pub(crate) const H2_MAX_HEADER_COUNT: usize = 128;
-// Pin the h2 reset-flood ceilings to their current upstream defaults instead
-// of inheriting them silently. The h2 docs mark the pending-accept (20) and
-// local-error (1024) defaults as "could change"; a future h2 upgrade must
-// not silently widen the edge. No behavior change at h2 0.4.20, no new
-// policy knob: explicitness is the fail-closed default.
+// Pin the h2 reset-flood count ceilings explicitly instead of inheriting them
+// silently. The h2 docs mark the pending-accept (20) and local-error (1024)
+// defaults as "could change"; concurrent-reset stays at 50 as qpx's memory
+// policy. h2 0.4.21 deliberately raises reset_stream_duration to 5s to avoid
+// spurious connection resets on ordinary client cancellation (h2#1010), so
+// qpx adopts that default instead of re-pinning the old 1s heuristic. Any
+// further change is a deliberate review point, not silent drift.
 pub(crate) const H2_MAX_PENDING_ACCEPT_RESET_STREAMS: usize = 20;
 pub(crate) const H2_MAX_LOCAL_ERROR_RESET_STREAMS: usize = 1024;
 pub(crate) const H2_MAX_CONCURRENT_RESET_STREAMS: usize = 50;

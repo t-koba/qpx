@@ -1242,17 +1242,21 @@ async fn h2_server_refuses_header_list_over_transport_cap() {
 }
 
 #[test]
-fn h2_reset_flood_caps_are_pinned_to_current_h2_defaults() {
-    // Explicitness guard: h2 marks pending-accept (20) and local-error (1024)
-    // defaults as "could change" and concurrent-reset defaults as 50. If h2
-    // moves any default, this test forces a deliberate review instead of a
-    // silent edge widening. Tuning itself is exercised by the tuned-builder
-    // handshake tests below.
+fn h2_reset_flood_caps_pin_counts_and_record_reset_duration() {
+    // Count ceilings are qpx policy; the 5s reset-stream retention is a
+    // deliberate adoption of h2 0.4.21's fix for spurious connection resets
+    // after ordinary client cancellation (h2#1010). If either drifts, this
+    // test forces a deliberate review. Tuning itself is exercised by the
+    // tuned-builder handshake tests below.
     assert_eq!(H2_MAX_PENDING_ACCEPT_RESET_STREAMS, 20);
     assert_eq!(H2_MAX_LOCAL_ERROR_RESET_STREAMS, 1024);
     assert_eq!(H2_MAX_CONCURRENT_RESET_STREAMS, 50);
     let mut builder = h2::server::Builder::new();
     tune_h2_server_builder_with(&mut builder, H2ServerTuning::default());
+    assert!(
+        format!("{builder:?}").contains("reset_stream_duration: 5s"),
+        "h2 0.4.21 reset-stream retention must stay a deliberate documented default"
+    );
 }
 
 #[test]
