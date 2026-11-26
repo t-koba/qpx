@@ -88,11 +88,24 @@ where
     loop {
         let line = read_crlf_line(&mut read_half, &mut read_buf, read_timeout).await?;
         validate_chunk_size_line(&line)?;
-        let size_token = line
-            .split(|b| *b == b';')
-            .next()
-            .ok_or_else(|| anyhow!("invalid chunk-size line"))?;
-        if size_token.is_empty() || !size_token.iter().all(|b| b.is_ascii_hexdigit()) {
+        let (size_part, has_extension) = match line.iter().position(|b| *b == b';') {
+            Some(index) => (&line[..index], true),
+            None => (&line[..], false),
+        };
+        let size_len = size_part
+            .iter()
+            .take_while(|b| b.is_ascii_hexdigit())
+            .count();
+        let size_token = &size_part[..size_len];
+        if size_token.is_empty() {
+            return Err(anyhow!("invalid chunk-size: expected 1*HEXDIG"));
+        }
+        // RFC 9112 BWS (SP/HTAB) may precede an extension delimiter, but any
+        // other byte after the HEXDIG run is an ambiguous framing boundary.
+        if size_part[size_len..]
+            .iter()
+            .any(|b| *b != b' ' && *b != b'\t' || !has_extension)
+        {
             return Err(anyhow!("invalid chunk-size: expected 1*HEXDIG"));
         }
         let size_str = std::str::from_utf8(size_token)?;
@@ -639,6 +652,7 @@ mod tests {
             &b"+1\r\nA\r\n0\r\n\r\n"[..],
             &b" 1\r\nA\r\n0\r\n\r\n"[..],
             &b"1 \r\nA\r\n0\r\n\r\n"[..],
+            &b"0\x0b;x=y\r\n\r\n"[..],
             &b"\r\n\r\n"[..],
         ] {
             let (result, mut body) = forward_buffered(bytes).await;
@@ -647,6 +661,16 @@ mod tests {
             assert!(err.to_string().contains("invalid chunk-size"), "{err}");
             assert!(matches!(body.data().await, Some(Err(_))));
         }
+    }
+
+    #[tokio::test]
+    async fn chunked_accepts_bws_before_chunk_extension() {
+        let (result, mut body) = forward_buffered(b"2 \t;name=value\r\nAB\r\n0\r\n\r\n").await;
+
+        let (_, leftover) = result.expect("BWS before chunk extension");
+        assert!(leftover.is_empty());
+        assert_eq!(body.data().await.expect("chunk").expect("data"), &b"AB"[..]);
+        assert!(body.data().await.is_none());
     }
 
     #[tokio::test]
