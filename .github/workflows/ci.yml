@@ -922,6 +922,8 @@ jobs:
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
+      - name: verify fuzz lockfile
+        run: cargo metadata --manifest-path fuzz/Cargo.toml --format-version 1 --locked >/dev/null
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-audit,cargo-deny
