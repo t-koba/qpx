@@ -122,6 +122,10 @@ class StreamingGapStatsTest(unittest.TestCase):
             streaming_gap_percentile.percentile(gaps, 99),
             sorted(gaps)[streaming_gap_percentile.rank_index(len(gaps), 99)],
         )
+        self.assertEqual(
+            streaming_gap_percentile.percentile_sorted(sorted(gaps), 99),
+            streaming_gap_percentile.percentile(gaps, 99),
+        )
 
 
 if __name__ == "__main__":

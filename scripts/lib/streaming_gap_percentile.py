@@ -14,9 +14,13 @@ def rank_index(count, percentile):
     return min(count - 1, max(0, int((count * percentile + 99) // 100) - 1))
 
 
-def percentile(gaps, percentile_value):
-    """The nearest-rank percentile of the gap observations."""
-    ordered = sorted(gaps)
+def percentile_sorted(ordered, percentile_value):
+    """The nearest-rank percentile of already sorted gap observations."""
     if not ordered:
         return 0.0
     return ordered[rank_index(len(ordered), percentile_value)]
+
+
+def percentile(gaps, percentile_value):
+    """The nearest-rank percentile of the gap observations."""
+    return percentile_sorted(sorted(gaps), percentile_value)

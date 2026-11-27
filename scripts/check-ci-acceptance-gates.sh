@@ -470,6 +470,7 @@ require .github/workflows/ci.yml 'CARGO_PROFILE_RELEASE_STRIP: "none"'
 require .github/workflows/ci.yml 'python3 scripts/test-perf-policy.py'
 require .github/workflows/ci.yml 'python3 scripts/test-streaming-performance.py'
 require .github/workflows/ci.yml 'python3 scripts/test-streaming-confirmation.py'
+require .github/workflows/ci.yml 'python3 scripts/test-streaming-gap-percentile.py'
 require .github/workflows/ci.yml 'python3 scripts/test-streaming-reference-comparison.py'
 python3 scripts/check_ci_artifact_paths.py .github/workflows/ci.yml
 require .github/workflows/ci.yml 'target/perf/streaming-compare-logs/**'

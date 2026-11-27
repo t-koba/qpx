@@ -3507,6 +3507,7 @@ fn ci_acceptance_violations(
         "cargo build -p qpxd --release --locked",
         "python3 scripts/test-perf-policy.py",
         "python3 scripts/test-streaming-reference-comparison.py",
+        "python3 scripts/test-streaming-gap-percentile.py",
         "checkout pinned previous release",
         "d67a148e7ccbbd272750415213601005af0f38c5",
         "python3 scripts/perf-audit-policy.py run proxy",
@@ -6199,6 +6200,7 @@ mod tests {
             target/perf/proxy-compare-logs/**
             python3 scripts/test-perf-policy.py
             python3 scripts/test-streaming-reference-comparison.py
+            python3 scripts/test-streaming-gap-percentile.py
             checkout pinned previous release
             d67a148e7ccbbd272750415213601005af0f38c5
             python3 scripts/perf-audit-policy.py run proxy
