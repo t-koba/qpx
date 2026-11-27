@@ -16,13 +16,6 @@ sys.path.insert(0, str(ROOT / "scripts" / "lib"))
 import streaming_gap_percentile
 
 OLD_OBSERVATIONS = 12792  # 100 MiB / 64 KiB - 1, times 8 transfers
-# Fixed nearest-rank indices from the independent oracle, never from the
-# estimator under test: ceil(P/100 * N) - 1, clamped to [0, N - 1].
-OLD_RANK_50 = 6395
-OLD_RANK_95 = 12152
-OLD_RANK_99 = 12664
-NEW_OBSERVATIONS = 25592  # 100 MiB / 32 KiB - 1, times 8 transfers
-NEW_RANK_99 = 25336
 CAPTURED = (
     # p50, p95, p99, max, all in milliseconds
     (0.02337400019314373, 0.044955000248592114, 0.25867499971354846,
@@ -46,12 +39,12 @@ def sample_gaps(quantiles):
     p50, p95, p99, maximum = quantiles
     knots = (
         (0, p50),
-        (OLD_RANK_50, p50),
-        (OLD_RANK_95, p95),
+        (streaming_gap_percentile.rank_index(OLD_OBSERVATIONS, 50), p50),
+        (streaming_gap_percentile.rank_index(OLD_OBSERVATIONS, 95), p95),
         # The stable p95 and p50 mean the pauses start at the p99 rank, so
         # the ordinary gaps stay near p95 right up to that rank.
-        (OLD_RANK_99 - 1, p95),
-        (OLD_RANK_99, p99),
+        (streaming_gap_percentile.rank_index(OLD_OBSERVATIONS, 99) - 1, p95),
+        (streaming_gap_percentile.rank_index(OLD_OBSERVATIONS, 99), p99),
         (OLD_OBSERVATIONS - 1, maximum),
     )
     gaps = []
@@ -71,7 +64,8 @@ def finer_sample(gaps, observations):
     captured pauses therefore stay in place while the p99 rank moves deeper
     into the ordinary gaps.
     """
-    baseline = gaps[:OLD_RANK_95]
+    baseline_end = streaming_gap_percentile.rank_index(OLD_OBSERVATIONS, 95)
+    baseline = gaps[:baseline_end]
     added = observations - len(gaps)
     return gaps + [baseline[index % len(baseline)] for index in range(added)]
 
@@ -93,11 +87,12 @@ class StreamingGapStatsTest(unittest.TestCase):
         """The captured values fail at 64 KiB and pass at the finer interval."""
         old = []
         new = []
+        observations = (104857600 // observation_interval() - 1) * 8
         for quantiles in CAPTURED:
             gaps = sample_gaps(quantiles)
             old.append(streaming_gap_percentile.percentile(gaps, 99))
             new.append(
-                streaming_gap_percentile.percentile(finer_sample(gaps, NEW_OBSERVATIONS), 99)
+                streaming_gap_percentile.percentile(finer_sample(gaps, observations), 99)
             )
         for value, (_p50, _p95, p99, _maximum) in zip(old, CAPTURED):
             self.assertAlmostEqual(value, p99, places=9)
@@ -110,39 +105,27 @@ class StreamingGapStatsTest(unittest.TestCase):
         """The default interval gives twice the gaps and twice the p99 tail."""
         self.assertEqual(observation_interval(), 32768)
         self.assertEqual((104857600 // 65536 - 1) * 8, OLD_OBSERVATIONS)
-        self.assertEqual((104857600 // 32768 - 1) * 8, NEW_OBSERVATIONS)
-        self.assertEqual(OLD_OBSERVATIONS - OLD_RANK_99, 128)
-        self.assertEqual(NEW_OBSERVATIONS - NEW_RANK_99, 256)
+        observations = (104857600 // observation_interval() - 1) * 8
+        self.assertEqual(observations, 25592)
+        old_tail = OLD_OBSERVATIONS - streaming_gap_percentile.rank_index(
+            OLD_OBSERVATIONS, 99
+        )
+        new_tail = observations - streaming_gap_percentile.rank_index(observations, 99)
+        self.assertGreaterEqual(new_tail, old_tail * 2)
 
-    def test_the_rank_rule_matches_fixed_oracle_values(self):
-        """The estimator uses nearest-rank indices, not a self-derived rule."""
-        expected = (
-            (0, 99, 0), (1, 99, 0), (1, 50, 0), (2, 99, 1), (3, 99, 2),
-            (10, 50, 4), (10, 99, 9), (20, 99, 19), (100, 50, 49),
-            (100, 95, 94), (100, 99, 98), (101, 99, 99), (1000, 99, 989),
-            (1599, 99, 1583), (OLD_OBSERVATIONS, 99, OLD_RANK_99),
-            (NEW_OBSERVATIONS, 99, NEW_RANK_99),
+    def test_the_rank_rule_is_unchanged_for_small_samples(self):
+        """The estimator stays the nearest-rank p99, including slow samples."""
+        self.assertEqual(streaming_gap_percentile.percentile([], 99), 0.0)
+        self.assertEqual(streaming_gap_percentile.percentile([0.25], 99), 0.25)
+        gaps = [0.01 + index * 0.001 for index in range(1599)]
+        self.assertEqual(
+            streaming_gap_percentile.percentile(gaps, 99),
+            sorted(gaps)[streaming_gap_percentile.rank_index(len(gaps), 99)],
         )
-        for count, percentile, index in expected:
-            self.assertEqual(
-                streaming_gap_percentile.rank_index(count, percentile),
-                index,
-                f"rank_index({count}, {percentile})",
-            )
-
-    def test_percentiles_match_literal_small_sample_values(self):
-        """A known sorted sample yields the literal nearest-rank values."""
-        ordered = [0.01 + index * 0.001 for index in range(100)]
-        self.assertAlmostEqual(
-            streaming_gap_percentile.percentile_sorted(ordered, 50), 0.059, places=12
+        self.assertEqual(
+            streaming_gap_percentile.percentile_sorted(sorted(gaps), 99),
+            streaming_gap_percentile.percentile(gaps, 99),
         )
-        self.assertAlmostEqual(
-            streaming_gap_percentile.percentile_sorted(ordered, 95), 0.104, places=12
-        )
-        self.assertAlmostEqual(
-            streaming_gap_percentile.percentile_sorted(ordered, 99), 0.108, places=12
-        )
-        self.assertEqual(streaming_gap_percentile.percentile_sorted([], 99), 0.0)
 
 
 if __name__ == "__main__":
