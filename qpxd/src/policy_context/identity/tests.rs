@@ -302,3 +302,45 @@ async fn trusted_identity_uses_configured_content_length_literal_values() {
     assert_eq!(identity.groups, ["007", "7", "A", "a", "8"]);
     assert_eq!(identity.identity_source.as_deref(), Some("literal"));
 }
+
+#[test]
+fn strip_uses_direct_peer_not_a_trusted_proxy_asserted_source() {
+    let state = runtime_with_sources(vec![trusted_headers_source("headers", vec!["10.0.0.0/8"])]);
+    let policy = EffectivePolicyContext {
+        identity_sources: vec!["headers".into()],
+        decision_service: None,
+    };
+    let name = OrdinaryHeaderName::try_from("x-user").unwrap();
+
+    // The effective/PROXY source is in the trusted-header peer list; the
+    // physical peer is not. Trust must follow the physical peer.
+    let mut request = http::Request::new(());
+    request
+        .headers_mut()
+        .insert("x-user", "alice".parse().unwrap());
+    let mut headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
+    strip_untrusted_identity_headers(
+        &state,
+        &policy,
+        "203.0.113.9".parse().unwrap(),
+        &mut headers,
+    )
+    .unwrap();
+    assert!(!headers.contains_key(&name));
+
+    let mut request = http::Request::new(());
+    request
+        .headers_mut()
+        .insert("x-user", "alice".parse().unwrap());
+    let mut headers = qpx_core::http_message::Request::from_http(request)
+        .headers()
+        .clone();
+    strip_untrusted_identity_headers(&state, &policy, "10.0.0.8".parse().unwrap(), &mut headers)
+        .unwrap();
+    assert_eq!(
+        headers.get(&name),
+        Some(&http::HeaderValue::from_static("alice"))
+    );
+}

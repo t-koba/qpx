@@ -92,7 +92,11 @@ reload for compatible config edits.
 
 - Forward, reverse, and transparent listeners can consume PROXY v2 metadata via
   `xdp.enabled: true` and `metadata_mode: proxy-v2`.
-- Source address metadata is used for `src_ip` rule evaluation.
+- PROXY-derived source address is used for `src_ip` rule evaluation, connection
+  filters, access logs, module `remote_ip` and generated `Forwarded for=`.
+- Inbound `Forwarded`/XFF chain trust (`forwarded.trusted_peers`) and trusted
+  identity headers are evaluated against the direct physical TCP peer, never
+  against the source asserted by the trusted L4 sender.
 - When `xdp.enabled: true`, `trusted_peers` is required and metadata is accepted
   only from trusted peer CIDRs.
 

@@ -253,6 +253,7 @@ where
                         let route = MitmRouteContext {
                             listener_name: listener_name.as_str(),
                             src_addr: remote_addr,
+                            direct_remote: remote_addr,
                             dst_port: port,
                             host: connect_host.as_str(),
                             sni: connect_host.as_str(),

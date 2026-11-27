@@ -49,6 +49,7 @@ pub(super) async fn complete_transparent_request(
     let remote_addr = context.remote_addr;
     let connect_target = mode.connect_target;
     let host_for_match = mode.host_for_match;
+    let direct_remote = mode.direct_remote;
     let effective_policy = prepared_policy.effective_policy;
     let destination = prepared_policy.destination;
     let identity = prepared_policy.identity;
@@ -192,7 +193,12 @@ pub(super) async fn complete_transparent_request(
     {
         return Ok(response);
     }
-    strip_untrusted_identity_headers(&state, &effective_policy, remote_ip, req.headers_mut())?;
+    strip_untrusted_identity_headers(
+        &state,
+        &effective_policy,
+        direct_remote.ip(),
+        req.headers_mut(),
+    )?;
     let websocket = is_websocket_upgrade(req.method(), req.headers())?;
     let policy_headers = policy.headers.as_deref();
     prepare_request_with_headers_in_place(&mut req, proxy_name, policy_headers, websocket);

@@ -124,6 +124,7 @@ impl H3RequestHandler for ForwardH3Handler {
             self.runtime.clone(),
             self.listener_name.as_ref(),
             conn.remote_addr,
+            conn.remote_addr,
         )
         .await
         {
@@ -153,6 +154,7 @@ impl H3RequestHandler for ForwardH3Handler {
             req,
             self.runtime.clone(),
             self.listener_name.as_ref(),
+            conn.remote_addr,
             conn.remote_addr,
         )
         .await

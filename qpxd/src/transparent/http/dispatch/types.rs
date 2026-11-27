@@ -2,6 +2,7 @@ use super::super::ConnectTarget;
 use crate::http::policy::EvaluatedAction;
 use qpx_core::http_message::Request;
 use qpx_http::body::Body;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 pub(super) type TransparentPrepareOutcome =
@@ -24,6 +25,7 @@ pub(super) struct TransparentPreparedPolicy {
 }
 
 pub(super) struct TransparentPreparedMode {
+    pub(super) direct_remote: SocketAddr,
     pub(super) connect_target: ConnectTarget,
     pub(super) host_for_match: Option<String>,
 }

@@ -23,6 +23,7 @@ use self::dispatch::dispatch_transparent_request;
 pub(super) async fn handle_http_connection<I>(
     stream: I,
     remote_addr: SocketAddr,
+    direct_remote: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
     runtime: Runtime,
@@ -52,6 +53,7 @@ where
                 qpx_core::http_message::Request::from_http(req),
                 runtime,
                 remote_addr,
+                direct_remote,
                 original_target,
                 listener_name.as_str(),
             )

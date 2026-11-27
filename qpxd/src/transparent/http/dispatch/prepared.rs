@@ -16,6 +16,7 @@ pub(super) struct TransparentBuildInput<'a> {
     pub(super) listener_name: &'a str,
     pub(super) listener_cfg: crate::runtime::CompiledListenerSettings,
     pub(super) remote_addr: SocketAddr,
+    pub(super) direct_remote: SocketAddr,
     pub(super) base: crate::http::protocol::base_fields::BaseRequestFields,
     pub(super) connect_target: ConnectTarget,
     pub(super) host_for_match: Option<String>,
@@ -45,6 +46,7 @@ pub(super) fn build_transparent_prepared(
         listener_name,
         listener_cfg,
         remote_addr,
+        direct_remote,
         base,
         connect_target,
         host_for_match,
@@ -132,6 +134,7 @@ pub(super) fn build_transparent_prepared(
                 request_rpc_observed,
             },
             mode: TransparentPreparedMode {
+                direct_remote,
                 connect_target,
                 host_for_match,
             },

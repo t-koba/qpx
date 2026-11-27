@@ -135,7 +135,7 @@ async fn run_forward_acceptor(
                 .limits
                 .timeouts
                 .http_header_read_timeout();
-            let (stream, effective_remote_addr) = match resolve_remote_addr_with_xdp(
+            let resolved = match resolve_remote_addr_with_xdp(
                 stream,
                 remote_addr,
                 xdp_cfg.as_ref(),
@@ -149,6 +149,11 @@ async fn run_forward_acceptor(
                     return;
                 }
             };
+            let stream = resolved.stream;
+            let effective_remote_addr = resolved.effective_remote;
+            // Header trust is anchored to the immediate TCP peer, not to an
+            // address asserted by the trusted L4 PROXY sender.
+            let direct_remote_addr = resolved.direct_remote;
             let block_rule = {
                 let state = runtime.state();
                 evaluate_connection_filter(
@@ -198,6 +203,7 @@ async fn run_forward_acceptor(
                     request_runtime.clone(),
                     listener_name.clone(),
                     effective_remote_addr,
+                    direct_remote_addr,
                 )
             });
             let service = AccessLogService::new(
@@ -246,6 +252,7 @@ async fn handle_request(
     runtime: Runtime,
     listener_name: String,
     remote_addr: SocketAddr,
+    direct_addr: SocketAddr,
 ) -> Result<OwnerResponse<Body>, Infallible> {
     let started = Instant::now();
     let state = runtime.state();
@@ -253,7 +260,7 @@ async fn handle_request(
     let req = OwnerRequest::from_http(req);
     let request_method = req.method().clone();
     let request_version = req.version();
-    let result = handle_request_inner(req, runtime, &listener_name, remote_addr).await;
+    let result = handle_request_inner(req, runtime, &listener_name, remote_addr, direct_addr).await;
     match result {
         Ok(response) => {
             http_metrics::forward_request_with_latency(

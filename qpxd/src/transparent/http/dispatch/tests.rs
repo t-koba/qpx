@@ -125,6 +125,7 @@ settings:
         Request::from_http(request),
         runtime,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         None,
         "transparent",
     )
@@ -180,6 +181,7 @@ async fn transparent_early_response_respects_response_body_cap() {
     let response: OwnerResponse<Body> = dispatch_transparent_request(
         Request::from_http(request),
         runtime,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         None,
         "transparent",
@@ -240,6 +242,7 @@ async fn transparent_terminal_owner_preserves_headers_and_enforces_body_cap() {
         Request::from_http(request),
         runtime,
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         None,
         "transparent",
     )
@@ -287,6 +290,7 @@ async fn transparent_prepared_early_response_is_adopted_after_processing() {
     let TransparentPrepareOutcome::Prepared(mut prepared) = prepare_transparent_request(
         Request::from_http(request),
         runtime,
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         None,
         "transparent",
@@ -348,6 +352,7 @@ async fn transparent_preflight_rejection_is_an_owned_prepared_outcome() {
     let TransparentPrepareOutcome::Response(response) = prepare_transparent_request(
         request,
         runtime,
+        "127.0.0.1:1234".parse().unwrap(),
         "127.0.0.1:1234".parse().unwrap(),
         None,
         "transparent",

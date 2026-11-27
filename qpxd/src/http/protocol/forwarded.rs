@@ -16,10 +16,14 @@ static FORWARDED_CHAIN_HEADERS: [HeaderName; 5] = [
     HeaderName::from_static("x-forwarded-port"),
 ];
 
+/// `client_ip` is the effective peer (PROXY metadata source when trusted) and
+/// is recorded in generated hops. `trust_ip` is the immediate TCP peer and is
+/// the only address allowed to confer trust on inbound chain headers.
 pub(crate) fn apply_forwarded_policy(
     headers: &mut Headers,
     policy: Option<&CompiledForwardedPolicy>,
-    peer_ip: IpAddr,
+    client_ip: IpAddr,
+    trust_ip: IpAddr,
     scheme: &str,
     host: Option<&str>,
 ) -> Result<()> {
@@ -29,7 +33,7 @@ pub(crate) fn apply_forwarded_policy(
     let trusted = policy
         .trusted_peers
         .iter()
-        .any(|network| network.contains(&peer_ip));
+        .any(|network| network.contains(&trust_ip));
     let mut present_headers = 0_u8;
     for (name, _) in headers.iter() {
         present_headers |= match name.as_str() {
@@ -63,13 +67,13 @@ pub(crate) fn apply_forwarded_policy(
     if chain.is_empty() {
         headers.insert(
             OrdinaryHeaderName::try_from(FORWARDED.clone()).expect("ordinary field"),
-            cached_current_hop(policy, peer_ip, scheme, host)?,
+            cached_current_hop(policy, client_ip, scheme, host)?,
         );
         return Ok(());
     }
 
     let mut parameters = vec![
-        ("for".to_string(), format_forwarded_node(peer_ip)),
+        ("for".to_string(), format_forwarded_node(client_ip)),
         ("by".to_string(), policy.by.to_string()),
         ("proto".to_string(), scheme.to_ascii_lowercase()),
     ];
@@ -231,6 +235,7 @@ mod tests {
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Discard)),
             "203.0.113.8".parse().expect("IP"),
+            "203.0.113.8".parse().expect("IP"),
             "https",
             Some("example.com"),
         )
@@ -272,6 +277,7 @@ mod tests {
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Reject)),
             "10.0.0.8".parse().expect("IP"),
+            "10.0.0.8".parse().expect("IP"),
             "http",
             None,
         )
@@ -297,6 +303,7 @@ mod tests {
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Reject)),
             "10.0.0.8".parse().expect("IP"),
+            "10.0.0.8".parse().expect("IP"),
             "http",
             None,
         )
@@ -310,6 +317,72 @@ mod tests {
     }
 
     #[test]
+    fn proxy_asserted_src_does_not_confer_forwarded_trust() {
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"),
+            "for=192.0.2.4".parse().expect("header"),
+        );
+        // The trusted L4 sender asserted a source inside trusted_peers, but the
+        // physical peer is not: the chain must not be trusted.
+        apply_forwarded_policy(
+            &mut headers,
+            Some(&policy(UntrustedForwardedChainPolicy::Discard)),
+            "10.0.0.8".parse().expect("effective IP"),
+            "203.0.113.8".parse().expect("direct IP"),
+            "http",
+            None,
+        )
+        .expect("apply policy");
+        assert_eq!(
+            headers
+                .get(&OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"))
+                .expect("Forwarded"),
+            "for=10.0.0.8;by=qpx-edge;proto=http"
+        );
+
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"),
+            "for=192.0.2.4".parse().expect("header"),
+        );
+        let error = apply_forwarded_policy(
+            &mut headers,
+            Some(&policy(UntrustedForwardedChainPolicy::Reject)),
+            "10.0.0.8".parse().expect("effective IP"),
+            "203.0.113.8".parse().expect("direct IP"),
+            "http",
+            None,
+        )
+        .expect_err("PROXY-supplied src must not satisfy trusted_peers");
+        assert!(error.to_string().contains("untrusted peer"));
+    }
+
+    #[test]
+    fn direct_peer_confers_trust_and_effective_peer_is_hop_source() {
+        let mut headers = Headers::new();
+        headers.insert(
+            OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"),
+            "for=192.0.2.4".parse().expect("header"),
+        );
+        apply_forwarded_policy(
+            &mut headers,
+            Some(&policy(UntrustedForwardedChainPolicy::Reject)),
+            "10.1.2.3".parse().expect("effective IP"),
+            "10.0.0.8".parse().expect("direct IP"),
+            "http",
+            None,
+        )
+        .expect("physically trusted peer");
+        assert_eq!(
+            headers
+                .get(&OrdinaryHeaderName::try_from("forwarded").expect("ordinary field"))
+                .expect("Forwarded"),
+            "for=192.0.2.4, for=10.1.2.3;by=qpx-edge;proto=http"
+        );
+    }
+
+    #[test]
     fn rejects_untrusted_chain_when_configured() {
         let mut headers = Headers::new();
         headers.insert(
@@ -319,6 +392,7 @@ mod tests {
         let error = apply_forwarded_policy(
             &mut headers,
             Some(&policy(UntrustedForwardedChainPolicy::Reject)),
+            "203.0.113.8".parse().expect("IP"),
             "203.0.113.8".parse().expect("IP"),
             "http",
             None,

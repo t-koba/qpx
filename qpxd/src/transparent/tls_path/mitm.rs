@@ -23,6 +23,7 @@ pub(super) struct TransparentMitmContext {
     pub(super) runtime: Runtime,
     pub(super) listener_name: String,
     pub(super) remote_addr: SocketAddr,
+    pub(super) direct_remote: SocketAddr,
     pub(super) sni: String,
     pub(super) mitm: qpx_core::tls::MitmConfig,
     pub(super) verify_upstream: bool,
@@ -40,6 +41,7 @@ where
         runtime,
         listener_name,
         remote_addr,
+        direct_remote,
         sni,
         mitm,
         verify_upstream,
@@ -100,6 +102,7 @@ where
             let route = MitmRouteContext {
                 listener_name: listener_name.as_str(),
                 src_addr: remote_addr,
+                direct_remote,
                 dst_port: connect_target.port(),
                 host: target_host.as_str(),
                 sni: sni.as_str(),

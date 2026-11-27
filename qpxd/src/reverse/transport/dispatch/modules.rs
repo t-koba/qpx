@@ -29,7 +29,7 @@ pub(super) async fn prepare_reverse_modules(
     strip_untrusted_identity_headers(
         state,
         selected_policy,
-        conn.remote_addr.ip(),
+        conn.direct_remote.ip(),
         req.headers_mut(),
     )?;
     if let Some(rewrite) = route.path_rewrite.as_ref() {

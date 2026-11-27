@@ -23,6 +23,7 @@ pub(crate) async fn handle_request_inner(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
+    direct_addr: std::net::SocketAddr,
 ) -> Result<OwnerResponse<Body>> {
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
@@ -63,6 +64,7 @@ pub(crate) async fn handle_request_inner(
         runtime,
         listener_name,
         remote_addr,
+        direct_addr,
         ftp_credentials,
     )
     .await

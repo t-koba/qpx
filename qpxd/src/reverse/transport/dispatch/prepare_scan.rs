@@ -118,7 +118,7 @@ pub(super) async fn scan_reverse_routes(
             let identity = resolve_identity_for_request(
                 state,
                 &policy,
-                conn.remote_addr.ip(),
+                conn.direct_remote.ip(),
                 Some(sanitized_headers),
                 conn.peer_certificates
                     .as_deref()
@@ -268,7 +268,7 @@ pub(super) fn sanitized_headers_for_route_scan<'a>(
     sanitize_headers_for_policy(
         state,
         &EffectivePolicyContext::default(),
-        conn.remote_addr.ip(),
+        conn.direct_remote.ip(),
         &mut sanitized,
     )?;
     Ok(std::borrow::Cow::Owned(sanitized))

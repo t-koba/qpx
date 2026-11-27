@@ -118,6 +118,7 @@ async fn forward_response_rule_matches_request_derived_rpc_fields() {
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await
     .expect("response");
@@ -268,6 +269,7 @@ async fn assert_forward_response_rule_matches_streaming(
         OwnerRequest::from_http(request),
         runtime,
         "forward",
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await

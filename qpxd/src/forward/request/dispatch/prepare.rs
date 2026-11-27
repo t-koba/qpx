@@ -26,6 +26,7 @@ pub(super) async fn prepare_forward_dispatch(
         state,
         effective_policy,
         remote_addr,
+        direct_addr,
         proxy_name,
         listener_name,
         selected_plan,
@@ -43,7 +44,7 @@ pub(super) async fn prepare_forward_dispatch(
     strip_untrusted_identity_headers(
         &state,
         effective_policy,
-        remote_addr.ip(),
+        direct_addr.ip(),
         req.headers_mut(),
     )?;
     let forwarded_scheme = req.uri().scheme_str().unwrap_or("http").to_string();
@@ -53,6 +54,7 @@ pub(super) async fn prepare_forward_dispatch(
         req.headers_mut(),
         selected_plan.forwarded.as_deref(),
         remote_addr.ip(),
+        direct_addr.ip(),
         forwarded_scheme.as_str(),
         Some(http_authority.as_str()),
     )?;

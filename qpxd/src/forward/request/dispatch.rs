@@ -44,6 +44,7 @@ pub(super) async fn dispatch_forward_request(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
+    direct_addr: std::net::SocketAddr,
     ftp_credentials: crate::ftp::FtpCredentials,
 ) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
     instrument_request_span!(
@@ -59,6 +60,7 @@ pub(super) async fn dispatch_forward_request(
             runtime,
             listener_name,
             remote_addr,
+            direct_addr,
             ftp_credentials
         ),
     )
@@ -70,6 +72,7 @@ async fn execute_forward_request(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
+    direct_addr: std::net::SocketAddr,
     ftp_credentials: crate::ftp::FtpCredentials,
 ) -> std::result::Result<OwnerResponse<Body>, DispatchError> {
     match prepare_forward_request(
@@ -78,6 +81,7 @@ async fn execute_forward_request(
         runtime,
         listener_name,
         remote_addr,
+        direct_addr,
         ftp_credentials,
     )
     .await?
@@ -141,6 +145,7 @@ async fn prepare_forward_request(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: std::net::SocketAddr,
+    direct_addr: std::net::SocketAddr,
     ftp_credentials: crate::ftp::FtpCredentials,
 ) -> std::result::Result<ForwardPrepareOutcome, DispatchError> {
     let state = runtime.state();
@@ -435,6 +440,7 @@ async fn prepare_forward_request(
         },
         mode: ForwardPreparedMode {
             host,
+            direct_addr,
             is_ftp_request,
             ftp_credentials,
         },
@@ -461,6 +467,7 @@ async fn complete_forward_request(
     let listener_name = context.listener_name;
     let listener_cfg = context.listener_cfg;
     let remote_addr = context.remote_addr;
+    let direct_addr = mode.direct_addr;
     let host = mode.host;
     let is_ftp_request = mode.is_ftp_request;
     let effective_policy = policy.effective_policy;
@@ -631,6 +638,7 @@ async fn complete_forward_request(
         state: state.clone(),
         effective_policy: &effective_policy,
         remote_addr,
+        direct_addr,
         proxy_name,
         listener_name,
         selected_plan: &selected_plan,
@@ -725,6 +733,7 @@ mod prepared_response_tests {
                     base,
                     runtime.clone(),
                     "forward",
+                    "127.0.0.1:1234".parse().unwrap(),
                     "127.0.0.1:1234".parse().unwrap(),
                     Default::default(),
                 )

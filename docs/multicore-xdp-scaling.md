@@ -32,6 +32,9 @@ This document focuses on practical scale-out settings for `qpxd` on multi-core h
 
 - source/destination context can be injected by an external L4/XDP layer.
 - rule engine then uses that metadata for `src_ip` and transparent-destination matching.
+- header trust is anchored to the physical TCP peer: the PROXY-derived source is
+  used for `src_ip` rules/logs and generated `Forwarded for=`, while
+  `forwarded.trusted_peers` and trusted identity headers check the immediate peer.
 - security defaults:
   - `xdp.require_metadata` defaults to `true` when XDP metadata mode is enabled.
   - `xdp.trusted_peers` is required and metadata is accepted only from those CIDRs.

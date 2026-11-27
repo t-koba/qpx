@@ -19,6 +19,7 @@ pub(super) type ForwardPreparedRequest = crate::http::pipeline::PreparedRequestP
 
 pub(super) struct ForwardPreparedMode {
     pub(super) host: HostPort,
+    pub(super) direct_addr: std::net::SocketAddr,
     pub(super) is_ftp_request: bool,
     pub(super) ftp_credentials: crate::ftp::FtpCredentials,
 }
@@ -82,6 +83,7 @@ pub(super) struct ForwardDispatchPrepareInput<'a> {
     pub(super) state: Arc<crate::runtime::RuntimeState>,
     pub(super) effective_policy: &'a crate::policy_context::EffectivePolicyContext,
     pub(super) remote_addr: std::net::SocketAddr,
+    pub(super) direct_addr: std::net::SocketAddr,
     pub(super) proxy_name: &'a str,
     pub(super) listener_name: &'a str,
     pub(super) selected_plan: &'a crate::runtime::ExecutionPlan,

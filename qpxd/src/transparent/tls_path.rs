@@ -55,6 +55,7 @@ impl TransparentTlsOutcome {
 pub(super) async fn handle_tls_connection<I>(
     stream: I,
     remote_addr: SocketAddr,
+    direct_remote: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
     runtime: Runtime,
@@ -348,6 +349,7 @@ where
                 runtime,
                 listener_name: listener_name.to_string(),
                 remote_addr,
+                direct_remote,
                 sni: sni_host,
                 mitm,
                 verify_upstream,

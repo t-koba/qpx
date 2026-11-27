@@ -222,6 +222,7 @@ pub(super) async fn mitm_h3_connect_stream(input: MitmH3ConnectInput) -> Result<
                 let route = MitmRouteContext {
                     listener_name: listener_name.as_ref(),
                     src_addr: remote_addr,
+                    direct_remote: remote_addr,
                     dst_port: port,
                     host: connect_host.as_str(),
                     sni: connect_host.as_str(),

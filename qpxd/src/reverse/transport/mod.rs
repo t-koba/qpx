@@ -36,6 +36,9 @@ pub(in crate::reverse) use self::raw_http1::{
 #[derive(Debug, Clone)]
 pub(crate) struct ReverseConnInfo {
     pub(crate) remote_addr: std::net::SocketAddr,
+    /// Immediate TCP peer; `remote_addr` may be PROXY-derived. Header trust
+    /// decisions use this address, while rules and logs use `remote_addr`.
+    pub(crate) direct_remote: std::net::SocketAddr,
     pub(crate) dst_port: u16,
     pub(crate) tls_sni: Option<Arc<str>>,
     pub(crate) tls_terminated: bool,
@@ -44,9 +47,17 @@ pub(crate) struct ReverseConnInfo {
 }
 
 impl ReverseConnInfo {
+    /// Tests and H3 callers have no PROXY-overridden peer, so the direct peer
+    /// defaults to `remote_addr` in the constructors above.
+    pub(crate) fn with_direct_remote(mut self, direct_remote: std::net::SocketAddr) -> Self {
+        self.direct_remote = direct_remote;
+        self
+    }
+
     pub(crate) fn plain(remote_addr: std::net::SocketAddr, dst_port: u16) -> Self {
         Self {
             remote_addr,
+            direct_remote: remote_addr,
             dst_port,
             tls_sni: None,
             tls_terminated: false,
@@ -72,6 +83,7 @@ impl ReverseConnInfo {
             });
         Self {
             remote_addr,
+            direct_remote: remote_addr,
             dst_port,
             tls_sni,
             tls_terminated: true,

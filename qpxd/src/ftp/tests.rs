@@ -316,6 +316,7 @@ async fn forward_ftp_uri_credentials_authenticate_after_ingress_stripping() {
             runtime,
             "ftp-test",
             "127.0.0.1:12345".parse().unwrap(),
+            "127.0.0.1:12345".parse().unwrap(),
         ),
     )
     .await
@@ -401,6 +402,7 @@ async fn failed_ftp_listing_final_reply_aborts_response_body() {
             req,
             runtime,
             "ftp-test",
+            "127.0.0.1:12345".parse().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
         ),
     )
@@ -554,6 +556,7 @@ async fn forward_ftp_active_mode_negotiates_binary_representation() {
             runtime,
             "ftp-test",
             "127.0.0.1:12345".parse().unwrap(),
+            "127.0.0.1:12345".parse().unwrap(),
         ),
     )
     .await
@@ -581,6 +584,7 @@ async fn forward_http_userinfo_is_rejected_before_dispatch() {
             req,
             ftp_forward_test_runtime(),
             "ftp-test",
+            "127.0.0.1:12345".parse().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
         )
         .await

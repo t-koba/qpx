@@ -99,6 +99,7 @@ settings:
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await
     .expect("response");
@@ -215,6 +216,7 @@ settings:
         OwnerRequest::from_http(request),
         runtime,
         "forward",
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await
@@ -376,6 +378,7 @@ settings:
         OwnerRequest::from_http(request),
         runtime,
         "forward",
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await
@@ -566,6 +569,7 @@ async fn forward_module_uri_authority_policy() {
                             OwnerRequest::from_http(request),
                             runtime,
                             "forward",
+                            "127.0.0.1:12345".parse().unwrap(),
                             "127.0.0.1:12345".parse().unwrap(),
                         ),
                     )

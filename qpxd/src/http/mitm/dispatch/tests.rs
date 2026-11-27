@@ -109,6 +109,7 @@ settings:
         crate::http::mitm::MitmRouteContext {
             listener_name: "forward",
             src_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+            direct_remote: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
             dst_port: 443,
             host: "secure.example",
             sni: "secure.example",
@@ -201,6 +202,7 @@ async fn mitm_forwards_owned_request_bytes_and_body() {
             crate::http::mitm::MitmRouteContext {
                 listener_name: "forward",
                 src_addr: "127.0.0.1:12345".parse().unwrap(),
+                direct_remote: "127.0.0.1:12345".parse().unwrap(),
                 dst_port: 443,
                 host: "secure.example",
                 sni: "secure.example",
@@ -363,6 +365,7 @@ async fn mitm_websocket_upstream_upgrade_relays_bytes_and_rejects_bad_accept() {
                 crate::http::mitm::MitmRouteContext {
                     listener_name: "forward",
                     src_addr: "127.0.0.1:12345".parse().expect("source address"),
+                    direct_remote: "127.0.0.1:12345".parse().expect("direct address"),
                     dst_port: 443,
                     host: "secure.example",
                     sni: "secure.example",

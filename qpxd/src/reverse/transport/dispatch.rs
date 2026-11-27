@@ -523,6 +523,7 @@ async fn execute_reverse_request<R: ReverseTerminalResponse>(
         req.headers_mut(),
         route.plan.forwarded.as_deref(),
         conn.remote_addr.ip(),
+        conn.direct_remote.ip(),
         if conn.tls_terminated { "https" } else { "http" },
         Some(host),
     )?;

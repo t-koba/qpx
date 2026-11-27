@@ -66,7 +66,8 @@ impl DestinationResolver {
         metadata_timeout: Duration,
     ) -> Result<(
         crate::http::protocol::io_prefix::PrefixedIo<TcpStream>,
-        SocketAddr,
+        SocketAddr, // effective remote (PROXY metadata source when trusted)
+        SocketAddr, // direct physical peer
         Option<ConnectTarget>,
     )> {
         let mut stream = stream;
@@ -84,6 +85,7 @@ impl DestinationResolver {
                     .map(ConnectTarget::Socket);
                 Ok((
                     crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
+                    remote_addr,
                     remote_addr,
                     target,
                 ))
@@ -108,6 +110,7 @@ impl DestinationResolver {
                     return Ok((
                         crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
                         remote_addr,
+                        remote_addr,
                         target,
                     ));
                 }
@@ -131,6 +134,7 @@ impl DestinationResolver {
                 Ok((
                     crate::http::protocol::io_prefix::PrefixedIo::new(stream, result.prefix),
                     effective_remote,
+                    remote_addr,
                     target,
                 ))
             }
@@ -405,12 +409,13 @@ mod tests {
             trusted_peers: vec!["127.0.0.0/8".parse::<IpCidr>().expect("cidr")],
             original_dst_source: OriginalDstSource::LinuxSoOriginalDst,
         };
-        let (mut prefixed, effective_remote, target) = resolver
+        let (mut prefixed, effective_remote, direct_remote, target) = resolver
             .resolve_original_target(stream, remote_addr, Duration::from_secs(1))
             .await
             .expect("resolve");
 
         assert_eq!(effective_remote, "10.2.3.4:41234".parse().unwrap());
+        assert_eq!(direct_remote, remote_addr);
         assert!(matches!(
             target,
             Some(ConnectTarget::Socket(addr)) if addr == "203.0.113.8:8443".parse().unwrap()

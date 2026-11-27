@@ -108,7 +108,12 @@ pub(super) async fn dispatch_mitm_upstream(
     {
         return Ok(response);
     }
-    strip_identity(&state, effective_policy, src_ip, input.req.headers_mut())?;
+    strip_identity(
+        &state,
+        effective_policy,
+        input.route.direct_remote.ip(),
+        input.req.headers_mut(),
+    )?;
     prepare_request(&mut input.req, proxy_name, route_headers, input.websocket);
     *input.req.version_mut() = http::Version::HTTP_11;
     let host_header = OrdinaryHeaderName::try_from(http::header::HOST)?;
@@ -363,6 +368,7 @@ mod tests {
                     route: MitmRouteContext {
                         listener_name: "test",
                         src_addr: "127.0.0.1:1234".parse().unwrap(),
+                        direct_remote: "127.0.0.1:1234".parse().unwrap(),
                         host: "selected.test",
                         dst_port: 443,
                         sni: "sni.test",
@@ -407,5 +413,101 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn mitm_strips_identity_headers_when_direct_peer_is_untrusted() {
+        // The effective (PROXY-asserted) source is trusted, but the immediate
+        // TCP peer is not: identity headers must still be stripped upstream.
+        let upstream = crate::test_util::spawn_request_head_echo_server().await;
+        let stream = tokio::net::TcpStream::connect(upstream).await.unwrap();
+        let (sender, connection) = qpx_http::protocol::common::handshake_http1(stream)
+            .await
+            .unwrap();
+        let driver = tokio::spawn(connection);
+        let config: qpx_core::config::Config = serde_yaml::from_str(
+            r#"
+security:
+  identity_sources:
+  - name: headers
+    type: trusted_headers
+    from:
+      trusted_peers: [10.0.0.0/8]
+    headers:
+      user: x-user
+    strip_from_untrusted: true
+edges:
+  - kind: forward
+    name: test
+    listen: 127.0.0.1:0
+    default_action: { type: direct }
+"#,
+        )
+        .unwrap();
+        let runtime = Runtime::new(config).unwrap();
+        let state = runtime.state();
+        let plan = state
+            .plan
+            .ingress_edge_execution_plan("test", None)
+            .unwrap();
+        let req = OwnerRequest::from_http(
+            http::Request::builder()
+                .uri("/")
+                .header("host", "secure.example")
+                .header("x-user", "alice")
+                .body(Body::empty())
+                .unwrap(),
+        );
+        let base = extract_base_request_fields(&req, BaseRequestContext::default());
+        let effective_policy = plan.policy_context.clone();
+        let response = dispatch_mitm_upstream(MitmDispatch {
+            req,
+            base: &base,
+            runtime,
+            sender: Arc::new(Mutex::new(sender)),
+            route: MitmRouteContext {
+                listener_name: "test",
+                src_addr: "10.0.0.8:12345".parse().unwrap(),
+                direct_remote: "203.0.113.9:54321".parse().unwrap(),
+                dst_port: 443,
+                host: "secure.example",
+                sni: "secure.example",
+                upstream_cert: None,
+            },
+            selected_plan: plan,
+            effective_policy,
+            request_limits: Default::default(),
+            identity: Default::default(),
+            matched_rule: None,
+            headers: None,
+            timeout_override: None,
+            request_rpc: None,
+            destination: Default::default(),
+            upstream_cert: None,
+            audit: DispatchAuditContext::new(
+                None,
+                ProxyKind::Mitm,
+                None,
+                "10.0.0.8:12345".parse().unwrap(),
+                http::Method::GET,
+                None,
+                Default::default(),
+            ),
+            websocket: false,
+            client_upgrade: None,
+            req_method: http::Method::GET,
+            req_version: http::Version::HTTP_11,
+        })
+        .await
+        .unwrap();
+        driver.abort();
+        assert_eq!(response.status(), http::StatusCode::OK);
+        let echoed = qpx_http::body::to_bytes(response.into_head_and_body().1)
+            .await
+            .unwrap();
+        let echoed = String::from_utf8(echoed.to_vec())
+            .unwrap()
+            .to_ascii_lowercase();
+        assert!(!echoed.contains("x-user:"), "{echoed}");
     }
 }

@@ -109,6 +109,7 @@ async fn request_size_rule_uses_actual_chunked_body_size() {
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await
     .expect("response");
@@ -209,6 +210,7 @@ async fn forward_request_preserves_upstream_early_hints() {
         runtime,
         "forward",
         SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
+        SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12345),
     )
     .await
     .expect("response");
@@ -268,6 +270,7 @@ edges:
             runtime,
             "forward",
             "192.0.2.1:12345".parse().expect("peer"),
+            "192.0.2.1:12345".parse().expect("peer"),
         ),
     )
     .await
@@ -291,6 +294,98 @@ edges:
     assert!(!head.contains("\r\nx-client-only:"), "{head}");
     assert!(!head.contains("\r\nkeep-alive:"), "{head}");
     assert!(!head.contains("\r\nconnection:"), "{head}");
+}
+
+#[tokio::test]
+async fn forwarded_and_identity_trust_use_physical_peer_not_proxy_source() {
+    let addr = crate::test_util::spawn_request_head_echo_server().await;
+    let trusted_peer_addr = crate::test_util::spawn_request_head_echo_server().await;
+    let config: Config = serde_yaml::from_str(
+        r#"
+security:
+  identity_sources:
+  - name: headers
+    type: trusted_headers
+    from:
+      trusted_peers: [10.0.0.0/8]
+    headers:
+      user: x-user
+    strip_from_untrusted: true
+edges:
+  - kind: forward
+    name: forward
+    listen: 127.0.0.1:0
+    default_action: { type: direct }
+    http:
+      forwarded: { trusted_peers: [10.0.0.0/8], by: qpx-test }
+"#,
+    )
+    .expect("config");
+    let runtime = Runtime::new(config).expect("runtime");
+
+    // PROXY metadata asserted 10.0.0.8 (trusted by both lists), but the
+    // immediate TCP peer is not trusted: neither chain nor identity header
+    // may be believed.
+    let request = http::Request::builder()
+        .uri(format!("http://{addr}/"))
+        .header("host", addr.to_string())
+        .header("forwarded", "for=192.0.2.4")
+        .header("x-user", "alice")
+        .body(Body::empty())
+        .expect("request");
+    let response = handle_request_inner(
+        OwnerRequest::from_http(request),
+        runtime.clone(),
+        "forward",
+        "10.0.0.8:12345".parse().expect("effective"),
+        "203.0.113.9:54321".parse().expect("direct"),
+    )
+    .await
+    .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let head = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("echo");
+    let head = std::str::from_utf8(&head)
+        .expect("UTF-8")
+        .to_ascii_lowercase();
+    assert!(
+        head.contains("\r\nforwarded: for=10.0.0.8;by=qpx-test;proto=http"),
+        "{head}"
+    );
+    assert!(!head.contains("for=192.0.2.4"), "{head}");
+    assert!(!head.contains("x-user:"), "{head}");
+
+    // A physically trusted peer is still trusted, and the generated hop uses
+    // the effective (PROXY-derived) source.
+    let request = http::Request::builder()
+        .uri(format!("http://{trusted_peer_addr}/"))
+        .header("host", trusted_peer_addr.to_string())
+        .header("forwarded", "for=192.0.2.4")
+        .header("x-user", "alice")
+        .body(Body::empty())
+        .expect("request");
+    let response = handle_request_inner(
+        OwnerRequest::from_http(request),
+        runtime,
+        "forward",
+        "192.0.2.100:12345".parse().expect("effective"),
+        "10.0.0.8:54321".parse().expect("direct"),
+    )
+    .await
+    .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let head = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("echo");
+    let head = std::str::from_utf8(&head)
+        .expect("UTF-8")
+        .to_ascii_lowercase();
+    assert!(
+        head.contains("for=192.0.2.4, for=192.0.2.100;by=qpx-test"),
+        "{head}"
+    );
+    assert!(head.contains("\r\nx-user: alice\r\n"), "{head}");
 }
 
 #[tokio::test]
@@ -336,6 +431,7 @@ edges:
         // owner finalization, optional export limiting, logging and annotation.
         let response: OwnerResponse<Body> = handle_request_inner(
             OwnerRequest::from_http(request), runtime, "forward",
+            "127.0.0.1:12345".parse().unwrap(),
             "127.0.0.1:12345".parse().unwrap(),
         ).await.unwrap();
         assert_eq!(response.status(), StatusCode::OK);
@@ -408,6 +504,7 @@ edges:
         OwnerRequest::from_http(request),
         runtime,
         "ftp-test",
+        "127.0.0.1:12345".parse().unwrap(),
         "127.0.0.1:12345".parse().unwrap(),
     )
     .await

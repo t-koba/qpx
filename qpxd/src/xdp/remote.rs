@@ -4,15 +4,21 @@ use std::net::SocketAddr;
 use tokio::net::TcpStream;
 use tokio::time::Duration;
 
+/// The immediate TCP peer and the address asserted by trusted PROXY metadata
+/// (which may differ). Trust decisions about headers must use `direct_remote`;
+/// rule matching, logs and generated `Forwarded` hops use `effective_remote`.
+pub(crate) struct ResolvedRemote {
+    pub(crate) stream: crate::http::protocol::io_prefix::PrefixedIo<TcpStream>,
+    pub(crate) effective_remote: SocketAddr,
+    pub(crate) direct_remote: SocketAddr,
+}
+
 pub(crate) async fn resolve_remote_addr_with_xdp(
     stream: TcpStream,
     remote_addr: SocketAddr,
     xdp_cfg: Option<&super::CompiledXdpConfig>,
     metadata_timeout: Duration,
-) -> Result<(
-    crate::http::protocol::io_prefix::PrefixedIo<TcpStream>,
-    SocketAddr,
-)> {
+) -> Result<ResolvedRemote> {
     let mut stream = stream;
     if let Some(xdp_cfg) = xdp_cfg {
         let trusted = super::peer_is_trusted(remote_addr.ip(), &xdp_cfg.trusted_peers);
@@ -23,24 +29,27 @@ pub(crate) async fn resolve_remote_addr_with_xdp(
                     remote_addr
                 ));
             }
-            return Ok((
-                crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
-                remote_addr,
-            ));
+            return Ok(ResolvedRemote {
+                stream: crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
+                effective_remote: remote_addr,
+                direct_remote: remote_addr,
+            });
         }
         let result =
             super::consume_proxy_metadata(&mut stream, xdp_cfg.require_metadata, metadata_timeout)
                 .await?;
         let effective_remote = result.meta.and_then(|meta| meta.src).unwrap_or(remote_addr);
-        return Ok((
-            crate::http::protocol::io_prefix::PrefixedIo::new(stream, result.prefix),
+        return Ok(ResolvedRemote {
+            stream: crate::http::protocol::io_prefix::PrefixedIo::new(stream, result.prefix),
             effective_remote,
-        ));
+            direct_remote: remote_addr,
+        });
     }
-    Ok((
-        crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
-        remote_addr,
-    ))
+    Ok(ResolvedRemote {
+        stream: crate::http::protocol::io_prefix::PrefixedIo::new(stream, Bytes::new()),
+        effective_remote: remote_addr,
+        direct_remote: remote_addr,
+    })
 }
 
 #[cfg(test)]
@@ -103,8 +112,10 @@ mod tests {
                     .expect("required metadata rejects DGRAM fallback");
                 assert!(err.to_string().contains("proxy metadata required"));
             } else {
-                let (mut prefixed, effective_remote) = result.expect("optional metadata");
-                assert_eq!(effective_remote, remote_addr);
+                let resolved = result.expect("optional metadata");
+                assert_eq!(resolved.effective_remote, remote_addr);
+                assert_eq!(resolved.direct_remote, remote_addr);
+                let mut prefixed = resolved.stream;
                 let mut received = Vec::new();
                 prefixed
                     .read_to_end(&mut received)
@@ -140,12 +151,15 @@ mod tests {
             require_metadata: true,
             trusted_peers: vec!["127.0.0.0/8".parse::<IpCidr>().expect("cidr")],
         };
-        let (mut prefixed, effective_remote) =
+        let resolved =
             resolve_remote_addr_with_xdp(stream, remote_addr, Some(&cfg), Duration::from_secs(1))
                 .await
                 .expect("resolve");
 
-        assert_eq!(effective_remote, "10.1.2.3:40123".parse().unwrap());
+        assert_eq!(resolved.effective_remote, "10.1.2.3:40123".parse().unwrap());
+        // PROXY metadata changes rule/log identity only; the immediate peer is retained.
+        assert_eq!(resolved.direct_remote, remote_addr);
+        let mut prefixed = resolved.stream;
         let mut buf = vec![0u8; payload.len()];
         prefixed.read_exact(&mut buf).await.expect("read prefixed");
         assert_eq!(buf, payload);
@@ -172,12 +186,14 @@ mod tests {
             require_metadata: false,
             trusted_peers: vec!["10.0.0.0/8".parse::<IpCidr>().expect("cidr")],
         };
-        let (mut prefixed, effective_remote) =
+        let resolved =
             resolve_remote_addr_with_xdp(stream, remote_addr, Some(&cfg), Duration::from_secs(1))
                 .await
                 .expect("resolve");
 
-        assert_eq!(effective_remote, remote_addr);
+        assert_eq!(resolved.effective_remote, remote_addr);
+        assert_eq!(resolved.direct_remote, remote_addr);
+        let mut prefixed = resolved.stream;
         let mut buf = vec![0u8; payload.len()];
         prefixed.read_exact(&mut buf).await.expect("read prefixed");
         assert_eq!(buf, payload);

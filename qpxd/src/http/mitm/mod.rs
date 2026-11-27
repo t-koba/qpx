@@ -20,6 +20,8 @@ use self::dispatch::dispatch_mitm_request;
 pub struct MitmRouteContext<'a> {
     pub listener_name: &'a str,
     pub src_addr: SocketAddr,
+    /// Immediate TCP peer; only identity-header trust is anchored to it.
+    pub direct_remote: SocketAddr,
     pub dst_port: u16,
     pub host: &'a str,
     pub sni: &'a str,

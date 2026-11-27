@@ -175,7 +175,7 @@ async fn handle_connection(
         .limits
         .timeouts
         .http_header_read_timeout();
-    let (mut stream, remote_addr, original_target) = resolver
+    let (mut stream, remote_addr, direct_remote, original_target) = resolver
         .resolve_original_target(stream, remote_addr, metadata_timeout)
         .await?;
     let accept_stage_block = {
@@ -257,6 +257,7 @@ async fn handle_connection(
         let result = tls_path::handle_tls_connection(
             stream,
             remote_addr,
+            direct_remote,
             original_target,
             listener_name,
             runtime.clone(),
@@ -288,6 +289,7 @@ async fn handle_connection(
     let result = http::handle_http_connection(
         stream,
         remote_addr,
+        direct_remote,
         original_target,
         listener_name,
         runtime.clone(),

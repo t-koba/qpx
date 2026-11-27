@@ -119,7 +119,7 @@ pub(crate) async fn run_reverse_tls_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let Some((stream, remote_addr, _header_read_timeout)) =
+            let Some((stream, remote_addr, direct_remote, _header_read_timeout)) =
                 prepare_reverse_accepted_stream(
                     &reverse,
                     stream,
@@ -133,7 +133,9 @@ pub(crate) async fn run_reverse_tls_acceptor(
             };
             let reverse_name_for_log = reverse_name.clone();
             let ctx = ReverseTlsContext { reverse };
-            if let Err(err) = handle_tls_connection(stream, remote_addr, local_port, ctx).await {
+            if let Err(err) =
+                handle_tls_connection(stream, remote_addr, direct_remote, local_port, ctx).await
+            {
                 record_reverse_tls_connection_error(
                     &err,
                     reverse_name_for_log.as_ref(),
@@ -268,6 +270,7 @@ async fn prepare_reverse_tls_connection(
 async fn handle_tls_connection(
     stream: PrefixedIo<TcpStream>,
     remote_addr: std::net::SocketAddr,
+    direct_remote: std::net::SocketAddr,
     local_port: u16,
     ctx: ReverseTlsContext,
 ) -> Result<()> {
@@ -310,7 +313,8 @@ async fn handle_tls_connection(
         .limits
         .timeouts
         .http_header_read_timeout();
-    let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), peer_certificates);
+    let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), peer_certificates)
+        .with_direct_remote(direct_remote);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
     let service = ReverseInterimService::new(reverse.clone(), conn);
@@ -353,6 +357,7 @@ async fn handle_tls_connection(
 async fn handle_tls_connection(
     stream: PrefixedIo<TcpStream>,
     remote_addr: std::net::SocketAddr,
+    direct_remote: std::net::SocketAddr,
     local_port: u16,
     ctx: ReverseTlsContext,
 ) -> Result<()> {
@@ -386,7 +391,8 @@ async fn handle_tls_connection(
         .limits
         .timeouts
         .http_header_read_timeout();
-    let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None);
+    let conn = ReverseConnInfo::terminated(remote_addr, local_port, sni.clone(), None)
+        .with_direct_remote(direct_remote);
     let access_cfg = reverse.runtime.state().resources.access_log.clone();
     let reverse_name = reverse.name.clone();
     let service = ReverseInterimService::new(reverse.clone(), conn);

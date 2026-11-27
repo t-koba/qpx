@@ -570,6 +570,7 @@ edges:
         crate::runtime::Runtime::new(config).unwrap(),
         "test",
         "127.0.0.1:12345".parse().unwrap(),
+        "127.0.0.1:12345".parse().unwrap(),
     )
     .await
     .unwrap();

@@ -35,6 +35,7 @@ pub(super) async fn dispatch_transparent_request(
     req: Request<Body>,
     runtime: Runtime,
     remote_addr: SocketAddr,
+    direct_remote: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
 ) -> Result<OwnerResponse<Body>> {
@@ -45,7 +46,14 @@ pub(super) async fn dispatch_transparent_request(
             host = tracing::field::Empty,
             method = %req.method(),
         ),
-        execute_transparent_request(req, runtime, remote_addr, original_target, listener_name),
+        execute_transparent_request(
+            req,
+            runtime,
+            remote_addr,
+            direct_remote,
+            original_target,
+            listener_name,
+        ),
     )
 }
 
@@ -53,11 +61,19 @@ async fn execute_transparent_request(
     req: Request<Body>,
     runtime: Runtime,
     remote_addr: SocketAddr,
+    direct_remote: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
 ) -> Result<OwnerResponse<Body>> {
-    match prepare_transparent_request(req, runtime, remote_addr, original_target, listener_name)
-        .await?
+    match prepare_transparent_request(
+        req,
+        runtime,
+        remote_addr,
+        direct_remote,
+        original_target,
+        listener_name,
+    )
+    .await?
     {
         TransparentPrepareOutcome::Response(response) => Ok(*response),
         TransparentPrepareOutcome::Prepared(prepared) => {
@@ -70,6 +86,7 @@ async fn prepare_transparent_request(
     mut req: Request<Body>,
     runtime: Runtime,
     remote_addr: SocketAddr,
+    direct_remote: SocketAddr,
     original_target: Option<ConnectTarget>,
     listener_name: &str,
 ) -> Result<TransparentPrepareOutcome> {
@@ -262,6 +279,7 @@ async fn prepare_transparent_request(
         listener_name,
         listener_cfg,
         remote_addr,
+        direct_remote,
         base,
         connect_target,
         host_for_match,

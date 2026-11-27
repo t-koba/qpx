@@ -51,6 +51,7 @@ async fn prepare_reverse_accepted_stream(
 ) -> Option<(
     crate::http::protocol::io_prefix::PrefixedIo<tokio::net::TcpStream>,
     std::net::SocketAddr,
+    std::net::SocketAddr,
     Duration,
 )> {
     let header_read_timeout = reverse
@@ -60,7 +61,7 @@ async fn prepare_reverse_accepted_stream(
         .limits
         .timeouts
         .http_header_read_timeout();
-    let (stream, remote_addr) =
+    let resolved =
         match resolve_remote_addr_with_xdp(stream, remote_addr, xdp_cfg, header_read_timeout).await
         {
             Ok(resolved) => resolved,
@@ -69,6 +70,9 @@ async fn prepare_reverse_accepted_stream(
                 return None;
             }
         };
+    let stream = resolved.stream;
+    let remote_addr = resolved.effective_remote;
+    let direct_remote = resolved.direct_remote;
     if let Some(matched_rule) =
         reverse_connection_filter_match(reverse, remote_addr, local_port, None)
     {
@@ -82,7 +86,7 @@ async fn prepare_reverse_accepted_stream(
         );
         return None;
     }
-    Some((stream, remote_addr, header_read_timeout))
+    Some((stream, remote_addr, direct_remote, header_read_timeout))
 }
 
 #[derive(Clone)]
@@ -184,14 +188,15 @@ pub(super) async fn run_reverse_http_acceptor(
         let reverse_name = reverse.name.clone();
         tokio::spawn(async move {
             let _permit = permit;
-            let Some((stream, remote_addr, header_read_timeout)) = prepare_reverse_accepted_stream(
-                &reverse,
-                stream,
-                remote_addr,
-                xdp_cfg.as_ref(),
-                local_port,
-            )
-            .await
+            let Some((stream, remote_addr, direct_remote, header_read_timeout)) =
+                prepare_reverse_accepted_stream(
+                    &reverse,
+                    stream,
+                    remote_addr,
+                    xdp_cfg.as_ref(),
+                    local_port,
+                )
+                .await
             else {
                 return;
             };
@@ -204,7 +209,8 @@ pub(super) async fn run_reverse_http_acceptor(
                 }
             };
             let (stream, preface) = stream.into_inner_with_leading_prefix(preface);
-            let conn = ReverseConnInfo::plain(remote_addr, local_port);
+            let conn =
+                ReverseConnInfo::plain(remote_addr, local_port).with_direct_remote(direct_remote);
             if preface.as_ref() == H2_PREFACE {
                 let stream = crate::http::protocol::io_prefix::PrefixedIo::new(stream, preface);
                 let access_cfg = reverse.runtime.state().resources.access_log.clone();
