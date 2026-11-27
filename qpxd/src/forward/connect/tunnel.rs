@@ -44,6 +44,7 @@ use tracing::warn;
 
 pub(super) struct TunnelConnectContext {
     pub remote_addr: SocketAddr,
+    pub direct_addr: SocketAddr,
     pub listener_name: String,
     pub host: String,
     pub port: u16,
@@ -173,6 +174,7 @@ where
     .await?;
     let TunnelConnectContext {
         remote_addr,
+        direct_addr,
         listener_name,
         host,
         port,
@@ -187,7 +189,7 @@ where
         throttle,
     } = ctx;
     #[cfg(not(feature = "mitm"))]
-    let _ = (&host, port);
+    let _ = (&host, port, direct_addr);
 
     match action.kind {
         ActionKind::Block | ActionKind::Respond => Ok(()),
@@ -253,7 +255,7 @@ where
                         let route = MitmRouteContext {
                             listener_name: listener_name.as_str(),
                             src_addr: remote_addr,
-                            direct_remote: remote_addr,
+                            direct_remote: direct_addr,
                             dst_port: port,
                             host: connect_host.as_str(),
                             sni: connect_host.as_str(),

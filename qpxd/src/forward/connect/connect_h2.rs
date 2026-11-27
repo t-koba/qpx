@@ -48,6 +48,7 @@ pub(super) async fn handle_h2_extended_connect(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: SocketAddr,
+    direct_addr: SocketAddr,
 ) -> Result<OwnerResponse<Body>> {
     let protocol = req
         .extensions()
@@ -90,7 +91,7 @@ pub(super) async fn handle_h2_extended_connect(
     sanitize_headers_for_policy(
         &state,
         &effective_policy,
-        remote_addr.ip(),
+        direct_addr.ip(),
         &mut sanitized_headers,
     )?;
     let request_context = IdentityRequestContext::from_request_parts(
@@ -102,7 +103,7 @@ pub(super) async fn handle_h2_extended_connect(
     let mut identity = match resolve_identity_for_request(
         &state,
         &effective_policy,
-        remote_addr.ip(),
+        direct_addr.ip(),
         Some(&sanitized_headers),
         None,
         request_context.as_ref(),

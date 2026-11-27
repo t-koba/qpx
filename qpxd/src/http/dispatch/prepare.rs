@@ -32,7 +32,10 @@ pub(crate) struct DispatchRequestPrepareInput<'a> {
     pub(crate) proxy_name: &'a str,
     pub(crate) state: &'a Arc<crate::runtime::RuntimeState>,
     pub(crate) effective_policy: &'a EffectivePolicyContext,
+    /// PROXY-derived source, used by callers for rules, logs and generated hops.
     pub(crate) remote_ip: IpAddr,
+    /// Physical peer; the only address trusted for header-chain and identity headers.
+    pub(crate) direct_ip: IpAddr,
     pub(crate) request_scheme: &'a str,
 }
 
@@ -98,11 +101,12 @@ pub(crate) async fn prepare_dispatch_request(
     } else {
         req
     };
+    tracing::trace!(effective_ip = %input.remote_ip, "preparing dispatch request");
     let mut sanitized_headers = req.headers().clone();
     sanitize_headers_for_policy(
         input.state,
         input.effective_policy,
-        input.remote_ip,
+        input.direct_ip,
         &mut sanitized_headers,
     )?;
     let request_context = IdentityRequestContext::from_request_parts(
@@ -114,7 +118,7 @@ pub(crate) async fn prepare_dispatch_request(
     let identity = match resolve_identity_for_request(
         input.state,
         input.effective_policy,
-        input.remote_ip,
+        input.direct_ip,
         Some(&sanitized_headers),
         None,
         request_context.as_ref(),

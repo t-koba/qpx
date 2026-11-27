@@ -97,6 +97,10 @@ reload for compatible config edits.
 - Inbound `Forwarded`/XFF chain trust (`forwarded.trusted_peers`) and trusted
   identity headers are evaluated against the direct physical TCP peer, never
   against the source asserted by the trusted L4 sender.
+- `forwarded.trusted_peers` preserves the inbound `Forwarded`/XFF chain. It is
+  safe only when every trusted proxy strips or rewrites client-supplied
+  `Forwarded`/XFF headers before forwarding; block direct access to `qpxd`
+  from anything other than those trusted proxies.
 - When `xdp.enabled: true`, `trusted_peers` is required and metadata is accepted
   only from trusted peer CIDRs.
 

@@ -524,3 +524,84 @@ edges:
         .expect("FTP response body");
     assert_eq!(body.as_ref(), b"ftp method is not supported");
 }
+
+#[tokio::test]
+async fn identity_trust_uses_direct_peer_not_proxy_asserted_source() {
+    let addr = crate::test_util::spawn_request_head_echo_server().await;
+    let trusted_addr = crate::test_util::spawn_request_head_echo_server().await;
+    let config: Config = serde_yaml::from_str(
+        r#"
+security:
+  identity_sources:
+  - name: headers
+    type: trusted_headers
+    from:
+      trusted_peers: [10.0.0.0/8]
+    headers:
+      user: x-user
+    strip_from_untrusted: true
+edges:
+  - kind: forward
+    name: forward
+    listen: 127.0.0.1:0
+    policy_context:
+      identity_sources: [headers]
+    default_action: { type: direct }
+    rules:
+      - name: trusted-user
+        match:
+          identity:
+            user: [alice]
+        action:
+          type: respond
+          local_response: { status: 204, body: "" }
+"#,
+    )
+    .expect("config");
+    let runtime = Runtime::new(config).expect("runtime");
+
+    // The PROXY-derived source is trusted, but the physical peer is not: the
+    // asserted identity must not resolve and its header must be stripped.
+    let request = http::Request::builder()
+        .uri(format!("http://{addr}/"))
+        .header("host", addr.to_string())
+        .header("x-user", "alice")
+        .body(Body::empty())
+        .expect("request");
+    let response = handle_request_inner(
+        OwnerRequest::from_http(request),
+        runtime.clone(),
+        "forward",
+        "10.0.0.8:12345".parse().expect("effective"),
+        "203.0.113.9:54321".parse().expect("direct"),
+    )
+    .await
+    .expect("response");
+    assert_eq!(response.status(), StatusCode::OK);
+    let head = to_bytes(response.into_head_and_body().1)
+        .await
+        .expect("echo");
+    let head = std::str::from_utf8(&head)
+        .expect("UTF-8")
+        .to_ascii_lowercase();
+    assert!(!head.contains("\r\nx-user:"), "{head}");
+
+    // A trusted physical peer resolves the identity even when the effective
+    // (PROXY-derived) source is outside the trusted set.
+    let request = http::Request::builder()
+        .uri(format!("http://{trusted_addr}/"))
+        .header("host", trusted_addr.to_string())
+        .header("x-user", "alice")
+        .body(Body::empty())
+        .expect("request");
+    let response = handle_request_inner(
+        OwnerRequest::from_http(request),
+        runtime,
+        "forward",
+        "192.0.2.100:12345".parse().expect("effective"),
+        "10.0.0.8:54321".parse().expect("direct"),
+    )
+    .await
+    .expect("response");
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+}

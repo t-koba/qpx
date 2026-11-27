@@ -46,7 +46,8 @@ pub(crate) async fn handle_request_inner(
         PreflightOutcome::Reject(response) => return Ok(*response),
     };
     if req.method() == Method::CONNECT {
-        return connect::handle_connect(req, runtime, listener_name, remote_addr).await;
+        return connect::handle_connect(req, runtime, listener_name, remote_addr, direct_addr)
+            .await;
     }
 
     let base = extract_base_request_fields(

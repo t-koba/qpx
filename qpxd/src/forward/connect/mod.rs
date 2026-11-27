@@ -83,9 +83,11 @@ pub(super) async fn handle_connect(
     runtime: Runtime,
     listener_name: &str,
     remote_addr: SocketAddr,
+    direct_addr: SocketAddr,
 ) -> Result<OwnerResponse<Body>> {
     if req.version() == http::Version::HTTP_2 && req.extensions().get::<H2Protocol>().is_some() {
-        return handle_h2_extended_connect(req, runtime, listener_name, remote_addr).await;
+        return handle_h2_extended_connect(req, runtime, listener_name, remote_addr, direct_addr)
+            .await;
     }
     let state = runtime.state();
     let proxy_name = state.plan.identity.proxy_name.as_ref();
@@ -109,7 +111,7 @@ pub(super) async fn handle_connect(
     sanitize_headers_for_policy(
         &state,
         &effective_policy,
-        remote_addr.ip(),
+        direct_addr.ip(),
         &mut sanitized_headers,
     )?;
     let request_context = IdentityRequestContext::from_request_parts(
@@ -121,7 +123,7 @@ pub(super) async fn handle_connect(
     let mut identity = match resolve_identity_for_request(
         &state,
         &effective_policy,
-        remote_addr.ip(),
+        direct_addr.ip(),
         Some(&sanitized_headers),
         None,
         request_context.as_ref(),
@@ -431,6 +433,7 @@ pub(super) async fn handle_connect(
                         runtime_for_mitm,
                         TunnelConnectContext {
                             remote_addr,
+                            direct_addr,
                             listener_name: listener_name_owned,
                             host,
                             port,
@@ -503,6 +506,7 @@ pub(super) async fn handle_connect(
                     runtime_for_tunnel,
                     TunnelConnectContext {
                         remote_addr,
+                        direct_addr,
                         listener_name: listener_name_owned,
                         host,
                         port,

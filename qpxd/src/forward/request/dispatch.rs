@@ -217,6 +217,7 @@ async fn prepare_forward_request(
         state: &state,
         effective_policy: &effective_policy,
         remote_ip: remote_addr.ip(),
+        direct_ip: direct_addr.ip(),
         request_scheme: "http",
     })
     .await?

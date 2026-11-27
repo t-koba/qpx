@@ -125,6 +125,7 @@ async fn execute_mitm_request(
         state: &state,
         effective_policy: &effective_policy,
         remote_ip: route.src_addr.ip(),
+        direct_ip: route.direct_remote.ip(),
         request_scheme: "https",
     })
     .await?

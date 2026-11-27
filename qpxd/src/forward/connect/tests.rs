@@ -779,6 +779,7 @@ async fn connect_owned_generated_responses_keep_status_and_tunnel_semantics() {
                 runtime,
                 "forward",
                 SocketAddr::from(([127, 0, 0, 1], 12345)),
+                SocketAddr::from(([127, 0, 0, 1], 12345)),
             )
             .await
             .unwrap();
@@ -820,6 +821,7 @@ async fn connect_owned_generated_responses_keep_status_and_tunnel_semantics() {
         OwnerRequest::from_http(request),
         direct_connect_runtime(),
         "forward",
+        SocketAddr::from(([127, 0, 0, 1], 12345)),
         SocketAddr::from(([127, 0, 0, 1], 12345)),
     )
     .await
@@ -921,6 +923,7 @@ async fn classic_h2_client(
                     OwnerRequest::from_http(req),
                     runtime,
                     "forward",
+                    SocketAddr::from(([127, 0, 0, 1], 12345)),
                     SocketAddr::from(([127, 0, 0, 1], 12345)),
                 )
                 .await
@@ -1079,5 +1082,109 @@ async fn classic_h2_connect_reset_and_idle_timeout_release_upstream() {
         })
         .await
         .expect("reset or tunnel idle timeout must release the TCP tunnel");
+    }
+}
+
+#[tokio::test]
+async fn connect_identity_trust_uses_direct_peer_not_proxy_asserted_source() {
+    let config: Config = serde_yaml::from_str(
+        r#"
+security:
+  identity_sources:
+  - name: headers
+    type: trusted_headers
+    from:
+      trusted_peers: [10.0.0.0/8]
+    headers:
+      user: x-user
+    strip_from_untrusted: true
+edges:
+  - kind: forward
+    name: forward
+    listen: 127.0.0.1:0
+    policy_context:
+      identity_sources: [headers]
+    default_action: { type: block }
+    rules:
+      - name: trusted-user
+        match:
+          identity:
+            user: [alice]
+        action:
+          type: respond
+          local_response: { status: 204, body: "" }
+"#,
+    )
+    .expect("config");
+    let runtime = Runtime::new(config).expect("runtime");
+
+    for (extended, version) in [
+        (false, http::Version::HTTP_11),
+        (true, http::Version::HTTP_2),
+    ] {
+        // The asserted PROXY source is trusted, but the physical peer is not.
+        let mut request = http::Request::builder()
+            .method(Method::CONNECT)
+            .version(version)
+            .uri(if extended {
+                "http://example.com:443/"
+            } else {
+                "example.com:443"
+            })
+            .header("x-user", "alice")
+            .body(Body::empty())
+            .expect("request");
+        if extended {
+            request
+                .extensions_mut()
+                .insert(H2Protocol::from_static("test"));
+        }
+        let response = handle_connect(
+            OwnerRequest::from_http(request),
+            runtime.clone(),
+            "forward",
+            "10.0.0.8:12345".parse().expect("effective"),
+            "203.0.113.9:54321".parse().expect("direct"),
+        )
+        .await
+        .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "extended={extended}"
+        );
+
+        // A trusted physical peer resolves the identity, even though the
+        // effective source is outside the trusted set.
+        let mut request = http::Request::builder()
+            .method(Method::CONNECT)
+            .version(version)
+            .uri(if extended {
+                "http://example.com:443/"
+            } else {
+                "example.com:443"
+            })
+            .header("x-user", "alice")
+            .body(Body::empty())
+            .expect("request");
+        if extended {
+            request
+                .extensions_mut()
+                .insert(H2Protocol::from_static("test"));
+        }
+        let response = handle_connect(
+            OwnerRequest::from_http(request),
+            runtime.clone(),
+            "forward",
+            "192.0.2.100:12345".parse().expect("effective"),
+            "10.0.0.8:54321".parse().expect("direct"),
+        )
+        .await
+        .expect("response");
+        assert_eq!(
+            response.status(),
+            StatusCode::NO_CONTENT,
+            "extended={extended}"
+        );
     }
 }

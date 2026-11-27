@@ -35,6 +35,9 @@ This document focuses on practical scale-out settings for `qpxd` on multi-core h
 - header trust is anchored to the physical TCP peer: the PROXY-derived source is
   used for `src_ip` rules/logs and generated `Forwarded for=`, while
   `forwarded.trusted_peers` and trusted identity headers check the immediate peer.
+  `forwarded.trusted_peers` preserves the inbound `Forwarded`/XFF chain, so every
+  trusted proxy must strip or rewrite client-supplied `Forwarded`/XFF headers and
+  direct access to `qpxd` must be blocked.
 - security defaults:
   - `xdp.require_metadata` defaults to `true` when XDP metadata mode is enabled.
   - `xdp.trusted_peers` is required and metadata is accepted only from those CIDRs.
