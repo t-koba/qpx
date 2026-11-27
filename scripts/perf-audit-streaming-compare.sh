@@ -8,7 +8,7 @@ OUT_JSON="${1:-${QPX_STREAMING_COMPARE_JSON:-$ROOT_DIR/target/perf/perf-audit-st
 LOG_ARTIFACT_DIR="${QPX_STREAMING_COMPARE_LOG_DIR:-$ROOT_DIR/target/perf/streaming-compare-logs}"
 QPXD_BIN="${QPXD_BIN:-$ROOT_DIR/target/release/qpxd}"
 STREAM_BYTES="${QPX_STREAMING_COMPARE_BYTES:-104857600}"
-CHUNK_BYTES="${QPX_STREAMING_COMPARE_CHUNK_BYTES:-65536}"
+CHUNK_BYTES="${QPX_STREAMING_COMPARE_CHUNK_BYTES:-32768}"
 SLOW_READ_DELAY_MS="${QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS:-1}"
 FAST_TRANSFERS="${QPX_STREAMING_COMPARE_FAST_TRANSFERS:-8}"
 SAMPLE_ATTEMPTS="${QPX_STREAMING_COMPARE_SAMPLE_ATTEMPTS:-3}"
@@ -383,14 +383,16 @@ run_client() {
   local port="$2"
   local read_mode="$3"
   local delay_ms="$4"
-  python3 - "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" <<'PY'
+  python3 - "$ROOT_DIR/scripts/lib" "$proxy" "$port" "$read_mode" "$delay_ms" "$STREAM_BYTES" "$CHUNK_BYTES" "$FAST_TRANSFERS" <<'PY'
 import json
 import socket
 import statistics
 import sys
 import time
 
-proxy, port, read_mode, delay_ms, expected, chunk_bytes, fast_transfers = sys.argv[1:8]
+lib_dir, proxy, port, read_mode, delay_ms, expected, chunk_bytes, fast_transfers = sys.argv[1:9]
+sys.path.insert(0, lib_dir)
+import streaming_gap_percentile
 port = int(port)
 delay = float(delay_ms) / 1000.0
 expected = int(expected)
@@ -446,19 +448,14 @@ for _ in range(transfers):
     first_byte_ms.append((first_byte - transfer_started) * 1000.0)
 finished = time.perf_counter()
 gaps_sorted = sorted(gaps)
-def percentile(p):
-    if not gaps_sorted:
-        return 0.0
-    index = min(len(gaps_sorted) - 1, max(0, int((len(gaps_sorted) * p + 99) // 100) - 1))
-    return gaps_sorted[index]
 print(json.dumps({
     "proxy": proxy,
     "read_mode": read_mode,
     "transfers": transfers,
     "first_byte_ms": statistics.median(first_byte_ms),
-    "p50_chunk_gap_ms": percentile(50),
-    "p95_chunk_gap_ms": percentile(95),
-    "p99_chunk_gap_ms": percentile(99),
+    "p50_chunk_gap_ms": streaming_gap_percentile.percentile(gaps, 50),
+    "p95_chunk_gap_ms": streaming_gap_percentile.percentile(gaps, 95),
+    "p99_chunk_gap_ms": streaming_gap_percentile.percentile(gaps, 99),
     "max_chunk_gap_ms": max(gaps_sorted) if gaps_sorted else 0.0,
     "total_ms": (finished - started) * 1000.0,
     "bytes": received,

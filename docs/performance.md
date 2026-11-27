@@ -506,19 +506,27 @@ failing run.
 
 `scripts/perf-audit-streaming-compare.sh` transfers a 100 MiB response through
 the direct backend, qpx, nginx, Apache, and lighttpd. It measures fast readers
-and deliberately slow readers. Observations occur at fixed cumulative 64 KiB
+and deliberately slow readers. Observations occur at fixed cumulative 32 KiB
 boundaries; operating-system `recv` segmentation therefore cannot favor a
-proxy that happens to emit smaller frames. The five implementations are
-interleaved across rounds. Each proxy requires a majority of valid samples and
-uses independent conservative medians for total time, latency, and CPU
-efficiency. Fast mode defaults to eight sequential complete transfers per sample
-with client reads capped at 64 KiB; repetitions limit timer quantization. Slow
-mode defaults to one complete transfer per sample, applying the configured
-inter-read delay (`QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS`, default 1 ms) at
-each 64 KiB observation. CPU efficiency covers proxy and backend. Stability is
-mandatory for qpx, direct backend, the winning external proxy, and every external
-proxy within 25% of the leader. A distant unstable implementation remains visible
-in the artifact but cannot invalidate an otherwise stable competitive comparison.
+proxy that happens to emit smaller frames. The finer interval gives each fast
+sample 25,592 gaps instead of 12,792, and twice as many observations at the p99
+rank: a scheduler pause is an event in time, so the same burst covers a smaller
+share of the sample and can no longer decide the 99th percentile. The p99 is
+still the nearest-rank 99th percentile of the observed gaps, and every objective
+and spread cap, including the 3.0 p99 sample-spread cap, is unchanged. The five
+implementations are interleaved across rounds. Each proxy requires a majority
+of valid samples and uses independent conservative medians for total time,
+latency, and CPU efficiency. Fast mode defaults to eight sequential complete
+transfers per sample with client reads capped at 32 KiB; repetitions limit timer
+quantization. Slow mode defaults to one complete transfer per sample, applying
+the configured inter-read delay (`QPX_STREAMING_COMPARE_SLOW_READ_DELAY_MS`,
+default 1 ms) at each 32 KiB observation, so a slow sample takes longer but
+moves the same bytes. The interval can be overridden with
+`QPX_STREAMING_COMPARE_CHUNK_BYTES`. CPU efficiency covers proxy and backend.
+Stability is mandatory for qpx, direct backend, the winning external proxy, and
+every external proxy within 25% of the leader. A distant unstable implementation
+remains visible in the artifact but cannot invalidate an otherwise stable
+competitive comparison.
 
 The p99 gap, maximum chunk gap, scheduler queue-delay and CPU-rate spreads are
 judged against the observed range the lane publishes for them beside their
