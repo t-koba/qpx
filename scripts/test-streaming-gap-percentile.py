@@ -4,7 +4,9 @@
 The captured samples are qpxd fast rounds 1-3 of run 46025615821 at source
 sha 5e69146651c63cf7d1d4fe1dce4d4f4ba0cbeb13. Their p99 chunk gaps were
 0.258675, 0.177012 and 0.543261 ms: a 3.069063x spread against the unchanged
-3.0 stability cap, although their p50 gaps stayed near 0.0233 ms.
+3.0 stability cap, although their p50 gaps stayed near 0.0233 ms. The
+reconstruction below is illustrative, not causal: the retained quantiles do
+not determine where the pauses began.
 """
 import re
 import sys
@@ -37,19 +39,18 @@ CAPTURED = (
 def sample_gaps(quantiles):
     """A monotone gap sample hitting every captured quantile at its rank.
 
-    The raw gaps were not retained. This reconstruction makes the fewest
-    assumptions possible: it is monotone, puts the captured p99 at the p99
-    rank and the captured maximum at the last rank, and interpolates between
-    them. The pauses stay confined to the worst gaps, as the stable p50 and
-    p95 require.
+    The raw gaps were not retained. This monotone reconstruction puts the
+    captured p99 at the p99 rank and the captured maximum at the last rank,
+    then interpolates between them and the captured p50/p95. It is one sample
+    consistent with the quantiles, not an identified cause of the spread.
     """
     p50, p95, p99, maximum = quantiles
     knots = (
         (0, p50),
         (OLD_RANK_50, p50),
         (OLD_RANK_95, p95),
-        # The stable p95 and p50 mean the pauses start at the p99 rank, so
-        # the ordinary gaps stay near p95 right up to that rank.
+        # Illustrative placement: other burst onsets are equally consistent
+        # with the captured quantiles.
         (OLD_RANK_99 - 1, p95),
         (OLD_RANK_99, p99),
         (OLD_OBSERVATIONS - 1, maximum),
@@ -66,10 +67,9 @@ def sample_gaps(quantiles):
 def finer_sample(gaps, observations):
     """The same sample read at a finer fixed-byte interval.
 
-    Scheduler pauses are events in time: a finer observation interval creates
-    more ordinary gaps between them but does not create more pauses. The
-    captured pauses therefore stay in place while the p99 rank moves deeper
-    into the ordinary gaps.
+    Illustration only: if pauses are confined to the tail, adding ordinary
+    gaps moves the p99 rank deeper into them. The captured quantiles cannot
+    establish this placement, so the result is not a causal claim.
     """
     baseline = gaps[:OLD_RANK_95]
     added = observations - len(gaps)

@@ -510,10 +510,12 @@ and deliberately slow readers. Observations occur at fixed cumulative 32 KiB
 boundaries; operating-system `recv` segmentation therefore cannot favor a
 proxy that happens to emit smaller frames. The finer interval gives each fast
 sample 25,592 gaps instead of 12,792, and twice as many observations at the p99
-rank: a scheduler pause is an event in time, so the same burst covers a smaller
-share of the sample and can no longer decide the 99th percentile. The p99 is
-still the nearest-rank 99th percentile of the observed gaps, and every objective
-and spread cap, including the 3.0 p99 sample-spread cap, is unchanged. The five
+rank. A bounded illustrative fixture shows that a burst confined to the tail
+can fall below the p99 at the finer interval; the captured quantiles alone do
+not identify where the pauses began, so this is not an established cause of the
+earlier spread. The p99 is still the nearest-rank 99th percentile of the
+observed gaps, and every objective and spread cap, including the 3.0 p99
+sample-spread cap, is unchanged. The five
 implementations are interleaved across rounds. Each proxy requires a majority
 of valid samples and uses independent conservative medians for total time,
 latency, and CPU efficiency. Fast mode defaults to eight sequential complete
