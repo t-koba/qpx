@@ -155,7 +155,10 @@ serves a temporary `acme-tls/1` challenge certificate; DNS-01 uses
 `dns_hook.set_command` and `dns_hook.clear_command` with `QPX_ACME_DOMAIN` and
 `QPX_ACME_TXT_VALUE` in the hook environment. Each hook invocation is bounded by
 `dns_hook.timeout_secs` (default 60, minimum 1); this deadline is separate from
-`propagation_wait_secs`. A timed-out set hook triggers the configured clear hook
+`propagation_wait_secs`. `renew_before_days` (default 30, minimum 1) stays the
+operator's renewal lead, but the renewal point is bounded to the second half of
+the leaf's observed `not_before..not_after` span, so a short-lived certificate is
+not reissued on every manager pass when the configured lead exceeds its lifetime. A timed-out set hook triggers the configured clear hook
 before renewal moves on. On Unix, timeout/cancellation kills the hook's process
 group; on Windows, the shell is assigned to a Job Object before it is resumed,
 so descendants are covered as well. Windows hook startup fails closed if the
