@@ -64,6 +64,11 @@ pub(super) async fn handle_tls_connection<I>(
 where
     I: tokio::io::AsyncRead + tokio::io::AsyncWrite + Send + Unpin + 'static,
 {
+    // The physical peer is consumed only by the MITM branch; keep the
+    // parameter meaningful in builds that compile TLS without MITM.
+    #[cfg(not(feature = "mitm"))]
+    let _ = direct_remote;
+
     let (connect_target, sni) = resolve_tls_connect_target(original_target, client_hello.as_ref())?;
 
     let host_for_match_owned = match &connect_target {
