@@ -524,8 +524,10 @@ default 1 ms) at each 32 KiB observation, so a slow sample takes longer but
 moves the same bytes. The interval can be overridden with
 `QPX_STREAMING_COMPARE_CHUNK_BYTES`. `scripts/test-streaming-gap-percentile.py`
 runs in CI alongside the other streaming fixtures and guards both the interval
-and the rank rule against regression; the measured verdict still comes from
-the lane's three samples. CPU efficiency covers proxy and backend.
+and the rank rule against regression. Its rank assertions use fixed nearest-rank
+indices and literal percentile values rather than deriving expectations from the
+estimator they check; the measured verdict still comes from the lane's three
+samples. CPU efficiency covers proxy and backend.
 Stability is mandatory for qpx, direct backend, the winning external proxy, and
 every external proxy within 25% of the leader. A distant unstable implementation
 remains visible in the artifact but cannot invalidate an otherwise stable
