@@ -122,8 +122,12 @@ where
 pub(crate) fn classify_bodyless_http1_request(
     req: Request<Body>,
 ) -> Result<std::result::Result<BodylessHttp1Request, Request<Body>>> {
+    // The bodyless serializer copies the head verbatim, so a chunked
+    // declaration with no body would reach the origin unterminated. Return
+    // the request to the framing writer, which re-derives its own framing.
     let is_bodyless = http_body::Body::is_end_stream(req.body())
-        && parse_declared_content_length(req.headers())?.is_none_or(|length| length == 0);
+        && parse_declared_content_length(req.headers())?.is_none_or(|length| length == 0)
+        && !req.headers().contains_key(TRANSFER_ENCODING);
     Ok(if is_bodyless {
         Ok(BodylessHttp1Request(req))
     } else {
@@ -389,6 +393,42 @@ mod tests {
             "request body exceeded declared content-length"
         );
         assert_eq!(sent, b"O");
+    }
+
+    #[tokio::test]
+    async fn transfer_encoding_head_uses_framing_writer_not_bodyless_serializer() {
+        for method in [Method::GET, Method::HEAD] {
+            let request = Request::builder()
+                .method(method.clone())
+                .uri("/asset")
+                .header("host", "origin.test")
+                .header("transfer-encoding", "chunked")
+                .body(Body::empty())
+                .expect("request");
+            let classified =
+                classify_bodyless_http1_request(request).expect("content-length validation");
+            let request = match classified {
+                Ok(_) => panic!("{method} with transfer-encoding must use the framing writer"),
+                Err(request) => request,
+            };
+
+            let (mut upstream, mut downstream) = tokio::io::duplex(256);
+            let mut head = BytesMut::new();
+            super::write_http1_request(&mut upstream, request, &mut head)
+                .await
+                .expect("write request");
+            drop(upstream);
+            let mut sent = Vec::new();
+            downstream
+                .read_to_end(&mut sent)
+                .await
+                .expect("read request");
+
+            assert_eq!(
+                sent,
+                format!("{method} /asset HTTP/1.1\r\nhost: origin.test\r\n\r\n").as_bytes()
+            );
+        }
     }
 
     #[test]
