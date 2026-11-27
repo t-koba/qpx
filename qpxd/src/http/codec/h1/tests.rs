@@ -157,6 +157,49 @@ fn request_head_parser_promotes_storage_for_many_headers() {
 }
 
 #[test]
+fn request_head_parser_rejects_bare_lf_line_endings() {
+    // RFC 9112 section 2.2: a recipient may recognize a single LF as a line
+    // terminator, but qpx's raw head framing must not accept it: a second
+    // reader could disagree about where this head ends.
+    for raw in [
+        &b"POST / HTTP/1.1\nHost: example.test\n\n"[..],
+        b"POST / HTTP/1.1\r\nHost: example.test\n\r\n",
+        b"POST / HTTP/1.1\r\nHost: example.test\r\n\n",
+    ] {
+        assert!(
+            try_parse_http1_request_head(raw).is_err(),
+            "bare LF must not parse as a head: {raw:?}"
+        );
+    }
+
+    let parsed = try_parse_http1_request_head(b"POST / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        .expect("valid CRLF head")
+        .expect("complete");
+    assert_eq!(parsed.consumed, 39);
+}
+
+#[test]
+fn request_head_parser_rejects_whitespace_before_field_name_colon() {
+    // RFC 9112 section 5.1: no whitespace is allowed between the field name
+    // and its colon. Accepting it would let two readers select different
+    // field lines from the same bytes.
+    for raw in [
+        &b"POST / HTTP/1.1\r\nHost : example.test\r\n\r\n"[..],
+        b"POST / HTTP/1.1\r\nHost\t: example.test\r\n\r\n",
+    ] {
+        assert!(
+            try_parse_http1_request_head(raw).is_err(),
+            "whitespace before colon must not parse: {raw:?}"
+        );
+    }
+
+    let parsed = try_parse_http1_request_head(b"POST / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        .expect("valid field line")
+        .expect("complete");
+    assert_eq!(parsed.headers.len(), 1);
+}
+
+#[test]
 fn request_head_parser_rejects_more_than_maximum_headers() {
     let mut raw = b"GET / HTTP/1.1\r\nHost: example.test\r\n".to_vec();
     for index in 0..MAX_HTTP1_REQUEST_HEADERS {
@@ -1688,6 +1731,107 @@ async fn read_http1_response_head(stream: &mut TcpStream) -> Vec<u8> {
         }
     }
     raw
+}
+
+#[tokio::test]
+async fn invalid_request_head_framing_is_rejected_and_closes_without_reaching_service() {
+    for head in [
+        "POST /first HTTP/1.1\nHost: example.test\n\n",
+        "POST /first HTTP/1.1\r\nHost : example.test\r\n\r\n",
+    ] {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let service = CountingService {
+            calls: Arc::clone(&calls),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.expect("accept");
+            let _ = serve_http1_with_interim(socket, service, Duration::from_secs(5)).await;
+        });
+
+        let mut stream = TcpStream::connect(addr).await.expect("connect");
+        let pipelined = format!(
+            "{head}GET /second HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n"
+        );
+        stream
+            .write_all(pipelined.as_bytes())
+            .await
+            .expect("write pipelined requests");
+
+        let text = String::from_utf8(read_http1_response_head(&mut stream).await)
+            .expect("response head is ASCII");
+        assert!(
+            text.starts_with("HTTP/1.1 400"),
+            "expected 400 for {head:?}, got {text:?}"
+        );
+        assert!(text.contains("Connection: close"));
+
+        let mut rest = Vec::new();
+        match tokio::time::timeout(Duration::from_secs(2), stream.read_to_end(&mut rest)).await {
+            Ok(Ok(_)) => assert!(
+                !rest.windows(12).any(|window| window == b"HTTP/1.1 200"),
+                "pipelined request must not receive a second response for {head:?}"
+            ),
+            Ok(Err(error)) if error.kind() == io::ErrorKind::ConnectionReset => {}
+            Ok(Err(error)) => panic!("read after 400 response: {error}"),
+            Err(_) => panic!("connection remained open after 400 for {head:?}"),
+        }
+        server.await.expect("server task");
+        assert_eq!(
+            calls.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "rejected framing in {head:?} must not reach the service"
+        );
+    }
+}
+
+#[tokio::test]
+async fn framing_rejected_h1_request_never_recycles_upstream_connection() {
+    // The recycler is the pool boundary. A request whose framing is rejected
+    // by the H1 client writer must be dropped, never handed back as idle.
+    let (stream, mut peer) = tokio::io::duplex(1024);
+    let recycles = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let recycled = Arc::clone(&recycles);
+    let recycler = crate::upstream::raw_http1::Http1ConnectionRecycler::new(
+        move |_stream: tokio::io::DuplexStream,
+              _read_buf: bytes::BytesMut,
+              _write_buf: bytes::BytesMut| {
+            recycled.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
+    );
+    let mut request = Request::builder()
+        .method(Method::POST)
+        .uri("/")
+        .version(Version::HTTP_11)
+        .body(Body::empty())
+        .expect("request");
+    request
+        .headers_mut()
+        .append(CONTENT_LENGTH, HeaderValue::from_static("5"));
+    request
+        .headers_mut()
+        .append(CONTENT_LENGTH, HeaderValue::from_static("6"));
+
+    let error = crate::upstream::raw_http1::send_http1_request_with_interim_reusable(
+        stream,
+        BytesMut::new(),
+        BytesMut::new(),
+        request,
+        recycler,
+    )
+    .await
+    .err()
+    .expect("conflicting content-length must be rejected");
+    assert!(
+        error.to_string().contains("conflicting content-length"),
+        "unexpected error: {error}"
+    );
+    assert_eq!(recycles.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    let mut wire = Vec::new();
+    peer.read_to_end(&mut wire).await.expect("upstream EOF");
+    assert!(wire.is_empty(), "rejected request was written: {wire:?}");
 }
 
 #[tokio::test]

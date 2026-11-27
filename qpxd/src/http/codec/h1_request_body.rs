@@ -185,7 +185,7 @@ fn validate_chunk_size_line(line: &[u8]) -> Result<()> {
 }
 
 /// Whether the slice has an LF that is not part of a CRLF.
-fn has_bare_lf(bytes: &[u8]) -> bool {
+pub(super) fn has_bare_lf(bytes: &[u8]) -> bool {
     bytes
         .iter()
         .enumerate()

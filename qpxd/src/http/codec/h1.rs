@@ -3,7 +3,7 @@ use crate::http::codec::h1_common::{
     parse_header_map_recycled, parse_version,
 };
 use crate::http::codec::h1_request_body::{
-    forward_chunked_request_body, forward_content_length_request_body,
+    forward_chunked_request_body, forward_content_length_request_body, has_bare_lf,
 };
 use crate::http::codec::lazy_timeout::timeout_after_pending;
 use crate::upstream::raw_http1::InterimResponseHead;
@@ -449,7 +449,7 @@ fn try_parse_http1_request_head(buf: &[u8]) -> Result<Option<ParsedRequestHead>>
         &mut common_headers,
     ) {
         Ok(httparse::Status::Complete(consumed)) => {
-            return finish_parsed_http1_request(&request, consumed).map(Some);
+            return finish_parsed_http1_request(buf, &request, consumed).map(Some);
         }
         Ok(httparse::Status::Partial) => return Ok(None),
         Err(httparse::Error::TooManyHeaders) => {}
@@ -465,7 +465,7 @@ fn try_parse_http1_request_head(buf: &[u8]) -> Result<Option<ParsedRequestHead>>
         &mut maximum_headers,
     ) {
         Ok(httparse::Status::Complete(consumed)) => {
-            finish_parsed_http1_request(&request, consumed).map(Some)
+            finish_parsed_http1_request(buf, &request, consumed).map(Some)
         }
         Ok(httparse::Status::Partial) => Ok(None),
         Err(httparse::Error::TooManyHeaders) => Err(RequestHeaderFieldsTooLarge.into()),
@@ -474,12 +474,19 @@ fn try_parse_http1_request_head(buf: &[u8]) -> Result<Option<ParsedRequestHead>>
 }
 
 fn finish_parsed_http1_request(
+    buf: &[u8],
     request: &httparse::Request<'_, '_>,
     consumed: usize,
 ) -> Result<ParsedRequestHead> {
     // `buf` may also contain a body or pipelined request; cap only the parsed head.
     if consumed > MAX_HEADER_BYTES {
         return Err(RequestHeaderFieldsTooLarge.into());
+    }
+    // httparse tolerates bare LF as a line terminator. Refuse it in the head
+    // itself: a downstream reader using CRLF alone would frame the same bytes
+    // differently. Bytes after the head belong to the body or next request.
+    if has_bare_lf(&buf[..consumed]) {
+        return Err(anyhow!("invalid HTTP/1 request head: bare LF"));
     }
     let method = request
         .method

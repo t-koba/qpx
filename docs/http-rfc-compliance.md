@@ -86,6 +86,20 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 | 9113 | transport-library-with-contract | pinned h2 transport with non-poisoning low-contention stream locks; HTTP/2 framing, stream lifecycle, extended CONNECT, limits, and forward/reverse/transparent paths | qpxd HTTP/2 codec lifecycle tests; HTTP/2 contract, E2E, and comparative performance suites |
 | 9114 | transport-library-with-contract | HTTP semantics over QUIC, control streams, settings, QPACK, request pseudo-header validation (:authority/Host same-value and :path form), H3 errors, and backend parity | qpx-h3 unit/E2E and external H3 matrix |
 
+### HTTP/1 raw framing guards
+
+The H1 request head is framed only by CRLF line endings and field lines with no
+whitespace before the colon (RFC 9112 sections 2.2 and 5.1). Bare LF and
+`Host : value` are refused with 400 and `Connection: close`, as are conflicting
+Transfer-Encoding with Content-Length and bare LF in chunked trailers; the
+pipelined bytes after a rejected head never reach the service. A request whose
+framing the H1 upstream writer rejects is dropped rather than returned to the
+connection pool. Evidence: `request_head_parser_rejects_bare_lf_line_endings`,
+`request_head_parser_rejects_whitespace_before_field_name_colon`,
+`invalid_request_head_framing_is_rejected_and_closes_without_reaching_service`,
+`framing_rejected_h1_request_never_recycles_upstream_connection`, and the
+existing CL+TE and bare-LF trailer regressions in the H1 codec tests.
+
 ## Methods, status codes, and fields
 
 | RFC | Classification | Implemented contract | Evidence |
