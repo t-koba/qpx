@@ -164,7 +164,9 @@ fn reuse_existing_certificate(state: &AcmeRuntime, sni: &str) -> Result<bool> {
         return Ok(false);
     }
     let (not_before, not_after) = read_leaf_validity(&cert_path)?;
-    if SystemTime::now() < not_before || should_renew(not_after, state.renew_before_days)? {
+    if SystemTime::now() < not_before
+        || should_renew(not_before, not_after, state.renew_before_days)?
+    {
         return Ok(false);
     }
     load_cert_into_store(state, sni)
@@ -720,13 +722,35 @@ mod dns_hook_process {
     }
 }
 
-fn should_renew(not_after: SystemTime, renew_before_days: u64) -> Result<bool> {
-    let renew_before = Duration::from_secs(renew_before_days.saturating_mul(86_400));
-    let now = SystemTime::now();
-    let renew_at = not_after
-        .checked_sub(renew_before)
-        .ok_or_else(|| anyhow!("invalid cert not_after (too early)"))?;
-    Ok(now >= renew_at)
+fn renewal_point(
+    not_before: SystemTime,
+    not_after: SystemTime,
+    renew_before_days: u64,
+) -> Result<SystemTime> {
+    let lifetime = not_after
+        .duration_since(not_before)
+        .map_err(|_| anyhow!("invalid cert validity: not_after precedes not_before"))?;
+    let configured = Duration::from_secs(renew_before_days.saturating_mul(86_400));
+    // A lead longer than the leaf's lifetime would put the renewal point at or
+    // before issuance, so the hourly manager would reissue on every pass.
+    // Keep the operator's lead as policy but bound it to the observed span.
+    let lead = configured.min(lifetime / 2);
+    if lead.is_zero() {
+        return Err(anyhow!(
+            "certificate lifetime too short to schedule renewal"
+        ));
+    }
+    not_after
+        .checked_sub(lead)
+        .ok_or_else(|| anyhow!("invalid cert not_after (too early)"))
+}
+
+fn should_renew(
+    not_before: SystemTime,
+    not_after: SystemTime,
+    renew_before_days: u64,
+) -> Result<bool> {
+    Ok(SystemTime::now() >= renewal_point(not_before, not_after, renew_before_days)?)
 }
 
 fn read_leaf_validity(cert_path: &Path) -> Result<(SystemTime, SystemTime)> {
@@ -1182,7 +1206,8 @@ mod tests {
         let (cert, key) = test_pair();
         fixture.write_pair(&cert, &key);
         let (cert_path, key_path) = cert_paths_for_sni(&fixture.0, TEST_SNI);
-        assert!(!should_renew(read_leaf_validity(&cert_path).unwrap().1, 30).unwrap());
+        let (not_before, not_after) = read_leaf_validity(&cert_path).unwrap();
+        assert!(!should_renew(not_before, not_after, 30).unwrap());
         let (replacement_cert, replacement_key) = test_pair();
         // Simulate interruption after key.pem is replaced but before cert.pem is written.
         write_bytes_file(&key_path, replacement_key.serialize_pem().as_bytes(), 0o600).unwrap();
@@ -1322,12 +1347,51 @@ mod tests {
         fixture.0.renew_before_days = 40_000;
         let key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
-        params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+        params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        params.not_after = rcgen::date_time_ymd(2030, 1, 1);
         fixture.write_pair(&params.self_signed(&key).unwrap(), &key);
-        let (_, not_after) =
+        let (not_before, not_after) =
             read_leaf_validity(&cert_paths_for_sni(&fixture.0, TEST_SNI).0).unwrap();
-        assert!(should_renew(not_after, fixture.0.renew_before_days).unwrap());
+        assert!(should_renew(not_before, not_after, fixture.0.renew_before_days).unwrap());
         assert!(load_cert_into_store(&fixture.0, TEST_SNI).unwrap());
+    }
+
+    #[test]
+    fn renewal_point_keeps_the_configured_lead_for_normal_lifetimes() {
+        let issued = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let expires = issued + Duration::from_secs(90 * 86_400);
+        assert_eq!(
+            renewal_point(issued, expires, 30).unwrap(),
+            expires - Duration::from_secs(30 * 86_400)
+        );
+    }
+
+    #[test]
+    fn renewal_point_bounds_the_lead_to_half_the_observed_lifetime() {
+        let issued = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        for days in [6_u64, 45, 64] {
+            let lifetime = Duration::from_secs(days * 86_400);
+            let expires = issued + lifetime;
+            let point = renewal_point(issued, expires, 30).unwrap();
+            assert!(point > issued, "{days}-day leaf renews at issuance");
+            let expected_lead = Duration::from_secs(30 * 86_400).min(lifetime / 2);
+            assert_eq!(expires.duration_since(point).unwrap(), expected_lead);
+        }
+    }
+
+    #[test]
+    fn short_lived_certificate_is_not_due_immediately_after_issuance() {
+        let issued = SystemTime::now() - Duration::from_secs(60);
+        let expires = issued + Duration::from_secs(6 * 86_400);
+        assert!(!should_renew(issued, expires, 30).unwrap());
+        assert!(!should_renew(issued, expires, 6).unwrap());
+    }
+
+    #[test]
+    fn invalid_validity_spans_fail_closed() {
+        let issued = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        assert!(renewal_point(issued + Duration::from_secs(1), issued, 30).is_err());
+        assert!(renewal_point(issued, issued, 30).is_err());
     }
 
     #[cfg(unix)]
