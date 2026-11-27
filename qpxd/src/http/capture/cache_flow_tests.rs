@@ -334,3 +334,52 @@ async fn writeback_snapshot_keeps_original_head_when_preparing_revalidation() {
         "preparing must not mutate the caller's request"
     );
 }
+
+/// End-to-end guard for the desync: encode the prepared bodyless head with
+/// hyper's H1 client codec and inspect the bytes actually written to the wire.
+/// A header-only assertion would miss a stale declaration the encoder could
+/// reintroduce; this checks the property that matters to an upstream peer.
+#[tokio::test]
+async fn prepared_revalidation_head_sends_no_stale_cl_on_wire() {
+    use hyper_util::rt::TokioIo;
+    use tokio::io::AsyncReadExt;
+
+    let (state, _written) = stale_revalidation_state().await;
+    let mut req = OwnerRequest::from_http(
+        http::Request::get("http://example.test/asset")
+            .header("content-length", "42")
+            .body(())
+            .unwrap(),
+    );
+    prepare_background_revalidation_request(&mut req, &state);
+    let hyper_req = req
+        .map_body(|()| Body::empty())
+        .into_http_for_codec()
+        .unwrap();
+
+    let (client_io, mut server_io) = tokio::io::duplex(16384);
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(client_io))
+        .await
+        .unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    tokio::spawn(async move {
+        let _ = sender.send_request(hyper_req).await;
+    });
+
+    let mut buf = vec![0u8; 8192];
+    let n = tokio::time::timeout(Duration::from_secs(5), server_io.read(&mut buf))
+        .await
+        .expect("read timeout")
+        .expect("read error");
+    let wire = String::from_utf8_lossy(&buf[..n]);
+    assert!(
+        wire.contains("\r\n\r\n"),
+        "expected a complete request head on the wire: {wire:?}"
+    );
+    assert!(
+        !wire.to_ascii_lowercase().contains("content-length: 42"),
+        "stale Content-Length reached the wire: {wire:?}"
+    );
+}
