@@ -351,6 +351,19 @@ fn direct_combined_log_request(request: &http::Request<Body>) -> http::Request<(
     log_request
 }
 
+/// Whether the head contains an LF that is not part of a CRLF.
+///
+/// `httparse` accepts bare LF as a line ending while the generic H1 codec
+/// refuses it. The raw fast path must apply the same guard to the parsed head
+/// bytes only, leaving body and pipelined bytes untouched. The codec helper is
+/// private to the codec module, so this path keeps its own check.
+fn has_bare_lf(bytes: &[u8]) -> bool {
+    bytes
+        .iter()
+        .enumerate()
+        .any(|(index, byte)| *byte == b'\n' && (index == 0 || bytes[index - 1] != b'\r'))
+}
+
 fn try_prepare_request<'a>(
     bytes: &[u8],
     reverse: &ReloadableReverse,
@@ -358,7 +371,7 @@ fn try_prepare_request<'a>(
     cache: &'a mut RawHttp1ConnectionCache,
 ) -> FastParse<'a> {
     if let Some(consumed) = cache.cached_prefix_len(reverse, bytes) {
-        if consumed > MAX_HEADER_BYTES {
+        if consumed > MAX_HEADER_BYTES || has_bare_lf(&bytes[..consumed]) {
             return FastParse::Fallback;
         }
         let Some(request) = cache.prepared_request_ref_unchecked() else {
@@ -374,9 +387,10 @@ fn try_prepare_request<'a>(
         bytes,
         &mut common_headers,
     ) {
-        Ok(httparse::Status::Complete(consumed)) => {
+        Ok(httparse::Status::Complete(consumed)) if !has_bare_lf(&bytes[..consumed]) => {
             return prepare_complete_request(&parsed, consumed, bytes, reverse, conn, cache);
         }
+        Ok(httparse::Status::Complete(_)) => return FastParse::Fallback,
         Ok(httparse::Status::Partial) => return FastParse::Partial,
         Err(httparse::Error::TooManyHeaders) => {}
         Err(_) => return FastParse::Fallback,
@@ -390,9 +404,10 @@ fn try_prepare_request<'a>(
         bytes,
         &mut maximum_headers,
     ) {
-        Ok(httparse::Status::Complete(consumed)) => {
+        Ok(httparse::Status::Complete(consumed)) if !has_bare_lf(&bytes[..consumed]) => {
             prepare_complete_request(&parsed, consumed, bytes, reverse, conn, cache)
         }
+        Ok(httparse::Status::Complete(_)) => FastParse::Fallback,
         Ok(httparse::Status::Partial) => FastParse::Partial,
         Err(_) => FastParse::Fallback,
     }
@@ -552,6 +567,47 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[tokio::test]
+    async fn raw_fast_path_rejects_bare_lf_head_and_accepts_crlf_head() {
+        let reverse = super::super::tests::build_reloadable_reverse(([127, 0, 0, 1], 8080).into());
+        let conn = ReverseConnInfo::plain(([127, 0, 0, 1], 12345).into(), 80);
+        let mut cache = RawHttp1ConnectionCache::default();
+
+        for head in [
+            &b"GET / HTTP/1.1\nHost: example.test\n\n"[..],
+            b"GET / HTTP/1.1\r\nHost: example.test\n\r\n",
+            b"GET / HTTP/1.1\r\nHost: example.test\r\n\n",
+        ] {
+            // httparse tolerates these heads; only qpx's explicit guard does not.
+            let mut headers = [httparse::EMPTY_HEADER; COMMON_HTTP1_REQUEST_HEADERS];
+            let mut parsed = httparse::Request::new(&mut headers);
+            assert_eq!(
+                parsed.parse(head).unwrap(),
+                httparse::Status::Complete(head.len())
+            );
+            assert!(
+                matches!(
+                    try_prepare_request(head, &reverse, &conn, &mut cache),
+                    FastParse::Fallback
+                ),
+                "bare LF head must not be prepared: {head:?}"
+            );
+            assert_eq!(cache.cached_prefix_len(&reverse, head), None);
+        }
+
+        const HEAD: &[u8] = b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n";
+        let mut buffered = BytesMut::from(HEAD);
+        // An LF in the body is not a head line ending and must not be refused.
+        buffered.extend_from_slice(b"line\nnext");
+        let FastParse::Prepared { consumed, .. } =
+            try_prepare_request(&buffered, &reverse, &conn, &mut cache)
+        else {
+            panic!("CRLF head with an LF-bearing body must be prepared");
+        };
+        assert_eq!(consumed, HEAD.len());
+        assert_eq!(&buffered[consumed..], b"line\nnext");
     }
 
     #[tokio::test]

@@ -89,12 +89,14 @@ program. Detailed contracts and evidence follow in the corresponding sections.
 ### HTTP/1 raw framing guards
 
 The H1 request head is framed only by CRLF line endings and field lines with no
-whitespace before the colon (RFC 9112 sections 2.2 and 5.1). Bare LF and
+whitespace before the colon (RFC 9112 sections 2.2 and 5.1). Both the generic
+H1 codec and the reverse listener's raw fast path refuse bare LF; bare LF and
 `Host : value` are refused with 400 and `Connection: close`, as are conflicting
 Transfer-Encoding with Content-Length and bare LF in chunked trailers; the
 pipelined bytes after a rejected head never reach the service. A request whose
 framing the H1 upstream writer rejects is dropped rather than returned to the
-connection pool. Evidence: `request_head_parser_rejects_bare_lf_line_endings`,
+connection pool. Evidence: `raw_fast_path_rejects_bare_lf_head_and_accepts_crlf_head`,
+`request_head_parser_rejects_bare_lf_line_endings`,
 `request_head_parser_rejects_whitespace_before_field_name_colon`,
 `invalid_request_head_framing_is_rejected_and_closes_without_reaching_service`,
 `framing_rejected_h1_request_never_recycles_upstream_connection`, and the
