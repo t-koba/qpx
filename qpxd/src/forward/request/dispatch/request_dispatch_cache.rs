@@ -1,7 +1,7 @@
 use crate::forward::request::resolve_upstream;
 use crate::http::capture::cache_flow::{
     CacheLookupDecision, CacheWritebackContext, clone_request_head_for_revalidation,
-    lookup_with_revalidation, prepare_background_revalidation_request,
+    clone_revalidation_head_with_writeback_snapshot, lookup_with_revalidation,
     process_upstream_response_for_cache,
 };
 use crate::http::dispatch::{
@@ -131,9 +131,7 @@ fn maybe_spawn_forward_background_revalidation(
     let policy = policy.clone();
     let lookup_key = lookup_key.clone();
     let target_key = target_key.clone();
-    let mut bg_req = clone_request_head_for_revalidation(input.req);
-    prepare_background_revalidation_request(&mut bg_req, state);
-    let snapshot = clone_request_head_for_revalidation(&bg_req);
+    let (bg_req, snapshot) = clone_revalidation_head_with_writeback_snapshot(input.req, state);
     let upstream_timeout = input.context.upstream_timeout;
     let state = state.clone();
     tokio::spawn(async move {

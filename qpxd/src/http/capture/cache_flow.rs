@@ -15,6 +15,12 @@ use std::time::Duration;
 /// response. A background refresh must not inherit them: an origin 304 for a
 /// client condition would then be mistaken for a 304 to the cache's validators
 /// and used to refresh a different cached representation.
+///
+/// Callers discard this request's body and send `Body::empty()`, so any
+/// inherited Content-Length must go: declaring bytes that are never written
+/// is a request-smuggling-shaped H1 desync. Removing the declaration lets the
+/// encoder derive a bodyless GET; the original head stays available to the
+/// caller as a separate writeback snapshot.
 pub(crate) fn prepare_background_revalidation_request(
     req: &mut OwnerRequest<()>,
     state: &cache::RevalidationState,
@@ -32,7 +38,21 @@ pub(crate) fn prepare_background_revalidation_request(
         };
         req.headers_mut().remove(&name);
     }
+    req.headers_mut().remove_content_length();
     let _cache_owned = cache::attach_revalidation_headers(req.headers_mut(), state);
+}
+
+/// Clone the outgoing bodyless revalidation head together with the unmodified
+/// head used for cache writeback. Snapshot first so cache-owned changes never
+/// leak into bookkeeping of the original client request.
+pub(crate) fn clone_revalidation_head_with_writeback_snapshot<B>(
+    req: &OwnerRequest<B>,
+    state: &cache::RevalidationState,
+) -> (OwnerRequest<()>, OwnerRequest<()>) {
+    let snapshot = clone_request_head_for_revalidation(req);
+    let mut outgoing = clone_request_head_for_revalidation(req);
+    prepare_background_revalidation_request(&mut outgoing, state);
+    (outgoing, snapshot)
 }
 
 pub(crate) fn clone_request_head_for_revalidation<B>(req: &OwnerRequest<B>) -> OwnerRequest<()> {

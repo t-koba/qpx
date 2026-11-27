@@ -170,3 +170,167 @@ async fn cache_owned_304_refreshes_metadata_without_storing_again() {
     .await
     .expect("bounded cache-owned 304 test");
 }
+
+fn ordinary(name: &str) -> OrdinaryHeaderName {
+    OrdinaryHeaderName::try_from(name).unwrap()
+}
+
+/// Store a stale entry with validators, then take the state a background
+/// revalidation would receive. The receiver is kept alive for write events.
+async fn stale_revalidation_state() -> (RevalidationState, mpsc::UnboundedReceiver<String>) {
+    let (writes, written) = mpsc::unbounded_channel();
+    let backend: Arc<dyn CacheBackend> = Arc::new(RecordingBackend {
+        objects: Mutex::default(),
+        writes,
+    });
+    let backends = HashMap::from([("test".into(), backend)]);
+    let policy: CachePolicyConfig =
+        serde_json::from_value(serde_json::json!({"enabled": true, "backend": "test"})).unwrap();
+    let seed = clone_request_head_for_revalidation(&OwnerRequest::from_http(
+        http::Request::get("http://example.test/asset")
+            .body(())
+            .unwrap(),
+    ));
+    let key = CacheRequestKey::for_lookup(&seed, "http").unwrap().unwrap();
+    let admission = CacheWritebackAdmission::with_default_capacity();
+    let response = cache::maybe_store(
+        &seed,
+        &key,
+        &policy,
+        Response::from_http(
+            http::Response::builder()
+                .header("cache-control", "public, no-cache, max-age=300")
+                .header("etag", "\"cached\"")
+                .header("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT")
+                .body(Body::from("cached body"))
+                .unwrap(),
+        ),
+        cache::CacheStoreContext {
+            timing: cache::CacheStoreTiming {
+                response_delay_secs: 0,
+                body_read_timeout: Duration::from_secs(5),
+                request_collapse_guard: None,
+            },
+            writeback_admission: &admission,
+            backends: &backends,
+        },
+    )
+    .await
+    .unwrap();
+    to_bytes(response.into_head_and_body().1).await.unwrap();
+
+    let revalidations = Arc::new(cache::InFlightRevalidations::with_default_shards());
+    let state = match cache::lookup(&seed, &key, &policy, &backends, &revalidations)
+        .await
+        .unwrap()
+    {
+        cache::LookupOutcome::Revalidate(state) => state,
+        _ => panic!("expected a stale entry to require revalidation"),
+    };
+    (state, written)
+}
+
+#[tokio::test]
+async fn prepared_revalidation_head_drops_stale_content_length() {
+    let (state, _written) = stale_revalidation_state().await;
+    let mut req = OwnerRequest::from_http(
+        http::Request::get("http://example.test/asset")
+            .header("content-length", "42")
+            .body(())
+            .unwrap(),
+    );
+    assert_eq!(req.headers().declared_content_length().unwrap(), Some(42));
+
+    prepare_background_revalidation_request(&mut req, &state);
+
+    assert_eq!(req.headers().declared_content_length().unwrap(), None);
+}
+
+#[tokio::test]
+async fn prepared_revalidation_head_replaces_client_conditions_with_cached_validators() {
+    let (state, _written) = stale_revalidation_state().await;
+    let mut req = OwnerRequest::from_http(
+        http::Request::get("http://example.test/asset")
+            .header("content-length", "42")
+            .header("if-match", "\"client-match\"")
+            .header("if-none-match", "\"client-none-match\"")
+            .header("if-modified-since", "Tue, 20 Oct 2015 07:28:00 GMT")
+            .header("if-unmodified-since", "Tue, 20 Oct 2015 07:28:00 GMT")
+            .header("if-range", "\"client-none-match\"")
+            .header("range", "bytes=0-3")
+            .header("x-client", "keep")
+            .body(())
+            .unwrap(),
+    );
+
+    prepare_background_revalidation_request(&mut req, &state);
+
+    for name in ["if-match", "if-unmodified-since", "if-range", "range"] {
+        assert!(
+            !req.headers().contains_key(&ordinary(name)),
+            "{name} must be gone"
+        );
+    }
+    assert_eq!(
+        req.headers().get(&ordinary("if-none-match")).unwrap(),
+        "\"cached\"",
+        "the cache's validator replaces the stripped client condition"
+    );
+    assert_eq!(
+        req.headers().get(&ordinary("if-modified-since")).unwrap(),
+        "Wed, 21 Oct 2015 07:28:00 GMT",
+        "the cache's validator replaces the client's date"
+    );
+    assert_eq!(
+        req.headers().get(&ordinary("x-client")).unwrap(),
+        "keep",
+        "unrelated client fields survive"
+    );
+    assert_eq!(req.headers().declared_content_length().unwrap(), None);
+}
+
+#[tokio::test]
+async fn writeback_snapshot_keeps_original_head_when_preparing_revalidation() {
+    let (state, _written) = stale_revalidation_state().await;
+    let original = OwnerRequest::from_http(
+        http::Request::get("http://example.test/asset")
+            .header("content-length", "42")
+            .header("if-none-match", "\"client-none-match\"")
+            .header("range", "bytes=0-3")
+            .header("x-client", "keep")
+            .body(())
+            .unwrap(),
+    );
+
+    let (outgoing, snapshot) = clone_revalidation_head_with_writeback_snapshot(&original, &state);
+
+    assert_eq!(outgoing.headers().declared_content_length().unwrap(), None);
+    assert_eq!(
+        outgoing.headers().get(&ordinary("if-none-match")).unwrap(),
+        "\"cached\""
+    );
+    assert_eq!(
+        snapshot.headers().declared_content_length().unwrap(),
+        Some(42)
+    );
+    assert_eq!(
+        snapshot.headers().get(&ordinary("if-none-match")).unwrap(),
+        "\"client-none-match\""
+    );
+    assert!(snapshot.headers().contains_key(&ordinary("range")));
+    assert!(
+        snapshot
+            .headers()
+            .get(&ordinary("if-modified-since"))
+            .is_none()
+    );
+    assert_eq!(
+        snapshot.headers().get(&ordinary("x-client")).unwrap(),
+        "keep"
+    );
+    assert_eq!(
+        original.headers().declared_content_length().unwrap(),
+        Some(42),
+        "preparing must not mutate the caller's request"
+    );
+}
