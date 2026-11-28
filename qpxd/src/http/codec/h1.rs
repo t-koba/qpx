@@ -592,15 +592,26 @@ fn expect_continue(headers: &HeaderMap) -> bool {
 }
 
 fn determine_request_body_kind(headers: &HeaderMap, version: Version) -> Result<RequestBodyKind> {
+    let transfer_encoding_present = headers.contains_key(TRANSFER_ENCODING);
     // RFC 9112 section 6.1: Transfer-Encoding has no defined meaning for
     // HTTP/1.0 senders. Treat any present framing as faulty and fail closed
     // through the existing bad-request/close path.
-    if version == Version::HTTP_10 && headers.contains_key(TRANSFER_ENCODING) {
+    if version == Version::HTTP_10 && transfer_encoding_present {
         return Err(anyhow!(
             "transfer-encoding is not defined for HTTP/1.0 requests"
         ));
     }
     let has_chunked = has_only_chunked_transfer_encoding(headers)?;
+    // The shared classifier reports `false` both when the header is absent and
+    // when it is present with no usable coding. A request cannot fall back to
+    // an empty body in the latter case: RFC 9112 section 6.1 requires rejecting
+    // a request whose body length cannot be determined, otherwise a pipelined
+    // follow-up could be read as the next request on the connection.
+    if transfer_encoding_present && !has_chunked {
+        return Err(anyhow!(
+            "invalid transfer-encoding: expected exactly one chunked coding"
+        ));
+    }
     let declared_length = super::h2::parse_declared_content_length(headers)?;
     if has_chunked && declared_length.is_some() {
         return Err(anyhow!(

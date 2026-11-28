@@ -1538,6 +1538,47 @@ fn request_transfer_encoding_allows_only_chunked_singleton() {
     assert!(determine_request_body_kind(&headers, Version::HTTP_11).is_err());
 }
 
+#[test]
+fn request_transfer_encoding_without_single_chunked_is_faulty_framing() {
+    for head in [
+        "POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding:\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: ,\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding:\r\nContent-Length: 0\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: gzip\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: gzip, chunked\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n\r\n",
+        "POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n\r\n",
+    ] {
+        let error = try_parse_http1_request_head(head.as_bytes())
+            .expect_err("request with undeterminable body length must be rejected");
+        assert!(
+            error.to_string().contains("transfer-encoding"),
+            "unexpected error for {head:?}: {error}"
+        );
+    }
+
+    // Controls: absent Transfer-Encoding keeps its prior framing, and a single
+    // chunked coding remains valid.
+    let parsed = try_parse_http1_request_head(b"GET / HTTP/1.1\r\nHost: example.test\r\n\r\n")
+        .expect("request without transfer-encoding")
+        .expect("complete");
+    assert_eq!(parsed.body_kind, RequestBodyKind::Empty);
+
+    let parsed = try_parse_http1_request_head(
+        b"GET / HTTP/1.1\r\nHost: example.test\r\nContent-Length: 0\r\n\r\n",
+    )
+    .expect("request with zero content-length")
+    .expect("complete");
+    assert_eq!(parsed.body_kind, RequestBodyKind::Empty);
+
+    let parsed = try_parse_http1_request_head(
+        b"POST / HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\n\r\n",
+    )
+    .expect("single chunked coding")
+    .expect("complete");
+    assert_eq!(parsed.body_kind, RequestBodyKind::Chunked);
+}
+
 #[tokio::test]
 async fn unsupported_expect_with_100_continue_does_not_send_interim_continue() {
     let mut reader = tokio::io::empty();
@@ -1843,6 +1884,11 @@ async fn invalid_transfer_encoding_framing_is_rejected_and_closes_without_reachi
         "POST /first HTTP/1.0\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello",
         // HTTP/1.1 forbids combining Transfer-Encoding and Content-Length.
         "POST /first HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\nhello",
+        // An empty or comma-only coding leaves the body length undetermined:
+        // the pipelined follow-up must not be parsed as a second request.
+        "POST /first HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding:\r\n\r\n",
+        "POST /first HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: ,\r\n\r\n",
+        "POST /first HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding:\r\nContent-Length: 0\r\n\r\n",
     ] {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let service = CountingService {
@@ -1901,6 +1947,8 @@ async fn http11_chunked_and_http10_plain_controls_reach_service() {
         "POST /chunked HTTP/1.1\r\nHost: example.test\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
         // Valid HTTP/1.0 without Transfer-Encoding.
         "GET /plain HTTP/1.0\r\nHost: example.test\r\n\r\n",
+        // Valid HTTP/1.1 without Transfer-Encoding.
+        "GET /plain HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
     ] {
         let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let service = CountingService {
