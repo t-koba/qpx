@@ -109,12 +109,19 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
     let mut upstream_capsules = CapsuleBuffer::new();
     let mut downstream_scratch = BytesMut::new();
     let mut upstream_scratch = BytesMut::new();
+    let mut downstream_eof = false;
+    let mut upstream_eof = false;
+    let mut downstream_send_finished = false;
+    let mut upstream_send_finished = false;
     let deadline = tokio::time::sleep(idle_timeout);
     tokio::pin!(deadline);
     loop {
+        if downstream_eof && upstream_eof {
+            break;
+        }
         tokio::select! {
             _ = &mut deadline => break,
-            chunk = downstream_recv.recv_data() => {
+            chunk = downstream_recv.recv_data(), if !downstream_eof => {
                 let Some(chunk) = chunk? else {
                     if let Err(err) = downstream_capsules.ensure_complete() {
                         // Reset the malformed leg and cancel reading the peer response.
@@ -123,7 +130,12 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                         upstream_recv.stop_receiving_request_body();
                         return Err(err);
                     }
-                    break;
+                    downstream_eof = true;
+                    if !upstream_send_finished {
+                        let _ = upstream_send.finish().await;
+                        upstream_send_finished = true;
+                    }
+                    continue;
                 };
                 downstream_capsules.push(chunk, max_capsule_buffer_bytes)?;
                 while let Some((capsule_type, payload)) = downstream_capsules.take_next()? {
@@ -135,7 +147,7 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 }
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            chunk = upstream_recv.recv_data() => {
+            chunk = upstream_recv.recv_data(), if !upstream_eof => {
                 let Some(chunk) = chunk? else {
                     if let Err(err) = upstream_capsules.ensure_complete() {
                         // Reset the malformed leg and cancel reading the peer request.
@@ -144,7 +156,12 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                         downstream_recv.stop_receiving_request_body();
                         return Err(err);
                     }
-                    break;
+                    upstream_eof = true;
+                    if !downstream_send_finished {
+                        let _ = downstream_send.finish().await;
+                        downstream_send_finished = true;
+                    }
+                    continue;
                 };
                 upstream_capsules.push(chunk, max_capsule_buffer_bytes)?;
                 while let Some((capsule_type, payload)) = upstream_capsules.take_next()? {
@@ -157,7 +174,10 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
             payload = super::recv_stream_datagram(&mut downstream_datagrams) => {
-                let Some(payload) = payload else { break };
+                let Some(payload) = payload else {
+                    downstream_datagrams = None;
+                    continue;
+                };
                 validate_connect_ip_datagram(&payload, &downstream_policy)?;
                 if let Some(datagrams) = upstream_datagrams.as_mut() {
                     datagrams.sender.send_unprefixed_datagram_with_scratch(payload, &mut upstream_scratch)?;
@@ -169,7 +189,10 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
             payload = super::recv_stream_datagram(&mut upstream_datagrams) => {
-                let Some(payload) = payload else { break };
+                let Some(payload) = payload else {
+                    upstream_datagrams = None;
+                    continue;
+                };
                 validate_connect_ip_datagram(&payload, &upstream_policy)?;
                 if let Some(datagrams) = downstream_datagrams.as_mut() {
                     datagrams.sender.send_unprefixed_datagram_with_scratch(payload, &mut downstream_scratch)?;
@@ -182,8 +205,12 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
             }
         }
     }
-    let _ = upstream_send.finish().await;
-    let _ = downstream_send.finish().await;
+    if !upstream_send_finished {
+        let _ = upstream_send.finish().await;
+    }
+    if !downstream_send_finished {
+        let _ = downstream_send.finish().await;
+    }
     Ok(())
 }
 
@@ -201,19 +228,25 @@ pub(super) async fn relay_qpx_connect_ip_device(
     let mut capsules = CapsuleBuffer::new();
     let mut datagram_scratch = BytesMut::new();
     let mut packet = vec![0u8; 65_535];
+    let mut req_eof = false;
+    let mut device_eof = false;
     let deadline = tokio::time::sleep(idle_timeout);
     tokio::pin!(deadline);
     loop {
+        if req_eof && device_eof {
+            break;
+        }
         tokio::select! {
             _ = &mut deadline => break,
-            chunk = req_recv.recv_data() => {
+            chunk = req_recv.recv_data(), if !req_eof => {
                 let Some(chunk) = chunk? else {
                     if let Err(err) = capsules.ensure_complete() {
                         req_send.abort_message_stream();
                         req_recv.abort_message_stream();
                         return Err(err);
                     }
-                    break;
+                    req_eof = true;
+                    continue;
                 };
                 capsules.push(chunk, max_capsule_buffer_bytes)?;
                 while let Some((capsule_type, payload)) = capsules.take_next()? {
@@ -237,17 +270,22 @@ pub(super) async fn relay_qpx_connect_ip_device(
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
             payload = super::recv_stream_datagram(&mut datagrams) => {
-                let Some(payload) = payload else { break };
+                let Some(payload) = payload else {
+                    datagrams = None;
+                    continue;
+                };
                 validate_connect_ip_datagram(&payload, &downstream_policy)?;
                 let (_, offset) = decode_quic_varint(&payload)
                     .ok_or_else(|| anyhow!("CONNECT-IP datagram context is invalid"))?;
                 device_writer.send_packet(&payload[offset..]).await?;
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
-            read = device_reader.recv_packet(&mut packet) => {
+            read = device_reader.recv_packet(&mut packet), if !device_eof => {
                 let read = read?;
                 if read == 0 {
-                    break;
+                    device_eof = true;
+                    let _ = req_send.finish().await;
+                    continue;
                 }
                 upstream_policy.validate(&packet[..read])?;
                 let mut payload = BytesMut::with_capacity(read + 1);
@@ -271,7 +309,9 @@ pub(super) async fn relay_qpx_connect_ip_device(
             }
         }
     }
-    let _ = req_send.finish().await;
+    if !device_eof {
+        let _ = req_send.finish().await;
+    }
     Ok(())
 }
 
@@ -344,13 +384,14 @@ pub(super) async fn relay_qpx_connect_udp_stream(
         udp_buf.extend_from_slice(prefix.as_ref());
     }
     udp_buf.extend_from_slice(&[0]); // CONNECT-UDP context id = 0
+    let mut req_eof = false;
 
     loop {
         tokio::select! {
             _ = &mut idle_deadline => {
                 break;
             }
-            recv = req_recv.recv_data() => {
+            recv = req_recv.recv_data(), if !req_eof => {
                 match recv? {
                     Some(chunk) => {
                         capsule_buf.push(chunk, connect_udp_cfg.max_capsule_buffer_bytes)?;
@@ -365,13 +406,16 @@ pub(super) async fn relay_qpx_connect_udp_stream(
                             req_recv.abort_message_stream();
                             return Err(err);
                         }
-                        break;
+                        // The client FIN only closes its send direction: UDP
+                        // responses and datagrams still flow to the client.
+                        req_eof = true;
                     }
                 }
             }
             payload = super::recv_stream_datagram(&mut datagrams) => {
                 let Some(payload) = payload else {
-                    break;
+                    datagrams = None;
+                    continue;
                 };
                 let Some(datagram_payload) = decode_connect_udp_payload(payload.as_ref()) else {
                     continue;
@@ -463,13 +507,20 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
     tokio::pin!(idle_deadline);
     let mut upstream_datagram_scratch = BytesMut::new();
     let mut downstream_datagram_scratch = BytesMut::new();
+    let mut downstream_eof = false;
+    let mut upstream_eof = false;
+    let mut upstream_send_finished = false;
+    let mut downstream_send_finished = false;
 
     loop {
+        if downstream_eof && upstream_eof {
+            break;
+        }
         tokio::select! {
             _ = &mut idle_deadline => {
                 break;
             }
-            recv = downstream_recv.recv_data() => {
+            recv = downstream_recv.recv_data(), if !downstream_eof => {
                 match recv? {
                     Some(bytes) => {
                         apply_connect_udp_bandwidth_controls(
@@ -485,10 +536,16 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                             .as_mut()
                             .reset(crate::runtime::tokio_deadline_after(idle_timeout));
                     }
-                    None => break,
+                    None => {
+                        downstream_eof = true;
+                        if !upstream_send_finished {
+                            let _ = timeout(idle_timeout, upstream_send.finish()).await;
+                            upstream_send_finished = true;
+                        }
+                    }
                 }
             }
-            recv = upstream_recv.recv_data() => {
+            recv = upstream_recv.recv_data(), if !upstream_eof => {
                 match recv? {
                     Some(bytes) => {
                         apply_connect_udp_bandwidth_controls(
@@ -504,12 +561,19 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                             .as_mut()
                             .reset(crate::runtime::tokio_deadline_after(idle_timeout));
                     }
-                    None => break,
+                    None => {
+                        upstream_eof = true;
+                        if !downstream_send_finished {
+                            let _ = timeout(idle_timeout, downstream_send.finish()).await;
+                            downstream_send_finished = true;
+                        }
+                    }
                 }
             }
             down_payload = super::recv_stream_datagram(&mut downstream_datagrams) => {
                 let Some(payload) = down_payload else {
-                    break;
+                    downstream_datagrams = None;
+                    continue;
                 };
                 let fallback = payload.clone();
                 apply_connect_udp_bandwidth_controls(
@@ -542,7 +606,8 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
             }
             up_payload = super::recv_stream_datagram(&mut upstream_datagrams) => {
                 let Some(payload) = up_payload else {
-                    break;
+                    upstream_datagrams = None;
+                    continue;
                 };
                 let fallback = payload.clone();
                 apply_connect_udp_bandwidth_controls(
@@ -576,8 +641,12 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
         }
     }
 
-    let _ = timeout(idle_timeout, upstream_send.finish()).await;
-    let _ = timeout(idle_timeout, downstream_send.finish()).await;
+    if !upstream_send_finished {
+        let _ = timeout(idle_timeout, upstream_send.finish()).await;
+    }
+    if !downstream_send_finished {
+        let _ = timeout(idle_timeout, downstream_send.finish()).await;
+    }
     Ok(())
 }
 

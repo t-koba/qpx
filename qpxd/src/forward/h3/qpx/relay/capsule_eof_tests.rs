@@ -1,8 +1,12 @@
 use super::*;
+use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::mpsc;
 
 const WAIT: Duration = Duration::from_secs(5);
+// A clean FIN leaves the opposite direction open, so capsule regressions use
+// a short idle deadline instead of the multi-second WAIT bound of assertions.
+const RELAY_IDLE: Duration = Duration::from_millis(750);
 
 #[derive(Clone)]
 struct CaptureStream(mpsc::Sender<qpx_h3::RequestStream>);
@@ -195,6 +199,11 @@ async fn connect_ip_chained_capsule_eof_both_directions() -> Result<()> {
                 }
                 send_fragmented(source, residue).await?;
                 source.finish().await?;
+                if residue.is_empty() {
+                    // A bidirectional capsule stream completes only after both
+                    // receive directions have seen FIN.
+                    destination.finish().await?;
+                }
                 let result = timeout(WAIT, relay).await??;
                 assert_eq!(result.is_err(), !residue.is_empty(), "{residue:?}");
                 if let Err(err) = result {
@@ -236,10 +245,10 @@ async fn connect_ip_local_device_capsule_eof() -> Result<()> {
             }
             send_fragmented(&mut client.request_stream, residue).await?;
             client.request_stream.finish().await?;
-            let result = timeout(WAIT, relay).await;
-            // Release any blocking file read before asserting (also on timeout).
+            // The client FIN closes only its send direction; the device leg
+            // must also end before the relay propagates FIN back to H3.
             drop(peer);
-            let result = result??;
+            let result = timeout(WAIT, relay).await??;
             assert_eq!(result.is_err(), !residue.is_empty(), "{residue:?}");
             if let Err(err) = result {
                 assert!(err.to_string().contains("incomplete capsule"));
@@ -333,6 +342,299 @@ async fn connect_ip_device_partial_capsule_timeout_and_cancellation_are_not_eof(
         if let Some(task) = client.driver {
             task.abort();
         }
+    }
+    Ok(())
+}
+
+fn udp_config() -> ConnectUdpConfig {
+    ConnectUdpConfig {
+        enabled: true,
+        idle_timeout_secs: 1,
+        max_capsule_buffer_bytes: 1024,
+        uri_template: None,
+    }
+}
+
+async fn send_data_capsule(stream: &mut qpx_h3::RequestStream, payload: &[u8]) -> Result<()> {
+    stream
+        .send_data(encode_capsule_header(0, payload.len())?)
+        .await?;
+    if !payload.is_empty() {
+        stream.send_data(Bytes::copy_from_slice(payload)).await?;
+    }
+    Ok(())
+}
+
+// Both CONNECT-UDP and CONNECT-IP carry a context ID before the payload.
+async fn assert_forwarded_datagram(
+    stream: &mut qpx_h3::RequestStream,
+    expected: &[u8],
+) -> Result<()> {
+    let mut capsules = CapsuleBuffer::new();
+    loop {
+        let chunk = timeout(WAIT, stream.recv_data())
+            .await??
+            .ok_or_else(|| anyhow!("stream FIN before the peer capsule arrived"))?;
+        capsules.push(chunk, 1024)?;
+        if let Some((capsule_type, payload)) = capsules.take_next()? {
+            assert_eq!(capsule_type, 0);
+            assert_eq!(decode_connect_udp_payload(&payload), Some(expected));
+            return Ok(());
+        }
+    }
+}
+
+#[tokio::test]
+async fn connect_ip_chained_capsule_after_peer_fin_is_forwarded() -> Result<()> {
+    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
+    let (upstream, mut upstream_peer, upstream_task) = stream_pair().await?;
+    let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
+        downstream: downstream_stream,
+        downstream_datagrams: None,
+        upstream: upstream.request_stream,
+        upstream_datagrams: None,
+        downstream_policy: policy(),
+        upstream_policy: policy(),
+        max_capsule_buffer_bytes: 1024,
+        idle_timeout: RELAY_IDLE,
+    }));
+
+    downstream.request_stream.finish().await?;
+    // Only the upstream send half gets FIN: the upstream receive leg stays live.
+    assert_completion(&mut upstream_peer, false).await?;
+    send_fragmented(&mut upstream_peer, &[37, 1, 99]).await?;
+    let mut forwarded = Vec::new();
+    while forwarded.len() < 3 {
+        forwarded.extend_from_slice(
+            &timeout(WAIT, downstream.request_stream.recv_data())
+                .await??
+                .ok_or_else(|| anyhow!("FIN before the post-FIN capsule"))?,
+        );
+    }
+    assert_eq!(forwarded, [37, 1, 99]);
+
+    upstream_peer.finish().await?;
+    timeout(WAIT, relay).await???;
+    assert_completion(&mut downstream.request_stream, false).await?;
+    assert_completion(&mut upstream_peer, false).await?;
+    downstream_task.abort();
+    upstream_task.abort();
+    if let Some(task) = downstream.driver {
+        task.abort();
+    }
+    if let Some(task) = upstream.driver {
+        task.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn connect_ip_chained_malformed_residue_at_eof_still_resets() -> Result<()> {
+    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
+    let (upstream, _upstream_peer, upstream_task) = stream_pair().await?;
+    let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
+        downstream: downstream_stream,
+        downstream_datagrams: None,
+        upstream: upstream.request_stream,
+        upstream_datagrams: None,
+        downstream_policy: policy(),
+        upstream_policy: policy(),
+        max_capsule_buffer_bytes: 1024,
+        idle_timeout: RELAY_IDLE,
+    }));
+
+    send_fragmented(&mut downstream.request_stream, &[0, 3, 0, 42]).await?;
+    downstream.request_stream.finish().await?;
+    let err = timeout(WAIT, relay)
+        .await??
+        .expect_err("truncated capsule must reset");
+    assert!(err.to_string().contains("incomplete capsule"));
+    assert_completion(&mut downstream.request_stream, true).await?;
+    downstream_task.abort();
+    upstream_task.abort();
+    if let Some(task) = downstream.driver {
+        task.abort();
+    }
+    if let Some(task) = upstream.driver {
+        task.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn connect_ip_chained_one_fin_then_idle_is_not_malformed() -> Result<()> {
+    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
+    let (upstream, mut upstream_peer, upstream_task) = stream_pair().await?;
+    let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
+        downstream: downstream_stream,
+        downstream_datagrams: None,
+        upstream: upstream.request_stream,
+        upstream_datagrams: None,
+        downstream_policy: policy(),
+        upstream_policy: policy(),
+        max_capsule_buffer_bytes: 1024,
+        idle_timeout: RELAY_IDLE,
+    }));
+
+    downstream.request_stream.finish().await?;
+    assert_completion(&mut upstream_peer, false).await?;
+    timeout(WAIT, relay).await???;
+    assert_completion(&mut downstream.request_stream, false).await?;
+    downstream_task.abort();
+    upstream_task.abort();
+    if let Some(task) = downstream.driver {
+        task.abort();
+    }
+    if let Some(task) = upstream.driver {
+        task.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn connect_udp_local_response_after_client_fin_is_forwarded() -> Result<()> {
+    let (mut client, stream, server) = stream_pair().await?;
+    let udp = UdpSocket::bind("127.0.0.1:0").await?;
+    let peer = UdpSocket::bind("127.0.0.1:0").await?;
+    udp.connect(peer.local_addr()?).await?;
+    peer.connect(udp.local_addr()?).await?;
+    let relay = tokio::spawn(relay_qpx_connect_udp_stream(
+        stream,
+        udp,
+        udp_config(),
+        None,
+        RateLimitContext::default(),
+        AppliedRateLimits::default(),
+    ));
+
+    send_data_capsule(&mut client.request_stream, &[0, b'g', b'o']).await?;
+    let mut buf = [0u8; 32];
+    let read = timeout(WAIT, peer.recv(&mut buf)).await??;
+    assert_eq!(&buf[..read], b"go");
+
+    client.request_stream.finish().await?;
+    peer.send(b"after-fin").await?;
+    assert_forwarded_datagram(&mut client.request_stream, b"after-fin").await?;
+
+    timeout(WAIT, relay).await???;
+    assert_completion(&mut client.request_stream, false).await?;
+    server.abort();
+    if let Some(task) = client.driver {
+        task.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn connect_udp_local_malformed_residue_at_eof_resets() -> Result<()> {
+    let (mut client, stream, server) = stream_pair().await?;
+    let udp = UdpSocket::bind("127.0.0.1:0").await?;
+    let peer = UdpSocket::bind("127.0.0.1:0").await?;
+    udp.connect(peer.local_addr()?).await?;
+    peer.connect(udp.local_addr()?).await?;
+    let relay = tokio::spawn(relay_qpx_connect_udp_stream(
+        stream,
+        udp,
+        udp_config(),
+        None,
+        RateLimitContext::default(),
+        AppliedRateLimits::default(),
+    ));
+
+    send_fragmented(&mut client.request_stream, &[0, 3, 0, 42]).await?;
+    client.request_stream.finish().await?;
+    let err = timeout(WAIT, relay)
+        .await??
+        .expect_err("truncated capsule must reset");
+    assert!(err.to_string().contains("incomplete capsule"));
+    assert_completion(&mut client.request_stream, true).await?;
+    server.abort();
+    if let Some(task) = client.driver {
+        task.abort();
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn connect_udp_chained_data_after_peer_fin_is_forwarded() -> Result<()> {
+    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
+    let (upstream, mut upstream_peer, upstream_task) = stream_pair().await?;
+    let relay = tokio::spawn(relay_qpx_connect_udp_stream_chained(
+        downstream_stream,
+        None,
+        upstream.request_stream,
+        None,
+        udp_config(),
+        RateLimitContext::default(),
+        AppliedRateLimits::default(),
+    ));
+
+    downstream.request_stream.finish().await?;
+    assert_completion(&mut upstream_peer, false).await?;
+    upstream_peer
+        .send_data(Bytes::from_static(b"peer-after-fin"))
+        .await?;
+    let mut forwarded = Vec::new();
+    while forwarded.len() < b"peer-after-fin".len() {
+        forwarded.extend_from_slice(
+            &timeout(WAIT, downstream.request_stream.recv_data())
+                .await??
+                .ok_or_else(|| anyhow!("FIN before the post-FIN DATA"))?,
+        );
+    }
+    assert_eq!(forwarded, b"peer-after-fin");
+
+    upstream_peer.finish().await?;
+    timeout(WAIT, relay).await???;
+    assert_completion(&mut downstream.request_stream, false).await?;
+    assert_completion(&mut upstream_peer, false).await?;
+    downstream_task.abort();
+    upstream_task.abort();
+    if let Some(task) = downstream.driver {
+        task.abort();
+    }
+    if let Some(task) = upstream.driver {
+        task.abort();
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn connect_ip_device_packet_after_client_fin_is_forwarded() -> Result<()> {
+    let (mut client, stream, server) = stream_pair().await?;
+    let (device, mut peer) = crate::connect_ip::SystemIpDevice::test_pair()?;
+    let relay = tokio::spawn(relay_qpx_connect_ip_device(
+        stream,
+        None,
+        device,
+        policy(),
+        policy(),
+        1024,
+        Duration::from_secs(1),
+    ));
+
+    client.request_stream.finish().await?;
+    assert!(
+        timeout(
+            Duration::from_millis(100),
+            client.request_stream.recv_data()
+        )
+        .await
+        .is_err(),
+        "client FIN must not end the device direction"
+    );
+    let packet = [
+        0x45, 0, 0, 20, 0, 0, 0, 0, 64, 1, 0, 0, 192, 0, 2, 1, 198, 51, 100, 2,
+    ];
+    peer.write_all(&packet)?;
+    assert_forwarded_datagram(&mut client.request_stream, &packet).await?;
+    drop(peer);
+    timeout(WAIT, relay).await???;
+    assert_completion(&mut client.request_stream, false).await?;
+    server.abort();
+    if let Some(task) = client.driver {
+        task.abort();
     }
     Ok(())
 }
