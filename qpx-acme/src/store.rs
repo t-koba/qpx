@@ -1,6 +1,6 @@
 use arc_swap::ArcSwap;
 use rustls::sign::CertifiedKey;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 /// TLS certificate store populated by ACME renewals.
@@ -24,6 +24,16 @@ impl AcmeCertStore {
         let mut next = (**self.by_sni.load()).clone();
         next.insert(sni.to_ascii_lowercase(), key);
         self.by_sni.store(Arc::new(next));
+    }
+
+    /// Drops entries for SNIs that are no longer managed by ACME.
+    pub(crate) fn retain_snis(&self, desired: &HashSet<String>) {
+        let current = self.by_sni.load();
+        let mut next = (**current).clone();
+        next.retain(|sni, _| desired.contains(sni));
+        if next.len() != current.len() {
+            self.by_sni.store(Arc::new(next));
+        }
     }
 }
 
@@ -50,6 +60,16 @@ impl AcmeQuicCertStore {
         let mut next = (**self.by_sni.load()).clone();
         next.insert(sni.to_ascii_lowercase(), key);
         self.by_sni.store(Arc::new(next));
+    }
+
+    /// Drops entries for SNIs that are no longer managed by ACME.
+    pub(crate) fn retain_snis(&self, desired: &HashSet<String>) {
+        let current = self.by_sni.load();
+        let mut next = (**current).clone();
+        next.retain(|sni, _| desired.contains(sni));
+        if next.len() != current.len() {
+            self.by_sni.store(Arc::new(next));
+        }
     }
 }
 

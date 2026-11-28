@@ -51,6 +51,10 @@ pub async fn run_manager(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
             .operational_config_provider
             .current_operational_config();
         let snis = desired_acme_snis(current_operational.as_ref());
+        let desired: HashSet<String> = snis.iter().cloned().collect();
+        state.store.retain_snis(&desired);
+        #[cfg(feature = "http3")]
+        state.quic_store.retain_snis(&desired);
         for sni in snis {
             if let Err(err) = ensure_certificate(state.as_ref(), &acct, &sni).await {
                 warn!(sni = %sni, error = ?err, "acme certificate ensure failed");
@@ -2126,5 +2130,42 @@ mod tests {
             deferrals.get("active.example"),
             Some(&(now + Duration::from_secs(3600)))
         );
+    }
+    #[cfg(unix)]
+    #[test]
+    fn cert_stores_drop_entries_outside_desired_snis() {
+        let fixture = CertFixture::new();
+        let (cert, key) = test_pair();
+        fixture.write_pair(&cert, &key);
+        load_cert_into_store(&fixture.0, TEST_SNI).unwrap();
+
+        let retired = "retired.example";
+        let (retired_cert, retired_key) = test_pair();
+        let (cert_path, key_path) = cert_paths_for_sni(&fixture.0, retired);
+        ensure_dir(cert_path.parent().unwrap(), 0o700).unwrap();
+        write_bytes_file(&key_path, retired_key.serialize_pem().as_bytes(), 0o600).unwrap();
+        write_bytes_file(&cert_path, retired_cert.pem().as_bytes(), 0o644).unwrap();
+        load_cert_into_store(&fixture.0, retired).unwrap();
+
+        assert!(fixture.0.store.get(TEST_SNI).is_some());
+        assert!(fixture.0.store.get(retired).is_some());
+        #[cfg(feature = "http3")]
+        {
+            assert!(fixture.0.quic_store.get(TEST_SNI).is_some());
+            assert!(fixture.0.quic_store.get(retired).is_some());
+        }
+
+        let desired: HashSet<String> = [TEST_SNI.to_string()].into_iter().collect();
+        fixture.0.store.retain_snis(&desired);
+        #[cfg(feature = "http3")]
+        fixture.0.quic_store.retain_snis(&desired);
+
+        assert!(fixture.0.store.get(TEST_SNI).is_some());
+        assert!(fixture.0.store.get(retired).is_none());
+        #[cfg(feature = "http3")]
+        {
+            assert!(fixture.0.quic_store.get(TEST_SNI).is_some());
+            assert!(fixture.0.quic_store.get(retired).is_none());
+        }
     }
 }
