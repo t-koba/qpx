@@ -2119,7 +2119,7 @@ mod tests {
                 now + Duration::from_secs(3600),
             );
         }
-        sweep_expired_issuance_deferrals(&state, now);
+        sweep_expired_issuance_deferrals(state, now);
         let deferrals = state.issuance_deferrals.lock().unwrap();
         assert!(!deferrals.contains_key("gone.example"));
         assert_eq!(
