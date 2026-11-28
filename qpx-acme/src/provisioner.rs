@@ -21,6 +21,27 @@ use tracing::{info, warn};
 
 const POST_ISSUANCE_DEFERRAL: Duration = Duration::from_secs(24 * 3600);
 const POST_ISSUANCE_EXPIRY_MARGIN: Duration = Duration::from_secs(3600);
+const MANAGER_PASS_INTERVAL: Duration = Duration::from_secs(3600);
+const MANAGER_WAKEUP_MIN_DELAY: Duration = Duration::from_millis(1);
+
+// An active deferral is the manager's next deadline: sleeping a full interval past
+// it would suppress the pass that makes the deferred renewal effective. Due and
+// expired deadlines wake on the next pass, with a positive delay to avoid spinning.
+fn manager_pass_delay(state: &AcmeRuntime, now: SystemTime) -> Duration {
+    let Ok(deferrals) = state.issuance_deferrals.lock() else {
+        return MANAGER_PASS_INTERVAL;
+    };
+    let Some(deadline) = deferrals.values().copied().min() else {
+        return MANAGER_PASS_INTERVAL;
+    };
+    match deadline.duration_since(now) {
+        Ok(remaining) if remaining < MANAGER_PASS_INTERVAL => {
+            remaining.max(MANAGER_WAKEUP_MIN_DELAY)
+        }
+        Ok(_) => MANAGER_PASS_INTERVAL,
+        Err(_) => MANAGER_WAKEUP_MIN_DELAY,
+    }
+}
 
 /// Runs the ACME account and certificate renewal manager.
 pub async fn run_manager(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
@@ -62,7 +83,7 @@ pub async fn run_manager(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
         }
 
         account = Some(acct);
-        sleep(Duration::from_secs(3600)).await;
+        sleep(manager_pass_delay(state.as_ref(), SystemTime::now())).await;
     }
 }
 pub(crate) fn acme_directory_url(acme: &AcmeConfig) -> String {
@@ -2108,6 +2129,63 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read hook output");
         assert_eq!(text, "example.com|txt-value");
         let _ = std::fs::remove_file(path);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn manager_pass_delay_wakes_at_earliest_active_deferral() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        let fixture = CertFixture::new();
+        let state = &fixture.0;
+
+        assert_eq!(manager_pass_delay(state, now), MANAGER_PASS_INTERVAL);
+
+        {
+            let mut deferrals = state.issuance_deferrals.lock().unwrap();
+            deferrals.insert(
+                "long-life.example".to_string(),
+                now + Duration::from_secs(2 * 3600),
+            );
+            deferrals.insert(
+                "soon.example".to_string(),
+                now + Duration::from_secs(30 * 60),
+            );
+            deferrals.insert(
+                "later.example".to_string(),
+                now + Duration::from_secs(5 * 3600),
+            );
+        }
+        assert_eq!(manager_pass_delay(state, now), Duration::from_secs(30 * 60));
+
+        // A 62-minute expiry-bound deadline seen after the hourly pass leaves one
+        // minute: that wakeup must not be replaced by another full hour of sleep.
+        {
+            let mut deferrals = state.issuance_deferrals.lock().unwrap();
+            deferrals.insert(
+                "soon.example".to_string(),
+                now + Duration::from_secs(62 * 60),
+            );
+        }
+        assert_eq!(
+            manager_pass_delay(state, now + Duration::from_secs(61 * 60)),
+            Duration::from_secs(60)
+        );
+
+        {
+            let mut deferrals = state.issuance_deferrals.lock().unwrap();
+            deferrals.insert("soon.example".to_string(), now);
+        }
+        assert_eq!(manager_pass_delay(state, now), MANAGER_WAKEUP_MIN_DELAY);
+
+        {
+            let mut deferrals = state.issuance_deferrals.lock().unwrap();
+            deferrals.clear();
+            deferrals.insert("expired.example".to_string(), now - Duration::from_secs(1));
+        }
+        // An overdue deadline that outlives the pass's sweep wakes once; that pass
+        // removes it, so the following delay is back to the hourly interval.
+        assert_eq!(manager_pass_delay(state, now), MANAGER_WAKEUP_MIN_DELAY);
+        sweep_expired_issuance_deferrals(state, now);
+        assert_eq!(manager_pass_delay(state, now), MANAGER_PASS_INTERVAL);
     }
     #[cfg(unix)]
     #[test]
