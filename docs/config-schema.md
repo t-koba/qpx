@@ -161,10 +161,14 @@ the leaf's observed `not_before..not_after` span. This guarantees no immediate
 reissue when a short-lived leaf's validity begins at issuance and the configured
 lead exceeds half its lifetime. The anchor is the certificate's `not_before`,
 not qpx's receipt time: a directory that backdates validity can still hand qpx a
-leaf that is already past its renewal point, and no receipt-time reference or
-post-success cooldown is implemented. qpx does not query ACME Renewal Information
-(ARI), apply failure backoff, or randomize the hourly manager loop, so this guard
-is not a general no-churn guarantee for private or backdated profiles. A
+leaf that is already past its renewal point. A successful issuance that installs
+such a due leaf records an in-memory per-SNI deferral of 24 hours, capped to one
+hour before `not_after`; while it is active the hourly manager skips a new order
+only if the persisted pair is still usable; missing, mismatched, future-dated,
+expired or unreadable material still triggers immediate recovery. The deferral is
+not persisted and is lost on restart. qpx does not query ACME Renewal Information
+(ARI), apply failure backoff, or randomize the hourly manager loop, so this guard is not a general
+no-churn guarantee for private or backdated profiles. A
 timed-out set hook triggers the configured clear hook
 before renewal moves on. On Unix, timeout/cancellation kills the hook's process
 group; on Windows, the shell is assigned to a Job Object before it is resumed,

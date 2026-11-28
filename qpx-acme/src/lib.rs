@@ -20,10 +20,11 @@ use hyper::service::service_fn;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use qpx_core::config::{AcmeDnsHookConfig, Config};
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
-use std::time::Duration;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, SystemTime};
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::Semaphore;
@@ -72,6 +73,7 @@ pub struct AcmeRuntime {
     pub(crate) quic_store: Arc<AcmeQuicCertStore>,
     pub(crate) tokens: Arc<Http01TokenStore>,
     pub(crate) tls_alpn01: Arc<TlsAlpn01CertStore>,
+    pub(crate) issuance_deferrals: Mutex<HashMap<String, SystemTime>>,
 }
 
 static STATE: OnceLock<Arc<AcmeRuntime>> = OnceLock::new();
@@ -136,6 +138,7 @@ pub fn init(
         quic_store: Arc::new(AcmeQuicCertStore::new()),
         tokens: Arc::new(Http01TokenStore::new()),
         tls_alpn01: Arc::new(TlsAlpn01CertStore::new()),
+        issuance_deferrals: Mutex::new(HashMap::new()),
     });
 
     let _ = STATE.set(rt.clone());

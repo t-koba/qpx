@@ -19,6 +19,9 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{info, warn};
 
+const POST_ISSUANCE_DEFERRAL: Duration = Duration::from_secs(24 * 3600);
+const POST_ISSUANCE_EXPIRY_MARGIN: Duration = Duration::from_secs(3600);
+
 /// Runs the ACME account and certificate renewal manager.
 pub async fn run_manager(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
     if !state.tos_agreed {
@@ -157,19 +160,103 @@ fn load_cert_into_store_from_chain(
     Ok(true)
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReuseDecision {
+    Reusable,
+    Due,
+    Unusable,
+}
+
 // A not-due leaf alone is insufficient: an interrupted write may have replaced only its key.
-fn reuse_existing_certificate(state: &AcmeRuntime, sni: &str) -> Result<bool> {
+fn reuse_decision_at(state: &AcmeRuntime, sni: &str, now: SystemTime) -> Result<ReuseDecision> {
     let (cert_path, key_path) = cert_paths_for_sni(state, sni);
     if !cert_path.exists() || !key_path.exists() {
-        return Ok(false);
+        return Ok(ReuseDecision::Unusable);
     }
     let (not_before, not_after) = read_leaf_validity(&cert_path)?;
-    if SystemTime::now() < not_before
-        || should_renew(not_before, not_after, state.renew_before_days)?
-    {
-        return Ok(false);
+    if now < not_before {
+        return Ok(ReuseDecision::Unusable);
     }
-    load_cert_into_store(state, sni)
+    if should_renew_at(not_before, not_after, state.renew_before_days, now)? {
+        return Ok(ReuseDecision::Due);
+    }
+    if load_cert_into_store(state, sni)? {
+        Ok(ReuseDecision::Reusable)
+    } else {
+        Ok(ReuseDecision::Unusable)
+    }
+}
+
+#[cfg(all(test, unix))]
+fn reuse_existing_certificate(state: &AcmeRuntime, sni: &str) -> Result<bool> {
+    Ok(reuse_decision_at(state, sni, SystemTime::now())? == ReuseDecision::Reusable)
+}
+
+// A due leaf gets one bounded reprieve after a successful issuance if the pair on disk
+// is still usable. Any validation failure falls through to the normal recovery path.
+fn reuse_or_deferred_certificate(state: &AcmeRuntime, sni: &str, now: SystemTime) -> Result<bool> {
+    match reuse_decision_at(state, sni, now)? {
+        ReuseDecision::Reusable => Ok(true),
+        ReuseDecision::Due => Ok(deferred_due_pair_is_usable(state, sni, now)),
+        ReuseDecision::Unusable => Ok(false),
+    }
+}
+
+fn deferred_due_pair_is_usable(state: &AcmeRuntime, sni: &str, now: SystemTime) -> bool {
+    if !deferral_active_at(state, sni, now) {
+        return false;
+    }
+    match load_cert_into_store(state, sni) {
+        Ok(usable) => usable,
+        Err(err) => {
+            warn!(sni = %sni, error = ?err, "deferred acme certificate is unusable; renewing");
+            false
+        }
+    }
+}
+
+fn deferral_active_at(state: &AcmeRuntime, sni: &str, now: SystemTime) -> bool {
+    let Ok(mut deferrals) = state.issuance_deferrals.lock() else {
+        return false;
+    };
+    let key = sni.to_ascii_lowercase();
+    match deferrals.get(&key) {
+        Some(&deadline) if deadline > now => true,
+        Some(_) => {
+            deferrals.remove(&key);
+            false
+        }
+        None => false,
+    }
+}
+
+// Records a post-success deferral only for leaves that are already due on receipt.
+fn record_issuance_deferral(
+    state: &AcmeRuntime,
+    sni: &str,
+    cert_path: &Path,
+    now: SystemTime,
+) -> Result<()> {
+    let (not_before, not_after) = read_leaf_validity(cert_path)?;
+    if !should_renew_at(not_before, not_after, state.renew_before_days, now)? {
+        return Ok(());
+    }
+    let deadline = now
+        .checked_add(POST_ISSUANCE_DEFERRAL)
+        .zip(not_after.checked_sub(POST_ISSUANCE_EXPIRY_MARGIN))
+        .map(|(day, expiry)| day.min(expiry));
+    let Some(deadline) = deadline else {
+        return Ok(());
+    };
+    if deadline <= now {
+        return Ok(());
+    }
+    let mut deferrals = state
+        .issuance_deferrals
+        .lock()
+        .map_err(|_| anyhow!("acme issuance deferral state is poisoned"))?;
+    deferrals.insert(sni.to_ascii_lowercase(), deadline);
+    Ok(())
 }
 
 async fn load_or_create_account(state: &AcmeRuntime) -> Result<Account> {
@@ -220,7 +307,7 @@ fn account_builder() -> Result<instant_acme::AccountBuilder> {
 
 async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -> Result<()> {
     let (cert_path, key_path) = cert_paths_for_sni(state, sni);
-    match reuse_existing_certificate(state, sni) {
+    match reuse_or_deferred_certificate(state, sni, SystemTime::now()) {
         Ok(true) => return Ok(()),
         Ok(false) => {}
         Err(err) => {
@@ -303,6 +390,9 @@ async fn ensure_certificate(state: &AcmeRuntime, account: &Account, sni: &str) -
         return Err(anyhow!(
             "ACME certificate/key pair missing after issuance for {sni}"
         ));
+    }
+    if let Err(err) = record_issuance_deferral(state, sni, &cert_path, SystemTime::now()) {
+        warn!(sni = %sni, error = ?err, "failed to record post-issuance deferral");
     }
     Ok(())
 }
@@ -745,12 +835,22 @@ fn renewal_point(
         .ok_or_else(|| anyhow!("invalid cert not_after (too early)"))
 }
 
+#[cfg(test)]
 fn should_renew(
     not_before: SystemTime,
     not_after: SystemTime,
     renew_before_days: u64,
 ) -> Result<bool> {
-    Ok(SystemTime::now() >= renewal_point(not_before, not_after, renew_before_days)?)
+    should_renew_at(not_before, not_after, renew_before_days, SystemTime::now())
+}
+
+fn should_renew_at(
+    not_before: SystemTime,
+    not_after: SystemTime,
+    renew_before_days: u64,
+    now: SystemTime,
+) -> Result<bool> {
+    Ok(now >= renewal_point(not_before, not_after, renew_before_days)?)
 }
 
 fn read_leaf_validity(cert_path: &Path) -> Result<(SystemTime, SystemTime)> {
@@ -915,6 +1015,10 @@ mod tests {
     use crate::ConfigProvider;
     #[cfg(unix)]
     use crate::store::{AcmeCertStore, Http01TokenStore, TlsAlpn01CertStore};
+    #[cfg(unix)]
+    use std::collections::HashMap;
+    #[cfg(unix)]
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     #[cfg(unix)]
@@ -966,6 +1070,7 @@ mod tests {
                 quic_store: Arc::new(crate::AcmeQuicCertStore::new()),
                 tokens: Arc::new(Http01TokenStore::new()),
                 tls_alpn01: Arc::new(TlsAlpn01CertStore::new()),
+                issuance_deferrals: Mutex::new(HashMap::new()),
             })
         }
 
@@ -996,6 +1101,64 @@ mod tests {
         let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
         params.not_after = rcgen::date_time_ymd(4096, 1, 1);
         (params.self_signed(&key).unwrap(), key)
+    }
+
+    #[cfg(unix)]
+    fn unix_days_to_ymd(unix_secs: u64) -> (i32, u8, u8) {
+        // Days since 1970-01-01 to a UTC calendar date (civil_from_days).
+        let days = (unix_secs / 86_400) as i64;
+        let z = days + 719_468;
+        let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+        let doe = z - era * 146_097;
+        let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+        let mp = (5 * doy + 2) / 153;
+        let month = mp + if mp < 10 { 3 } else { -9 };
+        (
+            (yoe + era * 400 + i64::from(month <= 2)) as i32,
+            month as u8,
+            (doy - (153 * mp + 2) / 5 + 1) as u8,
+        )
+    }
+
+    #[cfg(unix)]
+    fn pair_valid_from_to(
+        not_before: SystemTime,
+        not_after: SystemTime,
+    ) -> (rcgen::Certificate, KeyPair) {
+        let to_secs = |time: SystemTime| time.duration_since(UNIX_EPOCH).unwrap().as_secs();
+        let (year, month, day) = unix_days_to_ymd(to_secs(not_before));
+        let (end_year, end_month, end_day) = unix_days_to_ymd(to_secs(not_after));
+        let key = KeyPair::generate().unwrap();
+        let mut params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        params.not_before = rcgen::date_time_ymd(year, month, day);
+        params.not_after = rcgen::date_time_ymd(end_year, end_month, end_day);
+        (params.self_signed(&key).unwrap(), key)
+    }
+
+    #[cfg(unix)]
+    fn backdated_due_pair() -> (rcgen::Certificate, KeyPair) {
+        // Six-day leaf backdated four days: still valid, but due under the default
+        // 30-day lead because the lead is clamped to half of its lifetime.
+        let today = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            / 86_400
+            * 86_400;
+        let issued = UNIX_EPOCH + Duration::from_secs(today - 4 * 86_400);
+        pair_valid_from_to(issued, issued + Duration::from_secs(6 * 86_400))
+    }
+
+    #[cfg(unix)]
+    fn deferral_until(fixture: &CertFixture) -> Option<SystemTime> {
+        fixture
+            .0
+            .issuance_deferrals
+            .lock()
+            .unwrap()
+            .get(TEST_SNI)
+            .copied()
     }
 
     #[cfg(unix)]
@@ -1354,6 +1517,153 @@ mod tests {
             read_leaf_validity(&cert_paths_for_sni(&fixture.0, TEST_SNI).0).unwrap();
         assert!(should_renew(not_before, not_after, fixture.0.renew_before_days).unwrap());
         assert!(load_cert_into_store(&fixture.0, TEST_SNI).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn due_but_usable_backdated_leaf_is_skipped_while_deferral_is_active() {
+        let fixture = CertFixture::new();
+        let (cert, key) = backdated_due_pair();
+        fixture.write_pair(&cert, &key);
+        let (cert_path, _) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+        let (not_before, not_after) = read_leaf_validity(&cert_path).unwrap();
+        let receipt = SystemTime::now();
+        assert!(not_before <= receipt && receipt < not_after);
+        assert!(should_renew_at(not_before, not_after, 30, receipt).unwrap());
+        assert!(!reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
+
+        record_issuance_deferral(&fixture.0, TEST_SNI, &cert_path, receipt).unwrap();
+        assert_eq!(
+            deferral_until(&fixture),
+            Some(receipt + POST_ISSUANCE_DEFERRAL)
+        );
+        for at in [receipt, receipt + Duration::from_secs(3600)] {
+            assert!(reuse_or_deferred_certificate(&fixture.0, TEST_SNI, at).unwrap());
+            assert_eq!(
+                fixture.0.store.get(TEST_SNI).unwrap().cert,
+                vec![cert.der().clone()]
+            );
+        }
+        // Ordinary reuse still declines: the skip comes from the bounded deferral.
+        assert!(!reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expired_deferral_allows_renewal_of_a_still_valid_due_leaf() {
+        let fixture = CertFixture::new();
+        let (cert, key) = backdated_due_pair();
+        fixture.write_pair(&cert, &key);
+        let (cert_path, _) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+        let receipt = SystemTime::now();
+        record_issuance_deferral(&fixture.0, TEST_SNI, &cert_path, receipt).unwrap();
+        let deadline = deferral_until(&fixture).expect("deferral recorded after issuance");
+        let (_, not_after) = read_leaf_validity(&cert_path).unwrap();
+        assert!(deadline < not_after, "leaf must still be valid at deadline");
+
+        assert!(!reuse_or_deferred_certificate(&fixture.0, TEST_SNI, deadline).unwrap());
+        assert!(!deferral_active_at(&fixture.0, TEST_SNI, deadline));
+        assert_eq!(deferral_until(&fixture), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unusable_due_pairs_are_not_suppressed_by_an_active_deferral() {
+        let fixture = CertFixture::new();
+        let (cert, key) = backdated_due_pair();
+        fixture.write_pair(&cert, &key);
+        let (cert_path, key_path) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+        let receipt = SystemTime::now();
+        record_issuance_deferral(&fixture.0, TEST_SNI, &cert_path, receipt).unwrap();
+        assert!(load_cert_into_store(&fixture.0, TEST_SNI).unwrap());
+        let good = fixture.0.store.get(TEST_SNI).unwrap();
+        let assert_renewal_required = || {
+            assert!(
+                !reuse_or_deferred_certificate(&fixture.0, TEST_SNI, receipt).unwrap(),
+                "an unusable pair must not be suppressed by the deferral"
+            );
+            assert!(Arc::ptr_eq(&good, &fixture.0.store.get(TEST_SNI).unwrap()));
+        };
+
+        fs::remove_file(&key_path).unwrap();
+        assert_renewal_required();
+        write_bytes_file(&key_path, key.serialize_pem().as_bytes(), 0o600).unwrap();
+
+        let (_, other_key) = test_pair();
+        write_bytes_file(&key_path, other_key.serialize_pem().as_bytes(), 0o600).unwrap();
+        assert_renewal_required();
+
+        write_bytes_file(&key_path, b"not a private key", 0o600).unwrap();
+        assert_renewal_required();
+        write_bytes_file(&key_path, key.serialize_pem().as_bytes(), 0o600).unwrap();
+
+        let future_key = KeyPair::generate().unwrap();
+        let mut future_params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        future_params.not_before = rcgen::date_time_ymd(2099, 1, 1);
+        future_params.not_after = rcgen::date_time_ymd(2100, 1, 1);
+        fixture.write_pair(
+            &future_params.self_signed(&future_key).unwrap(),
+            &future_key,
+        );
+        assert_renewal_required();
+
+        let expired_key = KeyPair::generate().unwrap();
+        let mut expired_params = CertificateParams::new(vec![TEST_SNI.to_string()]).unwrap();
+        expired_params.not_before = rcgen::date_time_ymd(2020, 1, 1);
+        expired_params.not_after = rcgen::date_time_ymd(2021, 1, 1);
+        fixture.write_pair(
+            &expired_params.self_signed(&expired_key).unwrap(),
+            &expired_key,
+        );
+        assert_renewal_required();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn deferral_deadline_is_capped_before_expiry_and_skipped_when_past() {
+        let fixture = CertFixture::new();
+        let (cert, key) = backdated_due_pair();
+        fixture.write_pair(&cert, &key);
+        let (cert_path, _) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+        let (_, not_after) = read_leaf_validity(&cert_path).unwrap();
+
+        let almost_expired = not_after - Duration::from_secs(2 * 3600);
+        record_issuance_deferral(&fixture.0, TEST_SNI, &cert_path, almost_expired).unwrap();
+        assert_eq!(
+            deferral_until(&fixture),
+            Some(not_after - POST_ISSUANCE_EXPIRY_MARGIN)
+        );
+
+        fixture
+            .0
+            .issuance_deferrals
+            .lock()
+            .unwrap()
+            .remove(TEST_SNI);
+        let too_late = not_after - Duration::from_secs(1800);
+        record_issuance_deferral(&fixture.0, TEST_SNI, &cert_path, too_late).unwrap();
+        assert_eq!(deferral_until(&fixture), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_due_leaf_is_reused_without_recording_a_deferral() {
+        let fixture = CertFixture::new();
+        let (cert, key) = test_pair();
+        fixture.write_pair(&cert, &key);
+        let (cert_path, _) = cert_paths_for_sni(&fixture.0, TEST_SNI);
+        let receipt = SystemTime::now();
+        record_issuance_deferral(&fixture.0, TEST_SNI, &cert_path, receipt).unwrap();
+        assert_eq!(deferral_until(&fixture), None);
+        assert!(reuse_existing_certificate(&fixture.0, TEST_SNI).unwrap());
+        assert!(
+            reuse_or_deferred_certificate(&fixture.0, TEST_SNI, receipt + POST_ISSUANCE_DEFERRAL)
+                .unwrap()
+        );
+        assert_eq!(
+            fixture.0.store.get(TEST_SNI).unwrap().cert,
+            vec![cert.der().clone()]
+        );
     }
 
     #[test]
