@@ -777,10 +777,7 @@ runtime:
                 {
                     // The stock h3 relay finishes both halves at clean EOF.
                     let result = timeout(Duration::from_secs(5), stream.recv_data()).await?;
-                    assert!(
-                        result?.is_none(),
-                        "complete stream should finish cleanly"
-                    );
+                    assert!(result?.is_none(), "complete stream should finish cleanly");
                 }
             } else {
                 let result = timeout(Duration::from_secs(5), stream.recv_data()).await?;
