@@ -761,15 +761,27 @@ runtime:
             }
             stream.finish().await?;
             if residue.is_empty() {
-                // A clean client FIN closes only that direction; the relay
-                // keeps the response half open until the idle deadline.
-                assert!(
-                    timeout(Duration::from_millis(200), stream.recv_data())
-                        .await
-                        .is_err(),
-                    "client FIN must not finish the response half"
-                );
-                drop(stream);
+                #[cfg(feature = "http3-backend-qpx")]
+                {
+                    // The qpx relay half-closes: a clean client FIN leaves
+                    // the response half open until the idle deadline.
+                    assert!(
+                        timeout(Duration::from_millis(200), stream.recv_data())
+                            .await
+                            .is_err(),
+                        "client FIN must not finish the response half"
+                    );
+                    drop(stream);
+                }
+                #[cfg(not(feature = "http3-backend-qpx"))]
+                {
+                    // The stock h3 relay finishes both halves at clean EOF.
+                    let result = timeout(Duration::from_secs(5), stream.recv_data()).await?;
+                    assert!(
+                        result?.is_none(),
+                        "complete stream should finish cleanly"
+                    );
+                }
             } else {
                 let result = timeout(Duration::from_secs(5), stream.recv_data()).await?;
                 assert!(
