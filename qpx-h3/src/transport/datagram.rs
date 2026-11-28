@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 const DATAGRAM_ROUTE_SHARDS: usize = 64;
 
 /// Sender for HTTP/3 DATAGRAM frames associated with a stream.
+#[derive(Clone)]
 pub struct DatagramSender {
     conn: quinn::Connection,
     prefix: Bytes,

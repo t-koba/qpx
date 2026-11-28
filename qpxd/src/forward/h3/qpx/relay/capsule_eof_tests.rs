@@ -10,7 +10,10 @@ const WAIT: Duration = Duration::from_secs(5);
 const RELAY_IDLE: Duration = Duration::from_millis(750);
 
 #[derive(Clone)]
-struct CaptureStream(mpsc::Sender<qpx_h3::RequestStream>);
+struct CaptureStream(
+    mpsc::Sender<qpx_h3::RequestStream>,
+    mpsc::Sender<Option<qpx_h3::StreamDatagrams>>,
+);
 
 impl qpx_h3::RequestHandler for CaptureStream {
     fn settings(&self) -> qpx_h3::Settings {
@@ -37,8 +40,12 @@ impl qpx_h3::RequestHandler for CaptureStream {
         mut stream: qpx_h3::RequestStream,
         _: qpx_h3::ConnectionInfo,
         _: qpx_h3::Protocol,
-        _: Option<qpx_h3::StreamDatagrams>,
+        datagrams: Option<qpx_h3::StreamDatagrams>,
     ) -> qpx_h3::H3Result<()> {
+        self.1
+            .send(datagrams)
+            .await
+            .map_err(|_| anyhow!("datagram capture closed"))?;
         stream
             .send_response_head(
                 &http::Response::builder()
@@ -60,6 +67,7 @@ impl qpx_h3::RequestHandler for CaptureStream {
 async fn stream_pair() -> Result<(
     qpx_h3::ExtendedConnectStream,
     qpx_h3::RequestStream,
+    Option<qpx_h3::StreamDatagrams>,
     tokio::task::JoinHandle<()>,
 )> {
     use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
@@ -81,9 +89,11 @@ async fn stream_pair() -> Result<(
     )?;
     let addr = endpoint.local_addr()?;
     let (tx, mut rx) = mpsc::channel(1);
+    let (datagram_tx, mut datagram_rx) = mpsc::channel(1);
     let server = tokio::spawn(async move {
         let incoming = endpoint.accept().await.unwrap();
-        let _ = qpx_h3::serve_connection(incoming, addr.port(), CaptureStream(tx)).await;
+        let _ =
+            qpx_h3::serve_connection(incoming, addr.port(), CaptureStream(tx, datagram_tx)).await;
     });
     let mut roots = quinn::rustls::RootCertStore::empty();
     roots.add(der)?;
@@ -121,7 +131,10 @@ async fn stream_pair() -> Result<(
     let stream = timeout(WAIT, rx.recv())
         .await?
         .ok_or_else(|| anyhow!("missing stream"))?;
-    Ok((client, stream, server))
+    let server_datagrams = timeout(WAIT, datagram_rx.recv())
+        .await?
+        .ok_or_else(|| anyhow!("missing datagram handle"))?;
+    Ok((client, stream, server_datagrams, server))
 }
 
 fn policy() -> ConnectIpPacketPolicy {
@@ -169,8 +182,8 @@ async fn connect_ip_chained_capsule_eof_both_directions() -> Result<()> {
     for from_upstream in [false, true] {
         for residue in [&[][..], &[0x40], &[0, 0x40], &[0, 3, 0, 42]] {
             for prefix in [false, true] {
-                let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
-                let (upstream, mut upstream_peer, upstream_task) = stream_pair().await?;
+                let (mut downstream, downstream_stream, _, downstream_task) = stream_pair().await?;
+                let (upstream, mut upstream_peer, _, upstream_task) = stream_pair().await?;
                 let relay =
                     tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
                         downstream: downstream_stream,
@@ -230,7 +243,7 @@ async fn connect_ip_chained_capsule_eof_both_directions() -> Result<()> {
 async fn connect_ip_local_device_capsule_eof() -> Result<()> {
     for residue in [&[][..], &[0x40], &[0, 0x40], &[0, 3, 0, 42]] {
         for prefix in [false, true] {
-            let (mut client, stream, server) = stream_pair().await?;
+            let (mut client, stream, _, server) = stream_pair().await?;
             let (device, peer) = crate::connect_ip::SystemIpDevice::test_pair()?;
             let relay = tokio::spawn(relay_qpx_connect_ip_device(
                 stream,
@@ -267,8 +280,8 @@ async fn connect_ip_local_device_capsule_eof() -> Result<()> {
 #[tokio::test]
 async fn connect_ip_chained_partial_capsule_timeout_and_cancellation_are_not_eof() -> Result<()> {
     for cancel in [false, true] {
-        let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
-        let (upstream, _upstream_peer, upstream_task) = stream_pair().await?;
+        let (mut downstream, downstream_stream, _, downstream_task) = stream_pair().await?;
+        let (upstream, _upstream_peer, _, upstream_task) = stream_pair().await?;
         // No FIN: pending bytes alone do not establish a malformed stream.
         send_fragmented(&mut downstream.request_stream, &[0, 3, 0, 42]).await?;
         if cancel {
@@ -311,7 +324,7 @@ async fn connect_ip_chained_partial_capsule_timeout_and_cancellation_are_not_eof
 #[tokio::test]
 async fn connect_ip_device_partial_capsule_timeout_and_cancellation_are_not_eof() -> Result<()> {
     for cancel in [false, true] {
-        let (mut client, stream, server) = stream_pair().await?;
+        let (mut client, stream, _, server) = stream_pair().await?;
         let (device, peer) = crate::connect_ip::SystemIpDevice::test_pair()?;
         send_fragmented(&mut client.request_stream, &[0, 3, 0, 42]).await?;
         if cancel {
@@ -385,10 +398,52 @@ async fn assert_forwarded_datagram(
     }
 }
 
+fn ipv4_test_packet() -> [u8; 20] {
+    [
+        0x45, 0, 0, 20, 0, 0, 0, 0, 64, 17, 0, 0, 192, 0, 2, 1, 198, 51, 100, 1,
+    ]
+}
+
+#[tokio::test]
+async fn connect_ip_chained_datagram_after_fin_does_not_reset_other_half() -> Result<()> {
+    let (mut downstream, downstream_stream, server_datagrams, _downstream_task) =
+        stream_pair().await?;
+    let (upstream, mut upstream_peer, _, _upstream_task) = stream_pair().await?;
+    // The relay owns the server-side receiver; keep the client-side sender to
+    // inject a DATAGRAM after the client's stream direction has been FINed.
+    let mut sender = downstream.datagrams.as_mut().unwrap().sender.clone();
+    let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
+        downstream: downstream_stream,
+        downstream_datagrams: server_datagrams,
+        upstream: upstream.request_stream,
+        upstream_datagrams: None,
+        downstream_policy: policy(),
+        upstream_policy: policy(),
+        max_capsule_buffer_bytes: 1024,
+        idle_timeout: RELAY_IDLE,
+    }));
+
+    downstream.request_stream.finish().await?;
+    assert_completion(&mut upstream_peer, false).await?;
+
+    let mut payload = BytesMut::with_capacity(21);
+    payload.extend_from_slice(&[0]); // CONNECT-IP context ID
+    payload.extend_from_slice(&ipv4_test_packet());
+    let mut scratch = BytesMut::new();
+    for _ in 0..4 {
+        sender.send_unprefixed_datagram_with_scratch(payload.clone().freeze(), &mut scratch)?;
+    }
+
+    let result = timeout(WAIT, relay).await??;
+    assert!(result.is_ok(), "post-FIN datagram must not abort relay");
+    assert_completion(&mut upstream_peer, false).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn connect_ip_chained_capsule_after_peer_fin_is_forwarded() -> Result<()> {
-    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
-    let (upstream, mut upstream_peer, upstream_task) = stream_pair().await?;
+    let (mut downstream, downstream_stream, _, downstream_task) = stream_pair().await?;
+    let (upstream, mut upstream_peer, _, upstream_task) = stream_pair().await?;
     let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
         downstream: downstream_stream,
         downstream_datagrams: None,
@@ -431,8 +486,8 @@ async fn connect_ip_chained_capsule_after_peer_fin_is_forwarded() -> Result<()> 
 
 #[tokio::test]
 async fn connect_ip_chained_malformed_residue_at_eof_still_resets() -> Result<()> {
-    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
-    let (upstream, _upstream_peer, upstream_task) = stream_pair().await?;
+    let (mut downstream, downstream_stream, _, downstream_task) = stream_pair().await?;
+    let (upstream, _upstream_peer, _, upstream_task) = stream_pair().await?;
     let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
         downstream: downstream_stream,
         downstream_datagrams: None,
@@ -464,8 +519,8 @@ async fn connect_ip_chained_malformed_residue_at_eof_still_resets() -> Result<()
 
 #[tokio::test]
 async fn connect_ip_chained_one_fin_then_idle_is_not_malformed() -> Result<()> {
-    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
-    let (upstream, mut upstream_peer, upstream_task) = stream_pair().await?;
+    let (mut downstream, downstream_stream, _, downstream_task) = stream_pair().await?;
+    let (upstream, mut upstream_peer, _, upstream_task) = stream_pair().await?;
     let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
         downstream: downstream_stream,
         downstream_datagrams: None,
@@ -494,7 +549,7 @@ async fn connect_ip_chained_one_fin_then_idle_is_not_malformed() -> Result<()> {
 
 #[tokio::test]
 async fn connect_udp_local_response_after_client_fin_is_forwarded() -> Result<()> {
-    let (mut client, stream, server) = stream_pair().await?;
+    let (mut client, stream, _, server) = stream_pair().await?;
     let udp = UdpSocket::bind("127.0.0.1:0").await?;
     let peer = UdpSocket::bind("127.0.0.1:0").await?;
     udp.connect(peer.local_addr()?).await?;
@@ -527,8 +582,41 @@ async fn connect_udp_local_response_after_client_fin_is_forwarded() -> Result<()
 }
 
 #[tokio::test]
+async fn connect_udp_chained_datagram_after_fin_does_not_reset_other_half() -> Result<()> {
+    let (mut downstream, downstream_stream, server_datagrams, _downstream_task) =
+        stream_pair().await?;
+    let (upstream, mut upstream_peer, _, _upstream_task) = stream_pair().await?;
+    let mut sender = downstream.datagrams.as_mut().unwrap().sender.clone();
+    let relay = tokio::spawn(relay_qpx_connect_udp_stream_chained(
+        downstream_stream,
+        server_datagrams,
+        upstream.request_stream,
+        None,
+        udp_config(),
+        RateLimitContext::default(),
+        AppliedRateLimits::default(),
+    ));
+
+    downstream.request_stream.finish().await?;
+    assert_completion(&mut upstream_peer, false).await?;
+
+    let mut scratch = BytesMut::new();
+    for _ in 0..4 {
+        sender.send_unprefixed_datagram_with_scratch(
+            Bytes::from_static(&[0, b'g', b'o']),
+            &mut scratch,
+        )?;
+    }
+
+    let result = timeout(WAIT, relay).await??;
+    assert!(result.is_ok(), "post-FIN datagram must not abort relay");
+    assert_completion(&mut upstream_peer, false).await?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn connect_udp_local_malformed_residue_at_eof_resets() -> Result<()> {
-    let (mut client, stream, server) = stream_pair().await?;
+    let (mut client, stream, _, server) = stream_pair().await?;
     let udp = UdpSocket::bind("127.0.0.1:0").await?;
     let peer = UdpSocket::bind("127.0.0.1:0").await?;
     udp.connect(peer.local_addr()?).await?;
@@ -558,8 +646,8 @@ async fn connect_udp_local_malformed_residue_at_eof_resets() -> Result<()> {
 
 #[tokio::test]
 async fn connect_udp_chained_data_after_peer_fin_is_forwarded() -> Result<()> {
-    let (mut downstream, downstream_stream, downstream_task) = stream_pair().await?;
-    let (upstream, mut upstream_peer, upstream_task) = stream_pair().await?;
+    let (mut downstream, downstream_stream, _, downstream_task) = stream_pair().await?;
+    let (upstream, mut upstream_peer, _, upstream_task) = stream_pair().await?;
     let relay = tokio::spawn(relay_qpx_connect_udp_stream_chained(
         downstream_stream,
         None,
@@ -603,7 +691,7 @@ async fn connect_udp_chained_data_after_peer_fin_is_forwarded() -> Result<()> {
 #[cfg(unix)]
 #[tokio::test]
 async fn connect_ip_device_packet_after_client_fin_is_forwarded() -> Result<()> {
-    let (mut client, stream, server) = stream_pair().await?;
+    let (mut client, stream, _, server) = stream_pair().await?;
     let (device, mut peer) = crate::connect_ip::SystemIpDevice::test_pair()?;
     let relay = tokio::spawn(relay_qpx_connect_ip_device(
         stream,

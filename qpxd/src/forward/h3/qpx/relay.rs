@@ -181,11 +181,15 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 validate_connect_ip_datagram(&payload, &downstream_policy)?;
                 if let Some(datagrams) = upstream_datagrams.as_mut() {
                     datagrams.sender.send_unprefixed_datagram_with_scratch(payload, &mut upstream_scratch)?;
-                } else {
+                } else if !upstream_send_finished {
                     let header = encode_datagram_capsule_header(payload.len())?;
                     upstream_send.send_data(header).await?;
                     upstream_send.send_data(payload).await?;
                 }
+                // DATAGRAMs remain live after a stream FIN. When the peer has
+                // no datagram path and our capsule send half is finished, the
+                // unreliable datagram is dropped rather than aborting the
+                // still-live opposite direction.
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
             payload = super::recv_stream_datagram(&mut upstream_datagrams) => {
@@ -196,11 +200,14 @@ pub(super) async fn relay_qpx_connect_ip_stream_chained(
                 validate_connect_ip_datagram(&payload, &upstream_policy)?;
                 if let Some(datagrams) = downstream_datagrams.as_mut() {
                     datagrams.sender.send_unprefixed_datagram_with_scratch(payload, &mut downstream_scratch)?;
-                } else {
+                } else if !downstream_send_finished {
                     let header = encode_datagram_capsule_header(payload.len())?;
                     downstream_send.send_data(header).await?;
                     downstream_send.send_data(payload).await?;
                 }
+                // The upstream FIN only closes its capsule send half; a
+                // datagram without a peer datagram path is dropped instead of
+                // writing to that finished half.
                 deadline.as_mut().reset(crate::runtime::tokio_deadline_after(idle_timeout));
             }
         }
@@ -591,7 +598,7 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                 {
                     sent = true;
                 }
-                if !sent {
+                if !sent && !upstream_send_finished {
                     let header = encode_datagram_capsule_header(fallback.len())?;
                     timeout(idle_timeout, upstream_send.send_data(header))
                         .await
@@ -600,6 +607,9 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                         .await
                         .map_err(|_| anyhow!("qpx-h3 CONNECT-UDP upstream capsule payload send timed out"))??;
                 }
+                // A client FIN finished the upstream capsule half, but QUIC
+                // DATAGRAMs are independent: forward them when possible and
+                // drop the unreliable fallback when no capsule half remains.
                 idle_deadline
                     .as_mut()
                     .reset(crate::runtime::tokio_deadline_after(idle_timeout));
@@ -625,7 +635,7 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                 {
                     sent = true;
                 }
-                if !sent {
+                if !sent && !downstream_send_finished {
                     let header = encode_datagram_capsule_header(fallback.len())?;
                     timeout(idle_timeout, downstream_send.send_data(header))
                         .await
@@ -634,6 +644,8 @@ pub(super) async fn relay_qpx_connect_udp_stream_chained(
                         .await
                         .map_err(|_| anyhow!("qpx-h3 CONNECT-UDP downstream capsule payload send timed out"))??;
                 }
+                // An upstream FIN does not stop client-bound DATAGRAMs; only
+                // the unavailable capsule fallback is skipped.
                 idle_deadline
                     .as_mut()
                     .reset(crate::runtime::tokio_deadline_after(idle_timeout));
