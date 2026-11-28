@@ -89,8 +89,9 @@ def observation_interval():
 
 
 class StreamingGapStatsTest(unittest.TestCase):
-    def test_captured_spread_falls_below_the_cap_with_more_observations(self):
-        """The captured values fail at 64 KiB and pass at the finer interval."""
+    def test_illustrative_spread_falls_below_the_cap_with_finer_interval(self):
+        """Captured 64 KiB p99 spread exceeds the cap; the modeled 32 KiB
+        reconstruction illustrates a pass at the finer interval."""
         old = []
         new = []
         for quantiles in CAPTURED:
@@ -104,7 +105,10 @@ class StreamingGapStatsTest(unittest.TestCase):
         self.assertAlmostEqual(spread(old), 3.069063, places=6)
         self.assertGreater(spread(old), 3.0)
         self.assertLessEqual(spread(new), 3.0)
-        print("captured p99 spread:", f"{spread(old):.6f}", "->", f"{spread(new):.6f}")
+        print(
+            "captured p99 spread:", f"{spread(old):.6f}",
+            "-> modeled p99 spread:", f"{spread(new):.6f}",
+        )
 
     def test_the_finer_interval_doubles_the_tail_sample(self):
         """The default interval gives twice the gaps and twice the p99 tail."""
