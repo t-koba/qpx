@@ -1,4 +1,5 @@
 use super::*;
+#[cfg(unix)]
 use std::io::Write;
 use std::sync::Arc;
 use tokio::sync::mpsc;

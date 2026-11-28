@@ -760,10 +760,18 @@ runtime:
                 stream.send_data(Bytes::copy_from_slice(&[*byte])).await?;
             }
             stream.finish().await?;
-            let result = timeout(Duration::from_secs(5), stream.recv_data()).await?;
             if residue.is_empty() {
-                assert!(result?.is_none(), "complete stream should finish cleanly");
+                // A clean client FIN closes only that direction; the relay
+                // keeps the response half open until the idle deadline.
+                assert!(
+                    timeout(Duration::from_millis(200), stream.recv_data())
+                        .await
+                        .is_err(),
+                    "client FIN must not finish the response half"
+                );
+                drop(stream);
             } else {
+                let result = timeout(Duration::from_secs(5), stream.recv_data()).await?;
                 assert!(
                     matches!(result, Err(::h3::error::StreamError::RemoteTerminate { code })
                     if code == ::h3::error::Code::H3_MESSAGE_ERROR),
