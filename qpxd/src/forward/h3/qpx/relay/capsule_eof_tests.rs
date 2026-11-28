@@ -410,7 +410,7 @@ async fn connect_ip_chained_datagram_after_fin_does_not_reset_other_half() -> Re
         stream_pair().await?;
     let (upstream, mut upstream_peer, _, _upstream_task) = stream_pair().await?;
     // The relay owns the server-side receiver; keep the client-side sender to
-    // inject a DATAGRAM after the client's stream direction has been FINed.
+    // inject a DATAGRAM after the client's stream send half finished.
     let mut sender = downstream.datagrams.as_mut().unwrap().sender.clone();
     let relay = tokio::spawn(relay_qpx_connect_ip_stream_chained(ChainedConnectIpRelay {
         downstream: downstream_stream,
