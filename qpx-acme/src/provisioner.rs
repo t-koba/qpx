@@ -32,6 +32,9 @@ pub async fn run_manager(state: Arc<AcmeRuntime>) -> AcmeResult<()> {
 
     let mut account: Option<Account> = None;
     loop {
+        // The deferral writer runs on successful issuance; the manager pass is the
+        // matching owner of expired entries, even for SNIs no longer configured.
+        sweep_expired_issuance_deferrals(state.as_ref(), SystemTime::now());
         let acct = match account.take() {
             Some(a) => a,
             None => match load_or_create_account(state.as_ref()).await {
@@ -212,6 +215,12 @@ fn deferred_due_pair_is_usable(state: &AcmeRuntime, sni: &str, now: SystemTime) 
             warn!(sni = %sni, error = ?err, "deferred acme certificate is unusable; renewing");
             false
         }
+    }
+}
+
+fn sweep_expired_issuance_deferrals(state: &AcmeRuntime, now: SystemTime) {
+    if let Ok(mut deferrals) = state.issuance_deferrals.lock() {
+        deferrals.retain(|_, deadline| *deadline > now);
     }
 }
 
@@ -2095,5 +2104,27 @@ mod tests {
         let text = std::fs::read_to_string(&path).expect("read hook output");
         assert_eq!(text, "example.com|txt-value");
         let _ = std::fs::remove_file(path);
+    }
+    #[cfg(unix)]
+    #[test]
+    fn expired_deferrals_are_swept_even_when_their_sni_is_not_visited() {
+        let now = SystemTime::now();
+        let fixture = CertFixture::new();
+        let state = &fixture.0;
+        {
+            let mut deferrals = state.issuance_deferrals.lock().unwrap();
+            deferrals.insert("gone.example".to_string(), now - Duration::from_secs(1));
+            deferrals.insert(
+                "active.example".to_string(),
+                now + Duration::from_secs(3600),
+            );
+        }
+        sweep_expired_issuance_deferrals(&state, now);
+        let deferrals = state.issuance_deferrals.lock().unwrap();
+        assert!(!deferrals.contains_key("gone.example"));
+        assert_eq!(
+            deferrals.get("active.example"),
+            Some(&(now + Duration::from_secs(3600)))
+        );
     }
 }
